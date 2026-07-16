@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs: reconciled the assistant-reply lifecycle RFCs/contracts with shipped behavior.** The Stable Assistant Turn Anchors and Live-to-Final RFCs, `docs/CONTRACTS.md`, and the Phase 0 architecture inventory were updated from "proposed/scaffold" framing to "accepted/implemented" to match what actually ships (single assistant-turn owner projecting one `activity_scene_v1` into Compact Worklog / Transparent Stream / Final answer). Documentation-only — no runtime behavior or CI-gate change; the one code touch is a corrected comment header in `static/assistant_turn_anchors.js`. Remaining hardening stays tracked under #3400. Thanks @franksong2702. (#6144)
+
 ### Fixed
 
 - **Models selected from a list-shaped custom-provider allowlist now route to the right provider.** A `custom_providers[].models` allowlist can be written as either a mapping or a list, and the model picker accepted both — but runtime routing only read mapping keys, so a model chosen from a *list*-shaped allowlist could silently stay on the active/default provider instead of its own. The supported-model-ID extraction is now centralized in one helper used by both catalog construction and routing, so the picker and runtime can no longer drift. Existing mapping-shaped and list-of-strings configs are unaffected. Thanks @franksong2702. (#6127, #6121)

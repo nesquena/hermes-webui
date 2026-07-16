@@ -1,12 +1,16 @@
 # Stable Assistant Turn Anchors Phase 0 Inventory
 
-This inventory implements the first non-visual slice of
-[`stable-assistant-turn-anchors.md`](../rfcs/stable-assistant-turn-anchors.md).
-It documents the current per-turn state layers and the event-shape contract that
-future anchor phases must consume. It does not claim that anchors are wired into
-streaming or rendering yet.
+This inventory began as the first non-visual slice of
+[`stable-assistant-turn-anchors.md`](../rfcs/stable-assistant-turn-anchors.md) and
+now records the shipped phase progression. Current `master` wires Anchor-owned
+`activity_scene_v1` data into live and settled Compact Worklog, Transparent
+Stream, journal hydration, session re-entry, and transcript-backed persistence.
 
-## RFC Phase Progress
+The slice-by-slice sections below are retained as implementation history.
+Present-tense statements such as “unwired” or “future phase” describe the point
+when that slice landed; they do not override the current coverage summary above.
+
+## Shipped RFC Phase Progress
 
 - The #3962 Phase 0 scaffold shipped through #3977 / v0.51.359: inventory the
   current state layers, encode the owner seed, and pin the source classification
