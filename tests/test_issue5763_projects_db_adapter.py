@@ -804,7 +804,7 @@ def test_routes_project_rename_and_delete_use_profile_identity(monkeypatch):
     monkeypatch.setattr(
         routes,
         "read_body",
-        lambda _handler: {"project_id": "shared", "name": "Renamed"},
+        lambda _handler: {"project_id": "shared", "profile": "work", "name": "Renamed"},
     )
     rename_payload = routes.handle_post(object(), urlparse("/api/projects/rename"))
 
@@ -817,7 +817,7 @@ def test_routes_project_rename_and_delete_use_profile_identity(monkeypatch):
     monkeypatch.setattr(
         routes,
         "read_body",
-        lambda _handler: {"project_id": "shared"},
+        lambda _handler: {"project_id": "shared", "profile": "work"},
     )
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", Path("missing-index.json"))
     delete_payload = routes.handle_post(object(), urlparse("/api/projects/delete"))
@@ -826,6 +826,86 @@ def test_routes_project_rename_and_delete_use_profile_identity(monkeypatch):
     assert saved[-1] == [
         {"project_id": "shared", "name": "Default", "profile": "default"},
     ]
+
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"project_id": "shared", "profile": "default", "name": "Wrong"},
+    )
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, *_args, **_kwargs: {"error": message})
+    assert routes.handle_post(object(), urlparse("/api/projects/rename"))["error"] == "Project not found"
+    assert saved[-1] == [
+        {"project_id": "shared", "name": "Default", "profile": "default"},
+    ]
+
+
+def test_session_new_requires_exact_profile_project_pair(monkeypatch):
+    import api.routes as routes
+
+    calls = []
+    created = []
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {
+        "profile": "work",
+        "project_id": "shared",
+    })
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        routes,
+        "load_projects",
+        lambda **kwargs: calls.append(kwargs) or [
+            {"project_id": "shared", "name": "Work", "profile": "work"},
+        ],
+    )
+
+    class _Session:
+        session_id = "sid"
+        profile = "work"
+        messages = []
+
+        def compact(self):
+            return {"session_id": self.session_id, "profile": self.profile}
+
+    monkeypatch.setattr(
+        routes,
+        "new_session",
+        lambda **kwargs: created.append(kwargs) or _Session(),
+    )
+    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda *_args: (None, None))
+    monkeypatch.setattr(routes, "_validate_session_toolsets_shape", lambda _value: None)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload, raising=False)
+
+    payload = routes.handle_post(object(), urlparse("/api/session/new"))
+
+    assert calls == [{"include_db": True, "profile_name": "work"}]
+    assert created[0]["profile"] == "work"
+    assert created[0]["project_id"] == "shared"
+    assert payload["session"]["profile"] == "work"
+
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {
+        "profile": "work",
+        "project_id": "missing",
+    })
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, *_args, **_kwargs: {"error": message})
+    assert routes.handle_post(object(), urlparse("/api/session/new")) == {"error": "Project not found"}
+    assert len(created) == 1
+
+
+def test_mcp_invalid_profile_fails_closed_before_project_lookup(monkeypatch):
+    pytest.importorskip("mcp", reason="mcp package not installed")
+    import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_invalid_profile_override", True)
+    monkeypatch.setattr(
+        mcp_server,
+        "load_projects",
+        lambda **_kwargs: pytest.fail("invalid profile must not load projects"),
+    )
+
+    payload = json.loads(asyncio.run(mcp_server.handle_list_projects({}))[0].text)
+    assert payload == {"error": "invalid profile"}
 
 
 def test_mcp_list_and_move_use_active_profile_db_rows(monkeypatch):

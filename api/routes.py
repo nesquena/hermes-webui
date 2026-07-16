@@ -13974,6 +13974,17 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        requested_profile = str(body.get("profile") or "").strip()
+        if requested_profile:
+            from api.profiles import _PROFILE_ID_RE
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile", status=400)
+        session_profile = requested_profile or get_active_profile_name() or "default"
+        project_id = body.get("project_id") or None
+        if project_id:
+            projects = load_projects(include_db=True, profile_name=session_profile)
+            if not any(project_identity_matches(p, project_id, session_profile) for p in projects):
+                return bad(handler, "Project not found", status=404)
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
@@ -14088,8 +14099,8 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
-            project_id=body.get("project_id") or None,
+            profile=session_profile,
+            project_id=project_id,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
@@ -15891,14 +15902,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         import re as _re
 
+        requested_profile = str(body.get("profile") or "").strip()
+        active_profile = get_active_profile_name() or "default"
+        if requested_profile:
+            from api.profiles import _PROFILE_ID_RE
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile")
+            if not _profiles_match(requested_profile, active_profile):
+                return bad(handler, "Project not found", 404)
+        requested_profile = requested_profile or active_profile
         projects = load_projects()
-        active_profile = get_active_profile_name()
         proj = next(
-            (p for p in projects if project_identity_matches(p, body["project_id"], active_profile)), None
+            (p for p in projects if project_identity_matches(p, body["project_id"], requested_profile)), None
         )
         if not proj:
             return bad(handler, "Project not found", 404)
-        if not _profiles_match(proj.get("profile"), active_profile):
+        if not _profiles_match(proj.get("profile"), requested_profile):
             return bad(handler, "Project not found", 404)
         proj["name"] = body["name"].strip()[:128]
         if "color" in body:
@@ -15914,18 +15933,26 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id")
         except ValueError as e:
             return bad(handler, str(e))
+        requested_profile = str(body.get("profile") or "").strip()
+        active_profile = get_active_profile_name() or "default"
+        if requested_profile:
+            from api.profiles import _PROFILE_ID_RE
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile")
+            if not _profiles_match(requested_profile, active_profile):
+                return bad(handler, "Project not found", 404)
+        requested_profile = requested_profile or active_profile
         projects = load_projects()
-        active_profile = get_active_profile_name()
         proj = next(
-            (p for p in projects if project_identity_matches(p, body["project_id"], active_profile)), None
+            (p for p in projects if project_identity_matches(p, body["project_id"], requested_profile)), None
         )
         if not proj:
             return bad(handler, "Project not found", 404)
-        if not _profiles_match(proj.get("profile"), active_profile):
+        if not _profiles_match(proj.get("profile"), requested_profile):
             return bad(handler, "Project not found", 404)
         projects = [
             p for p in projects
-            if not project_identity_matches(p, body["project_id"], active_profile)
+            if not project_identity_matches(p, body["project_id"], requested_profile)
         ]
         save_projects(projects)
         # Unassign all sessions that belonged to this project.
@@ -15949,7 +15976,7 @@ def handle_post(handler, parsed) -> bool:
                 for entry in index:
                     if entry.get("project_id") != body["project_id"]:
                         continue
-                    if not _profiles_match(entry.get("profile"), active_profile):
+                    if not _profiles_match(entry.get("profile"), requested_profile):
                         continue
                     sid = entry.get("session_id")
                     try:

@@ -56,12 +56,23 @@ from api.config import (
     STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
 )
 from api.models import load_projects, project_identity_matches, save_projects
-from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match
+from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match, _PROFILE_ID_RE
 
 # ── Apply --profile override before any module uses get_active_profile_name
-if _profile_arg is not None:
+_invalid_profile_override = (
+    _profile_arg is not None
+    and _profile_arg != "default"
+    and _PROFILE_ID_RE.fullmatch(_profile_arg) is None
+)
+if _profile_arg is not None and not _invalid_profile_override:
     import api.profiles as _profiles
     _profiles._active_profile = _profile_arg
+
+
+def _invalid_profile_result() -> list[TextContent] | None:
+    if not _invalid_profile_override:
+        return None
+    return [TextContent(type="text", text=json.dumps({"error": "invalid profile"}))]
 
 # ── API auth state ─────────────────────────────────────────────────────────
 # Mirror the env-var contract used by api/config.py:32-33 so a non-default
@@ -198,6 +209,8 @@ def _api_post(endpoint: str, body: dict) -> dict:
 
 async def handle_list_projects(_arguments: dict) -> list[TextContent]:
     """List all projects with session counts, scoped to active profile."""
+    if error := _invalid_profile_result():
+        return error
     active = _active_profile()
     projects = load_projects(include_db=True, profile_name=active)
     index = _load_index()
@@ -226,6 +239,8 @@ async def handle_list_projects(_arguments: dict) -> list[TextContent]:
 
 async def handle_list_sessions(arguments: dict) -> list[TextContent]:
     """List sessions, optionally filtered by project or unassigned status."""
+    if error := _invalid_profile_result():
+        return error
     project_id = arguments.get("project_id")
     unassigned = arguments.get("unassigned", False)
     limit = max(1, min(500, arguments.get("limit", 50)))
@@ -253,6 +268,8 @@ async def handle_list_sessions(arguments: dict) -> list[TextContent]:
 
 async def handle_create_project(arguments: dict) -> list[TextContent]:
     """Create a new project (profile-scoped, exact-match title collision)."""
+    if error := _invalid_profile_result():
+        return error
     name = arguments.get("name", "").strip()[:128]
     if not name:
         return [TextContent(type="text", text=json.dumps(
@@ -289,6 +306,8 @@ async def handle_create_project(arguments: dict) -> list[TextContent]:
 
 async def handle_rename_project(arguments: dict) -> list[TextContent]:
     """Rename a project and optionally change its color (profile-checked)."""
+    if error := _invalid_profile_result():
+        return error
     project_id = arguments.get("project_id")
     name = arguments.get("name", "").strip()[:128]
     if not project_id or not name:
@@ -317,6 +336,8 @@ async def handle_rename_project(arguments: dict) -> list[TextContent]:
 
 async def handle_delete_project(arguments: dict) -> list[TextContent]:
     """Delete a project and unassign all its sessions (profile-checked)."""
+    if error := _invalid_profile_result():
+        return error
     project_id = arguments.get("project_id")
     if not project_id:
         return [TextContent(type="text", text=json.dumps(
@@ -407,6 +428,8 @@ async def handle_rename_session(arguments: dict) -> list[TextContent]:
 
 async def handle_move_session(arguments: dict) -> list[TextContent]:
     """Assign a session to a project via the authenticated webui API (cache-safe)."""
+    if error := _invalid_profile_result():
+        return error
     session_id = arguments.get("session_id")
     project_id = arguments.get("project_id")  # None/null = unassign
     if not session_id:
