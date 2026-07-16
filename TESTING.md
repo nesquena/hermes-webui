@@ -620,6 +620,22 @@ EXPECT:
   - Hover shows the trash icon on any session
 FAIL: Titles overflow sidebar, order is wrong, trash icon never appears.
 
+### T10.3: Concurrent Runs Keep Independent Reasoning Effort
+SETUP: Open two authenticated tabs or devices on different sessions. Select the
+same reasoning-capable model in both and keep browser Network inspection open.
+STEPS:
+  1. Select Low in the first composer and XHigh in the second composer
+  2. Submit a non-trivial prompt from each client without waiting for the other
+  3. Inspect each `POST /api/chat/start` request and the corresponding Gateway
+     `/v1/runs` request or isolated test-backend capture
+EXPECT:
+  - The first run carries `reasoning_effort: low`
+  - The second run carries `reasoning_effort: xhigh`
+  - Both requests may remain active concurrently without either effort changing
+  - The composer layout and existing profile-default behavior remain unchanged
+FAIL: Either request omits its selected effort, both runs use the last profile
+write, or changing one client alters the other client's in-flight request.
+
 ---
 
 ## Section 11: Visual and Layout Checks

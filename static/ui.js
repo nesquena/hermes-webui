@@ -247,11 +247,23 @@ function _readPersistedSessionQueue(sid){
   }
   return [];
 }
+function _reasoningEffortForQueuedMessage(sid,payload){
+  if(Object.prototype.hasOwnProperty.call(payload,'reasoning_effort')){
+    return payload.reasoning_effort;
+  }
+  const activeSid=typeof S!=='undefined'&&S.session&&S.session.session_id;
+  if(!activeSid||sid!==activeSid||typeof window.getComposerReasoningEffortForRun!=='function'){
+    return undefined;
+  }
+  return window.getComposerReasoningEffortForRun()||undefined;
+}
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
+  const reasoningEffort=_reasoningEffortForQueuedMessage(sid,payload);
+  if(reasoningEffort!==undefined) entry.reasoning_effort=reasoningEffort;
   q.push(entry);
   _persistSessionQueueStorage(sid,q);
   return q.length;
@@ -4840,7 +4852,10 @@ if(document.readyState==='loading'){
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
+let _currentReasoningEffortKey=null;
 let _profileTransitionReasoningContext=null;
+let _pendingReasoningEffortSelection=null;
+let _reasoningEffortWriteSeq=0;
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -4885,10 +4900,54 @@ function _reasoningEffortQuery(){
   return qs?('?'+qs):'';
 }
 
+function _reasoningEffortProfileKey(){
+  const transition=_profileTransitionReasoningContext;
+  const session=S&&S.session;
+  if(transition&&(!session||session.profile!==transition.profile)){
+    return String(transition.profile||'default');
+  }
+  return String((S&&S.activeProfile)||(session&&session.profile)||'default');
+}
+
+function _reasoningEffortStateKey(queryOverride){
+  const query=queryOverride===undefined?_reasoningEffortQuery():queryOverride;
+  return _reasoningEffortProfileKey()+'\n'+query;
+}
+
+function getComposerReasoningEffortForRun(){
+  const profileKey=_reasoningEffortProfileKey();
+  const pending=_pendingReasoningEffortSelection;
+  // Preserve the raw user choice while its profile write is in flight. The
+  // target backend, not a previous model's chip, owns model-specific coercion.
+  if(pending&&pending.profileKey===profileKey){
+    return _normalizeReasoningEffort(pending.effort);
+  }
+  if(_currentReasoningEffortKey!==_reasoningEffortStateKey()) return '';
+  return _currentReasoningEffort===null?'':_normalizeReasoningEffort(_currentReasoningEffort);
+}
+window.getComposerReasoningEffortForRun=getComposerReasoningEffortForRun;
+
 function _applyReasoningOptions(supportedEfforts){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
-  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  const supported=new Set(
+    (Array.isArray(supportedEfforts)?supportedEfforts:[])
+      .map(_normalizeReasoningEffort)
+      .filter(Boolean)
+  );
+  // The server follows the Agent's canonical vocabulary. Materialize levels
+  // added after this WebUI release so capability updates do not become hidden.
+  supported.forEach(function(effort){
+    if(effort==='none') return;
+    const exists=Array.from(dd.querySelectorAll('.reasoning-option'))
+      .some(function(opt){return opt.dataset.effort===effort;});
+    if(exists) return;
+    const opt=document.createElement('div');
+    opt.className='reasoning-option';
+    opt.dataset.effort=effort;
+    opt.textContent=_formatReasoningEffortLabel(effort);
+    dd.appendChild(opt);
+  });
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
     if(effort==='none'){
@@ -4903,10 +4962,11 @@ function _applyReasoningOptions(supportedEfforts){
   });
 }
 
-function _applyReasoningChip(eff){
-  const meta=arguments[1]||null;
+function _applyReasoningChip(eff, meta, stateKey){
+  meta=meta||null;
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
+  _currentReasoningEffortKey=stateKey===undefined?_reasoningEffortStateKey():stateKey;
   if(meta&&Array.isArray(meta.supported_efforts)){
     _currentReasoningEffortsSupported=meta.supported_efforts;
   }
@@ -4960,35 +5020,44 @@ function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
-  const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  const query=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  const stateKey=_reasoningEffortStateKey(query);
   const seq=++_reasoningFetchSeq;
-  _lastReasoningFetchKey=key;
-  api('/api/reasoning'+key).then(function(st){
+  _lastReasoningFetchKey=stateKey;
+  api('/api/reasoning'+query).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
-    // apply, so an older in-flight GET can't poison the current chip (#4650).
-    if(seq!==_reasoningFetchSeq) return;
-    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+    // apply, and it must still own the same profile/model/provider context.
+    if(seq!==_reasoningFetchSeq||stateKey!==_reasoningEffortStateKey()) return;
+    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{}, stateKey);
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
     // nor clear a newer fetch's key. Only the latest dispatch clears the key so
     // routine syncs retry after a genuine transient failure.
-    if(seq!==_reasoningFetchSeq) return;
+    if(seq!==_reasoningFetchSeq||stateKey!==_reasoningEffortStateKey()) return;
     _lastReasoningFetchKey=null;
-    _applyReasoningChip('', {supported_efforts:[]});
+    _applyReasoningChip('', {supported_efforts:[]}, stateKey);
   });
+}
+
+function _invalidateReasoningChipForKey(stateKey){
+  _currentReasoningEffort=null;
+  _currentReasoningEffortsSupported=null;
+  _applyReasoningChip('', {supported_efforts:[]}, stateKey);
 }
 
 function refreshProfileTransitionReasoningChip(model, provider){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
+  _currentReasoningEffortKey=null;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
-  _applyReasoningChip('', {supported_efforts:[]});
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
-  fetchReasoningChip(params.size?'?'+params.toString():undefined);
+  const query=params.size?'?'+params.toString():undefined;
+  _invalidateReasoningChipForKey(_reasoningEffortStateKey(query));
+  fetchReasoningChip(query);
 }
 
 function clearProfileTransitionReasoningContext(){
@@ -5005,18 +5074,24 @@ function syncReasoningChip(){
   // network when nothing is cached yet OR the model/provider identity changed
   // since the last fetch (the only inputs that change /api/reasoning's answer).
   // The user-pick and model-switch paths still update the cache directly.
-  const key=_reasoningEffortQuery();
+  const query=_reasoningEffortQuery();
+  const stateKey=_reasoningEffortStateKey(query);
   // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
   // already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
   // not ten). Apply the cached chip only once we actually have an effort value.
-  if(_lastReasoningFetchKey===key){
-    if(_currentReasoningEffort!==null) _applyReasoningChip(_currentReasoningEffort);
+  if(_lastReasoningFetchKey===stateKey){
+    if(_currentReasoningEffort!==null&&_currentReasoningEffortKey===stateKey){
+      _applyReasoningChip(_currentReasoningEffort, null, stateKey);
+    }
     return;
   }
-  fetchReasoningChip();
+  // Transfer ownership synchronously. Until the new status arrives, Send must
+  // omit the explicit override instead of reading the previous model's value.
+  _invalidateReasoningChipForKey(stateKey);
+  fetchReasoningChip(query);
 }
 
 function _highlightReasoningOption(effort){
@@ -5070,6 +5145,58 @@ function closeReasoningDropdown(){
   if(mobileAction) mobileAction.classList.remove('active');
 }
 
+function _setComposerReasoningEffort(effort){
+  const raw=_normalizeReasoningEffort(effort);
+  if(!raw) return Promise.resolve(null);
+  const context=_reasoningEffortContext();
+  const params=new URLSearchParams(context);
+  const query=params.size?'?'+params.toString():'';
+  const stateKey=_reasoningEffortStateKey(query);
+  const profileKey=_reasoningEffortProfileKey();
+  const writeSeq=++_reasoningEffortWriteSeq;
+
+  // Keep the raw selection separate from the model-coerced chip response. A
+  // Send or model switch during this POST must carry the user's actual choice.
+  _pendingReasoningEffortSelection={effort:raw,profileKey,writeSeq};
+  _applyReasoningChip(raw, null, stateKey);
+  const payload=Object.assign({effort:raw},context);
+
+  return api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+    .then(function(st){
+      if(writeSeq!==_reasoningEffortWriteSeq) return st;
+      const sameProfile=_reasoningEffortProfileKey()===profileKey;
+      const currentStateKey=_reasoningEffortStateKey();
+      ++_reasoningFetchSeq; // supersede any GET that observed pre-write config
+      _pendingReasoningEffortSelection=null;
+      if(sameProfile&&currentStateKey===stateKey){
+        _lastReasoningFetchKey=stateKey;
+        _applyReasoningChip((st&&st.reasoning_effort)||raw, st||{}, stateKey);
+      }else if(sameProfile){
+        // The write is profile-wide but its response was coerced for the old
+        // model. Refetch the current model instead of applying that response.
+        _lastReasoningFetchKey=null;
+        _invalidateReasoningChipForKey(currentStateKey);
+        fetchReasoningChip();
+      }
+      showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||raw));
+      return st;
+    })
+    .catch(function(){
+      if(writeSeq===_reasoningEffortWriteSeq){
+        const sameProfile=_reasoningEffortProfileKey()===profileKey;
+        _pendingReasoningEffortSelection=null;
+        if(sameProfile){
+          ++_reasoningFetchSeq;
+          _lastReasoningFetchKey=null;
+          _invalidateReasoningChipForKey(_reasoningEffortStateKey());
+          fetchReasoningChip();
+        }
+        showToast('🧠 Failed to set effort');
+      }
+      return null;
+    });
+}
+
 document.addEventListener('click',function(e){
   if(
     !e.target.closest('#composerReasoningChip') &&
@@ -5080,13 +5207,7 @@ document.addEventListener('click',function(e){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
     if(effort){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
-        .then(function(st){
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
-        })
-        .catch(function(){showToast('🧠 Failed to set effort');});
+      _setComposerReasoningEffort(effort);
       closeReasoningDropdown();
     }
   }
@@ -7792,7 +7913,7 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        send({reasoningEffort:next.reasoning_effort});
       },120);
     }
   }

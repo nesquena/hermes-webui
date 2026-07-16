@@ -239,7 +239,7 @@ Called after run_conversation() completes to set the session title retroactively
 
 This is the most architecturally interesting part. Two endpoints cooperate:
 
-    POST /api/chat/start     Receives the user message. Creates a queue.Queue, stores it
+    POST /api/chat/start     Receives the user message and explicit turn context. Creates a queue.Queue, stores it
                              in STREAMS[stream_id], spawns a daemon thread running
                              _run_agent_streaming(), returns {stream_id} immediately.
 
@@ -278,13 +278,15 @@ the agent finishes. The frontend never uses it but it can be useful for debuggin
 
 ### 4.4 Agent Invocation (_run_agent_streaming)
 
-    def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
+    def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id,
+                             reasoning_effort=None):
 
 1. Fetches session from SESSIONS (not from disk -- session was just updated by /api/chat/start)
 2. Sets TERMINAL_CWD, HERMES_EXEC_ASK, HERMES_SESSION_KEY env vars
 3. Creates AIAgent with:
    - model=model, platform='cli', quiet_mode=True
    - enabled_toolsets=CLI_TOOLSETS (from config.yaml or hardcoded default)
+   - reasoning_config from this run's explicit effort, or the profile default
    - session_id=session_id
    - stream_delta_callback=on_token (fires per token)
    - tool_progress_callback=on_tool (fires per tool invocation)
@@ -588,7 +590,7 @@ Step-by-step trace of what happens when you type a message and press Send:
 9.  setBusy(true), setStatus('Hermes is thinking...')
 10. INFLIGHT[activeSid] = {messages: [...S.messages], uploaded}
 11. startApprovalPolling(activeSid)
-12. POST /api/chat/start {session_id, message, model, workspace}
+12. POST /api/chat/start {session_id, message, model, workspace, reasoning_effort?}
     Server: saves session, creates queue.Queue, starts daemon thread, returns {stream_id}
 13. Browser opens EventSource('/api/chat/stream?stream_id=X')
 14. In the SSE loop:
@@ -1325,7 +1327,7 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
     /api/session/delete        {"session_id"} -> {"ok": true}
-    /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
+    /api/chat/start            {"session_id", "message", "model"?, "workspace"?, "reasoning_effort"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.

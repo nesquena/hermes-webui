@@ -56,7 +56,12 @@ def test_ui_posts_reasoning_context_with_effort():
     src = read("static/ui.js")
     assert "function _reasoningEffortContext()" in src
     assert "new URLSearchParams(_reasoningEffortContext())" in src
-    assert "Object.assign({effort:effort},_reasoningEffortContext())" in src
+    context = re.search(r"const (\w+)=_reasoningEffortContext\(\);", src)
+    assert context, "reasoning POST must snapshot its model/provider context"
+    assert re.search(
+        rf"Object\.assign\(\{{effort:\w+\}},{context.group(1)}\)",
+        src,
+    ), "reasoning POST must pair effort with the captured model/provider context"
 
 
 def test_reasoning_post_route_threads_model_context():

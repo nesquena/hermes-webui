@@ -1442,7 +1442,7 @@ def test_mobile_config_panel_escape_closes_panel_and_dropdowns():
 def test_reasoning_chip_updates_desktop_and_mobile_controls():
     """Reasoning chip sync should keep both footer and mobile overflow labels current."""
     ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-    chip_start = ui_js.index("function _applyReasoningChip(eff)")
+    chip_start = ui_js.index("function _applyReasoningChip(")
     chip_end = ui_js.index("function fetchReasoningChip(", chip_start)
     chip_body = ui_js[chip_start:chip_end]
     for expected in (

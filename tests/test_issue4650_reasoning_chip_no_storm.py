@@ -76,12 +76,15 @@ function extractFunc(name) {
   return src.slice(start, i);
 }
 
-// `let _currentReasoningEffort` / `_currentReasoningEffortsSupported` /
-// `_lastReasoningFetchKey` are module-scope state the functions close over;
+// Reasoning chip cache and ownership fields are module-scope state the
+// production functions close over;
 // declare them in this eval scope so the extracted functions can see them.
 var _currentReasoningEffort = null;
 var _currentReasoningEffortsSupported = null;
+var _currentReasoningEffortKey = null;
 var _profileTransitionReasoningContext = null;
+var _pendingReasoningEffortSelection = null;
+var _reasoningEffortWriteSeq = 0;
 var _lastReasoningFetchKey = null;
 var _reasoningFetchSeq = 0;
 
@@ -89,8 +92,11 @@ eval(extractFunc('_normalizeReasoningEffort'));
 eval(extractFunc('_formatReasoningEffortLabel'));
 eval(extractFunc('_reasoningEffortContext'));
 eval(extractFunc('_reasoningEffortQuery'));
+eval(extractFunc('_reasoningEffortProfileKey'));
+eval(extractFunc('_reasoningEffortStateKey'));
 eval(extractFunc('_applyReasoningChip'));
 eval(extractFunc('fetchReasoningChip'));
+eval(extractFunc('_invalidateReasoningChipForKey'));
 eval(extractFunc('syncReasoningChip'));
 
 // ── Scenario ───────────────────────────────────────────────────────────────
@@ -134,7 +140,7 @@ global.api = (url) => ({
   then: (onOk) => { HANDLERS.push({ url, onOk }); return { catch: (onErr) => { HANDLERS[HANDLERS.length-1].onErr = onErr; } }; },
   catch: () => {},
 });
-_currentReasoningEffort = null; _lastReasoningFetchKey = null;
+_currentReasoningEffort = null; _currentReasoningEffortKey = null; _lastReasoningFetchKey = null;
 fetchReasoningChip();                 // dispatch #A (seq N)
 fetchReasoningChip();                 // dispatch #B (seq N+1) — supersedes A
 // Resolve the OLDER one (#A) last with one effort; must be ignored.

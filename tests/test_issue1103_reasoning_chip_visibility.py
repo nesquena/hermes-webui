@@ -45,6 +45,9 @@ def test_reasoning_chip_html_starts_hidden():
     assert 'data-effort="max"' in src, (
         "composer reasoning dropdown must include Max option"
     )
+    assert 'data-effort="ultra"' in src, (
+        "composer reasoning dropdown must include the current Ultra fallback"
+    )
 
 
 def test_ui_js_passes_model_context_to_reasoning_api():
@@ -53,17 +56,18 @@ def test_ui_js_passes_model_context_to_reasoning_api():
     assert "_reasoningEffortQuery" in src, (
         "ui.js must pass the active session model/provider to /api/reasoning"
     )
-    # The /api/reasoning GET must carry the model/provider query. #4650 captures
-    # the query into a local `key` first (for the in-flight storm + stale-success
-    # guards), so accept either the inlined form or the captured-key form — both
-    # pass _reasoningEffortQuery()'s output to the endpoint.
+    # The /api/reasoning GET must carry the model/provider query. The query and
+    # cache-ownership key are intentionally separate, so do not require a local
+    # variable name from either implementation.
     fetch_match = re.search(r"function fetchReasoningChip\([^)]*\)\{(.+?)\n\}", src, re.DOTALL)
     assert fetch_match, "fetchReasoningChip function must exist"
     fetch_body = fetch_match.group(1)
     inlined = "api('/api/reasoning'+_reasoningEffortQuery())" in src
-    captured = (
-        "_reasoningEffortQuery()" in fetch_body
-        and "api('/api/reasoning'+key)" in fetch_body
+    captured = re.search(
+        r"const\s+(\w+)=keyOverride===undefined\?_reasoningEffortQuery\(\):keyOverride;"
+        r".*api\('/api/reasoning'\+\1\)",
+        fetch_body,
+        re.DOTALL,
     )
     assert inlined or captured, (
         "fetchReasoningChip must pass _reasoningEffortQuery() (model/provider context) "

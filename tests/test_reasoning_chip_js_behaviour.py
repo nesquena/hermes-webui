@@ -10,7 +10,6 @@ label fell through to a wrong value for an unknown input.
 This file pins the actual rendered output for every effort state so the
 chip's None/Default visibility cannot silently regress.
 """
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -89,7 +88,9 @@ eval(extractFunc('_highlightReasoningOption'));
 eval(extractFunc('_applyReasoningChip'));
 
 const input = JSON.parse(process.argv[3]);
-_applyReasoningChip(input);
+// Rendering is independent of model-context ownership; supply a fixed key so
+// this focused harness does not need to recreate the entire session selector.
+_applyReasoningChip(input, null, 'test-profile\ntest-model');
 const result = {
   display: els.composerReasoningWrap.style.display,
   label:   els.composerReasoningLabel.textContent,

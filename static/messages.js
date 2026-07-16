@@ -1128,6 +1128,7 @@ if(typeof document!=='undefined'){
 // setBusy(true) is only called after the first await inside send().
 let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
+let _sendInProgressReasoningEffort = '';  // effort captured with the in-flight session
 const _sessionTitleProvisionalBySid = new Map();
 // Agent commands that are safe to execute directly in the WebUI even though
 // their canonical command is registered on the backend (for example
@@ -1297,6 +1298,13 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  const options=arguments[0]||{};
+  const _hasQueuedReasoning=Object.prototype.hasOwnProperty.call(options,'reasoningEffort');
+  const reasoningEffortForSend=_hasQueuedReasoning
+    ? String(options.reasoningEffort||'').trim().toLowerCase()
+    : (typeof window.getComposerReasoningEffortForRun==='function'
+      ? window.getComposerReasoningEffortForRun()
+      : '');
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1308,9 +1316,17 @@ async function send(){
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
+    const _currentSid=(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)
+      ? _loadingSessionId
+      : (S.session&&S.session.session_id);
+    // A session switch must not pair the in-flight target with the newly
+    // visible session's composer effort.
+    const _targetReasoningEffort=_sendInProgressSid&&_targetSid!==_currentSid
+      ? _sendInProgressReasoningEffort
+      : reasoningEffortForSend;
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
-      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,reasoning_effort:_targetReasoningEffort||undefined,profile:S.activeProfile||'default'});
       _clearComposerAfterQueuedSelectionSend();
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
@@ -1320,8 +1336,8 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  _sendInProgressReasoningEffort = '';
   try{
-  const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
   let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
@@ -1390,7 +1406,7 @@ async function send(){
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,reasoning_effort:reasoningEffortForSend||undefined,profile:S.activeProfile||'default'});
         updateQueueBadge(S.session.session_id);
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
@@ -1404,7 +1420,7 @@ async function send(){
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,reasoning_effort:reasoningEffortForSend||undefined,profile:S.activeProfile||'default'});
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
@@ -1553,6 +1569,7 @@ async function send(){
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  _sendInProgressReasoningEffort=reasoningEffortForSend;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -1743,6 +1760,7 @@ async function send(){
       // matching provider fallback for the same outgoing model.
       model:_modelState.model,workspace:S.session.workspace,
       model_provider:_modelState.model_provider,
+      reasoning_effort:reasoningEffortForSend||undefined,
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
@@ -1787,7 +1805,7 @@ async function send(){
       stopClarifyPolling();
       // Keep the user's attempted turn by queueing it for after the current run.
       const _retryModelState=_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
+      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,reasoning_effort:reasoningEffortForSend||undefined,profile:S.activeProfile||'default'});
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
@@ -1890,7 +1908,7 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{ _sendInProgress=false; _sendInProgressSid=null; _sendInProgressReasoningEffort=''; }
 }
 
 const LIVE_STREAMS={};

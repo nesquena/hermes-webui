@@ -108,7 +108,14 @@ def _extract_reentrancy_guard() -> str:
     return body[start:i]
 
 
-def _run_reentrant_guard_in_node(composer_value: str):
+def _run_reentrant_guard_in_node(
+    composer_value: str,
+    *,
+    current_sid: str = "sid-1",
+    loading_sid: str = "",
+    current_effort: str = "low",
+    in_flight_effort: str = "low",
+):
     """Execute the REAL re-entrancy guard with a given live-composer value.
 
     Returns the list of queueSessionMessage calls the guard made. A non-empty
@@ -137,7 +144,11 @@ def _run_reentrant_guard_in_node(composer_value: str):
         // Minimal in-flight state: a send is already running for sid-1.
         let _sendInProgress = true;
         let _sendInProgressSid = 'sid-1';
-        const S = { session: { session_id: 'sid-1' }, pendingFiles: [], activeProfile: 'default' };
+        let _sendInProgressReasoningEffort = %(in_flight_effort)s;
+        const S = { session: { session_id: %(current_sid)s }, pendingFiles: [], activeProfile: 'default' };
+        const _loadingSessionId = %(loading_sid)s;
+        // send() snapshots this before entering the re-entrant guard.
+        const reasoningEffortForSend = %(current_effort)s;
 
         // Stubs the guard branch touches.
         function _chatPayloadModelState(){ return { model: 'm', model_provider: 'p' }; }
@@ -157,6 +168,10 @@ def _run_reentrant_guard_in_node(composer_value: str):
         """
     ) % {
         "composer_value": json.dumps(composer_value),
+        "current_sid": json.dumps(current_sid),
+        "loading_sid": json.dumps(loading_sid),
+        "current_effort": json.dumps(current_effort),
+        "in_flight_effort": json.dumps(in_flight_effort),
         "helper": helper,
         "guard": guard,
     }
@@ -185,4 +200,25 @@ def test_reentrant_send_would_double_submit_if_composer_not_cleared():
         "the stale-composer scenario must reproduce the double-submit the fix removes"
     )
     assert out["queued"][0]["payload"]["text"] == "hello world"
+    assert out["queued"][0]["payload"]["reasoning_effort"] == "low"
     assert out["queued"][0]["sid"] == "sid-1"
+
+
+@pytest.mark.parametrize(
+    ("current_sid", "loading_sid"),
+    [("sid-2", ""), ("sid-1", "sid-2")],
+)
+def test_reentrant_send_keeps_in_flight_effort_after_session_switch(current_sid, loading_sid):
+    """The in-flight session target must retain its own captured effort even
+    when another session and effort are visible during re-entry."""
+    out = _run_reentrant_guard_in_node(
+        "follow-up",
+        current_sid=current_sid,
+        loading_sid=loading_sid,
+        current_effort="xhigh",
+        in_flight_effort="low",
+    )
+
+    assert len(out["queued"]) == 1
+    assert out["queued"][0]["sid"] == "sid-1"
+    assert out["queued"][0]["payload"]["reasoning_effort"] == "low"
