@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import base64
 import binascii
-import concurrent.futures
 import ipaddress
 import json
 import logging
 import math
+import multiprocessing
 import os
+import queue
 import re
 import secrets
 import socket
 import tempfile
 import threading
+import time
 from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -28,20 +30,22 @@ _STORE_LOCK = threading.Lock()
 _WEB_PUSH_TIMEOUT_SECONDS = 10
 _WEB_PUSH_DELIVERY_MAX_WORKERS = 4
 _WEB_PUSH_DELIVERY_MAX_PENDING = 32
+_WEB_PUSH_DELIVERY_WALL_CLOCK_SECONDS = 15
+_WEB_PUSH_DELIVERY_SHUTDOWN_WAIT_SECONDS = 5
 _LOCAL_PUSH_HOST_ALIASES = {"localhost", "ip6-localhost", "ip6-loopback"}
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _PUSH_OWNER_RE = re.compile(r"^[0-9a-f]{64}$")
 _WEB_PUSH_ENDPOINT_MAX_LENGTH = 2048
 _WEB_PUSH_KEY_MAX_LENGTH = 256
 _WEB_PUSH_OWNER_SUBSCRIPTION_LIMIT = 32
-_WEB_PUSH_DELIVERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=_WEB_PUSH_DELIVERY_MAX_WORKERS,
-    thread_name_prefix="web-push",
+_WEB_PUSH_DELIVERY_QUEUE = queue.Queue(
+    maxsize=_WEB_PUSH_DELIVERY_MAX_WORKERS + _WEB_PUSH_DELIVERY_MAX_PENDING
 )
 _WEB_PUSH_DELIVERY_STOP_EVENT = threading.Event()
-_WEB_PUSH_DELIVERY_SLOTS = threading.BoundedSemaphore(
-    _WEB_PUSH_DELIVERY_MAX_WORKERS + _WEB_PUSH_DELIVERY_MAX_PENDING
-)
+_WEB_PUSH_DELIVERY_LOCK = threading.Lock()
+_WEB_PUSH_DELIVERY_WORKERS: list[threading.Thread] = []
+_WEB_PUSH_DELIVERY_ACTIVE_PROCESSES: dict[int, multiprocessing.Process] = {}
+_WEB_PUSH_DELIVERY_SHUTDOWN_DEADLINE: float | None = None
 
 
 class _PushEndpointResolutionError(ValueError):
@@ -79,7 +83,7 @@ def _load_store(*, profile_home: Path | None = None) -> dict:
     normalized = []
     for sub in subs:
         if not isinstance(sub, dict):
-            continue
+            raise _PushStoreUnavailable("Web Push subscription store is unavailable")
         try:
             normalized.append(
                 _normalize_subscription(
@@ -88,8 +92,9 @@ def _load_store(*, profile_home: Path | None = None) -> dict:
                     validate_endpoint=False,
                 )
             )
-        except ValueError:
-            logger.debug("Skipping malformed Web Push subscription entry", exc_info=True)
+        except ValueError as exc:
+            logger.debug("Malformed Web Push subscription entry in %s", path, exc_info=True)
+            raise _PushStoreUnavailable("Web Push subscription store is unavailable") from exc
     return {"subscriptions": normalized}
 
 
@@ -701,87 +706,226 @@ def _run_enqueued_web_push(payload: dict, *, owner_key: str, profile_home: Path 
     except Exception:
         logger.debug("Web Push background delivery failed", exc_info=True)
         return 0
-    finally:
-        _WEB_PUSH_DELIVERY_SLOTS.release()
 
 
-def _enqueue_web_push(payload: dict, *, owner_key: str | None, profile_home: Path | None = None) -> int:
+def _web_push_delivery_job(
+    payload: dict,
+    *,
+    session_id: str | None = None,
+    owner_key: str | None = None,
+    profile_home: Path | None = None,
+) -> dict | None:
+    payload_copy = dict(payload or {})
+    sid = str(session_id or "").strip()
     owner = str(owner_key or "").strip()
-    if not owner or _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
-        return 0
-    if not _WEB_PUSH_DELIVERY_SLOTS.acquire(blocking=False):
-        logger.debug("Skipping Web Push delivery because the background queue is full")
-        return 0
-    try:
-        if _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
-            _WEB_PUSH_DELIVERY_SLOTS.release()
-            return 0
-        _WEB_PUSH_DELIVERY_EXECUTOR.submit(
-            _run_enqueued_web_push,
-            dict(payload),
+    if sid:
+        return {"payload": payload_copy, "session_id": sid}
+    if owner:
+        return {"payload": payload_copy, "owner_key": owner, "profile_home": profile_home}
+    return None
+
+
+def _deliver_web_push_job(job: dict) -> int:
+    payload = dict((job or {}).get("payload") or {})
+    owner = str((job or {}).get("owner_key") or "").strip()
+    if owner:
+        profile_home = (job or {}).get("profile_home")
+        return _run_enqueued_web_push(
+            payload,
             owner_key=owner,
-            profile_home=profile_home,
+            profile_home=Path(profile_home).expanduser() if profile_home else None,
         )
+    session_id = str((job or {}).get("session_id") or "").strip()
+    if not session_id:
+        return 0
+    target = _session_push_target(session_id)
+    if not target:
+        return 0
+    return _run_enqueued_web_push(
+        payload,
+        owner_key=target[0],
+        profile_home=target[1],
+    )
+
+
+def _web_push_delivery_process_main(job: dict) -> None:
+    try:
+        _deliver_web_push_job(job)
     except Exception:
-        _WEB_PUSH_DELIVERY_SLOTS.release()
-        logger.debug("Failed to queue Web Push delivery", exc_info=True)
+        logger.debug("Web Push delivery subprocess failed", exc_info=True)
+
+
+def _effective_web_push_delivery_timeout() -> float:
+    timeout = _WEB_PUSH_DELIVERY_WALL_CLOCK_SECONDS
+    deadline = _WEB_PUSH_DELIVERY_SHUTDOWN_DEADLINE
+    if _WEB_PUSH_DELIVERY_STOP_EVENT.is_set() and deadline is not None:
+        timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+    return max(0.0, timeout)
+
+
+def _start_web_push_delivery_process(job: dict) -> multiprocessing.Process:
+    ctx = multiprocessing.get_context("spawn")
+    process = ctx.Process(
+        target=_web_push_delivery_process_main,
+        args=(job,),
+        daemon=True,
+        name="web-push-delivery",
+    )
+    process.start()
+    return process
+
+
+def _run_web_push_delivery_job(job: dict) -> None:
+    process: multiprocessing.Process | None = None
+    try:
+        process = _start_web_push_delivery_process(job)
+        with _WEB_PUSH_DELIVERY_LOCK:
+            _WEB_PUSH_DELIVERY_ACTIVE_PROCESSES[process.pid] = process
+        timeout = _effective_web_push_delivery_timeout()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1.0)
+            logger.debug(
+                "Web Push delivery terminated after %.1fs for session %s",
+                timeout,
+                (job or {}).get("session_id"),
+            )
+    except Exception:
+        logger.debug("Failed to run Web Push delivery job", exc_info=True)
+        if process and process.is_alive():
+            try:
+                process.terminate()
+                process.join(timeout=1.0)
+            except Exception:
+                logger.debug("Failed to terminate Web Push delivery process", exc_info=True)
+    finally:
+        if process is not None:
+            with _WEB_PUSH_DELIVERY_LOCK:
+                _WEB_PUSH_DELIVERY_ACTIVE_PROCESSES.pop(process.pid, None)
+
+
+def _web_push_delivery_worker() -> None:
+    while True:
+        try:
+            job = _WEB_PUSH_DELIVERY_QUEUE.get(timeout=0.5)
+        except queue.Empty:
+            if _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
+                return
+            continue
+        if job is None:
+            return
+        if _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
+            continue
+        _run_web_push_delivery_job(job)
+
+
+def _ensure_web_push_delivery_workers() -> None:
+    with _WEB_PUSH_DELIVERY_LOCK:
+        if _WEB_PUSH_DELIVERY_WORKERS or _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
+            return
+        for idx in range(_WEB_PUSH_DELIVERY_MAX_WORKERS):
+            worker = threading.Thread(
+                target=_web_push_delivery_worker,
+                name=f"web-push-{idx + 1}",
+                daemon=True,
+            )
+            worker.start()
+            _WEB_PUSH_DELIVERY_WORKERS.append(worker)
+
+
+def _enqueue_web_push(
+    payload: dict,
+    *,
+    session_id: str | None = None,
+    owner_key: str | None = None,
+    profile_home: Path | None = None,
+) -> int:
+    if _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
+        return 0
+    job = _web_push_delivery_job(
+        payload,
+        session_id=session_id,
+        owner_key=owner_key,
+        profile_home=profile_home,
+    )
+    if not job:
+        return 0
+    _ensure_web_push_delivery_workers()
+    try:
+        _WEB_PUSH_DELIVERY_QUEUE.put_nowait(job)
+    except queue.Full:
+        logger.debug("Skipping Web Push delivery because the background queue is full")
         return 0
     return 1
 
 
 def shutdown_web_push_delivery() -> None:
     _WEB_PUSH_DELIVERY_STOP_EVENT.set()
+    deadline = time.monotonic() + _WEB_PUSH_DELIVERY_SHUTDOWN_WAIT_SECONDS
+    with _WEB_PUSH_DELIVERY_LOCK:
+        global _WEB_PUSH_DELIVERY_SHUTDOWN_DEADLINE
+        _WEB_PUSH_DELIVERY_SHUTDOWN_DEADLINE = deadline
+        workers = list(_WEB_PUSH_DELIVERY_WORKERS)
     try:
-        _WEB_PUSH_DELIVERY_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    except Exception:
-        logger.debug("Failed to stop Web Push delivery executor", exc_info=True)
+        while True:
+            _WEB_PUSH_DELIVERY_QUEUE.get_nowait()
+    except queue.Empty:
+        pass
+    for _ in workers:
+        try:
+            _WEB_PUSH_DELIVERY_QUEUE.put_nowait(None)
+        except queue.Full:
+            break
+    for worker in workers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        worker.join(timeout=remaining)
+    with _WEB_PUSH_DELIVERY_LOCK:
+        active_processes = list(_WEB_PUSH_DELIVERY_ACTIVE_PROCESSES.values())
+    for process in active_processes:
+        if process.is_alive():
+            try:
+                process.terminate()
+            except Exception:
+                logger.debug("Failed to terminate Web Push delivery subprocess", exc_info=True)
+    for process in active_processes:
+        try:
+            process.join(timeout=1.0)
+        except Exception:
+            logger.debug("Failed to join Web Push delivery subprocess", exc_info=True)
 
 
 def notify_bg_task_complete(session_id: str, payload: dict) -> int:
     title = str((payload or {}).get("title") or "Background task complete")
     body = str((payload or {}).get("message") or "Task finished")
-    target = _session_push_target(session_id)
-    if not target:
-        return 0
     return _enqueue_web_push(
         _notification_payload(title, body, session_id=session_id),
-        owner_key=target[0],
-        profile_home=target[1],
+        session_id=session_id,
     )
 
 
 def notify_response_complete(session_id: str, answer: str) -> int:
     text = str(answer or "").strip()
     body = text[:120] if text else "Task finished"
-    target = _session_push_target(session_id)
-    if not target:
-        return 0
     return _enqueue_web_push(
         _notification_payload("Response complete", body, session_id=session_id),
-        owner_key=target[0],
-        profile_home=target[1],
+        session_id=session_id,
     )
 
 
 def notify_approval_required(session_id: str, approval: dict) -> int:
     body = str((approval or {}).get("description") or "Tool approval needed")
-    target = _session_push_target(session_id)
-    if not target:
-        return 0
     return _enqueue_web_push(
         _notification_payload("Approval required", body, session_id=session_id),
-        owner_key=target[0],
-        profile_home=target[1],
+        session_id=session_id,
     )
 
 
 def notify_clarify_required(session_id: str, clarify: dict) -> int:
     body = str((clarify or {}).get("question") or "Tool clarification needed")
-    target = _session_push_target(session_id)
-    if not target:
-        return 0
     return _enqueue_web_push(
         _notification_payload("Clarification needed", body, session_id=session_id),
-        owner_key=target[0],
-        profile_home=target[1],
+        session_id=session_id,
     )

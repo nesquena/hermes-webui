@@ -130,6 +130,7 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
     data = _with_timeout_metadata(data)
+    head_to_push = None
     with _lock:
         gw_queue = _gateway_queues.setdefault(session_key, [])
         # De-duplicate while unresolved: if the most recent pending clarify is
@@ -163,18 +164,22 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         entry = _ClarifyEntry(data)
         # Ensure clarify_id is present in the serialised data the frontend receives.
         entry.data["clarify_id"] = entry.clarify_id
+        was_empty = not gw_queue
         gw_queue.append(entry)
         _pending[session_key] = gw_queue[0].data
         cb = _gateway_notify_cbs.get(session_key)
         # Notify SSE subscribers from inside _lock for ordering guarantees.
         _clarify_sse_notify(session_key, dict(gw_queue[0].data), len(gw_queue))
+        if was_empty:
+            head_to_push = dict(gw_queue[0].data)
     publish_session_list_changed("attention_pending")
-    try:
-        from api.web_push import notify_clarify_required
+    if head_to_push:
+        try:
+            from api.web_push import notify_clarify_required
 
-        notify_clarify_required(session_key, entry.data)
-    except Exception:
-        logger.debug("Web Push clarify fanout failed for session %s", session_key, exc_info=True)
+            notify_clarify_required(session_key, head_to_push)
+        except Exception:
+            logger.debug("Web Push clarify fanout failed for session %s", session_key, exc_info=True)
     if cb:
         try:
             cb(data)
@@ -209,6 +214,7 @@ def pending_count(session_key: str) -> int:
 
 def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) -> int:
     """Resolve the oldest pending clarify request for a session."""
+    next_head_to_push = None
     with _lock:
         q = _gateway_queues.get(session_key)
         if not q:
@@ -218,10 +224,18 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
         if q:
             _pending[session_key] = q[0].data
             _clarify_sse_notify(session_key, dict(q[0].data), len(q))
+            next_head_to_push = dict(q[0].data)
         else:
             _clear_queue_locked(session_key)
             _clarify_sse_notify(session_key, None, 0)
     publish_session_list_changed("attention_resolved")
+    if next_head_to_push:
+        try:
+            from api.web_push import notify_clarify_required
+
+            notify_clarify_required(session_key, next_head_to_push)
+        except Exception:
+            logger.debug("Web Push clarify fanout failed for session %s", session_key, exc_info=True)
     count = 0
     for entry in entries:
         entry.result = response
@@ -235,6 +249,8 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
 
     Returns True if the id was found and resolved, False otherwise.
     """
+    next_head_to_push = None
+    resolved_entry = None
     with _lock:
         q = _gateway_queues.get(session_key)
         if not q:
@@ -246,13 +262,22 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
                 if q:
                     _pending[session_key] = q[0].data
                     _clarify_sse_notify(session_key, dict(q[0].data), len(q))
+                    next_head_to_push = dict(q[0].data)
                 else:
                     _clear_queue_locked(session_key)
                     _clarify_sse_notify(session_key, None, 0)
-                # Safe to call while holding _lock: publish() only takes the
-                # leaf _SESSION_EVENTS_LOCK and never re-acquires this lock.
-                publish_session_list_changed("attention_resolved")
-                entry.result = response
-                entry.event.set()
-                return True
-        return False
+                resolved_entry = entry
+                break
+        else:
+            return False
+    publish_session_list_changed("attention_resolved")
+    if next_head_to_push:
+        try:
+            from api.web_push import notify_clarify_required
+
+            notify_clarify_required(session_key, next_head_to_push)
+        except Exception:
+            logger.debug("Web Push clarify fanout failed for session %s", session_key, exc_info=True)
+    resolved_entry.result = response
+    resolved_entry.event.set()
+    return True

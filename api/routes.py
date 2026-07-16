@@ -20122,6 +20122,24 @@ def _stamp_session_push_owner_from_request(handler, session, *, log_label: str) 
         logger.debug("Failed to stamp Web Push owner for %s", log_label, exc_info=True)
 
 
+def _web_push_expected_profile_matches_request(handler, body) -> bool:
+    if not isinstance(body, dict):
+        return True
+    expected_profile = str(body.get("expected_profile") or body.get("expectedProfile") or "").strip()
+    if not expected_profile:
+        return True
+    try:
+        from api.profiles import get_active_profile_name
+
+        active_profile = get_active_profile_name() or "default"
+    except Exception:
+        active_profile = "default"
+    if _profiles_match(expected_profile, active_profile):
+        return True
+    bad(handler, "Active profile changed; retry the Web Push action", 409)
+    return False
+
+
 def _handle_push_vapid_public_key(handler):
     from api.config import web_push_public_key
     from api.web_push import web_push_status
@@ -20144,11 +20162,22 @@ def _handle_push_subscribe(handler, body):
 
     if not web_push_status().get("enabled"):
         return bad(handler, "Web Push is not configured", 409)
+    if not _web_push_expected_profile_matches_request(handler, body):
+        return False
     owner_key, set_cookie_header = ensure_push_owner_cookie(handler)
     subscription = body.get("subscription") if isinstance(body, dict) else None
     if not isinstance(subscription, dict):
         subscription = body if isinstance(body, dict) else {}
     previous_endpoint = str(body.get("previous_endpoint") or body.get("previousEndpoint") or "").strip() if isinstance(body, dict) else ""
+    active_session = None
+    active_session_id = str(body.get("session_id") or body.get("sessionId") or "").strip() if isinstance(body, dict) else ""
+    if active_session_id:
+        if not _session_id_visible_to_request_profile(handler, active_session_id):
+            return False
+        try:
+            active_session = get_session(active_session_id)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
     try:
         saved = upsert_subscription_for_owner_profiles(
             subscription,
@@ -20160,6 +20189,14 @@ def _handle_push_subscribe(handler, body):
         return bad(handler, str(exc), 400)
     except _PushStoreUnavailable as exc:
         return bad(handler, str(exc), 503)
+    if active_session is not None:
+        previous_owner = str(getattr(active_session, "push_owner", "") or "").strip()
+        if owner_key and owner_key != previous_owner:
+            active_session.push_owner = owner_key
+            try:
+                active_session.save(touch_updated_at=False)
+            except Exception:
+                logger.debug("Failed to persist Web Push owner for session %s", active_session_id, exc_info=True)
     extra_headers = {"Set-Cookie": set_cookie_header} if set_cookie_header else None
     return j(handler, {"ok": True, "subscription": _public_subscription(saved)}, extra_headers=extra_headers)
 
@@ -20174,6 +20211,8 @@ def _handle_push_unsubscribe(handler, body):
     )
     from api.profiles import get_active_hermes_home
 
+    if not _web_push_expected_profile_matches_request(handler, body):
+        return False
     endpoint = ""
     if isinstance(body, dict):
         endpoint = str(body.get("endpoint") or "").strip()
@@ -23618,23 +23657,6 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 # idempotent over the session key set so the outcome is
                 # the same regardless of which entry wins the race.
                 found_target = True
-        # Notify SSE subscribers of the new head (or empty state) so the UI
-        # surfaces any trailing approvals that were queued behind this one
-        # without waiting for the next submit_pending. Without this, a parallel
-        # tool-call scenario (#527) would leave the second approval invisible
-        # in the SSE path until the next event ever fired (the agent thread
-        # would be parked indefinitely from the user's perspective).
-        if isinstance(_pending.get(sid), list) and _pending[sid]:
-            next_head = _pending[sid][0]
-            next_head_identity = str(
-                next_head.get("approval_id")
-                or next_head.get("command")
-                or next_head.get("description")
-                or ""
-            )
-            _approval_sse_notify_locked(sid, next_head, len(_pending[sid]))
-        else:
-            _approval_sse_notify_locked(sid, None, 0)
 
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
@@ -23661,6 +23683,29 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
     resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(sid)
+        queue = _pending.get(sid)
+        if isinstance(queue, list) and queue:
+            next_head = queue[0]
+            next_head_identity = str(
+                next_head.get("approval_id")
+                or next_head.get("command")
+                or next_head.get("description")
+                or ""
+            )
+            _approval_sse_notify_locked(sid, next_head, len(queue))
+        elif queue:
+            next_head = queue
+            next_head_identity = str(
+                queue.get("approval_id")
+                or queue.get("command")
+                or queue.get("description")
+                or ""
+            )
+            _approval_sse_notify_locked(sid, queue, 1)
+        else:
+            _approval_sse_notify_locked(sid, None, 0)
     if next_head and next_head_identity and next_head_identity != previous_head_identity:
         try:
             from api.web_push import notify_approval_required

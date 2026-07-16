@@ -248,6 +248,73 @@ def test_push_routes_support_status_subscribe_and_delete(monkeypatch, tmp_path):
     assert captured_homes.count(active_home) == 6
 
 
+def test_push_subscribe_stamps_visible_active_session_owner(monkeypatch, tmp_path):
+    import api.profiles as profiles
+    import api.routes as routes
+    import api.web_push as web_push
+
+    store_path = tmp_path / "webui_push_subscriptions.json"
+    active_home = tmp_path / "active-profile"
+    session = SimpleNamespace(
+        session_id="session-123",
+        profile="default",
+        push_owner=None,
+        messages=[],
+        save_calls=[],
+    )
+    session.save = lambda touch_updated_at=False: session.save_calls.append(touch_updated_at)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda handler, sid, **kwargs: sid in (None, session.session_id))
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: active_home)
+    monkeypatch.setattr(web_push, "_subscription_store_path", lambda profile_home=None: store_path)
+    monkeypatch.setattr(web_push, "web_push_status", lambda: {
+        "enabled": True,
+        "configured": True,
+        "dependency_available": True,
+    })
+
+    subscribe_handler = _JSONHandler({
+        "session_id": session.session_id,
+        "subscription": _subscription("https://push.example/browser"),
+    })
+    assert routes.handle_post(subscribe_handler, SimpleNamespace(path="/api/push/subscribe")) is not False
+    assert subscribe_handler.status == 200
+    assert isinstance(session.push_owner, str) and len(session.push_owner) == 64
+    assert session.save_calls == [False]
+
+
+def test_push_routes_reject_expected_profile_mismatch(monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+    import api.web_push as web_push
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-b")
+    monkeypatch.setattr(web_push, "web_push_status", lambda: {
+        "enabled": True,
+        "configured": True,
+        "dependency_available": True,
+    })
+
+    subscribe_handler = _JSONHandler({
+        "expected_profile": "profile-a",
+        "subscription": _subscription("https://push.example/browser"),
+    })
+    assert routes.handle_post(subscribe_handler, SimpleNamespace(path="/api/push/subscribe")) is False
+    assert subscribe_handler.status == 409
+    assert _payload(subscribe_handler)["error"] == "Active profile changed; retry the Web Push action"
+
+    delete_handler = _JSONHandler({
+        "expected_profile": "profile-a",
+        "endpoint": "https://push.example/browser",
+    })
+    assert routes.handle_delete(delete_handler, SimpleNamespace(path="/api/push/subscribe")) is False
+    assert delete_handler.status == 409
+    assert _payload(delete_handler)["error"] == "Active profile changed; retry the Web Push action"
+
+
 def test_push_routes_fail_closed_when_server_not_ready(monkeypatch):
     import api.routes as routes
     import api.web_push as web_push
@@ -755,25 +822,24 @@ def test_response_complete_bridge_calls_web_push(monkeypatch):
     assert seen == [("session-123", "Final answer")]
 
 
-def test_notify_response_complete_scopes_delivery_to_session_owner(monkeypatch):
+def test_notify_response_complete_enqueues_background_session_lookup(monkeypatch):
     import api.web_push as web_push
 
     seen = []
     monkeypatch.setattr(
         web_push,
         "_session_push_target",
-        lambda session_id: (_OWNER_A, Path("profile-a")) if session_id == "session-123" else None,
+        lambda session_id: (_ for _ in ()).throw(AssertionError("session lookup must stay in the background job")),
     )
     monkeypatch.setattr(
         web_push,
         "_enqueue_web_push",
-        lambda payload, *, owner_key, profile_home: seen.append((owner_key, profile_home, payload["title"])) or 1,
+        lambda payload, *, session_id=None, owner_key=None, profile_home=None: seen.append((session_id, payload["title"])) or 1,
     )
 
     assert web_push.notify_response_complete("session-123", "Final answer") == 1
-    assert web_push.notify_response_complete("session-456", "Other answer") == 0
     assert seen == [
-        (_OWNER_A, Path("profile-a"), "Response complete"),
+        ("session-123", "Response complete"),
     ]
 
 
@@ -810,11 +876,12 @@ def test_worker_delivery_uses_persisted_profile_home_without_tls(monkeypatch, tm
     monkeypatch.setattr(
         web_push,
         "_enqueue_web_push",
-        lambda payload, *, owner_key, profile_home: web_push.send_web_push(
-            payload,
-            owner_key=owner_key,
-            profile_home=profile_home,
-        ),
+        lambda payload, *, session_id=None, owner_key=None, profile_home=None: web_push._deliver_web_push_job({
+            "payload": payload,
+            "session_id": session_id,
+            "owner_key": owner_key,
+            "profile_home": profile_home,
+        }),
     )
     web_push.upsert_subscription(_subscription("https://push.example/live"), owner_key=_OWNER_A, profile_home=home_a)
     web_push.upsert_subscription(_subscription("https://push.example/dead"), owner_key=_OWNER_A, profile_home=home_a)
@@ -857,6 +924,31 @@ def test_subscription_rotation_updates_all_owner_profile_stores(monkeypatch, tmp
     assert [sub["endpoint"] for sub in web_push.list_subscriptions(owner_key=_OWNER_A, profile_home=home_a)] == [new_endpoint]
     assert [sub["endpoint"] for sub in web_push.list_subscriptions(owner_key=_OWNER_A, profile_home=home_b)] == [new_endpoint]
     assert [sub["endpoint"] for sub in web_push.list_subscriptions(owner_key=_OWNER_B, profile_home=home_b)] == ["https://push.example/other"]
+
+
+def test_malformed_subscription_entry_fails_closed_without_rewriting(monkeypatch, tmp_path):
+    import api.web_push as web_push
+
+    store_path = tmp_path / "webui_push_subscriptions.json"
+    monkeypatch.setattr(web_push, "_subscription_store_path", lambda profile_home=None: store_path)
+    store_path.write_text(json.dumps({
+        "subscriptions": [
+            {
+                "endpoint": "https://push.example/corrupt",
+                "keys": {"p256dh": "!", "auth": _VALID_AUTH},
+                "owner": _OWNER_A,
+            },
+            _subscription("https://push.example/live") | {"owner": _OWNER_A},
+        ]
+    }), encoding="utf-8")
+    original = store_path.read_text(encoding="utf-8")
+
+    with pytest.raises(web_push._PushStoreUnavailable):
+        web_push.list_subscriptions(owner_key=_OWNER_A)
+    with pytest.raises(web_push._PushStoreUnavailable):
+        web_push.upsert_subscription(_subscription("https://push.example/new"), owner_key=_OWNER_A)
+
+    assert store_path.read_text(encoding="utf-8") == original
 
 
 def test_remove_subscription_for_owner_profiles_cleans_all_associations(monkeypatch, tmp_path):
@@ -950,23 +1042,85 @@ def test_send_web_push_stops_after_shutdown_signal(monkeypatch, tmp_path):
     assert seen == ["https://push.example/one"]
 
 
-def test_shutdown_web_push_delivery_sets_stop_flag_and_cancels_pending(monkeypatch):
+def test_run_web_push_delivery_job_terminates_overdue_worker(monkeypatch):
     import api.web_push as web_push
 
+    class _FakeProcess:
+        def __init__(self):
+            self.pid = 17
+            self.joins = []
+            self.terminated = 0
+            self._alive = True
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            self.terminated += 1
+            self._alive = False
+
+    process = _FakeProcess()
+    monkeypatch.setattr(web_push, "_start_web_push_delivery_process", lambda job: process)
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_LOCK", threading.Lock())
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_ACTIVE_PROCESSES", {})
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_WALL_CLOCK_SECONDS", 15)
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_STOP_EVENT", threading.Event())
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_SHUTDOWN_DEADLINE", None)
+
+    web_push._run_web_push_delivery_job({"session_id": "session-123", "payload": {"title": "Response complete"}})
+
+    assert process.joins == [15, 1.0]
+    assert process.terminated == 1
+
+
+def test_shutdown_web_push_delivery_sets_stop_flag_and_terminates_stragglers(monkeypatch):
+    import api.web_push as web_push
+    import queue as _queue
+
     stop_event = threading.Event()
-    shutdown_calls = []
+    delivery_queue = _queue.Queue()
+    delivery_queue.put({"payload": {"title": "queued"}})
+    joined = []
 
-    class _FakeExecutor:
-        def shutdown(self, *, wait, cancel_futures):
-            shutdown_calls.append((wait, cancel_futures))
+    class _FakeThread:
+        def join(self, timeout=None):
+            joined.append(timeout)
 
+    class _FakeProcess:
+        def __init__(self):
+            self.pid = 19
+            self.terminated = 0
+            self.joins = []
+            self._alive = True
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            self.terminated += 1
+            self._alive = False
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+    process = _FakeProcess()
     monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_STOP_EVENT", stop_event)
-    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_EXECUTOR", _FakeExecutor())
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_QUEUE", delivery_queue)
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_WORKERS", [_FakeThread()])
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_ACTIVE_PROCESSES", {process.pid: process})
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_LOCK", threading.Lock())
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_SHUTDOWN_WAIT_SECONDS", 5)
 
     web_push.shutdown_web_push_delivery()
 
     assert stop_event.is_set() is True
-    assert shutdown_calls == [(False, True)]
+    assert delivery_queue.get_nowait() is None
+    assert joined and joined[0] <= 5
+    assert process.terminated == 1
+    assert process.joins == [1.0]
 
 
 def test_send_web_push_uses_fresh_vapid_claims_per_subscription(monkeypatch, tmp_path):
@@ -1050,6 +1204,34 @@ def test_approval_and_clarify_submit_pending_fan_out(monkeypatch):
     assert seen == [
         ("approval", "push-approval", "Tool approval needed"),
         ("clarify", "push-clarify", "Need more detail?"),
+    ]
+
+
+def test_clarify_push_tracks_the_actionable_head(monkeypatch):
+    import api.clarify as clarify
+    import api.web_push as web_push
+
+    session_id = "clarify-head-push"
+    seen = []
+    monkeypatch.setattr(clarify, "publish_session_list_changed", lambda *_: None)
+    monkeypatch.setattr(web_push, "notify_clarify_required", lambda sid, head: seen.append((sid, head["question"])) or 1)
+
+    try:
+        first = clarify.submit_pending(
+            session_id,
+            {"question": "Clarify A?", "choices_offered": ["yes", "no"]},
+        )
+        clarify.submit_pending(
+            session_id,
+            {"question": "Clarify B?", "choices_offered": ["yes", "no"]},
+        )
+        assert clarify.resolve_clarify_by_id(session_id, first.clarify_id, "yes") is True
+    finally:
+        clarify.clear_pending(session_id)
+
+    assert seen == [
+        (session_id, "Clarify A?"),
+        (session_id, "Clarify B?"),
     ]
 
 
@@ -1265,13 +1447,17 @@ def test_static_sources_cover_closed_app_push_flow():
     assert "/api/push/subscribe" in MESSAGES_JS
     assert "method:'DELETE'" in MESSAGES_JS
     assert "payload && !payload.any_profile_subscribed_after" in MESSAGES_JS
+    assert "expected_profile:mutation&&mutation.profile||''" in MESSAGES_JS
+    assert "session_id:mutation&&mutation.sessionId||''" in MESSAGES_JS
     assert "_notify_response_complete_web_push(session_id, _answer)" in STREAMING_SRC
     assert STREAMING_SRC.count("_notify_response_complete_web_push(session_id, _answer)") == 1
     assert "notify_approval_required(session_key, head)" in ROUTE_APPROVALS_SRC
-    assert "notify_clarify_required(session_key, entry.data)" in CLARIFY_SRC
+    assert "notify_clarify_required(session_key, head_to_push)" in CLARIFY_SRC
+    assert "notify_clarify_required(session_key, next_head_to_push)" in CLARIFY_SRC
     assert "_notify_response_complete_web_push(session_id, assistant_text)" in (ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
     assert "get_hermes_home_for_profile" in (ROOT / "api" / "web_push.py").read_text(encoding="utf-8")
     assert "def _stamp_session_push_owner_from_request(handler, session, *, log_label: str) -> None:" in ROUTES_SRC
+    assert "def _web_push_expected_profile_matches_request(handler, body) -> bool:" in ROUTES_SRC
     assert ROUTES_SRC.count("_stamp_session_push_owner_from_request(") >= 4
     assert ROUTES_SRC.count('push_owner=getattr(source, "push_owner", None)') >= 2
     assert "https://github.com/nesquena/hermes-webui#web-push-setup" in MESSAGES_JS
