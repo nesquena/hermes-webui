@@ -97,21 +97,44 @@ def _install_fake_hermes_cli(monkeypatch, *, nous_ids=None, raise_on_lookup=Fals
 
 
 def _swap_in_test_config(extra_cfg):
-    """Snapshot config.cfg, replace with a minimal test config; return restore-fn."""
-    old_cfg = dict(config.cfg)
+    """Snapshot config cache globals, replace with test config; return restore-fn."""
+    old_cfg_obj = config.cfg
+    old_cfg_is_cache = old_cfg_obj is config._cfg_cache
+    old_cfg_copy = dict(old_cfg_obj) if isinstance(old_cfg_obj, dict) else old_cfg_obj
+    old_cache = dict(config._cfg_cache)
     old_mtime = config._cfg_mtime
-    config.cfg.clear()
-    config.cfg["model"] = {}
-    config.cfg.update(extra_cfg)
+    old_path = getattr(config, "_cfg_path", None)
+    old_fingerprint = getattr(config, "_cfg_fingerprint", None)
+    test_cfg = {"model": {}}
+    test_cfg.update(extra_cfg)
+    model_cfg = test_cfg.get("model")
+    if isinstance(model_cfg, dict) and model_cfg.get("provider") == "nous":
+        model_cfg.setdefault("default", "@nous:anthropic/claude-opus-4.6")
+    config._cfg_cache.clear()
+    config._cfg_cache.update(test_cfg)
+    config.cfg = config._cfg_cache
+    config._cfg_path = config._get_config_path()
     try:
-        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        config._cfg_mtime = config._cfg_path.stat().st_mtime
     except Exception:
         config._cfg_mtime = 0.0
+    config._cfg_fingerprint = config._fingerprint_config(config._cfg_cache)
+    config.invalidate_models_cache()
 
     def _restore():
-        config.cfg.clear()
-        config.cfg.update(old_cfg)
+        config._cfg_cache.clear()
+        config._cfg_cache.update(old_cache)
+        if old_cfg_is_cache:
+            config.cfg = config._cfg_cache
+        else:
+            if isinstance(old_cfg_obj, dict) and isinstance(old_cfg_copy, dict):
+                old_cfg_obj.clear()
+                old_cfg_obj.update(old_cfg_copy)
+            config.cfg = old_cfg_obj
         config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
+        config._cfg_fingerprint = old_fingerprint
+        config.invalidate_models_cache()
 
     return _restore
 
@@ -121,6 +144,7 @@ def _scrub_provider_env(monkeypatch):
     via the fake hermes_cli stubs (not unrelated keys leaked from the runner)."""
     for var in (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+        "HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL",
         "DEEPSEEK_API_KEY", "XAI_API_KEY", "GROQ_API_KEY",
         "MISTRAL_API_KEY", "OPENROUTER_API_KEY",
         "OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY",

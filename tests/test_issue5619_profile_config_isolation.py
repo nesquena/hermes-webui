@@ -184,6 +184,39 @@ def test_model_picker_keeps_work_profile_snapshot_during_default_reload(
     assert result["default_model"] == "work-provider-model"
 
 
+def test_static_model_catalog_uses_snapshot_for_provider_model_allowlist(
+    monkeypatch, tmp_path
+):
+    from api import config
+
+    for env_name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "work-provider", "default": "global-model"},
+            "providers": {"work-provider": {"models": {"global-model": {}}}},
+        },
+        raising=False,
+    )
+
+    snapshot = {
+        "model": {"provider": "work-provider", "default": "snapshot-model"},
+        "providers": {"work-provider": {"models": {"snapshot-model": {}}}},
+    }
+
+    result = config._static_models_catalog_without_live_probes(config_data=snapshot)
+    work_group = next(
+        group for group in result["groups"] if group.get("provider_id") == "work-provider"
+    )
+    model_ids = {model["id"] for model in work_group["models"]}
+
+    assert "snapshot-model" in model_ids
+    assert "global-model" not in model_ids
+
+
 def test_settings_default_model_uses_one_profile_snapshot(
     profile_config_harness, monkeypatch
 ):

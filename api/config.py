@@ -344,10 +344,9 @@ def _fingerprint_config(data: dict) -> str:
     """Return a stable fingerprint for config dictionaries.
 
     A few tests and legacy call sites still mutate ``cfg`` directly for
-    in-memory overrides.  Path-aware reloads should not immediately discard
-    those overrides just because the active profile path differs from the last
-    disk load, but an unchanged disk-loaded cache must still reload on profile
-    switches.
+    in-memory overrides.  Mtime-only reloads should not immediately discard
+    those overrides, but active-profile switches must still reload from the
+    target profile's config path.
     """
     try:
         return json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
@@ -375,6 +374,25 @@ def _cfg_has_in_memory_overrides() -> bool:
     except NameError:
         # cfg not yet defined (during initial reload_config() at import time).
         return False
+
+
+def _cfg_path_matches_active_profile_home(config_path: Path) -> bool:
+    """True when ``config_path`` is the config file for the active profile."""
+    try:
+        from api.profiles import get_active_hermes_home
+
+        return Path(get_active_hermes_home()).expanduser() == Path(config_path).expanduser().parent
+    except Exception:
+        return False
+
+
+def _cfg_cache_needs_refresh(config_path: Path, current_mtime: float) -> bool:
+    """Return True when the disk-backed config cache should be reloaded."""
+    path_changed = _cfg_path != config_path
+    mtime_stale = current_mtime != _cfg_mtime
+    if _cfg_has_in_memory_overrides():
+        return path_changed and _cfg_path_matches_active_profile_home(config_path)
+    return not _cfg_cache or path_changed or mtime_stale
 
 
 def _get_config_path() -> Path:
@@ -453,8 +471,7 @@ def reload_config_if_stale() -> None:
         except OSError:
             current_mtime = 0.0
         path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+        if _cfg_cache_needs_refresh(config_path, current_mtime):
             _refresh_config_cache(config_path)
             if path_changed:
                 cfg = _cfg_cache
@@ -467,9 +484,7 @@ def get_config() -> dict:
         current_mtime = config_path.stat().st_mtime
     except OSError:
         current_mtime = 0.0
-    path_changed = _cfg_path != config_path
-    mtime_stale = current_mtime != _cfg_mtime
-    if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+    if _cfg_cache_needs_refresh(config_path, current_mtime):
         reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
     # via monkeypatch.setattr(config, "cfg", ...), return that override rather
@@ -503,10 +518,7 @@ def get_config_snapshot() -> dict:
         except OSError:
             current_mtime = 0.0
         path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (
-            mtime_stale and not _cfg_has_in_memory_overrides()
-        ):
+        if _cfg_cache_needs_refresh(config_path, current_mtime):
             _refresh_config_cache(config_path)
             if path_changed:
                 cfg = _cfg_cache
@@ -5456,7 +5468,7 @@ def _static_models_catalog_without_live_probes(
 
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
-            provider_cfg = _get_provider_cfg(raw_key)
+            provider_cfg = _get_provider_cfg(raw_key, config_data=cfg)
             raw_models = []
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 raw_models = _configured_model_options(provider_cfg["models"])
@@ -6549,9 +6561,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     except OSError:
         _current_path = _get_config_path()
         _current_mtime = 0.0
-    path_changed = _current_path != _cfg_path
-    mtime_stale = _current_mtime != _cfg_mtime
-    if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+    if _cfg_cache_needs_refresh(_current_path, _current_mtime):
         reload_config_if_stale()
     # The builder performs a long sequence of config reads and may continue on
     # a detached worker. Keep one immutable profile snapshot for the complete
