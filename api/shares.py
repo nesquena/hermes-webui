@@ -8,14 +8,17 @@ links do not leak local workspace paths, profile details, or raw tool payloads.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from api.config import STATE_DIR
 from api.helpers import redact_session_data
@@ -30,6 +33,15 @@ logger = logging.getLogger(__name__)
 
 SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
+_LOCAL_ATTACHMENT_PLACEHOLDER = "[Local attachment omitted from public share]"
+
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MARKDOWN_FILE_URI_RE = re.compile(
+    r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
+    re.IGNORECASE,
+)
+_ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
+_FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
 
 
 def _ensure_share_dir() -> None:
@@ -109,6 +121,48 @@ def _redact_share_paths(text: str, extra_paths) -> str:
     return text
 
 
+def _is_public_media_url(raw_ref: str) -> bool:
+    try:
+        parsed = urlsplit(raw_ref)
+        hostname = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return False
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return False
+    try:
+        if not ipaddress.ip_address(hostname).is_global:
+            return False
+    except ValueError:
+        pass
+    return not parsed.path.rstrip("/").lower().endswith("/api/media")
+
+
+def _omit_local_media_references(text: str) -> str:
+    """Replace refs that the public renderer would route through /api/media."""
+    if not isinstance(text, str) or not text:
+        return text
+
+    public_media_tokens: list[str] = []
+    stash_prefix = f"\x00SHARE_MEDIA_{secrets.token_hex(8)}_"
+
+    def replace_media_token(match: re.Match) -> str:
+        raw_ref = match.group(1)
+        if _is_public_media_url(raw_ref):
+            public_media_tokens.append(match.group(0))
+            return f"{stash_prefix}{len(public_media_tokens) - 1}\x00"
+        return _LOCAL_ATTACHMENT_PLACEHOLDER
+
+    sanitized = _MEDIA_TOKEN_RE.sub(replace_media_token, text)
+    sanitized = _MARKDOWN_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
+    sanitized = _ANGLE_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
+    sanitized = _FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
+    for index, token in enumerate(public_media_tokens):
+        sanitized = sanitized.replace(f"{stash_prefix}{index}\x00", token)
+    return sanitized
+
+
 def _sanitize_message(message: dict, *, redact_paths=()) -> dict | None:
     if not isinstance(message, dict):
         return None
@@ -119,8 +173,11 @@ def _sanitize_message(message: dict, *, redact_paths=()) -> dict | None:
     if not text:
         return None
     # ALWAYS-ON hardening for the public boundary, independent of any setting:
-    # (1) force credential redaction, (2) strip known local paths.
+    # (1) force credential redaction, (2) omit local media references that the
+    # public renderer would route through authenticated /api/media, (3) strip
+    # known local paths from the remaining prose.
     text = _force_redact_credentials(text)
+    text = _omit_local_media_references(text)
     text = _redact_share_paths(text, redact_paths)
     if not text.strip():
         return None
