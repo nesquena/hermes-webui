@@ -1414,7 +1414,7 @@ async function newSession(flash, options={}){
       // safe default that matches the user's configured route. S.session.model_provider
       // is the previous-session fallback when the dropdown is unhydrated.
       //
-      // Guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
+      // #2518 guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
       // @provider:model string already carries a foreign provider namespace from
       // a previous session that was served by a different backend. Attaching
       // the current _activeProvider to such a slug would let the server's fast
@@ -1606,6 +1606,9 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
+    const defaultWorkspace=(typeof data.default_workspace==='string'&&data.default_workspace)||null;
+    S._profileDefaultWorkspace=defaultWorkspace;
+    S._profileSwitchWorkspace=defaultWorkspace;
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     if(data.default_model) window._defaultModel=data.default_model;
@@ -7375,6 +7378,37 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _projectRequestPayload(project, extra){
+  const payload={
+    project_id:project.project_id,
+    profile:project.profile||'default',
+  };
+  if(extra&&typeof extra==='object'){
+    for(const [key,value] of Object.entries(extra)){
+      if(value!==undefined) payload[key]=value;
+    }
+  }
+  return payload;
+}
+
+function _projectUsesActiveProfile(project){
+  const targetProfile=(project&&typeof project.profile==='string'&&project.profile.trim())
+    ? project.profile.trim()
+    : 'default';
+  const activeProfile=S.activeProfile||'default';
+  return typeof _profileMatchesActiveProfile==='function'
+    ? _profileMatchesActiveProfile(targetProfile,activeProfile)
+    : targetProfile===activeProfile;
+}
+
+function _ensureActiveProfileForProject(project){
+  if(!project||_projectUsesActiveProfile(project)) return Promise.resolve(false);
+  if(typeof _switchProfileForSessionLoad==='function'){
+    return Promise.resolve(_switchProfileForSessionLoad(project.profile||'default')).then(()=>true);
+  }
+  return Promise.resolve(false);
+}
+
 function _attachProjectQuickCreateButton(chip, project){
   const btn=document.createElement('button');
   btn.type='button';
@@ -7398,23 +7432,30 @@ function _attachProjectQuickCreateButton(chip, project){
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id,profile:project.profile});
+        await newSession(false,_projectRequestPayload(project));
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
       return;
     }
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
+    let switchedProfile=false;
+    try{
+      switchedProfile=await _ensureActiveProfileForProject(project);
+    }catch(err){
+      if(typeof showToast==='function') showToast('Profile switch failed: '+(err&&err.message||err));
+      return;
+    }
     _setActiveProjectFilter(project);
     try{
-      await newSession(false,{project_id:project.project_id,profile:project.profile});
+      await newSession(false,_projectRequestPayload(project));
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
       try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
       try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
     }catch(err){
-      _setActiveProjectFilter(previousProject);
+      if(!switchedProfile) _setActiveProjectFilter(previousProject);
       if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
     }
   };
@@ -9156,7 +9197,7 @@ function _startProjectRename(proj, chip){
     _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
-        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,profile:proj.profile,name:inp.value.trim()})});
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{name:inp.value.trim()}))});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
@@ -9214,7 +9255,7 @@ function _showProjectContextMenu(e, proj, chip){
     dot.onclick=async()=>{
       menu.remove();
       try {
-        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,profile:proj.profile,name:proj.name,color:hex})});
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{name:proj.name,color:hex}))});
         await renderSessionList();
         showToast('Color updated');
       } catch(e) {
@@ -9250,7 +9291,7 @@ async function _confirmDeleteProject(proj){
   });
   if(!ok){return;}
   try {
-    await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id,profile:proj.profile})});
+    await api('/api/projects/delete',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj))});
     if(_projectFilterMatches(_activeProject,proj)) _activeProject=null;
     await renderSessionList();
     showToast('Project deleted');

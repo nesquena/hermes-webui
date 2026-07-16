@@ -56,7 +56,7 @@ from api.config import (
     STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
 )
 from api.models import load_projects, project_identity_matches, save_projects
-from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match, _PROFILE_ID_RE
+from api.profiles import get_active_profile_name, _profiles_match, _PROFILE_ID_RE
 
 # ── Apply --profile override before any module uses get_active_profile_name
 _invalid_profile_override = (
@@ -406,6 +406,8 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
 
 async def handle_rename_session(arguments: dict) -> list[TextContent]:
     """Rename a session via the authenticated webui API (cache-safe)."""
+    if error := _invalid_profile_result():
+        return error
     session_id = arguments.get("session_id")
     title = arguments.get("title", "").strip()[:80]
     if not session_id or not title:

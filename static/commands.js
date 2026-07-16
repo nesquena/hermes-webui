@@ -1228,7 +1228,7 @@ async function cmdGoal(args){
       workspace:S.session.workspace,
       model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
       model_provider:S.session.model_provider||null,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:S.session.profile||S.activeProfile||'default',
     })});
     const msg = (() => {
       const raw = String((r && r.message) || '').trim();

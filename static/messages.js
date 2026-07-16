@@ -1743,7 +1743,7 @@ async function send(){
       // matching provider fallback for the same outgoing model.
       model:_modelState.model,workspace:S.session.workspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:S.session.profile||S.activeProfile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined

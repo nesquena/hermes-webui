@@ -46,8 +46,9 @@ def test_quick_create_button_attaches_filter_align_and_request_path():
     src = _read(SESSIONS_JS)
     helper = _extract_function(src, "_attachProjectQuickCreateButton")
     assert "project-chip-quick-create" in helper
+    assert "_ensureActiveProfileForProject(project)" in helper
     assert "_setActiveProjectFilter(project)" in helper
-    assert "newSession(false,{project_id:project.project_id})" in helper
+    assert "newSession(false,_projectRequestPayload(project))" in helper
     assert "if(_newSessionInFlight)" in helper
     assert "_setActiveProjectFilter(previousProject)" in helper
     assert "btn.ondblclick" in helper
@@ -192,6 +193,142 @@ eval(newSessionSrc);
     return json.loads(result.stdout.strip().splitlines()[-1])["body"]
 
 
+def _run_switched_profile_new_session_case(default_workspace: str):
+    _DRIVER = r"""
+const fs = require('fs');
+const [path, argsJson] = process.argv.slice(-2);
+const args = JSON.parse(argsJson);
+const src = fs.readFileSync(path, 'utf8');
+
+function extractAsyncFunction(source, name) {
+  const marker = `async function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(name + ' not found');
+  const brace = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('function body not closed for ' + name);
+}
+
+globalThis.window = globalThis;
+globalThis.document = {
+  baseURI: 'http://example.test/',
+  createElement(tag) {
+    const node = {
+      tagName: String(tag || '').toUpperCase(),
+      children: [],
+      appendChild(child) { this.children.push(child); },
+      textContent: '',
+      value: '',
+      selectedOptions: [{ dataset: { provider: '' } }],
+      dataset: {},
+    };
+    return node;
+  },
+};
+globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+globalThis.history = { replaceState: () => {} };
+globalThis.NO_PROJECT_FILTER = '__none__';
+globalThis._activeProject = null;
+globalThis._sessionSourceFilter = 'webui';
+globalThis._newSessionInFlight = null;
+globalThis._messagesTruncated = false;
+globalThis._oldestIdx = 0;
+globalThis._sessionListSkeletonActive = false;
+globalThis.INFLIGHT = {};
+globalThis.S = {
+  session: { session_id: 'session-1', workspace: 'old-session' },
+  toolCalls: [],
+  messages: [],
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  _pendingSessionToolsets: null,
+  _profileSwitchWorkspace: null,
+  _profileDefaultWorkspace: 'old-default',
+};
+globalThis._defaultModel = null;
+globalThis._activeProvider = 'openai';
+globalThis._emptyComposerModelOverride = null;
+globalThis._readPersistedModelState = () => null;
+globalThis._readEmptyComposerModelOverride = () => null;
+globalThis._clearEmptyComposerModelOverride = () => {};
+globalThis.$ = (id) => (id === 'modelSelect' ? { value: 'gpt-4', selectedOptions: [{ dataset: { provider: 'openai' } }] } : null);
+for (const name of [
+  '_setNewSessionPending', 'updateQueueBadge', '_clearPendingSelections',
+  'clearLiveToolCards', 'setComposerStatus', 'setStatus', 'updateSendBtn',
+  'syncTopbar', 'renderMessages', 'startSessionStream', '_setSessionViewedCount',
+  '_setActiveSessionUrl', '_rememberNewChatDraftSession', '_hydrateTodosFromSession',
+  '_setLiveAssistantTps', '_syncCtxIndicator', 'showToast', '_invalidateSessionListRenders',
+  '_setProfileSwitchListEmbargo', 'showSessionListSkeleton', 'renderSessionList',
+  'renderSessionListFromCache', 'startGatewaySSE'
+]) {
+  globalThis[name] = () => {};
+}
+globalThis.loadDir = async () => null;
+globalThis._applyModelToDropdown = () => true;
+globalThis._modelStateForSelect = () => ({ model: 'gpt-4', model_provider: 'openai' });
+globalThis._readPersistedModelState = () => null;
+globalThis.getModelLabel = (v) => v || '';
+globalThis._defaultModel = null;
+
+const calls = [];
+globalThis.api = async (url, opts) => {
+  if (url === '/api/profile/switch') {
+    calls.push({ url, body: JSON.parse(opts.body) });
+    return {
+      active: 'work',
+      is_default: false,
+      default_workspace: args.defaultWorkspace,
+      default_model: null,
+      default_model_provider: null,
+    };
+  }
+  if (url === '/api/session/new') {
+    const body = JSON.parse(opts.body);
+    calls.push({ url, body });
+    return { session: { session_id: 's-1', messages: [], model: 'gpt-4', model_provider: 'openai', workspace: body.workspace, profile: body.profile, message_count: 0, last_usage: {} } };
+  }
+  throw new Error('unexpected api call ' + url);
+};
+
+eval(extractAsyncFunction(src, '_switchProfileForSessionLoad'));
+eval(extractAsyncFunction(src, 'newSession'));
+
+(async () => {
+  await _switchProfileForSessionLoad('work');
+  await newSession(false, { project_id: 'project-123', profile: 'work' });
+  const createCall = calls.find((c) => c.url === '/api/session/new');
+  console.log(JSON.stringify({
+    activeProfile: globalThis.S.activeProfile,
+    defaultWorkspace: globalThis.S._profileDefaultWorkspace,
+    body: createCall ? createCall.body : {},
+  }));
+})().catch(err => {
+  console.error(String(err && err.stack ? err.stack : err));
+  process.exit(1);
+});
+"""
+
+    result = subprocess.run(
+        [NODE, "-e", _DRIVER, str(SESSIONS_JS), json.dumps({"defaultWorkspace": default_workspace})],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}"
+        )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_new_session_aligns_project_id_override_when_explicitly_set():
     body = _run_new_session_case(
@@ -199,6 +336,16 @@ def test_new_session_aligns_project_id_override_when_explicitly_set():
         active_project={"profile": "default", "project_id": "active-project"},
     )
     assert body["project_id"] == "explicit-project"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_foreign_profile_new_session_uses_switched_default_workspace():
+    out = _run_switched_profile_new_session_case("D:/foreign-workspace")
+
+    assert out["activeProfile"] == "work"
+    assert out["defaultWorkspace"] == "D:/foreign-workspace"
+    assert out["body"]["profile"] == "work"
+    assert out["body"]["workspace"] == "D:/foreign-workspace"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -260,6 +407,10 @@ globalThis.document = {
     };
   },
 };
+globalThis.S = {
+  activeProfile: params.activeProfileName || 'default',
+  activeProfileIsDefault: (params.activeProfileName || 'default') === 'default',
+};
 globalThis._setActiveProjectFilter = (project) => {
   globalThis._activeProject = project;
   params.filterProject = project;
@@ -280,13 +431,26 @@ globalThis.newSession = async (flash, options) => {
 globalThis.showToast = (message) => {
   params.toasts.push(String(message || ''));
 };
+globalThis._switchProfileForSessionLoad = async (profile) => {
+  params.calls.push({type: 'switch-profile', profile});
+  globalThis.S.activeProfile = profile;
+  globalThis.S.activeProfileIsDefault = profile === 'default';
+};
 globalThis._newSessionInFlight = params.newSessionInFlightReject
   ? Promise.reject(new Error(params.newSessionInFlightReject))
   : (params.newSessionInFlight
       ? Promise.resolve(params.newSessionInFlight)
       : null);
 
-eval(extractFunction(sessionsSrc, '_attachProjectQuickCreateButton'));
+for (const name of [
+  '_profileMatchesActiveProfile',
+  '_projectRequestPayload',
+  '_projectUsesActiveProfile',
+  '_ensureActiveProfileForProject',
+  '_attachProjectQuickCreateButton',
+]) {
+  eval(extractFunction(sessionsSrc, name));
+}
 
 const chip = {
   appended: [],
@@ -324,6 +488,7 @@ const touchEv = {
     touchStopCount: params.touchStopCount,
     touchPreventCount: params.touchPreventCount,
     touchStopImmediateCount: params.touchStopImmediateCount,
+    activeProfile: globalThis.S.activeProfile,
     calls: params.calls,
     toasts: params.toasts,
   }));
@@ -338,15 +503,18 @@ def _run_quick_create_case(
     project_id="example-project",
     *,
     active_project=None,
+    active_profile_name="default",
     fail_new_session=False,
     new_session_inflight=None,
     new_session_inflight_reject=None,
+    project_profile="default",
 ):
     if active_project is None:
         active_project = {"profile": "default", "project_id": "active-project"}
     payload = {
         "projectId": project_id,
-        "projectProfile": "default",
+        "projectProfile": project_profile,
+        "activeProfileName": active_profile_name,
         "activeProject": active_project,
         "filterProject": active_project,
         "filterProjectId": active_project["project_id"],
@@ -385,15 +553,32 @@ def test_project_chip_quick_create_keeps_active_filter_and_uses_project_override
     assert out["buttonAriaLabel"] == "New conversation in this project"
     assert out["filterProject"] == {"profile": "default", "project_id": "project-123"}
     assert out["filterProjectId"] == "project-123"
-    assert out["newSession"] == {"flash": False, "options": {"project_id": "project-123"}}
+    assert out["newSession"] == {"flash": False, "options": {"project_id": "project-123", "profile": "default"}}
     assert {"type": "set-filter", "project": {"profile": "default", "project_id": "project-123"}} in out["calls"]
-    assert {"type": "new-session", "flash": False, "options": {"project_id": "project-123"}} in out["calls"]
+    assert {"type": "new-session", "flash": False, "options": {"project_id": "project-123", "profile": "default"}} in out["calls"]
     assert out["stopCount"] >= 3
     assert out["preventCount"] >= 3
     assert out["stopImmediateCount"] >= 3
     assert out["touchStopCount"] >= 2
     assert out["touchPreventCount"] == 0
     assert out["touchStopImmediateCount"] >= 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_project_chip_quick_create_switches_profile_before_foreign_profile_session():
+    out = _run_quick_create_case(
+        "project-123",
+        active_project={"profile": "default", "project_id": "keep-me"},
+        active_profile_name="default",
+        project_profile="work",
+    )
+
+    assert out["activeProfile"] == "work"
+    assert out["calls"][:3] == [
+        {"type": "switch-profile", "profile": "work"},
+        {"type": "set-filter", "project": {"profile": "work", "project_id": "project-123"}},
+        {"type": "new-session", "flash": False, "options": {"project_id": "project-123", "profile": "work"}},
+    ]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

@@ -316,3 +316,10 @@ def test_move_picker_marks_only_profile_matching_same_slug_project_active():
         {"name": "Work", "className": "project-picker-item active"},
         {"name": "Default alias", "className": "project-picker-item"},
     ]
+
+
+def test_project_mutations_share_profile_qualified_payload_helper():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "function _projectRequestPayload(" in src
+    assert src.count("_projectRequestPayload(proj") >= 3
+    assert "JSON.stringify({project_id:proj.project_id,profile:proj.profile" not in src

@@ -906,6 +906,16 @@ def test_mcp_invalid_profile_fails_closed_before_project_lookup(monkeypatch):
 
     payload = json.loads(asyncio.run(mcp_server.handle_list_projects({}))[0].text)
     assert payload == {"error": "invalid profile"}
+    monkeypatch.setattr(
+        mcp_server,
+        "_api_post",
+        lambda *_args, **_kwargs: pytest.fail("invalid profile must not post session rename"),
+    )
+    rename_payload = json.loads(asyncio.run(mcp_server.handle_rename_session({
+        "session_id": "sid",
+        "title": "Renamed",
+    }))[0].text)
+    assert rename_payload == {"error": "invalid profile"}
 
 
 def test_mcp_list_and_move_use_active_profile_db_rows(monkeypatch):
