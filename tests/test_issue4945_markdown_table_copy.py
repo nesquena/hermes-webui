@@ -75,6 +75,8 @@ function extractFunc(name) {
 
 const required = [
   '_markdownTableCopyHtmlEscape',
+  '_markdownTableCopyHtmlAttributeEscape',
+  '_markdownTableCopySafeHref',
   '_markdownTableText',
   '_markdownTableCellText',
   '_sanitizeMarkdownTableCellText',
@@ -85,13 +87,23 @@ const required = [
   '_markdownTableBoundaryWithinCell',
   '_markdownTableEdgeCell',
   '_isFullEnhancedMarkdownTableSelection',
+  '_findEnhancedMarkdownTablesFromRange',
   '_findEnhancedMarkdownTableFromRange',
+  '_markdownTableCopySemanticChildren',
+  '_markdownTableCopySemanticHtml',
+  '_markdownTableCopyCellHtml',
   '_markdownTableCopyPayloadForTable',
+  '_markdownTableCopyPlainText',
+  '_markdownTableCopyPayloadForMixedRange',
   '_handleMarkdownTableCopy',
 ];
 
 for (const name of required) {
-  eval(extractFunc(name));
+  try {
+    eval(extractFunc(name));
+  } catch (error) {
+    throw new Error(name + ' extraction failed: ' + error.message);
+  }
 }
 
 function toNodeTypeElement(tagName) {
@@ -165,6 +177,10 @@ class FakeElement {
     return Object.prototype.hasOwnProperty.call(this.attrs, name);
   }
 
+  getAttribute(name) {
+    return this.hasAttribute(name) ? this.attrs[name] : null;
+  }
+
   removeAttribute(name) {
     delete this.attrs[name];
   }
@@ -220,6 +236,14 @@ class FakeElement {
 
   set rows(values) {
     this._rows = values || [];
+  }
+}
+
+class FakeFragment extends FakeElement {
+  constructor() {
+    super('fragment');
+    this.nodeType = 11;
+    this.tagName = undefined;
   }
 }
 
@@ -493,7 +517,7 @@ console.log(JSON.stringify({ prevented: event.preventDefaultCalled }));
     assert out["prevented"] is False
 
 
-def test_mixed_selection_that_crosses_table_leaves_native_copy_unmodified():
+def test_mixed_selection_without_clone_support_leaves_native_copy_unmodified():
     out = _run_js(
         """
 const {root, table, body} = buildEnhancedTableFixture(true);
@@ -646,6 +670,14 @@ const after = makeElement('p');
 after.appendChild(new FakeText('trailing prose'));
 root.appendChild(after);
 
+const partialFragment = new FakeFragment();
+const partial = buildEnhancedTableFixture(false);
+partial.table.rows = [partial.body];
+partialFragment.appendChild(partial.table);
+const clonedAfter = makeElement('p');
+clonedAfter.appendChild(new FakeText('trailing prose'));
+partialFragment.appendChild(clonedAfter);
+
 // Start inside a body cell's text, end in the trailing prose paragraph.
 const range = {
   startContainer: body.cells[0].children[0],
@@ -655,6 +687,9 @@ const range = {
   commonAncestorContainer: root,
   intersectsNode(node) {
     return node === table;
+  },
+  cloneContents() {
+    return partialFragment;
   },
 };
 
@@ -685,3 +720,128 @@ console.log(JSON.stringify({ prevented: event.preventDefaultCalled, data: clipbo
     )
     assert out["prevented"] is False
     assert out["data"] == {}
+
+
+def test_mixed_selection_exports_theme_neutral_semantic_payload():
+    out = _run_js(
+        """
+function appendMixedContent(root, suffix) {
+  const heading = makeElement('h2', {
+    className: 'msg-heading dark-theme',
+    attrs: {style: 'color: white; background: black;'},
+  });
+  heading.appendChild(new FakeText('Monthly Summary'));
+  root.appendChild(heading);
+
+  const first = buildEnhancedTableFixture(true, {
+    headerTexts: ['Product Name', 'Total'],
+    bodyTexts: ['Example Service A', '$10.00'],
+  });
+  root.appendChild(first.table);
+
+  const subheading = makeElement('h3', {className: 'muted'});
+  subheading.appendChild(new FakeText('Example Site B'));
+  root.appendChild(subheading);
+
+  const second = buildEnhancedTableFixture(true, {
+    headerTexts: ['Product Name', 'Total'],
+    bodyTexts: ['Monthly Subtotal', '$40.00'],
+  });
+  const strong = makeElement('strong', {attrs: {style: 'color: gold;'}});
+  strong.appendChild(new FakeText('Monthly Subtotal'));
+  second.body.cells[0].children = [];
+  second.body.cells[0].appendChild(strong);
+  root.appendChild(second.table);
+
+  const trailing = makeElement('p', {
+    className: 'msg-copy-source',
+    attrs: {style: 'font-family: sans-serif;', 'data-copy-id': suffix},
+  });
+  trailing.appendChild(new FakeText('End of report: '));
+  const safeLink = makeElement('a', {
+    className: 'themed-link',
+    attrs: {
+      href: 'https://example.com/report?q=monthly&view=full',
+      style: 'color: cyan;',
+      onclick: 'alert(1)',
+    },
+  });
+  safeLink.appendChild(new FakeText('open report'));
+  trailing.appendChild(safeLink);
+  trailing.appendChild(new FakeText(' / '));
+  const unsafeLink = makeElement('a', {attrs: {href: 'javascript:alert(1)'}});
+  const trailingEnd = new FakeText('unsafe link');
+  unsafeLink.appendChild(trailingEnd);
+  trailing.appendChild(unsafeLink);
+  const hiddenForm = makeElement('form');
+  hiddenForm.appendChild(new FakeText('hidden form value'));
+  trailing.appendChild(hiddenForm);
+  root.appendChild(trailing);
+  return {heading, first, second, trailing, trailingEnd};
+}
+
+const source = makeElement('div');
+const original = appendMixedContent(source, 'source');
+const fragment = new FakeFragment();
+appendMixedContent(fragment, 'clone');
+
+const range = {
+  startContainer: original.heading.children[0],
+  startOffset: 0,
+  endContainer: original.trailingEnd,
+  endOffset: original.trailingEnd.textContent.length,
+  commonAncestorContainer: source,
+  intersectsNode(node) {
+    return node === original.first.table || node === original.second.table;
+  },
+  cloneContents() {
+    return fragment;
+  },
+};
+
+window.getSelection = () => ({
+  isCollapsed: false,
+  rangeCount: 1,
+  getRangeAt: () => range,
+});
+
+const clipboard = {
+  data: {},
+  setData(type, value) {
+    this.data[type] = value;
+  },
+};
+const event = {
+  preventDefaultCalled: false,
+  preventDefault() {
+    this.preventDefaultCalled = true;
+  },
+  clipboardData: clipboard,
+};
+
+_handleMarkdownTableCopy(event);
+console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboard.data}));
+"""
+    )
+
+    assert out["prevented"] is True
+    html = out["data"]["text/html"]
+    plain = out["data"]["text/plain"]
+    assert "<h2>Monthly Summary</h2>" in html
+    assert html.count("<table>") == 2
+    assert html.count("<th>Product Name</th><th>Total</th>") == 2
+    assert "<strong>Monthly Subtotal</strong>" in html
+    assert '<a href="https://example.com/report?q=monthly&amp;view=full">open report</a>' in html
+    assert "<a>unsafe link</a>" in html
+    assert "javascript:" not in html
+    assert "onclick=" not in html
+    assert "style=" not in html
+    assert "class=" not in html
+    assert "data-copy-id" not in html
+    assert "markdown-table-sort" not in html
+    assert "hidden form value" not in html
+    assert "Monthly Summary" in plain
+    assert "Product Name\tTotal" in plain
+    assert "Monthly Subtotal\t$40.00" in plain
+    assert "End of report" in plain
+    assert "hidden form value" not in plain
