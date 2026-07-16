@@ -684,20 +684,30 @@ function _buildSidebarLineageProjectResolver(sessions, referenceSessions){
     if(!session) return null;
     if(session.project_id) return session.project_id;
     const scope=`${_sidebarLineageSourceBucket(session, fallbackIsCli)}\u0000${_sessionProfileScope(session)}`;
-    const queue=[];
-    for(const field of ancestorFields) if(session[field]) queue.push(session[field]);
-    const seen=new Set();
+    const active=new Set([session.session_id]);
+    const completed=new Set();
     const projects=new Set();
-    while(queue.length){
-      const identity=queue.shift();
-      if(!identity||seen.has(identity)) continue;
-      seen.add(identity);
+    const visit=(identity)=>{
+      if(!identity) return true;
+      if(active.has(identity)) return false;
+      if(completed.has(identity)) return true;
+      active.add(identity);
       for(const candidate of byScopeIdentity.get(`${scope}\u0000${identity}`)||[]){
         if(candidate.project_id) projects.add(candidate.project_id);
         for(const field of ancestorFields){
-          if(candidate[field]&&!seen.has(candidate[field])) queue.push(candidate[field]);
+          const isBenignSelfRoot=(field==='_lineage_root_id'||field==='lineage_root_id')
+            &&candidate[field]===candidate.session_id;
+          if(candidate[field]&&!isBenignSelfRoot&&!visit(candidate[field])) return false;
         }
       }
+      active.delete(identity);
+      completed.add(identity);
+      return true;
+    };
+    for(const field of ancestorFields){
+      const isBenignSelfRoot=(field==='_lineage_root_id'||field==='lineage_root_id')
+        &&session[field]===session.session_id;
+      if(session[field]&&!isBenignSelfRoot&&!visit(session[field])) return null;
     }
     return projects.size===1?[...projects][0]:null;
   };
