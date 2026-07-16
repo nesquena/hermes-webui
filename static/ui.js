@@ -1321,18 +1321,40 @@ function _compensateScrollForMeasurementDelta(renderFn){
   // owner, hold through two frames, then release and restore the semantic anchor.
   const _settleH=Math.max(_guardH,(_inner&&Number.isFinite(_inner.scrollHeight))?_inner.scrollHeight:0);
   const _settleToken=_compUnpinned?_pinWipeMinHeight(_inner,_settleH):null;
-  const _releaseSettledGuard=()=>{
+  // Delayed-restore movement guard (maintainer gate): the settle release runs two
+  // frames later. If the reader keeps scrolling during that window, restoring the
+  // pre-render `anchorBefore` would snap them back to the stale position (repro:
+  // scrollTop 200 -> 260 during the window, then forced back to 200). Capture the
+  // scrollTop the synchronous compensation below leaves (in the FIRST frame, after
+  // that compensation has run), then in the SECOND frame only restore the anchor if
+  // the reader has NOT moved since — otherwise yield to the fresh user position.
+  const _releaseSettledGuard=(expectedTop)=>{
     if(!_settleToken) return;
     // A newer render may supersede this delayed guard. Never apply the old
     // semantic anchor unless this callback still owned and released the token.
     if(!_releaseWipeMinHeight(_inner,_settleToken)) return;
     void container.scrollHeight;
-    if(anchorBefore) _restoreMessageViewportAnchor(anchorBefore);
+    if(!anchorBefore) return;
+    // If the reader scrolled during the two-frame window (current scrollTop diverged
+    // from the value compensation left, and we didn't cause it programmatically),
+    // do NOT restore the stale anchor — respect where the reader is now.
+    if(Number.isFinite(expectedTop)
+       && Math.abs(container.scrollTop-expectedTop)>3
+       && !(typeof _programmaticScroll!=='undefined'&&_programmaticScroll)){
+      _lastScrollTop=container.scrollTop;
+      return;
+    }
+    _restoreMessageViewportAnchor(anchorBefore);
   };
   if(typeof requestAnimationFrame==='function'){
-    requestAnimationFrame(()=>requestAnimationFrame(_releaseSettledGuard));
+    requestAnimationFrame(()=>{
+      // First frame: the synchronous compensation below has landed. Snapshot the
+      // scrollTop it settled on as the movement baseline for the second frame.
+      const _expectedTop=container.scrollTop;
+      requestAnimationFrame(()=>_releaseSettledGuard(_expectedTop));
+    });
   }else{
-    _releaseSettledGuard();
+    _releaseSettledGuard(container.scrollTop);
   }
   if(!anchorBefore){
     return;

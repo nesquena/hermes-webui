@@ -184,6 +184,66 @@ console.log(JSON.stringify({{threw,minHeight:inner.style.minHeight,token:inner.d
     }
 
 
+def test_delayed_settle_restore_yields_to_fresh_user_scroll():
+    # Maintainer gate: if the reader keeps scrolling during the two-frame settle
+    # window, the delayed release must NOT snap them back to the pre-render anchor.
+    helpers = "\n".join(
+        _function_body(UI_JS, name)
+        for name in (
+            "_pinWipeMinHeight",
+            "_releaseWipeMinHeight",
+            "_compensateScrollForMeasurementDelta",
+        )
+    )
+    # rafQueue lets the test interleave a user scroll between the two rAF frames.
+    source = f"""
+const rafQueue=[];
+function requestAnimationFrame(cb){{ rafQueue.push(cb); return rafQueue.length; }}
+function _deferClearProgrammaticScroll(){{}}
+let _programmaticScroll=false;
+let _lastScrollTop=0;
+let _messageUserUnpinned=true;
+let _wipeGuardSeq=0;
+let restoredAnchor=null;
+function _restoreMessageViewportAnchor(a){{ restoredAnchor=a; container.scrollTop=200; return true; }}
+const container={{
+  scrollTop:200,scrollHeight:5000,clientHeight:800,
+  classList:{{add(){{}},remove(){{}}}},
+  querySelector:()=>null,
+  getBoundingClientRect:()=>({{top:0}}),
+}};
+const inner={{scrollHeight:5000,style:{{minHeight:'17px'}},dataset:{{}}}};
+function $(id){{return id==='messages'?container:inner;}}
+function _captureMessageViewportAnchor(){{return {{rawIdx:5,sessionIdx:5,topOffset:0,topPadBefore:0}};}}
+{helpers}
+// Run the compensation. renderFn does nothing (no measured shift) so the
+// synchronous compensation leaves scrollTop where it started (200).
+_compensateScrollForMeasurementDelta(()=>{{}});
+// Frame 1: fires the outer rAF, which snapshots expectedTop (200) and queues frame 2.
+rafQueue.shift()();
+// USER SCROLLS during the window: 200 -> 260.
+container.scrollTop=260;
+// Frame 2: the settle release runs. It must see the divergence and NOT restore.
+rafQueue.shift()();
+const movedResult={{scrollTop:container.scrollTop, restoredAnchor:restoredAnchor!==null}};
+
+// Control: same flow but the reader does NOT move — the anchor restore must run.
+restoredAnchor=null;
+inner.style.minHeight='17px'; delete inner.dataset.wipeGuardToken; delete inner.dataset.wipeGuardPrevMinHeight;
+container.scrollTop=200;
+_compensateScrollForMeasurementDelta(()=>{{}});
+rafQueue.shift()();
+rafQueue.shift()();
+const stillResult={{scrollTop:container.scrollTop, restoredAnchor:restoredAnchor!==null}};
+console.log(JSON.stringify({{moved:movedResult, still:stillResult}}));
+"""
+    result = _run_node(source)
+    # Reader moved: restore must be skipped, fresh position (260) preserved.
+    assert result["moved"] == {"scrollTop": 260, "restoredAnchor": False}
+    # Reader stayed put: the semantic anchor restore runs normally.
+    assert result["still"]["restoredAnchor"] is True
+
+
 def test_all_guarded_render_paths_have_exception_cleanup_and_owned_restore():
     render = _function_body(UI_JS, "renderMessages")
     cache = render[render.index("const _cacheGuardToken="):render.index("// Mid-stream flicker fix")]
