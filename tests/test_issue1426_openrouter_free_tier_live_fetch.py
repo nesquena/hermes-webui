@@ -17,6 +17,7 @@ the urllib.request layer is monkeypatched.
 """
 from __future__ import annotations
 
+import copy
 import json
 import urllib.request
 
@@ -89,6 +90,11 @@ def _isolate_openrouter_cache(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(config, "cfg", openrouter_cfg, raising=False)
+
+    def _load_openrouter_config_raw(_path, _copy=True):
+        return copy.deepcopy(openrouter_cfg) if _copy else openrouter_cfg
+
+    monkeypatch.setattr(config, "_load_yaml_config_file_raw", _load_openrouter_config_raw)
     # Reset module-level cache
     try:
         config.invalidate_models_cache()

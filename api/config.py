@@ -3239,7 +3239,13 @@ def model_with_provider_context(
     if not model or not provider or provider == "default" or model.startswith("@"):
         return model
 
-    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
+    if isinstance(config_data, dict):
+        active_cfg = config_data
+    else:
+        try:
+            active_cfg = copy.deepcopy(cfg) if _cfg_has_in_memory_overrides() else get_config_snapshot()
+        except NameError:
+            active_cfg = get_config_snapshot()
     model_cfg = active_cfg.get("model", {})
     config_provider = None
     if isinstance(model_cfg, dict):
