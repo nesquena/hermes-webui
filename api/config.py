@@ -9154,6 +9154,7 @@ _SETTINGS_DEFAULTS = {
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
+    "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "hide_composer_attach": False,  # hide attach button in composer footer
@@ -9470,6 +9471,7 @@ _SETTINGS_BOOL_KEYS = {
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",
     "session_endless_scroll",
+    "transparent_stream_event_timestamps",
     "auto_scroll_follow",
     "worklog_details_expanded_default",
     "auth_disabled_acknowledged",
