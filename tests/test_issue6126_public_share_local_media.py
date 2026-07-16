@@ -32,6 +32,9 @@ def test_public_share_snapshot_omits_local_media_references():
                 "Private MEDIA:http://192.168.1.20/internal.png\n"
                 "Authenticated MEDIA:https://hermes.example.test/api/media?path=/tmp/private.png\n"
                 "Media subpath MEDIA:https://hermes.example.test/app/api/media/download?id=private\n"
+                "Encoded MEDIA:https://hermes.example.test/app/%61pi/media?path=/tmp/private.png\n"
+                "Wildcard dot MEDIA:https://127.0.0.1.nip.io/internal.png\n"
+                "Wildcard dash MEDIA:https://app.192-168-1-20.sslip.io/internal.png\n"
                 "Public MEDIA:https://cdn.example.test/image.png"
             ),
         },
@@ -40,7 +43,7 @@ def test_public_share_snapshot_omits_local_media_references():
     snapshot = shares.build_share_snapshot(session)
     content = snapshot["messages"][1]["content"]
 
-    assert content.count(OMITTED_ATTACHMENT) == 11
+    assert content.count(OMITTED_ATTACHMENT) == 14
     assert "file://" not in content
     assert "MEDIA:/" not in content
     assert "MEDIA:C:" not in content
@@ -48,6 +51,10 @@ def test_public_share_snapshot_omits_local_media_references():
     assert "192.168.1.20" not in content
     assert "hermes.example.test/api/media" not in content
     assert "/api/media/download" not in content
+    assert "hermes.example.test/app/api/media" not in content
+    assert "hermes.example.test/app/%61pi/media" not in content
+    assert "127.0.0.1.nip.io" not in content
+    assert "app.192-168-1-20.sslip.io" not in content
     assert "/private/workspace" not in content
     assert "MEDIA:https://cdn.example.test/image.png" in content
 

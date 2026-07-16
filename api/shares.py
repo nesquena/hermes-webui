@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from api.config import STATE_DIR
 from api.helpers import redact_session_data
@@ -42,6 +42,12 @@ _MARKDOWN_FILE_URI_RE = re.compile(
 )
 _ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
 _FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
+_API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
+_EMBEDDED_IPV4_RE = re.compile(
+    r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
+)
+_LOCAL_ONLY_HOSTNAMES = {"localhost", "host.docker.internal"}
+_LOCAL_ONLY_HOSTNAME_SUFFIXES = (".localhost", ".local", ".home.arpa")
 
 
 def _ensure_share_dir() -> None:
@@ -121,26 +127,36 @@ def _redact_share_paths(text: str, extra_paths) -> str:
     return text
 
 
+def _hostname_has_non_global_embedded_ip(hostname: str) -> bool:
+    for match in _EMBEDDED_IPV4_RE.finditer(hostname):
+        try:
+            if not ipaddress.ip_address(".".join(match.groups())).is_global:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _is_public_media_url(raw_ref: str) -> bool:
     try:
         parsed = urlsplit(raw_ref)
-        hostname = (parsed.hostname or "").lower()
+        hostname = (parsed.hostname or "").strip(".").lower()
     except ValueError:
         return False
     if parsed.scheme.lower() not in {"http", "https"} or not hostname:
-        return False
-    if hostname == "localhost" or hostname.endswith(".localhost"):
         return False
     try:
         if not ipaddress.ip_address(hostname).is_global:
             return False
     except ValueError:
-        pass
-    media_path = parsed.path.rstrip("/").lower()
-    return not (
-        media_path.endswith("/api/media")
-        or "/api/media/" in media_path
-    )
+        if (
+            hostname in _LOCAL_ONLY_HOSTNAMES
+            or hostname.endswith(_LOCAL_ONLY_HOSTNAME_SUFFIXES)
+            or "." not in hostname
+            or _hostname_has_non_global_embedded_ip(hostname)
+        ):
+            return False
+    return not _API_MEDIA_PATH_RE.search(unquote(parsed.path or ""))
 
 
 def _omit_local_media_references(text: str) -> str:
