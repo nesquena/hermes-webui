@@ -19,7 +19,6 @@ import json
 import os
 import sys
 import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import api.routes as routes
@@ -286,8 +285,6 @@ def test_cron_output_batch_surfaces_per_file_truncation(monkeypatch, tmp_path):
     used to have its per-file truncation flag silently discarded. The batch
     output entry must now carry `truncated: true` so a client can tell that
     file's content was clipped."""
-    from api.routes import _read_cron_output_bounded
-
     out_dir = tmp_path / "cron-out" / "job1"
     out_dir.mkdir(parents=True)
     # One file over the per-file cap (within the batch budget), with ## Response
