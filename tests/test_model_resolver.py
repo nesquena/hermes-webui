@@ -800,6 +800,46 @@ def test_custom_provider_models_dict_routes_to_named_custom_provider():
     assert base_url == 'http://127.0.0.1:8080/v1'
 
 
+def test_custom_provider_models_string_list_routes_to_named_custom_provider_6121():
+    """#6121: picker-visible string-list models must route to their custom provider."""
+    model, provider, base_url = _resolve_with_config(
+        'qwen3.6:35b-a3b',
+        provider='anthropic',
+        default='claude-haiku-4-5',
+        custom_providers=[{
+            'name': 'storm-ollama',
+            'base_url': 'http://ollama.test:11434/v1',
+            'models': ['qwen3.6:35b-a3b', 'violet-lotus:latest'],
+        }],
+    )
+    assert model == 'qwen3.6:35b-a3b'
+    assert provider == 'custom:storm-ollama'
+    assert base_url == 'http://ollama.test:11434/v1'
+
+
+def test_custom_provider_models_object_list_routes_to_named_custom_provider_6121():
+    """#6121: resolver accepts the same object-list ids as the model picker."""
+    for model_entry in (
+        {'id': 'picker-model-id'},
+        {'model': 'picker-model-name'},
+        {'name': 'picker-model-label'},
+    ):
+        requested_model = next(iter(model_entry.values()))
+        model, provider, base_url = _resolve_with_config(
+            requested_model,
+            provider='anthropic',
+            default='claude-haiku-4-5',
+            custom_providers=[{
+                'name': 'Picker Parity',
+                'base_url': 'https://models.example.test/v1',
+                'models': [model_entry],
+            }],
+        )
+        assert model == requested_model
+        assert provider == 'custom:picker-parity'
+        assert base_url == 'https://models.example.test/v1'
+
+
 # ── Issue #2047: parenthesized local provider names with ports ────────────
 
 def test_custom_provider_name_with_parenthesized_port_uses_safe_slug():

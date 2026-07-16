@@ -1351,6 +1351,27 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
+def _configured_model_ids(raw_models: object) -> list[str]:
+    """Return ordered model IDs from supported config allowlist shapes."""
+    if isinstance(raw_models, dict):
+        candidates = (key for key in raw_models if isinstance(key, str))
+    elif isinstance(raw_models, list):
+        candidates = raw_models
+    else:
+        return []
+
+    model_ids: list[str] = []
+    for item in candidates:
+        if isinstance(item, dict):
+            candidate = item.get("id") or item.get("model") or item.get("name")
+        else:
+            candidate = item
+        model_id = str(candidate or "").strip()
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return model_ids
+
+
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
@@ -2376,12 +2397,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
         if str(model_cfg.get("default") or "").strip() == model:
             return True
         _declared = model_cfg.get("models")
-        if isinstance(_declared, dict) and model in _declared:
-            return True
-        if isinstance(_declared, list) and any(
-            (str(m.get("id") or "").strip() if isinstance(m, dict) else str(m or "").strip()) == model
-            for m in _declared
-        ):
+        if model in _configured_model_ids(_declared):
             return True
     # Named custom:<slug> — scan its custom_providers[] entry for a verbatim id.
     prov = str(config_provider or "").strip().lower()
@@ -2394,13 +2410,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
                 continue
             if str(entry.get("model") or "").strip() == model:
                 return True
-            _em = entry.get("models")
-            if isinstance(_em, dict) and model in _em:
-                return True
-            if isinstance(_em, list) and any(
-                (str(m.get("id") or "").strip() if isinstance(m, dict) else str(m or "").strip()) == model
-                for m in _em
-            ):
+            if model in _configured_model_ids(entry.get("models")):
                 return True
     return False
 
@@ -2664,16 +2674,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     continue
                 if _canon_config_provider == "copilot":
                     continue  # copilot.models is a settings map, not an allowlist
-                _own_models = _pdef.get('models')
-                if isinstance(_own_models, list):
-                    for _m in _own_models:
-                        _mid = str(_m.get('id') or '') if isinstance(_m, dict) else str(_m or '')
-                        if _mid.strip():
-                            _provider_models_set.add(_mid.strip())
-                elif isinstance(_own_models, dict):
-                    _provider_models_set.update(
-                        str(k).strip() for k in _own_models if isinstance(k, str) and str(k).strip()
-                    )
+                _provider_models_set.update(_configured_model_ids(_pdef.get('models')))
     _skip_custom_providers = (
         _is_explicit_non_custom_provider
         and (
@@ -2694,13 +2695,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids = set()
             if entry_model:
                 entry_model_ids.add(entry_model)
-            entry_models = entry.get('models')
-            if isinstance(entry_models, dict):
-                entry_model_ids.update(
-                    key.strip()
-                    for key in entry_models.keys()
-                    if isinstance(key, str) and key.strip()
-                )
+            entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
                 return model_id, provider_hint, entry_base_url or None
@@ -2734,20 +2729,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             # own providers: entry may match; skip all other slugs.
             if _skip_custom_providers and _canonicalise_provider_id(slug) != _active_slug:
                 continue
-            p_models = pdef.get('models')
-            if isinstance(p_models, list):
-                for m in p_models:
-                    mid = str(m.get('id') or '') if isinstance(m, dict) else str(m or '')
-                    if not mid:
-                        continue
-                    if mid.strip() == target:
-                        p_base_url = str(pdef.get('base_url') or '').strip()
-                        return model_id, slug, p_base_url or None
-            elif isinstance(p_models, dict):
-                for mid in p_models:
-                    if isinstance(mid, str) and mid.strip() == target:
-                        p_base_url = str(pdef.get('base_url') or '').strip()
-                        return model_id, slug, p_base_url or None
+            if target in _configured_model_ids(pdef.get('models')):
+                p_base_url = str(pdef.get('base_url') or '').strip()
+                return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
@@ -5103,20 +5087,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                         for key in ("api_key", "key_env", "base_url")
                     )
                     provider_models = provider_cfg.get("models")
-                    if isinstance(provider_models, dict):
-                        for model_id in provider_models:
-                            _append_model_id(canonical, model_id)
-                            has_local_signal = True
-                    elif isinstance(provider_models, list):
-                        for item in provider_models:
-                            if isinstance(item, dict):
-                                _append_model_id(
-                                    canonical,
-                                    item.get("id") or item.get("model") or item.get("name"),
-                                )
-                            else:
-                                _append_model_id(canonical, item)
-                            has_local_signal = True
+                    for model_id in _configured_model_ids(provider_models):
+                        _append_model_id(canonical, model_id)
+                        has_local_signal = True
                     if has_local_signal:
                         detected_providers.add(canonical)
 
@@ -5166,21 +5139,9 @@ def _static_models_catalog_without_live_probes() -> dict:
             model_id = str(entry.get("model") or "").strip()
             if model_id:
                 configured_ids.append(model_id)
-            raw_models = entry.get("models")
-            if isinstance(raw_models, dict):
-                for key in raw_models:
-                    if isinstance(key, str) and key.strip() and key.strip() not in configured_ids:
-                        configured_ids.append(key.strip())
-            elif isinstance(raw_models, list):
-                for item in raw_models:
-                    if isinstance(item, dict):
-                        candidate = str(
-                            item.get("id") or item.get("model") or item.get("name") or ""
-                        ).strip()
-                    else:
-                        candidate = str(item or "").strip()
-                    if candidate and candidate not in configured_ids:
-                        configured_ids.append(candidate)
+            for configured_id in _configured_model_ids(entry.get("models")):
+                if configured_id not in configured_ids:
+                    configured_ids.append(configured_id)
 
             for configured_id in configured_ids:
                 label = _get_label_for_model(configured_id, [])
@@ -7132,21 +7093,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
                     _cp_model_ids.append(_cp_model)
-                _cp_models_dict = _cp.get("models")
-                if isinstance(_cp_models_dict, dict):
-                    for _m_id in _cp_models_dict:
-                        if isinstance(_m_id, str) and _m_id.strip() and _m_id not in _cp_model_ids:
-                            _cp_model_ids.append(_m_id.strip())
-                elif isinstance(_cp_models_dict, list):
-                    for _item in _cp_models_dict:
-                        if isinstance(_item, str):
-                            _mid = _item.strip()
-                            if _mid and _mid not in _cp_model_ids:
-                                _cp_model_ids.append(_mid)
-                        elif isinstance(_item, dict):
-                            _mid = str(_item.get("id") or _item.get("model") or _item.get("name") or "").strip()
-                            if _mid and _mid not in _cp_model_ids:
-                                _cp_model_ids.append(_mid)
+                for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                    if _cp_model_id not in _cp_model_ids:
+                        _cp_model_ids.append(_cp_model_id)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
