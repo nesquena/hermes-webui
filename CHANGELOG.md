@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Models selected from a list-shaped custom-provider allowlist now route to the right provider.** A `custom_providers[].models` allowlist can be written as either a mapping or a list, and the model picker accepted both — but runtime routing only read mapping keys, so a model chosen from a *list*-shaped allowlist could silently stay on the active/default provider instead of its own. The supported-model-ID extraction is now centralized in one helper used by both catalog construction and routing, so the picker and runtime can no longer drift. Existing mapping-shaped and list-of-strings configs are unaffected. Thanks @franksong2702. (#6127, #6121)
+
 - **Stale sidebar approval attention badge now clears once its gateway approval has drained.** A parent session could keep showing the red approval "attention" dot in the sidebar after the underlying gateway approval was already resolved/gone — the live gateway queue drained but the sidebar summary kept the mirrored approval alive. `_session_attention_summary()` now reconciles the gateway pending-mirror before counting attention (the same self-healing repair the approval-pending route already does), so the badge clears correctly. Live approvals stay visible and actionable and the clarify fallback is unchanged. This is the WebUI read-path mitigation; the child-session context-propagation root cause stays tracked in #6100. Thanks @rodboev. (#6117, #6100)
 
 ### Added
