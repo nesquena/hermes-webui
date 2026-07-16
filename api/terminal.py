@@ -126,21 +126,24 @@ class TerminalSession:
             item = (self._next_output_seq, event, payload)
             self._next_output_seq += 1
             self._backlog.append(item)
-            subscribers = list(self._subscribers)
-        for q in subscribers:
-            try:
-                q.put_nowait(item)
-            except queue.Full:
-                # Slow viewer: drop its oldest chunk to stay responsive. Isolated
-                # per subscriber, so one lagging tab can't starve another.
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    pass
+            # Keep sequence assignment, backlog append, and non-blocking fanout in
+            # one publication order. Releasing this lock before fanout lets two
+            # producers enqueue seq N+1 before seq N to a live subscriber.
+            for q in self._subscribers:
                 try:
                     q.put_nowait(item)
                 except queue.Full:
-                    pass
+                    # Slow viewer: drop its oldest chunk to stay responsive.
+                    # Isolated per subscriber, so one lagging tab can't starve
+                    # another; all queue operations remain non-blocking.
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(item)
+                    except queue.Full:
+                        pass
 
 
 _TERMINALS: dict[str, TerminalSession] = {}

@@ -245,6 +245,7 @@ def test_unsubscribe_unknown_queue_is_safe():
 
 def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover():
     term = _make_term()
+    live = term.subscribe()
     producer_count = 4
     events_per_producer = 600
     barrier = threading.Barrier(producer_count)
@@ -273,6 +274,9 @@ def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover(
     assert [seq for seq, _event, _payload in backlog] == list(
         range(total - terminal._OUTPUT_BUFFER_MAXLEN + 1, total + 1)
     )
+    assert [seq for seq, _event, _payload in _drain(live)] == list(
+        range(total - terminal._OUTPUT_BUFFER_MAXLEN + 1, total + 1)
+    )
     assert term._next_output_seq == total + 1
 
     cursor = backlog[0][0]
@@ -280,3 +284,45 @@ def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover(
     assert [seq for seq, _event, _payload in replay] == list(
         range(cursor + 1, total + 1)
     )
+
+
+def test_concurrent_producers_keep_live_subscriber_delivery_order():
+    term = _make_term()
+    first_delivery_started = threading.Event()
+    second_delivery_completed = threading.Event()
+    release_first_delivery = threading.Event()
+
+    class _PausingQueue(queue.Queue):
+        def put_nowait(self, item):
+            if item[0] == 1:
+                first_delivery_started.set()
+                assert release_first_delivery.wait(timeout=1.0)
+            result = super().put_nowait(item)
+            if item[0] == 2:
+                second_delivery_completed.set()
+            return result
+
+    subscriber = _PausingQueue(maxsize=terminal._OUTPUT_BUFFER_MAXLEN)
+    with term._sub_lock:
+        term._subscribers.append(subscriber)
+
+    first = threading.Thread(
+        target=term.put_output,
+        args=("output", {"text": "first"}),
+    )
+    second = threading.Thread(
+        target=term.put_output,
+        args=("output", {"text": "second"}),
+    )
+    first.start()
+    assert first_delivery_started.wait(timeout=1.0)
+    second.start()
+    second_delivered_before_release = second_delivery_completed.wait(timeout=0.1)
+    release_first_delivery.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not second_delivered_before_release
+    assert [seq for seq, _event, _payload in _drain(subscriber)] == [1, 2]
