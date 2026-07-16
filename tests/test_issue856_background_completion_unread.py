@@ -87,6 +87,16 @@ def test_background_done_uses_rotated_session_id_for_completion_unread():
     )
 
 
+def test_manual_completion_state_is_preserved_on_later_completion_mark():
+    """Manual markers are not downgraded to regular completion markers when a later
+    completion event updates the same session while the user keeps a manual intent."""
+    block = _sessions_function_block("_markSessionCompletionUnread", "_markSessionCompletionUnreadIfBackground")
+    assert "const existing = unread[sid]" in block
+    assert "const hasManual = Boolean(existing" in block
+    assert "else if (hasManual)" in block
+    assert "entry.manual = true" in block
+
+
 def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     done_block = _done_block()
 

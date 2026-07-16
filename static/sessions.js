@@ -545,16 +545,28 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
   const entry = {message_count: count, completed_at: Date.now()};
+  const existing = unread[sid];
+  const hasManual = Boolean(existing && typeof existing === 'object' && !Array.isArray(existing) && existing.manual);
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
     if (meta.manual) {
       entry.manual = true;
       entry.manual_pending = true;
+    } else if (hasManual) {
+      entry.manual = true;
+      if (Object.prototype.hasOwnProperty.call(existing, 'manual_pending')) {
+        entry.manual_pending = existing.manual_pending;
+      }
     }
     if (meta.source) entry.source = String(meta.source);
     if (typeof meta.profile === 'string' && meta.profile.trim()) {
       entry.profile = meta.profile.trim();
+    }
+  } else if (hasManual) {
+    entry.manual = true;
+    if (Object.prototype.hasOwnProperty.call(existing, 'manual_pending')) {
+      entry.manual_pending = existing.manual_pending;
     }
   }
   unread[sid] = entry;
