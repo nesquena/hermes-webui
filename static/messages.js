@@ -504,8 +504,7 @@ function _markdownTableCopySemanticChildren(node){
 function _markdownTableCopySemanticHtml(node){
   if(!node) return '';
   if(node.nodeType===3) return _markdownTableCopyHtmlEscape(node.textContent||'');
-  const children=_markdownTableCopySemanticChildren(node);
-  if(node.nodeType!==1||!node.tagName) return children;
+  if(node.nodeType!==1||!node.tagName) return _markdownTableCopySemanticChildren(node);
 
   const tag=String(node.tagName).toLowerCase();
   if(tag==='table'&&node.matches&&node.matches('table[data-markdown-table-enhanced]')){
@@ -519,6 +518,7 @@ function _markdownTableCopySemanticHtml(node){
   ];
   if(blockedTags.includes(tag)) return '';
 
+  const children=_markdownTableCopySemanticChildren(node);
   const semanticTags=[
     'a','abbr','b','blockquote','br','code','dd','del','details','div','dl','dt',
     'em','h1','h2','h3','h4','h5','h6','hr','i','kbd','li','mark','ol','p',
@@ -555,7 +555,7 @@ function _markdownTableCopyCellHtml(cell){
   const sortLabel=sortButton&&sortButton.querySelector
     ? sortButton.querySelector('.markdown-table-sort-label')
     : null;
-  return _markdownTableCopySemanticChildren(sortLabel||cell);
+  return _markdownTableCopySemanticChildren(sortLabel||sortButton||cell);
 }
 
 function _markdownTableCopyPayloadForTable(table){

@@ -347,6 +347,21 @@ console.log(JSON.stringify(payload));
     assert "\nWidget > Basic\t12 & change" in out["plain"]
 
 
+def test_copy_payload_preserves_sort_button_text_when_label_is_missing():
+    out = _run_js(
+        """
+const {table, header} = buildEnhancedTableFixture(false);
+const sortButton = header.cells[0].querySelector('.markdown-table-sort');
+sortButton.children = [];
+sortButton.appendChild(new FakeText('Legacy Product Header'));
+const payload = _markdownTableCopyPayloadForTable(table);
+console.log(JSON.stringify(payload));
+"""
+    )
+    assert "<th>Legacy Product Header</th>" in out["html"]
+    assert out["plain"].startswith("Legacy Product Header\tPrice\n")
+
+
 def test_partial_multi_cell_selection_leaves_native_copy_unmodified():
     out = _run_js(
         """
