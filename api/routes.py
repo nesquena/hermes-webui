@@ -7179,7 +7179,8 @@ def _resolve_compatible_session_model_state(
             catalog = get_available_models()
     else:
         catalog = get_available_models()
-    default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
+    catalog_default_model = str(catalog.get("default_model") or "").strip()
+    default_model = str(catalog_default_model or DEFAULT_MODEL or "").strip()
 
     # Profile-aware resolution: when the caller supplies profile context
     # (not an explicit per-chat override), use the profile's provider and
@@ -7437,7 +7438,7 @@ def _resolve_compatible_session_model_state(
         if model_provider in routable_provider_ids or has_openrouter_group:
             return model, requested_provider, False
         # Model prefix is not routable — stale cross-provider reference, clear it.
-        if default_model:
+        if catalog_default_model:
             return default_model, requested_provider, True
         return model, requested_provider, False
 

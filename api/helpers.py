@@ -1144,6 +1144,8 @@ def get_profile_cookie(handler, *, reject_invalid: bool = False) -> str | None:
     def _known_profile_name(val: str) -> bool:
         if not _valid_profile_name(val):
             return False
+        if not reject_invalid:
+            return True
         try:
             from api.profiles import _is_root_profile, get_hermes_home_for_profile
 

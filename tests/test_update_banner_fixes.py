@@ -1678,7 +1678,7 @@ class TestUpdateSummaryRouteModelSelection:
         )
         monkeypatch.setattr(cfg, 'get_effective_default_model', lambda: 'openai/test-main')
 
-        def fake_resolve_model_provider(model):
+        def fake_resolve_model_provider(model, **kwargs):
             thread_env = getattr(cfg._thread_ctx, 'env', {})
             captured['model_resolution_env'] = {
                 'HERMES_HOME': os.environ.get('HERMES_HOME'),
@@ -1689,7 +1689,7 @@ class TestUpdateSummaryRouteModelSelection:
             return model, 'openai', 'https://example.test/v1'
 
         monkeypatch.setattr(cfg, 'resolve_model_provider', fake_resolve_model_provider)
-        monkeypatch.setattr(cfg, 'resolve_custom_provider_connection', lambda provider: (None, None))
+        monkeypatch.setattr(cfg, 'resolve_custom_provider_connection', lambda provider, **kwargs: (None, None))
 
         fake_runtime_provider = types.ModuleType('hermes_cli.runtime_provider')
         fake_runtime_provider.resolve_runtime_provider = lambda requested=None: {

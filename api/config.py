@@ -2748,7 +2748,16 @@ def resolve_model_provider(
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
     """
-    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
+    if isinstance(config_data, dict):
+        active_cfg = config_data
+    else:
+        # Legacy focused tests and older call sites can still install direct
+        # in-memory config overrides through cfg. Request/runtime paths pass an
+        # explicit snapshot, so keep this compatibility branch off that path.
+        try:
+            active_cfg = copy.deepcopy(cfg) if _cfg_has_in_memory_overrides() else get_config_snapshot()
+        except NameError:
+            active_cfg = get_config_snapshot()
     config_provider = None
     config_base_url = None
     model_cfg = active_cfg.get("model", {})
@@ -3130,8 +3139,6 @@ def resolve_custom_provider_connection(
     if not slug:
         return None, None
 
-    # Read the live config snapshot to avoid stale module-level cache edge
-    # cases after profile switches or runtime config edits.
     cfg_data = config_data if isinstance(config_data, dict) else get_config_snapshot()
 
     def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
@@ -4650,7 +4657,11 @@ def _main_model_request_overrides(
     if not gate_provider:
         gate_provider = str(model_cfg.get("provider") or "").strip().lower()
         if not gate_provider:
-            _, gate_provider, _ = resolve_model_provider(gate_model)
+            _, gate_provider, _ = _call_with_supported_kwargs(
+                resolve_model_provider,
+                gate_model,
+                config_data=config_data,
+            )
     if _main_model_supports_service_tier(gate_model, gate_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":
@@ -4730,7 +4741,8 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
 
         previous_provider = str(model_cfg.get("provider") or "").strip()
         requested_provider = str(provider or "").strip()
-        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+        resolved_model, resolved_provider, resolved_base_url = _call_with_supported_kwargs(
+            resolve_model_provider,
             selected_model,
             config_data=config_data,
         )
@@ -4939,7 +4951,11 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg["model"] = model or ""
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
-                    _, _, resolved_base_url = resolve_model_provider(model)
+                    _, _, resolved_base_url = _call_with_supported_kwargs(
+                        resolve_model_provider,
+                        model,
+                        config_data=config_data,
+                    )
                     if resolved_base_url:
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:
@@ -6118,6 +6134,18 @@ def _models_cache_source_fingerprint(
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
         "catalog": _models_cache_catalog_fingerprint(),
     }
+
+
+def _call_with_supported_kwargs(func, *args, **kwargs):
+    try:
+        import inspect as _inspect
+        params = _inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return func(*args, **kwargs)
+    if any(param.kind == param.VAR_KEYWORD for param in params.values()):
+        return func(*args, **kwargs)
+    supported = {key: value for key, value in kwargs.items() if key in params}
+    return func(*args, **supported)
 
 
 def _delete_models_cache_on_disk() -> None:
@@ -8149,11 +8177,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     disk_groups = None
     stale_disk_groups = None
     if _available_models_cache is None and not force_refresh:
-        disk_groups = _load_models_cache_from_disk(config_data=cfg)
+        disk_groups = _call_with_supported_kwargs(_load_models_cache_from_disk, config_data=cfg)
         if disk_groups is None:
-            stale_disk_groups = _load_stale_models_cache_from_disk(config_data=cfg)
+            stale_disk_groups = _call_with_supported_kwargs(_load_stale_models_cache_from_disk, config_data=cfg)
     elif force_refresh:
-        stale_disk_groups = _load_stale_models_cache_from_disk(config_data=cfg)
+        stale_disk_groups = _call_with_supported_kwargs(_load_stale_models_cache_from_disk, config_data=cfg)
 
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
@@ -8336,7 +8364,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(
+                _call_with_supported_kwargs(
+                    _save_models_cache_to_disk,
                     result,
                     source_fingerprint=_catalog_source_fingerprint,
                 )
@@ -8389,7 +8418,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(
+                _call_with_supported_kwargs(
+                    _save_models_cache_to_disk,
                     result,
                     source_fingerprint=_catalog_source_fingerprint,
                 )

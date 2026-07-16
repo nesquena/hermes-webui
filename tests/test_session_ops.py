@@ -237,6 +237,7 @@ def test_status_returns_summary(cleanup_test_sessions):
 
 
 def test_status_returns_profile_specific_hermes_home(cleanup_test_sessions):
+    (TEST_STATE_DIR / 'profiles' / 'research').mkdir(parents=True, exist_ok=True)
     data = _post(TEST_BASE, '/api/session/new', {'profile': 'research'})
     sid = data['session']['session_id']
     cleanup_test_sessions.append(sid)

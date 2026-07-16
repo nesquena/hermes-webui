@@ -22,7 +22,11 @@ def _resolve_with_config(model_id, provider=None, base_url=None, default=None, c
     if custom_providers is not None:
         config.cfg['custom_providers'] = custom_providers
     try:
-        return config.resolve_model_provider(model_id, explicitly_picked=explicitly_picked)
+        return config.resolve_model_provider(
+            model_id,
+            explicitly_picked=explicitly_picked,
+            config_data=config.cfg,
+        )
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
@@ -407,7 +411,10 @@ def test_custom_remote_config_declared_full_id_preserved_cold_5979():
         'base_url': 'https://proxy.example.com/v1',
     }
     try:
-        model, provider, _ = config.resolve_model_provider('x-ai/grok-4.5')
+        model, provider, _ = config.resolve_model_provider(
+            'x-ai/grok-4.5',
+            config_data=config.cfg,
+        )
     finally:
         config._available_models_cache = old_cache
         config._advertised_model_ids_memo = old_memo
@@ -717,7 +724,7 @@ def test_warm_models_catalog_provenance_ignores_foreign_profile_resident_5979(mo
     old_fp = config._available_models_cache_source_fingerprint
     old_memo = config._advertised_model_ids_memo
     config._models_cache_provenance = foreign
-    monkeypatch.setattr(config, '_load_models_cache_from_disk', lambda: my_disk)
+    monkeypatch.setattr(config, '_load_models_cache_from_disk', lambda *, config_data=None: my_disk)
     try:
         config.warm_models_catalog_provenance_if_cold()
         prov = config._models_cache_provenance

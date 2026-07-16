@@ -27,7 +27,7 @@ def isolate_models_catalog_state(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
     monkeypatch.setattr(cfg, "_cfg_has_in_memory_overrides", lambda: True)
     monkeypatch.setattr(cfg, "_get_auth_store_path", lambda: auth_store_path)
-    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda *, config_data=None: None)
     monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
     # Point the stale-cache loader's path at an isolated (by default nonexistent)
     # temp file so the over-budget stale fallback (#3928 follow-up) stays
@@ -36,20 +36,20 @@ def isolate_models_catalog_state(monkeypatch, tmp_path):
     # flakes. Tests exercising the stale path override _get_models_cache_path
     # to write their own payload.
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: tmp_path / "models_cache.json")
-    monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda: None)
-    monkeypatch.setattr(
-        cfg,
-        "_models_cache_source_fingerprint",
-        lambda: "unit-test-fingerprint",
-    )
+    monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda *, config_data=None: None)
+    source_fingerprint = {"unit_test": str(tmp_path)}
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: source_fingerprint)
     monkeypatch.setattr(cfg, "_available_models_cache", None, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_ts", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_available_models_live_rebuild_ts", 0.0, raising=False)
     monkeypatch.setattr(
         cfg,
         "_available_models_cache_source_fingerprint",
         None,
         raising=False,
     )
+    monkeypatch.setattr(cfg, "_models_cache_provenance", None, raising=False)
+    monkeypatch.setattr(cfg, "_advertised_model_ids_memo", None, raising=False)
     monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
     monkeypatch.setattr(cfg, "cfg", {}, raising=False)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: hermes_home)

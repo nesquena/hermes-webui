@@ -196,7 +196,7 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
     # but the foreground still has to wait for (a stand-in for) it.
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", _slow_rebuild, raising=True)
     # Ensure no disk cache short-circuits the cold path.
-    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None, raising=True)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda *, config_data=None: None, raising=True)
 
     t0 = time.monotonic()
     result = cfg.get_available_models()
@@ -240,7 +240,7 @@ def test_prefer_cache_kw_exists_and_skips_live_rebuild(monkeypatch):
     from api import config as cfg
 
     cfg.invalidate_models_cache()
-    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None, raising=True)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda *, config_data=None: None, raising=True)
 
     def _must_not_run(_b):
         raise AssertionError(
