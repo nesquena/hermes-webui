@@ -59,6 +59,51 @@ def test_public_share_snapshot_omits_local_media_references():
     assert "MEDIA:https://cdn.example.test/image.png" in content
 
 
+def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
+    import api.shares as shares
+
+    class Session:
+        pass
+
+    private_refs = [
+        ("abbreviated loopback", "http://127.1/private.png"),
+        ("three-part loopback", "http://127.0.1/private.png"),
+        ("octal loopback", "http://0177.0.0.1/private.png"),
+        ("padded octal loopback", "http://127.00.00.01/private.png"),
+        ("hex loopback", "http://0x7f.1/private.png"),
+        ("abbreviated private", "http://10.1/private.png"),
+        ("ipv6 loopback", "http://[::1]/private.png"),
+        ("backslash media path", "https://hermes.example.test\\api\\media?path=/tmp/private.png"),
+        (
+            "double encoded media path",
+            "https://hermes.example.test/app/%2561pi/media?path=/tmp/private.png",
+        ),
+    ]
+
+    session = Session()
+    session.title = "Adversarial media share"
+    session.workspace = "/private/workspace"
+    session.messages = [
+        {
+            "role": "assistant",
+            "content": "\n".join(f"{label} MEDIA:{ref}" for label, ref in private_refs),
+        },
+    ]
+
+    snapshot = shares.build_share_snapshot(session)
+    content = snapshot["messages"][0]["content"]
+
+    assert content.count(OMITTED_ATTACHMENT) == len(private_refs)
+    for _label, ref in private_refs:
+        assert ref not in content
+    assert "127.1" not in content
+    assert "0177.0.0.1" not in content
+    assert "0x7f.1" not in content
+    assert "[::1]" not in content
+    assert "\\api\\media" not in content
+    assert "%2561pi" not in content
+
+
 def test_authenticated_media_route_stays_private(monkeypatch):
     import api.auth as auth
 

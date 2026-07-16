@@ -35,7 +35,7 @@ SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
 _LOCAL_ATTACHMENT_PLACEHOLDER = "[Local attachment omitted from public share]"
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)]+)")
 _MARKDOWN_FILE_URI_RE = re.compile(
     r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
     re.IGNORECASE,
@@ -45,6 +45,10 @@ _FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
 _API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
 _EMBEDDED_IPV4_RE = re.compile(
     r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
+)
+_BROWSER_IPV4_PART = r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)"
+_BROWSER_IPV4_LITERAL_RE = re.compile(
+    rf"^{_BROWSER_IPV4_PART}(?:\.{_BROWSER_IPV4_PART}){{0,3}}\.?$"
 )
 _LOCAL_ONLY_HOSTNAMES = {"localhost", "host.docker.internal"}
 _LOCAL_ONLY_HOSTNAME_SUFFIXES = (".localhost", ".local", ".home.arpa")
@@ -137,9 +141,57 @@ def _hostname_has_non_global_embedded_ip(hostname: str) -> bool:
     return False
 
 
+def _parse_browser_ipv4_number(part: str) -> int:
+    raw = str(part or "")
+    lower = raw.lower()
+    if lower.startswith("0x"):
+        return int(raw[2:], 16)
+    if len(raw) > 1 and raw.startswith("0"):
+        return int(raw[1:] or "0", 8)
+    return int(raw, 10)
+
+
+def _parse_browser_ipv4_literal(hostname: str):
+    """Parse legacy IPv4 host forms accepted by browser URL parsers."""
+    host = str(hostname or "").rstrip(".")
+    if not _BROWSER_IPV4_LITERAL_RE.fullmatch(host):
+        return None
+    parts = host.split(".")
+    numbers = [_parse_browser_ipv4_number(part) for part in parts]
+    if len(numbers) > 4:
+        raise ValueError("too many ipv4 parts")
+    for number in numbers[:-1]:
+        if number > 255:
+            raise ValueError("ipv4 part out of range")
+    max_last = (256 ** (5 - len(numbers))) - 1
+    if numbers[-1] > max_last:
+        raise ValueError("ipv4 final part out of range")
+    value = numbers[-1]
+    for index, number in enumerate(numbers[:-1]):
+        value += number * (256 ** (3 - index))
+    return ipaddress.IPv4Address(value)
+
+
+def _hostname_looks_like_browser_ipv4_literal(hostname: str) -> bool:
+    try:
+        return _parse_browser_ipv4_literal(hostname) is not None
+    except ValueError:
+        return _BROWSER_IPV4_LITERAL_RE.fullmatch(str(hostname or "").rstrip(".")) is not None
+
+
+def _media_url_path_for_boundary_check(path: str) -> str:
+    decoded = str(path or "")
+    for _ in range(4):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    return decoded.replace("\\", "/")
+
+
 def _is_public_media_url(raw_ref: str) -> bool:
     try:
-        parsed = urlsplit(raw_ref)
+        parsed = urlsplit(str(raw_ref or "").replace("\\", "/"))
         hostname = (parsed.hostname or "").strip(".").lower()
     except ValueError:
         return False
@@ -153,10 +205,11 @@ def _is_public_media_url(raw_ref: str) -> bool:
             hostname in _LOCAL_ONLY_HOSTNAMES
             or hostname.endswith(_LOCAL_ONLY_HOSTNAME_SUFFIXES)
             or "." not in hostname
+            or _hostname_looks_like_browser_ipv4_literal(hostname)
             or _hostname_has_non_global_embedded_ip(hostname)
         ):
             return False
-    return not _API_MEDIA_PATH_RE.search(unquote(parsed.path or ""))
+    return not _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path))
 
 
 def _omit_local_media_references(text: str) -> str:
