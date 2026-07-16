@@ -643,6 +643,22 @@ def _notification_payload(title: str, body: str, *, session_id: str | None = Non
 def send_web_push(
     payload: dict, *, owner_key: str | None, profile_home: Path | None = None,
 ) -> int:
+    sent, stale_endpoints = _send_web_push_attempt(
+        payload,
+        owner_key=owner_key,
+        profile_home=profile_home,
+    )
+    _prune_stale_endpoints(
+        stale_endpoints,
+        owner_key=owner_key,
+        profile_home=profile_home,
+    )
+    return sent
+
+
+def _send_web_push_attempt(
+    payload: dict, *, owner_key: str | None, profile_home: Path | None = None,
+) -> tuple[int, list[str]]:
     from api.config import (
         web_push_private_key,
         web_push_subject,
@@ -650,16 +666,16 @@ def send_web_push(
 
     status = web_push_status()
     if not status["enabled"]:
-        return 0
+        return 0, []
     owner = str(owner_key or "").strip()
     if not owner:
-        return 0
+        return 0, []
     subscriptions = list_subscriptions(owner_key=owner, profile_home=profile_home)
     if not subscriptions:
-        return 0
+        return 0, []
     webpush_fn, _ = _get_pywebpush_impl()
     if not webpush_fn:
-        return 0
+        return 0, []
     sent = 0
     stale_endpoints: list[str] = []
     data = json.dumps(payload, ensure_ascii=False)
@@ -693,19 +709,36 @@ def send_web_push(
             if status_code in (404, 410):
                 stale_endpoints.append(endpoint)
             logger.debug("Web Push send failed for %s", endpoint, exc_info=True)
+    return sent, stale_endpoints
+
+
+def _prune_stale_endpoints(
+    stale_endpoints: list[str],
+    *,
+    owner_key: str | None,
+    profile_home: Path | None = None,
+) -> None:
+    owner = str(owner_key or "").strip()
+    if not owner:
+        return
     for endpoint in stale_endpoints:
         remove_subscription(endpoint, owner_key=owner, profile_home=profile_home)
-    return sent
 
 
-def _run_enqueued_web_push(payload: dict, *, owner_key: str, profile_home: Path | None = None) -> int:
+def _run_enqueued_web_push(
+    payload: dict, *, owner_key: str, profile_home: Path | None = None,
+) -> tuple[int, list[str]]:
     try:
         if _WEB_PUSH_DELIVERY_STOP_EVENT.is_set():
-            return 0
-        return send_web_push(payload, owner_key=owner_key, profile_home=profile_home)
+            return 0, []
+        return _send_web_push_attempt(
+            payload,
+            owner_key=owner_key,
+            profile_home=profile_home,
+        )
     except Exception:
         logger.debug("Web Push background delivery failed", exc_info=True)
-        return 0
+        return 0, []
 
 
 def _web_push_delivery_job(
@@ -725,32 +758,49 @@ def _web_push_delivery_job(
     return None
 
 
-def _deliver_web_push_job(job: dict) -> int:
+def _deliver_web_push_job_result(job: dict) -> dict:
     payload = dict((job or {}).get("payload") or {})
     owner = str((job or {}).get("owner_key") or "").strip()
     if owner:
         profile_home = (job or {}).get("profile_home")
-        return _run_enqueued_web_push(
+        expanded_profile_home = Path(profile_home).expanduser() if profile_home else None
+        sent, stale_endpoints = _run_enqueued_web_push(
             payload,
             owner_key=owner,
-            profile_home=Path(profile_home).expanduser() if profile_home else None,
+            profile_home=expanded_profile_home,
         )
+        return {
+            "owner_key": owner,
+            "profile_home": str(expanded_profile_home) if expanded_profile_home else None,
+            "sent": sent,
+            "stale_endpoints": stale_endpoints,
+        }
     session_id = str((job or {}).get("session_id") or "").strip()
     if not session_id:
-        return 0
+        return {"owner_key": "", "profile_home": None, "sent": 0, "stale_endpoints": []}
     target = _session_push_target(session_id)
     if not target:
-        return 0
-    return _run_enqueued_web_push(
+        return {"owner_key": "", "profile_home": None, "sent": 0, "stale_endpoints": []}
+    sent, stale_endpoints = _run_enqueued_web_push(
         payload,
         owner_key=target[0],
         profile_home=target[1],
     )
+    return {
+        "owner_key": target[0],
+        "profile_home": str(target[1]) if target[1] else None,
+        "sent": sent,
+        "stale_endpoints": stale_endpoints,
+    }
 
 
-def _web_push_delivery_process_main(job: dict) -> None:
+def _deliver_web_push_job(job: dict) -> int:
+    return int(_deliver_web_push_job_result(job).get("sent") or 0)
+
+
+def _web_push_delivery_process_main(job: dict, result_queue) -> None:
     try:
-        _deliver_web_push_job(job)
+        result_queue.put(_deliver_web_push_job_result(job))
     except Exception:
         logger.debug("Web Push delivery subprocess failed", exc_info=True)
 
@@ -765,18 +815,43 @@ def _effective_web_push_delivery_timeout() -> float:
 
 def _start_web_push_delivery_process(job: dict) -> multiprocessing.Process:
     ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
     process = ctx.Process(
         target=_web_push_delivery_process_main,
-        args=(job,),
+        args=(job, result_queue),
         daemon=True,
         name="web-push-delivery",
     )
+    process._web_push_result_queue = result_queue
     process.start()
     return process
 
 
+def _pop_web_push_delivery_result(process: multiprocessing.Process) -> dict | None:
+    result_queue = getattr(process, "_web_push_result_queue", None)
+    if result_queue is None:
+        return None
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return None
+    except Exception:
+        logger.debug("Failed to read Web Push delivery result", exc_info=True)
+        return None
+    finally:
+        try:
+            result_queue.close()
+        except Exception:
+            pass
+        try:
+            result_queue.join_thread()
+        except Exception:
+            pass
+
+
 def _run_web_push_delivery_job(job: dict) -> None:
     process: multiprocessing.Process | None = None
+    result: dict | None = None
     try:
         process = _start_web_push_delivery_process(job)
         with _WEB_PUSH_DELIVERY_LOCK:
@@ -791,6 +866,8 @@ def _run_web_push_delivery_job(job: dict) -> None:
                 timeout,
                 (job or {}).get("session_id"),
             )
+        else:
+            result = _pop_web_push_delivery_result(process)
     except Exception:
         logger.debug("Failed to run Web Push delivery job", exc_info=True)
         if process and process.is_alive():
@@ -803,6 +880,13 @@ def _run_web_push_delivery_job(job: dict) -> None:
         if process is not None:
             with _WEB_PUSH_DELIVERY_LOCK:
                 _WEB_PUSH_DELIVERY_ACTIVE_PROCESSES.pop(process.pid, None)
+    if result:
+        profile_home = str(result.get("profile_home") or "").strip()
+        _prune_stale_endpoints(
+            list(result.get("stale_endpoints") or []),
+            owner_key=str(result.get("owner_key") or ""),
+            profile_home=Path(profile_home).expanduser() if profile_home else None,
+        )
 
 
 def _web_push_delivery_worker() -> None:

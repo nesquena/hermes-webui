@@ -876,12 +876,21 @@ def test_worker_delivery_uses_persisted_profile_home_without_tls(monkeypatch, tm
     monkeypatch.setattr(
         web_push,
         "_enqueue_web_push",
-        lambda payload, *, session_id=None, owner_key=None, profile_home=None: web_push._deliver_web_push_job({
+        lambda payload, *, session_id=None, owner_key=None, profile_home=None: (
+            lambda result: (
+                web_push._prune_stale_endpoints(
+                    result["stale_endpoints"],
+                    owner_key=result["owner_key"],
+                    profile_home=Path(result["profile_home"]).expanduser() if result["profile_home"] else None,
+                ),
+                result["sent"],
+            )[1]
+        )(web_push._deliver_web_push_job_result({
             "payload": payload,
             "session_id": session_id,
             "owner_key": owner_key,
             "profile_home": profile_home,
-        }),
+        })),
     )
     web_push.upsert_subscription(_subscription("https://push.example/live"), owner_key=_OWNER_A, profile_home=home_a)
     web_push.upsert_subscription(_subscription("https://push.example/dead"), owner_key=_OWNER_A, profile_home=home_a)
@@ -1074,6 +1083,78 @@ def test_run_web_push_delivery_job_terminates_overdue_worker(monkeypatch):
 
     assert process.joins == [15, 1.0]
     assert process.terminated == 1
+
+
+def test_run_web_push_delivery_job_prunes_stale_endpoints_in_parent_process(monkeypatch, tmp_path):
+    import api.web_push as web_push
+    import queue as _queue
+
+    class _FakeResultQueue:
+        def __init__(self, result):
+            self._result = result
+            self.closed = 0
+            self.joined = 0
+
+        def get_nowait(self):
+            if self._result is None:
+                raise _queue.Empty()
+            result = self._result
+            self._result = None
+            return result
+
+        def close(self):
+            self.closed += 1
+
+        def join_thread(self):
+            self.joined += 1
+
+    class _FakeProcess:
+        def __init__(self, result_queue):
+            self.pid = 23
+            self.joins = []
+            self.terminated = 0
+            self._alive = False
+            self._web_push_result_queue = result_queue
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            self.terminated += 1
+            self._alive = False
+
+    result_queue = _FakeResultQueue({
+        "owner_key": _OWNER_A,
+        "profile_home": str(tmp_path),
+        "sent": 0,
+        "stale_endpoints": ["https://push.example/dead"],
+    })
+    process = _FakeProcess(result_queue)
+    removals = []
+    monkeypatch.setattr(web_push, "_start_web_push_delivery_process", lambda job: process)
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_LOCK", threading.Lock())
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_ACTIVE_PROCESSES", {})
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_WALL_CLOCK_SECONDS", 15)
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_STOP_EVENT", threading.Event())
+    monkeypatch.setattr(web_push, "_WEB_PUSH_DELIVERY_SHUTDOWN_DEADLINE", None)
+    monkeypatch.setattr(
+        web_push,
+        "remove_subscription",
+        lambda endpoint, *, owner_key=None, profile_home=None: removals.append(
+            (endpoint, owner_key, profile_home)
+        ) or True,
+    )
+
+    web_push._run_web_push_delivery_job({"session_id": "session-123", "payload": {"title": "Response complete"}})
+
+    assert process.joins == [15]
+    assert process.terminated == 0
+    assert removals == [("https://push.example/dead", _OWNER_A, tmp_path)]
+    assert result_queue.closed == 1
+    assert result_queue.joined == 1
 
 
 def test_shutdown_web_push_delivery_sets_stop_flag_and_terminates_stragglers(monkeypatch):
