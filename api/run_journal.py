@@ -142,9 +142,76 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
+def _read_jsonl(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
+    tail: bool = False,
+) -> tuple[list[dict], list[dict]]:
+    """Read a run-journal JSONL file into (events, malformed).
+
+    Memory: unbounded by default this reads the WHOLE file via read_text() and
+    parses every line — fine for small journals but a turn with heavy tool use
+    / large file reads can produce a multi-MB journal that gets fully re-parsed
+    on every status/sidebar poll that touches it. The bounded modes cap that:
+
+    - ``tail=True`` with ``max_bytes``/``max_rows``: read only the TRAILING
+      ``max_bytes`` of the file (seek-to-end) and return at most the last
+      ``max_rows`` events. Used by the summary readers
+      (``latest_run_summary`` / ``find_run_summary``) which derive
+      ``last_seq``/``last_event_id``/``terminal_state`` from the LAST events —
+      a tail read keeps those correct for a large COMPLETED run without parsing
+      the whole history. A line split at the seek boundary is discarded.
+    - ``tail=False`` with caps: read forward but stop once ``max_bytes``/``max_rows``
+      is exceeded (head cap), via the existing bounded line iterator.
+
+    ``malformed`` entries carry ``{"line": n, "raw": ...}`` with 1-based line
+    numbers relative to the whole file (tail mode computes the offset).
+    """
     events: list[dict] = []
     malformed: list[dict] = []
+
+    if tail:
+        # tail=True only makes sense with a bound (it seeks to size - max_bytes).
+        # If a caller passes tail=True with no caps, default to the replay caps
+        # rather than silently falling through to the unbounded whole-file read
+        # (which would ignore tail entirely).
+        if max_bytes is None:
+            max_bytes = _SESSION_REPLAY_MAX_BYTES
+        if max_rows is None:
+            max_rows = _SESSION_REPLAY_MAX_ROWS
+        return _read_jsonl_tail(path, max_bytes=max_bytes, max_rows=max_rows)
+
+    if max_bytes is not None or max_rows is not None:
+        mb = max_bytes if max_bytes is not None else (1 << 62)
+        mr = max_rows if max_rows is not None else (1 << 62)
+        line_no = 0
+        try:
+            for ln, raw, _cumulative in _iter_bounded_raw_jsonl_lines(path, max_bytes=mb):
+                line_no = ln
+                if not raw.strip():
+                    continue
+                if line_no > mr:
+                    break
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    malformed.append({"line": line_no, "raw": raw.decode("utf-8", "replace")})
+                    continue
+                if isinstance(parsed, dict):
+                    events.append(parsed)
+                else:
+                    malformed.append({"line": line_no, "raw": raw.decode("utf-8", "replace")})
+        except FileNotFoundError:
+            return events, malformed
+        except ValueError:
+            # _iter_bounded_raw_jsonl_lines raises "replay_limit_bytes" once the
+            # byte cap is exceeded; the events collected so far are returned.
+            return events, malformed
+        return events, malformed
+
+    # Unbounded whole-file read (original behavior).
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -161,6 +228,96 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
             events.append(parsed)
         else:
             malformed.append({"line": line_no, "raw": raw})
+    return events, malformed
+
+
+def _read_jsonl_tail(
+    path: Path, *, max_bytes: int | None, max_rows: int | None
+) -> tuple[list[dict], list[dict]]:
+    """Read the trailing portion of a JSONL journal (bounded memory).
+
+    Seeks to (size - max_bytes) and reads forward, discarding the partial line
+    at the seek boundary, then returns at most the last ``max_rows`` parsed
+    events. ``line`` numbers in ``malformed`` are 1-based across the whole file.
+    Used by summary readers that need the LAST events of a possibly huge journal
+    (terminal_state / last_seq live in the tail).
+    """
+    events: list[dict] = []
+    malformed: list[dict] = []
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return events, malformed
+    if size <= 0:
+        return events, malformed
+    read_bytes_cap = (
+        max_bytes if (max_bytes is not None and max_bytes > 0)
+        else _SESSION_REPLAY_MAX_BYTES
+    )
+    read_bytes = min(size, read_bytes_cap)
+    rows_cap = max_rows if (max_rows is not None and max_rows > 0) else (1 << 62)
+    try:
+        with path.open("rb") as fh:
+            if size > read_bytes:
+                fh.seek(size - read_bytes)
+            raw = fh.read(read_bytes)
+    except (FileNotFoundError, OSError):
+        return events, malformed
+    text = raw.decode("utf-8", errors="replace")
+    # If we sought into the middle of the file, the first "line" is a partial
+    # fragment — drop everything up to and including the first newline.
+    if size > read_bytes:
+        nl = text.find("\n")
+        if nl >= 0:
+            text = text[nl + 1:]
+        else:
+            text = ""  # entire window was one truncated line; nothing whole
+    # 1-based line number of the first whole line in `text`, across the whole
+    # file. The discarded prefix (size - read_bytes bytes) contains some number
+    # of complete lines; the first whole line in the window is the next one. We
+    # must COUNT newlines in the discarded prefix — a byte offset is NOT a line
+    # number (a 4 MB head with ~80 B/line has ~50000 lines, not ~4 M). Count by
+    # streaming the head in chunks so a huge file doesn't get materialized twice.
+    head_bytes = size - read_bytes if size > read_bytes else 0
+    lines_before_window = 0
+    if head_bytes > 0:
+        try:
+            with path.open("rb") as _hf:
+                _remaining = head_bytes
+                while _remaining > 0:
+                    _chunk = _hf.read(min(_SESSION_REPLAY_READ_CHUNK_BYTES, _remaining))
+                    if not _chunk:
+                        break
+                    lines_before_window += _chunk.count(b"\n")
+                    _remaining -= len(_chunk)
+        except (FileNotFoundError, OSError):
+            lines_before_window = 0  # best-effort attribution; events are unaffected
+    # `text`'s first whole line in the file: the discarded head ended mid-line,
+    # so the partial line it left (line `lines_before_window + 1`) was dropped
+    # above, making the first whole line `lines_before_window + 2`. When there
+    # was no seek (whole file read), the first line is 1.
+    base_start_line = lines_before_window + 2 if head_bytes > 0 else 1
+    all_lines = text.splitlines()
+    # Keep only the last `rows_cap` lines so a huge tail window still bounds the
+    # parsed-event list (and the JSON decode cost). If we trim lines from the
+    # front, advance the starting line number by the trim count.
+    trim_from_front = max(0, len(all_lines) - rows_cap)
+    if trim_from_front:
+        all_lines = all_lines[-rows_cap:]
+    start_line = base_start_line + trim_from_front
+    for idx, raw_line in enumerate(all_lines):
+        line_no = start_line + idx
+        if not raw_line.strip():
+            continue
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            malformed.append({"line": line_no, "raw": raw_line})
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+        else:
+            malformed.append({"line": line_no, "raw": raw_line})
     return events, malformed
 
 
@@ -461,9 +618,11 @@ def read_run_events(
     after_seq: int | None = None,
     max_seq: int | None = None,
     session_dir: Path | None = None,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path)
+    events, malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -498,13 +657,26 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
     }
 
 
-def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
+def latest_run_summary(
+    session_id: str,
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int | None = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int | None = _SESSION_REPLAY_MAX_ROWS,
+) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
     cached = _get_cached_summary(path)
     if cached is not None:
         return cached
+    # Summary derives last_seq / last_event_id / terminal_state from the LAST
+    # events, so read the bounded TAIL (not the whole file) — a large completed
+    # run's terminal marker lives at the end and must not require parsing the
+    # full history. Callers needing head/all events use read_run_events().
     pre_read_signature = _summary_cache_signature(path)
-    events, _malformed = _read_jsonl(path)
+    events, _malformed = _read_jsonl(
+        path, max_bytes=max_bytes, max_rows=max_rows, tail=True
+    )
     summary = _summary_from_events(session_id, run_id, events)
     _cache_summary(path, summary, expected_signature=pre_read_signature)
     return summary
@@ -544,7 +716,13 @@ def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = N
     return (count, max_mtime, total_size)
 
 
-def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | None:
+def find_run_summary(
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int | None = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int | None = _SESSION_REPLAY_MAX_ROWS,
+) -> dict | None:
     rid = _validate_id(run_id, "run_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     journal_root = root / RUN_JOURNAL_DIR_NAME
@@ -553,7 +731,11 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
         summary = _get_cached_summary(path)
         if summary is None:
             pre_read_signature = _summary_cache_signature(path)
-            events, _malformed = _read_jsonl(path)
+            # Tail read: summary needs the terminal/last events (see
+            # latest_run_summary), so bound memory on large completed runs.
+            events, _malformed = _read_jsonl(
+                path, max_bytes=max_bytes, max_rows=max_rows, tail=True
+            )
             summary = _summary_from_events(session_id, rid, events)
             _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
