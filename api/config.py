@@ -4657,8 +4657,7 @@ def _main_model_request_overrides(
     if not gate_provider:
         gate_provider = str(model_cfg.get("provider") or "").strip().lower()
         if not gate_provider:
-            _, gate_provider, _ = _call_with_supported_kwargs(
-                resolve_model_provider,
+            _, gate_provider, _ = resolve_model_provider(
                 gate_model,
                 config_data=config_data,
             )
@@ -4741,8 +4740,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
 
         previous_provider = str(model_cfg.get("provider") or "").strip()
         requested_provider = str(provider or "").strip()
-        resolved_model, resolved_provider, resolved_base_url = _call_with_supported_kwargs(
-            resolve_model_provider,
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model,
             config_data=config_data,
         )
@@ -4951,8 +4949,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg["model"] = model or ""
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
-                    _, _, resolved_base_url = _call_with_supported_kwargs(
-                        resolve_model_provider,
+                    _, _, resolved_base_url = resolve_model_provider(
                         model,
                         config_data=config_data,
                     )
@@ -6134,18 +6131,6 @@ def _models_cache_source_fingerprint(
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
         "catalog": _models_cache_catalog_fingerprint(),
     }
-
-
-def _call_with_supported_kwargs(func, *args, **kwargs):
-    try:
-        import inspect as _inspect
-        params = _inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return func(*args, **kwargs)
-    if any(param.kind == param.VAR_KEYWORD for param in params.values()):
-        return func(*args, **kwargs)
-    supported = {key: value for key, value in kwargs.items() if key in params}
-    return func(*args, **supported)
 
 
 def _delete_models_cache_on_disk() -> None:
@@ -8177,11 +8162,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     disk_groups = None
     stale_disk_groups = None
     if _available_models_cache is None and not force_refresh:
-        disk_groups = _call_with_supported_kwargs(_load_models_cache_from_disk, config_data=cfg)
+        disk_groups = _load_models_cache_from_disk(config_data=cfg)
         if disk_groups is None:
-            stale_disk_groups = _call_with_supported_kwargs(_load_stale_models_cache_from_disk, config_data=cfg)
+            stale_disk_groups = _load_stale_models_cache_from_disk(config_data=cfg)
     elif force_refresh:
-        stale_disk_groups = _call_with_supported_kwargs(_load_stale_models_cache_from_disk, config_data=cfg)
+        stale_disk_groups = _load_stale_models_cache_from_disk(config_data=cfg)
 
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
@@ -8364,8 +8349,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 _sync_models_cache_provenance()
             try:
-                _call_with_supported_kwargs(
-                    _save_models_cache_to_disk,
+                _save_models_cache_to_disk(
                     result,
                     source_fingerprint=_catalog_source_fingerprint,
                 )
@@ -8418,8 +8402,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 _sync_models_cache_provenance()
             try:
-                _call_with_supported_kwargs(
-                    _save_models_cache_to_disk,
+                _save_models_cache_to_disk(
                     result,
                     source_fingerprint=_catalog_source_fingerprint,
                 )

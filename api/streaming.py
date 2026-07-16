@@ -456,8 +456,7 @@ def _resolve_custom_provider_runtime_overrides(
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = _call_with_supported_kwargs(
-        resolve_custom_provider_connection,
+    _cp_key, _cp_base = resolve_custom_provider_connection(
         resolved_provider,
         config_data=config_data,
     )
@@ -474,18 +473,6 @@ def _resolve_custom_provider_runtime_overrides(
         if not resolved_api_key:
             resolved_api_key = _KEYLESS_CUSTOM_API_KEY
     return resolved_provider, resolved_api_key, resolved_base_url
-
-
-def _call_with_supported_kwargs(func, *args, **kwargs):
-    try:
-        import inspect as _inspect
-        params = _inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return func(*args, **kwargs)
-    if any(param.kind == param.VAR_KEYWORD for param in params.values()):
-        return func(*args, **kwargs)
-    supported = {key: value for key, value in kwargs.items() if key in params}
-    return func(*args, **supported)
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:

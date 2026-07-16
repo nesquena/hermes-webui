@@ -37,8 +37,11 @@ def isolate_models_catalog_state(monkeypatch, tmp_path):
     # to write their own payload.
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: tmp_path / "models_cache.json")
     monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda *, config_data=None: None)
-    source_fingerprint = {"unit_test": str(tmp_path)}
-    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: source_fingerprint)
+    monkeypatch.setattr(
+        cfg,
+        "_models_cache_source_fingerprint",
+        lambda: "unit-test-fingerprint",
+    )
     monkeypatch.setattr(cfg, "_available_models_cache", None, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_ts", 0.0, raising=False)
     monkeypatch.setattr(cfg, "_available_models_live_rebuild_ts", 0.0, raising=False)
