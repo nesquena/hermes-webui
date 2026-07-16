@@ -87,7 +87,7 @@ class TestGetProviders:
         monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
         monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
 
-        def _counting_has_key(pid):
+        def _counting_has_key(pid, _config_data=None):
             calls.append(pid)
             return False
 
@@ -119,7 +119,11 @@ class TestGetProviders:
         monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
         monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
         monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
-        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: active_home["path"] == home_b)
+        monkeypatch.setattr(
+            prov,
+            "_provider_has_key",
+            lambda _pid, _config_data=None: active_home["path"] == home_b,
+        )
 
         try:
             first = prov.get_providers()
@@ -147,7 +151,11 @@ class TestGetProviders:
         monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
         monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
         monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
-        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: key_present["value"])
+        monkeypatch.setattr(
+            prov,
+            "_provider_has_key",
+            lambda _pid, _config_data=None: key_present["value"],
+        )
 
         def _fake_write_env_file(_path, values):
             key_present["value"] = bool(values.get("ANTHROPIC_API_KEY"))
@@ -236,7 +244,7 @@ class TestGetProviders:
         try:
             result = get_providers()
             for p in result["providers"]:
-                assert "id" in p, f"Missing 'id' in provider entry"
+                assert "id" in p, "Missing 'id' in provider entry"
                 assert "display_name" in p, f"Missing 'display_name' for {p['id']}"
                 assert "has_key" in p, f"Missing 'has_key' for {p['id']}"
                 assert "configurable" in p, f"Missing 'configurable' for {p['id']}"

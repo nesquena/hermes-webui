@@ -6942,7 +6942,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # and a phantom ``Opencode_Go`` group for the config-key form (#1568).
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
-        _cfg_providers = _get_providers_cfg()
+        _cfg_providers = _get_providers_cfg(config_data=cfg)
         # Map canonical provider IDs back to raw config keys so the
         # generic-provider branch can preserve mixed-case/underscore
         # provider_cfg values (#2245).

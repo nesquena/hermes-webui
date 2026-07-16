@@ -161,13 +161,21 @@ def test_model_picker_keeps_work_profile_snapshot_during_default_reload(
     config = harness.config
     harness.request_scope.profile = "work"
     original_get = config.get_config_snapshot
+    original_get_providers_cfg = config._get_providers_cfg
+    provider_cfg_global_reads = []
 
     def get_then_reload():
         config_data = original_get()
         _reload_default_in_other_thread(harness)
         return config_data
 
+    def track_provider_cfg_reads(*, config_data=None):
+        if config_data is None:
+            provider_cfg_global_reads.append(copy.deepcopy(config.cfg.get("providers", {})))
+        return original_get_providers_cfg(config_data=config_data)
+
     monkeypatch.setattr(config, "get_config_snapshot", get_then_reload)
+    monkeypatch.setattr(config, "_get_providers_cfg", track_provider_cfg_reads)
     monkeypatch.setattr(config, "_available_models_cache", None)
     monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
     monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
@@ -182,6 +190,7 @@ def test_model_picker_keeps_work_profile_snapshot_during_default_reload(
 
     assert result["active_provider"] == "work-provider"
     assert result["default_model"] == "work-provider-model"
+    assert provider_cfg_global_reads == []
 
 
 def test_static_model_catalog_uses_snapshot_for_provider_model_allowlist(
