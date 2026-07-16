@@ -1008,6 +1008,45 @@ def test_default_provider_models_not_prefixed(monkeypatch):
         assert not any(mid.startswith('@anthropic:') for mid in returned_ids), returned_ids
 
 
+def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(monkeypatch):
+    """Provider allowlists in the live catalog accept id/model/name object keys."""
+    import api.config as _cfg
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'myprov',
+        'default': 'by-model-key',
+    }
+    _cfg.cfg['providers'] = {
+        'myprov': {
+            'models': [
+                {'model': 'by-model-key', 'label': 'By Model Key'},
+                {'name': 'by-name-key'},
+                {'id': 'by-id-key', 'label': 'By Id Key'},
+            ],
+        },
+    }
+    try:
+        _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+    except Exception:
+        _cfg._cfg_mtime = 0.0
+    monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda pid: [])
+    try:
+        result = _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+    groups = {group['provider_id']: group['models'] for group in result['groups']}
+    model_rows = groups.get('myprov') or []
+    model_ids = [row['id'] for row in model_rows]
+    assert 'by-model-key' in model_ids
+    assert 'by-name-key' in model_ids
+    assert 'by-id-key' in model_ids
+    labels = {row['id']: row['label'] for row in model_rows}
+    assert labels['by-model-key'] == 'By Model Key'
+    assert labels['by-id-key'] == 'By Id Key'
+
+
 # ── get_available_models(): phantom "Custom" group regression ─────────────
 #
 # When the user has model.provider set to a real provider (e.g. openai-codex)

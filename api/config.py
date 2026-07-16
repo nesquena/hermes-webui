@@ -1372,6 +1372,25 @@ def _configured_model_ids(raw_models: object) -> list[str]:
     return model_ids
 
 
+def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
+    """Return picker option rows from supported config allowlist shapes."""
+    labels: dict[str, str] = {}
+    if isinstance(raw_models, list):
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("id") or item.get("model") or item.get("name")
+            model_id = str(candidate or "").strip()
+            if not model_id or model_id in labels:
+                continue
+            label = str(item.get("label") or model_id).strip() or model_id
+            labels[model_id] = label
+    return [
+        {"id": model_id, "label": labels.get(model_id, model_id)}
+        for model_id in _configured_model_ids(raw_models)
+    ]
+
+
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
@@ -5212,28 +5231,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                cfg_models = provider_cfg["models"]
-                if isinstance(cfg_models, dict):
-                    raw_models = [{"id": key, "label": key} for key in cfg_models.keys()]
-                elif isinstance(cfg_models, list):
-                    raw_models = []
-                    for item in cfg_models:
-                        if isinstance(item, dict):
-                            model_id = (
-                                item.get("id")
-                                or item.get("model")
-                                or item.get("name")
-                            )
-                            if not model_id:
-                                continue
-                            raw_models.append(
-                                {
-                                    "id": model_id,
-                                    "label": item.get("label", model_id),
-                                }
-                            )
-                        elif item:
-                            raw_models.append({"id": item, "label": item})
+                raw_models = _configured_model_options(provider_cfg["models"])
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
@@ -7566,13 +7564,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
-                        cfg_models = provider_cfg["models"]
-                        if isinstance(cfg_models, dict):
-                            raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
-                        elif isinstance(cfg_models, list):
-                            raw_models = [{"id": k["id"] if isinstance(k, dict) else k,
-                                            "label": k.get("label", k["id"]) if isinstance(k, dict) else k}
-                                           for k in cfg_models]
+                        raw_models = _configured_model_options(provider_cfg["models"])
 
                     if not raw_models:
                         if pid == "moa":
