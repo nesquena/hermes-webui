@@ -1782,7 +1782,8 @@ _PROVIDER_ALIASES = {
 # built once, not reconstructed per request.
 _OPENAI_COMPAT_ENDPOINTS = {
     "zai": "https://api.z.ai/v1",
-    "minimax": "https://api.minimax.chat/v1",
+    "minimax": "https://api.minimax.io/v1",
+    "minimax-cn": "https://api.minimaxi.com/v1",
     "mistralai": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
     "deepseek": "https://api.deepseek.com",

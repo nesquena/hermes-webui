@@ -182,21 +182,6 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "env_var": "MINIMAX_API_KEY",
         "default_model": "MiniMax-M3",
         "default_base_url": "https://api.minimax.io/v1",
-        "default_anthropic_base_url": "https://api.minimax.io/anthropic",
-        "endpoint_options": [
-            {
-                "region": "global_en",
-                "openai_base_url": "https://api.minimax.io/v1",
-                "anthropic_base_url": "https://api.minimax.io/anthropic",
-                "docs_root": "https://platform.minimax.io/docs",
-            },
-            {
-                "region": "cn_zh",
-                "openai_base_url": "https://api.minimaxi.com/v1",
-                "anthropic_base_url": "https://api.minimaxi.com/anthropic",
-                "docs_root": "https://platform.minimaxi.com/docs",
-            },
-        ],
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("minimax", [])),
         "category": "specialized",
@@ -206,21 +191,6 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "env_var": "MINIMAX_CN_API_KEY",
         "default_model": "MiniMax-M3",
         "default_base_url": "https://api.minimaxi.com/v1",
-        "default_anthropic_base_url": "https://api.minimaxi.com/anthropic",
-        "endpoint_options": [
-            {
-                "region": "global_en",
-                "openai_base_url": "https://api.minimax.io/v1",
-                "anthropic_base_url": "https://api.minimax.io/anthropic",
-                "docs_root": "https://platform.minimax.io/docs",
-            },
-            {
-                "region": "cn_zh",
-                "openai_base_url": "https://api.minimaxi.com/v1",
-                "anthropic_base_url": "https://api.minimaxi.com/anthropic",
-                "docs_root": "https://platform.minimaxi.com/docs",
-            },
-        ],
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("minimax-cn", [])),
         "category": "specialized",
@@ -640,8 +610,8 @@ def _provider_api_key_present(
             ):
                 return True
 
-    # For providers not in _SUPPORTED_PROVIDER_SETUPS (e.g. minimax-cn, deepseek,
-    # xai, etc.), ask the hermes_cli auth registry — it knows every provider's env
+    # For providers not in _SUPPORTED_PROVIDER_SETUPS (e.g. ollama-cloud, xai,
+    # etc.), ask the hermes_cli auth registry — it knows every provider's env
     # var names and can check os.environ for a valid key.
     # Exclude known OAuth/token-flow providers — those are handled separately by
     # _provider_oauth_authenticated() and should not be short-circuited here.
@@ -771,8 +741,8 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
                     )
         else:
             # Unknown provider — may be an OAuth flow (openai-codex, copilot, etc.)
-            # OR an API-key provider not in the quick-setup list (minimax-cn, deepseek,
-            # xai, etc.).  Check both: api key presence first (covers the majority of
+            # OR an API-key provider not in the setup registry (ollama-cloud, xai,
+            # etc.).  Check both: api key presence first (covers the majority of
             # third-party providers), then OAuth auth.json.
             provider_ready = (
                 _provider_api_key_present(provider, cfg, env_values)
@@ -915,17 +885,16 @@ def get_onboarding_status() -> dict:
     # as done.  These users configured Hermes via the CLI before the Web UI existed;
     # they must never be shown the first-run wizard — it would silently overwrite their
     # config.  We use provider_configured (not chat_ready) so that users with
-    # non-wizard providers (ollama-cloud, deepseek, xai, kimi, etc.) are not forced
-    # through the wizard just because their provider doesn't have a detectable API key
-    # — the wizard cannot represent their provider and would overwrite their config
-    # with whichever wizard-supported provider they accidentally select.
+    # providers outside the setup registry (ollama-cloud, xai, kimi, etc.) are not
+    # forced through the wizard just because their provider doesn't have a detectable
+    # API key — the wizard cannot represent their provider and would overwrite their
+    # config with whichever supported provider they accidentally select.
     config_exists = Path(_get_config_path()).exists()
 
-    # For providers not in the wizard's quick-setup list (e.g. ollama-cloud, deepseek,
-    # xai, kimi-k2.6), the wizard can never help — it only knows how to configure
-    # openrouter/anthropic/openai/google/custom.  If such a user has a configured
-    # provider + model in config.yaml, showing the wizard would only confuse them
-    # (or worse, let them accidentally overwrite their config with gpt-5.4-mini).
+    # For providers outside the setup registry (e.g. ollama-cloud, xai, kimi-k2.6),
+    # the wizard cannot configure them. If such a user has a configured provider +
+    # model in config.yaml, showing the wizard would only confuse them (or worse,
+    # let them accidentally overwrite their config with a supported provider).
     _current_provider = str(
         (cfg.get("model", {}) or {}).get("provider", "") if isinstance(cfg.get("model"), dict)
         else ""

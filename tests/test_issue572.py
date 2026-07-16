@@ -1,4 +1,4 @@
-"""Tests for issue #572: protect configured providers outside the quick-setup
+"""Tests for issue #572: protect configured providers outside the wizard setup
 list (ollama-cloud, xai, and similar providers) from being overwritten by the
 first-run wizard.
 
@@ -7,8 +7,8 @@ setup path: an incomplete configuration keeps onboarding visible so the user
 can provide a key, and it is not presented as an OAuth-only provider.
 
 Covers:
-  1. _provider_api_key_present returns True for minimax-cn when
-     MINIMAX_CN_API_KEY is in env (via hermes_cli.auth.get_auth_status)
+  1. _provider_api_key_present handles supported MiniMax-CN keys and the
+     hermes_cli fallback for unsupported providers
   2. _status_from_runtime gives chat_ready=True for minimax-cn with a key set
   3. get_onboarding_status keeps configured unsupported providers completed
      while leaving incomplete MiniMax-CN setup visible
@@ -54,28 +54,22 @@ def _call_provider_api_key_present(provider: str, cfg: dict = None, env_values: 
 
 
 # ---------------------------------------------------------------------------
-# 1. _provider_api_key_present via hermes_cli fallback
+# 1. _provider_api_key_present: supported setup and hermes_cli fallback
 # ---------------------------------------------------------------------------
 
-class TestProviderApiKeyPresentFallback:
+class TestProviderApiKeyPresent:
 
-    def test_minimax_cn_logged_in_returns_true(self):
-        """minimax-cn: if hermes_cli.auth.get_auth_status returns logged_in, must be True."""
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
-            with _inject_hermes_cli_auth({"logged_in": True}):
-                result = _call_provider_api_key_present("minimax-cn")
-                assert result is True
+    def test_unsupported_provider_logged_in_returns_true(self):
+        """An unsupported provider authenticated through hermes_cli is ready."""
+        with _inject_hermes_cli_auth({"logged_in": True}):
+            result = _call_provider_api_key_present("ollama-cloud")
+            assert result is True
 
     def test_unsupported_provider_logged_out_returns_false(self):
         """Unsupported provider with no key → False, no crash."""
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
-            with _inject_hermes_cli_auth({"logged_in": False}):
-                result = _call_provider_api_key_present("deepseek")
-                assert result is False
+        with _inject_hermes_cli_auth({"logged_in": False}):
+            result = _call_provider_api_key_present("ollama-cloud")
+            assert result is False
 
     def test_hermes_cli_import_failure_is_safe(self):
         """If hermes_cli is unavailable, falls back silently to False."""
@@ -87,18 +81,21 @@ class TestProviderApiKeyPresentFallback:
                 raise ImportError("hermes_cli not available")
             return real_import(name, *args, **kwargs)
 
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
-            with mock.patch("builtins.__import__", side_effect=_block_hermes_cli):
-                result = _call_provider_api_key_present("minimax-cn")
-                assert result is False  # safe fallback
+        with mock.patch("builtins.__import__", side_effect=_block_hermes_cli):
+            result = _call_provider_api_key_present("ollama-cloud")
+            assert result is False  # safe fallback
 
     def test_supported_provider_still_works_without_fallback(self):
         """openrouter with env key must still succeed via the original path."""
-        from api.onboarding import _provider_api_key_present, _SUPPORTED_PROVIDER_SETUPS
+        from api.onboarding import _provider_api_key_present
         env_values = {"OPENROUTER_API_KEY": "sk-test"}
         result = _provider_api_key_present("openrouter", {}, env_values)
+        assert result is True
+
+    def test_minimax_cn_env_key_uses_supported_setup_path(self):
+        """MiniMax-CN reads its key directly from the supported setup metadata."""
+        env_values = {"MINIMAX_CN_API_KEY": "sk-test"}
+        result = _call_provider_api_key_present("minimax-cn", env_values=env_values)
         assert result is True
 
     def test_inline_api_key_in_cfg_still_works(self):
@@ -109,10 +106,10 @@ class TestProviderApiKeyPresentFallback:
 
 
 # ---------------------------------------------------------------------------
-# 2. _status_from_runtime: unsupported provider with key → chat_ready=True
+# 2. _status_from_runtime: supported and unsupported provider readiness
 # ---------------------------------------------------------------------------
 
-class TestStatusFromRuntimeUnsupportedProvider:
+class TestStatusFromRuntimeProviderReadiness:
 
     def _run(self, provider: str, model: str, api_key_present: bool, oauth_present: bool = False):
         from api.onboarding import _status_from_runtime
@@ -133,14 +130,19 @@ class TestStatusFromRuntimeUnsupportedProvider:
         assert result["provider_ready"] is True
         assert result["setup_state"] == "ready"
 
-    def test_deepseek_with_key_gives_chat_ready(self):
-        """deepseek + api key → chat_ready."""
-        result = self._run("deepseek", "deepseek-chat", api_key_present=True)
+    def test_unsupported_provider_with_key_gives_chat_ready(self):
+        """An unsupported provider with an API key is ready."""
+        result = self._run("ollama-cloud", "ollama-cloud-model", api_key_present=True)
         assert result["chat_ready"] is True
 
     def test_unsupported_provider_no_key_no_oauth_gives_not_ready(self):
         """No key, no oauth → provider_ready=False."""
-        result = self._run("minimax-cn", "MiniMax-M2.7", api_key_present=False, oauth_present=False)
+        result = self._run(
+            "ollama-cloud",
+            "ollama-cloud-model",
+            api_key_present=False,
+            oauth_present=False,
+        )
         assert result["chat_ready"] is False
         assert result["provider_ready"] is False
 
