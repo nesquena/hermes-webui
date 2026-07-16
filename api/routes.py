@@ -9528,6 +9528,9 @@ def _session_attention_summary(session_id: str) -> dict | None:
     """Return sidebar attention metadata for pending approval/clarify work."""
     approval_count = 0
     with _lock:
+        # Reconcile stale gateway mirrors so sub-agent approvals that have
+        # already been dropped from _gateway_queues don't leave a phantom
+        # "waiting for permission" red dot on the parent session (#6100).
         reconcile_gateway_pending_mirror_locked(session_id)
         queue_list = _pending.get(session_id)
         if isinstance(queue_list, list):
