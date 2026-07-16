@@ -358,6 +358,8 @@ eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_buildSidebarLineageProjectResolver'));
 eval(extractFunc('_sidebarLineageScopeKey'));
 eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
@@ -370,7 +372,8 @@ const raw = [
   {{session_id:'child', title:'Subtask', parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:30, last_message_at:30}},
 ];
 const collapsed = _collapseSessionLineageForSidebar(raw);
-const attached = _attachChildSessionsToSidebarRows(collapsed, raw);
+const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const attached = _attachChildSessionsToSidebarRows(collapsed, raw, [], undefined, effectiveProject);
 console.log(JSON.stringify(attached));
 """
     rows = json.loads(_run_node(source))
@@ -1336,6 +1339,8 @@ eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_buildSidebarLineageProjectResolver'));
 eval(extractFunc('_sidebarLineageScopeKey'));
 eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
@@ -2459,3 +2464,36 @@ def test_nested_fork_rows_render_select_checkbox():
     fork_render_block = js[fork_render_start:fork_render_start + 2000]
     assert "session-select-cb" in fork_render_block
     assert "_sessionSelectMode" in fork_render_block
+
+
+def test_effective_project_resolves_root_only_within_canonical_profile_scope():
+    """Null-project descendants inherit a root project from their own profile,
+    while a same-id root in another profile cannot donate its project."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isCliSession(s) {{ return !!(s && s.is_cli_session); }}
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_buildSidebarLineageProjectResolver'));
+const root = {{session_id:'root', profile_scope:'work', project_id:'projA'}};
+const foreignRoot = {{session_id:'root', profile_scope:'other', project_id:'projB'}};
+const child = {{session_id:'child', profile_scope:'work', _parent_lineage_root_id:'root'}};
+const resolve = _buildSidebarLineageProjectResolver([root, foreignRoot, child], []);
+console.log(JSON.stringify({{child:resolve(child), foreign:resolve({{...child, profile_scope:'other'}})}}));
+"""
+    out = json.loads(_run_node(source))
+    assert out == {"child": "projA", "foreign": "projB"}
