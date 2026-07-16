@@ -30,17 +30,18 @@ def _partition_block() -> str:
 def test_render_uses_single_pass_partition_helper():
     render_body = _function_block("renderSessionListFromCache")
 
-    assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
+    assert "const effectiveProject=_buildSidebarLineageProjectResolver(" in render_body
+    assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar, effectiveProject)" in render_body
     assert "const lineageScope={" in render_body
     assert "_renderSidebarRowsFromRawSessions(" in render_body
-    assert "sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)], lineageScope)" in render_body
+    assert "sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, effectiveProject)], lineageScope, effectiveProject)" in render_body
     assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
     assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
     assert "? _renderSidebarRowsFromRawSessions(" in render_body
-    assert "webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]," in render_body
-    assert "{...lineageScope, isCli:false}).length" in render_body
-    assert "cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]," in render_body
-    assert "{...lineageScope, isCli:true}).length" in render_body
+    assert "webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, effectiveProject)]," in render_body
+    assert "{...lineageScope, isCli:false}, effectiveProject).length" in render_body
+    assert "cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, effectiveProject)]," in render_body
+    assert "{...lineageScope, isCli:true}, effectiveProject).length" in render_body
     assert ": null;" in render_body
     assert "null is a deliberate \"not computed\" sentinel" in render_body
     assert "const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
@@ -77,21 +78,23 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "cliSessionsRaw," in _partition_block()
     assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
     assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
-    assert "webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]," in render_body
-    assert "{...lineageScope, isCli:false}).length" in render_body
-    assert "cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]," in render_body
-    assert "{...lineageScope, isCli:true}).length" in render_body
+    assert "webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, effectiveProject)]," in render_body
+    assert "{...lineageScope, isCli:false}, effectiveProject).length" in render_body
+    assert "cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, effectiveProject)]," in render_body
+    assert "{...lineageScope, isCli:true}, effectiveProject).length" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
     assert "function _sessionProfileScope(session){" in SESSIONS_JS
     assert "function _sidebarLineageScopeKey(session, fallbackIsCli){" in SESSIONS_JS
     assert "function _sidebarScopedIdentityKey(session, identity, fallbackIsCli){" in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, lineageScope){" in SESSIONS_JS
+    assert "function _buildSidebarLineageProjectResolver(sessions, referenceSessions){" in SESSIONS_JS
+    assert "const project=typeof effectiveProject==='function' ? effectiveProject(s) : s.project_id;" in SESSIONS_JS
     assert "const durableLineageIdsByScope=new Map();" in SESSIONS_JS
     assert 'item["profile_scope"] = _session_list_cache_profile_scope(item.get("profile"))' in (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
     assert "session.profile_scope" in SESSIONS_JS
     assert "lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile" not in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(" in SESSIONS_JS
-    assert "_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIdsByScope)" in SESSIONS_JS
+    assert "_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIdsByScope, effectiveProject)" in SESSIONS_JS
 
 
 def test_archive_load_more_uses_source_wide_loaded_count_and_hides_under_filters():

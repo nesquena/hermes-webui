@@ -61,8 +61,11 @@ def test_unassigned_chip_filter_logic():
     assert "if(_activeProject===NO_PROJECT_FILTER){" in js, (
         "The Unassigned filter must select sessions without a project_id"
     )
-    assert "if(s.project_id) continue;" in js, (
-        "The Unassigned filter must skip sessions with a project_id"
+    assert "const project=typeof effectiveProject==='function' ? effectiveProject(s) : s.project_id;" in js, (
+        "The Unassigned filter must resolve each session's effective project"
+    )
+    assert "if(project) continue;" in js, (
+        "The Unassigned filter must skip sessions with an effective project"
     )
 
 
@@ -76,8 +79,8 @@ def test_unassigned_chip_only_shown_when_relevant():
     — though that's vanishingly rare).
     """
     js = _js()
-    assert "const hasUnprojected=profileFiltered.some(s=>!s.project_id);" in js, (
-        "The render function must compute whether unassigned sessions exist"
+    assert "const hasUnprojected=profileFiltered.some(s=>!effectiveProject(s));" in js, (
+        "The render function must compute unassigned sessions using effective project scope"
     )
     assert "if(_allProjects.length>0||hasUnprojected){" in js, (
         "The project-bar must render when EITHER there are real projects OR "
