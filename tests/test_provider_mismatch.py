@@ -583,8 +583,12 @@ def test_configured_provider_slash_model_keeps_provider_context():
         runtime_model = config.model_with_provider_context(
             "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
             "local-llama",
+            config_data=config.cfg,
         )
-        model, provider, base_url = config.resolve_model_provider(runtime_model)
+        model, provider, base_url = config.resolve_model_provider(
+            runtime_model,
+            config_data=config.cfg,
+        )
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
