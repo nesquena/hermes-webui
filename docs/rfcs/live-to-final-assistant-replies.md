@@ -222,10 +222,20 @@ assistant-turn activity data:
 For normal completed turns, the settled Compact Worklog remains collapsed by
 default. When a terminal error-family turn has actual Worklog content, the
 Worklog defaults open so readable partial work is not hidden behind the error
-outcome. The current error family is `error`, `no_response`, `degraded`,
-`connection_lost`, `tool_limit_reached`, and `compression_exhausted`; cancel and
-interruption keep their separate semantics. An explicit user disclosure choice
-wins over these defaults and may be restored across a render rebuild.
+outcome. The current disclosure error family is `error`, `no_response`,
+`degraded`, `connection_lost`, `tool_limit_reached`, and
+`compression_exhausted`; cancelled turns and the parent `interrupted` terminal
+outcome keep their separate semantics. An explicit user disclosure choice wins
+over these defaults and may be restored across a render rebuild.
+
+`degraded` and `connection_lost` are Anchor-level reconstruction/transport
+outcomes defined in
+[`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md), not
+additional canonical product states in the table below. In this parent
+contract, `connection_lost` is the transport-specific Anchor form of an
+interruption, while `degraded` is the explicit recovery-state counterpart to the
+restoring/degraded path. They use error-family disclosure only because they can
+leave readable partial Worklog content without a normal final answer.
 
 These are presentation and disclosure rules only. They do not change reply
 ownership, terminal classification, durable transcript truth, or the requirement
