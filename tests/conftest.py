@@ -908,6 +908,42 @@ def test_server():
     os.environ.setdefault('HERMES_WEBUI_TEST_PORT', str(TEST_PORT))
     # os.environ already set at module level above; no-op here.
 
+    # Provision the isolated Kanban DB BEFORE server.py spawns. The
+    # production watcher (api/kanban_notifications.py) fails closed
+    # when its DB is absent — it explicitly uses SQLite mode=rw and
+    # must NEVER create the file itself. The test fixture therefore
+    # owns the bootstrap: build a minimal ``task_events`` table under
+    # TEST_STATE_DIR / kanban.db and pin HERMES_KANBAN_DB so the
+    # production watcher reads the isolated path (NOT the user's
+    # live ``~/.hermes/kanban.db``).
+    import sqlite3 as _sqlite3
+    _kanban_db_path = TEST_STATE_DIR / "kanban.db"
+    with _sqlite3.connect(str(_kanban_db_path)) as _kanban_init_conn:
+        _kanban_init_conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT,
+                kind TEXT,
+                payload TEXT
+            );
+            CREATE TABLE IF NOT EXISTS kanban_notify_subs (
+              task_id TEXT,
+              platform TEXT,
+              chat_id TEXT,
+              notifier_profile TEXT,
+              last_event_id INTEGER,
+              updated_at INTEGER
+            );
+            """
+        )
+        _kanban_init_conn.commit()
+    # The temporary kanban DB path lives ONLY inside the spawned server
+    # subprocess env (see env.update below). Leaking it into the pytest
+    # process's own os.environ would let product modules imported during
+    # collection resolve the test DB instead of the live one, and a
+    # subsequent teardown rmtree could shred state another test needs.
+
     env = os.environ.copy()
     # Strip ANY real credential env var so the test subprocess never inherits
     # production creds. The test server uses a mock/isolated config — no real
@@ -980,6 +1016,23 @@ def test_server():
         # ~/.hermes/profiles/webui/ and overwrite real API keys.
         "HERMES_BASE_HOME":               str(TEST_STATE_DIR),
         "HERMES_WEBUI_PASSWORD":          "",
+        # Pin the isolated Kanban DB path for the watcher so it never
+        # touches the user's live ``~/.hermes/kanban.db``. The minimal
+        # ``task_events`` schema is provisioned earlier in this fixture
+        # so the production watcher can introspect a valid DB on boot
+        # (production's fail-closed behaviour is preserved — only the
+        # test fixture creates the file; the production helper still
+        # uses ``mode=rw`` and refuses to create on a missing path).
+        "HERMES_KANBAN_DB":               str(TEST_STATE_DIR / "kanban.db"),
+        # Isolated tests probe the server over plain HTTP. Forcing TLS
+        # off here ensures the spawn env never inherits a live
+        # HERMES_WEBUI_TLS_CERT/KEY (e.g. a dev's real cert) that would
+        # make server.py bind HTTPS instead of HTTP and break every
+        # test fixture's urlopen to http://127.0.0.1:<port>. We do NOT
+        # pop these from the parent os.environ — only the subprocess
+        # needs TLS cleared.
+        "HERMES_WEBUI_TLS_CERT":          "",
+        "HERMES_WEBUI_TLS_KEY":           "",
     })
 
     # Pass agent dir if discovered so server.py doesn't have to re-discover

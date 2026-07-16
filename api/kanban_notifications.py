@@ -1091,12 +1091,18 @@ def _update_cursor_row(
             chat_id,
             int(new_cursor),
         ]
-    if profile_column == "notifier_profile" and profile_value is not None:
-        sql += " AND notifier_profile = ?"
-        params.append(profile_value)
-    elif profile_column == "profile" and profile_value is not None:
-        sql += " AND profile = ?"
-        params.append(profile_value)
+    if profile_column == "notifier_profile":
+        if profile_value is None:
+            sql += " AND notifier_profile IS NULL"
+        else:
+            sql += " AND notifier_profile = ?"
+            params.append(profile_value)
+    elif profile_column == "profile":
+        if profile_value is None:
+            sql += " AND profile IS NULL"
+        else:
+            sql += " AND profile = ?"
+            params.append(profile_value)
     cur = conn.execute(sql, params)
     return int(getattr(cur, "rowcount", 0) or 0)
 
@@ -1910,7 +1916,6 @@ def _process_chat(
     # whether the agent actually started).
     accepted, reason = _is_dispatch_accepted(resp)
     if accepted:
-        chat_backoff_state.pop(chat_id, None)
         # A1 safe-adjacent advance: for each delivered terminal,
         # advance the cursor to the MIN of (max-non-terminal-id,
         # max-terminal-id-in-delivered-set) per subscription. This
@@ -1935,6 +1940,9 @@ def _process_chat(
         # ceiling per subscription is the min of:
         #   * the delivered-set max
         #   * the smallest terminal NOT in the delivered set (post-delivery)
+        any_advance_failed = False
+        first_failed: tuple | None = None
+        first_failed_event: int | None = None
         for sub_key, max_delivered in selected_max_by_sub.items():
             next_undelivered_terminal = None
             for t in dispatchable:
@@ -1956,7 +1964,7 @@ def _process_chat(
             ceiling = max_delivered
             if next_undelivered_terminal is not None:
                 ceiling = min(ceiling, next_undelivered_terminal - 1)
-            _advance_cursor_conn(
+            advanced = _advance_cursor_conn(
                 board=sub_key[0],
                 task_id=str(sub_key[1] or ""),
                 chat_id=str(sub_key[2] or ""),
@@ -1965,6 +1973,38 @@ def _process_chat(
                 profile_value=sub_key[3],
                 conn=_get_board_conn(sub_key[0]),
             )
+            if not advanced:
+                any_advance_failed = True
+                if first_failed is None:
+                    first_failed = sub_key
+                    first_failed_event = ceiling
+        if any_advance_failed:
+            # Accepted dispatch but at least one cursor UPDATE failed to
+            # persist (rowcount=0 — row missing / cursor already past /
+            # contention). We must NOT mark this chat as dispatched;
+            # the event stays readable so the next iteration replays it
+            # (at-least-once). To prevent an immediate re-dispatch loop
+            # the same agent would already be in the middle of handling,
+            # enter the existing chat backoff window. We deliberately do
+            # NOT pop the backoff entry here — failure persists.
+            (fb_board, fb_task, fb_chat, fb_profile) = first_failed or (
+                None, None, chat_id, None,
+            )
+            next_until = _bump_backoff(chat_backoff_state, chat_id)
+            logger.warning(
+                "kanban notification: accepted dispatch but cursor persist "
+                "failed for chat_id=%r board=%r task=%r target_cursor=%r "
+                "profile=%r; not advancing durable cursor; entering "
+                "chat backoff (%.1fs) to preserve at-least-once",
+                fb_chat,
+                fb_board,
+                fb_task,
+                first_failed_event,
+                fb_profile,
+                max(0.0, next_until - _mono()),
+            )
+            return
+        chat_backoff_state.pop(chat_id, None)
         dispatched_chats.append(chat_id)
         return
 

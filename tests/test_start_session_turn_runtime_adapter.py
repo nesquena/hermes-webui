@@ -128,3 +128,108 @@ def test_start_session_turn_routes_through_adapter_when_enabled(
     assert resp["_status"] == 200
     assert resp["stream_id"] == "stream-via-adapter"
     assert invoked == {"adapter": 1, "start_run": 1}
+
+
+def test_start_session_turn_direct_normalizes_response_with_status_200(
+    _stub_routes, monkeypatch
+):
+    """Defect A regression: ``_start_run`` documents its return contract as
+    ``_status`` + legacy fields, but the default direct code path was
+    returning ``_start_chat_stream_for_session`` unchanged, which produces
+    a dict with ``stream_id``/``session_id`` but NO ``_status`` key.
+
+    ``api.kanban_notifications._is_dispatch_accepted`` correctly requires
+    an integer ``_status`` plus a nonempty ``stream_id`` — so a real
+    successful direct wake was being rejected, never advancing its cursor,
+    and never firing the agent.
+
+    This test mocks the direct starter to return EXACTLY the production
+    ``_start_chat_stream_for_session`` shape (no ``_status``) and asserts
+    that ``start_session_turn`` normalizes the response so a successful
+    direct wake is contract-compliant. The pre-fix code returned the
+    underlying dict unchanged, so the assertion fails with ``KeyError`` /
+    ``_status != 200`` before the fix lands.
+    """
+    monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER_RUNNER", raising=False)
+
+    from api import routes as routes_mod
+
+    # Mirror the EXACT shape that _start_chat_stream_for_session builds
+    # in production: a successful start returns stream_id/session_id plus
+    # some metadata, but NO _status. That is the documented contract the
+    # Kanban watcher depends on (which requires _status to consider the
+    # dispatch accepted).
+    def _direct_starter(_s, **kwargs):
+        return {
+            "stream_id": "stream-direct-real",
+            "session_id": "sess-test",
+            "pending_started_at": 1700000000.0,
+            "turn_id": "turn-direct-real",
+            "title": "Test session",
+        }
+
+    monkeypatch.setattr(routes_mod, "_start_chat_stream_for_session", _direct_starter)
+
+    # Also silence the runtime adapter path so the call goes through
+    # _start_chat_stream_for_session directly.
+    from api import runtime_adapter as ra_mod
+
+    monkeypatch.setattr(ra_mod, "build_runtime_adapter", lambda **kw: None)
+
+    resp = _stub_routes.start_session_turn("sess-test", "wakeup msg")
+
+    # The normalized contract: _status must be present and equal to 200,
+    # stream_id must be preserved, and the legacy fields must round-trip.
+    assert resp.get("_status") == 200, (
+        "start_session_turn direct-path response must include _status=200; "
+        "kanban_notifications._is_dispatch_accepted requires an integer "
+        "_status in 100..399 to consider the dispatch accepted. Got: "
+        f"{resp!r}"
+    )
+    assert resp["stream_id"] == "stream-direct-real"
+    assert resp["session_id"] == "sess-test"
+
+
+def test_start_session_turn_does_not_normalize_error_without_stream_id(
+    _stub_routes, monkeypatch
+):
+    """Boundary guard for the defensive normalization: a response that has
+    no ``_status`` AND no non-empty ``stream_id`` (e.g. an error-only
+    dict from a legacy/custom adapter) must NOT be silently rewritten
+    to ``_status=200``. Only successful-direct wakes (stream_id present)
+    are normalized — error responses keep their original shape so the
+    kanban watcher can correctly reject the dispatch.
+    """
+    monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER_RUNNER", raising=False)
+
+    from api import routes as routes_mod
+
+    def _direct_starter(_s, **kwargs):
+        return {"error": "nope"}
+
+    monkeypatch.setattr(routes_mod, "_start_chat_stream_for_session", _direct_starter)
+
+    # Also silence the runtime adapter path so the call goes through
+    # _start_chat_stream_for_session directly.
+    from api import runtime_adapter as ra_mod
+
+    monkeypatch.setattr(ra_mod, "build_runtime_adapter", lambda **kw: None)
+
+    resp = _stub_routes.start_session_turn("sess-test", "wakeup msg")
+
+    # Error-only responses (no stream_id) must NOT be normalized to 200:
+    # the watcher relies on _status being absent/error to reject the dispatch.
+    assert resp.get("_status") != 200, (
+        "start_session_turn must not normalize an error-only response "
+        "(no stream_id) to _status=200. Got: "
+        f"{resp!r}"
+    )
+    assert "_status" not in resp, (
+        "start_session_turn must not synthesize _status for a response with "
+        "no stream_id — the watcher rejects dispatches lacking an accepted "
+        "_status, so an absent key is the correct signal. Got: "
+        f"{resp!r}"
+    )
+    assert resp == {"error": "nope"}

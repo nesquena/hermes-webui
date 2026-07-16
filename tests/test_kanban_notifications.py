@@ -308,6 +308,8 @@ class FakeConn:
             #   Legacy: ``SET last_event_id = ?`` (no updated_at column)
             #     params = (new_cursor, task_id, chat_id,
             #               cursor_max[, profile])
+            # The profile discriminator may take either equality
+            # (``AND notifier_profile = ?``) or NULL (``AND notifier_profile IS NULL``).
             has_updated_at_col = "updated_at = ?" in s
             base_idx = 2 if has_updated_at_col else 1
             new_cursor = params[0]
@@ -315,10 +317,14 @@ class FakeConn:
             task_id = params[base_idx]
             chat_id = params[base_idx + 1]
             cursor_max = params[base_idx + 2]
-            profile_clause_present = (
+            null_profile_clause = (
+                "AND notifier_profile IS NULL" in s
+                or "AND profile IS NULL" in s
+            )
+            eq_profile_clause = (
                 "AND notifier_profile = ?" in s or "AND profile = ?" in s
             )
-            expected_profile = params[base_idx + 3] if profile_clause_present else None
+            expected_profile = params[base_idx + 3] if eq_profile_clause else None
             rowcount = 0
             for r in self._db.subs:
                 if (
@@ -327,8 +333,13 @@ class FakeConn:
                     and r["chat_id"] == chat_id
                     and r["last_event_id"] < cursor_max
                 ):
-                    if profile_clause_present:
-                        actual = r.get("notifier_profile") or r.get("profile")
+                    actual = r.get("notifier_profile")
+                    if actual is None:
+                        actual = r.get("profile")
+                    if null_profile_clause:
+                        if actual is not None:
+                            continue
+                    elif eq_profile_clause:
                         if actual != expected_profile:
                             continue
                     r["last_event_id"] = new_cursor
@@ -4243,6 +4254,340 @@ def test_live_schema_break_then_repair_resumes_dispatch(
     assert any(c["chat_id"] == "chat-rep" for c in notifications_module.dispatched), (
         f"post-repair iteration did not dispatch; state={state!r}"
     )
+
+
+# ── Product work: defect-A + cursor-failure + NULL-profile regressions ──
+
+
+def test_accepted_direct_normalized_response_advances_fake_cursor(
+    notifications_module, monkeypatch
+):
+    """Defect-A regression on the WATCHER side (the producer side is
+    covered by ``tests/test_start_session_turn_runtime_adapter``).
+    A direct ``_status=200`` response — the exact shape the new
+    ``_start_chat_stream_for_session`` contract returns — must be
+    accepted by ``_is_dispatch_accepted`` AND advance the
+    subscription cursor durably on the real (FakeKanbanDB-backed)
+    row.
+
+    Run two iterations:
+      * Iteration 1: one terminal event above the cursor → exactly
+        one dispatch, cursor advances to event id.
+      * Iteration 2: no new events → no second dispatch. The cursor
+        is now durable past the terminal.
+    """
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    # Register the session so the chat is dispatch-eligible.
+    notifications_module.register_session("chat-direct", profile="default")
+    fb.add_task(FakeTask(id="t_direct", title="Direct", status="done"))
+    fb.add_event("t_direct", "completed", {"status": "done"}, event_id=42)
+    fb.add_sub(
+        FakeSub(
+            task_id="t_direct",
+            platform="webui",
+            chat_id="chat-direct",
+            notifier_profile="default",
+        )
+    )
+
+    state = mod._initialize_baseline_state(["default"])
+
+    # Iteration 1 — the response shape mirrors the new contract
+    # (the direct-path normalizer in routes.py now sets ``_status: 200``
+    # before returning; previously the watcher would reject because
+    # the dict lacked ``_status``). The fixture's stub already
+    # includes ``_status=200`` so this case is accepted out of the
+    # box; the regression we exercise is the WATCHER's cursor
+    # advance + at-most-once redispatch after the durable cursor.
+    mod._run_one_iteration(state)
+
+    # Exactly one dispatch, on the right chat, with a real stream_id.
+    assert len(notifications_module.dispatched) == 1, (
+        f"expected one dispatch, got {len(notifications_module.dispatched)}: "
+        f"{notifications_module.dispatched!r}"
+    )
+    call = notifications_module.dispatched[0]
+    assert call["chat_id"] == "chat-direct"
+    assert call["_status"] == 200
+    assert call["stream_id"]
+
+    # The cursor advanced on the real (FakeKanbanDB-backed) row.
+    sub = next(s for s in fb.subs if s["task_id"] == "t_direct")
+    assert sub["last_event_id"] == 42, (
+        f"first iteration did not advance real cursor; got "
+        f"last_event_id={sub['last_event_id']}"
+    )
+
+    # Iteration 2 — no new events, no redispatch.
+    notifications_module.dispatched.clear()
+    mod._run_one_iteration(state)
+    assert notifications_module.dispatched == [], (
+        f"second iteration redispatched despite no new events: "
+        f"{notifications_module.dispatched!r}"
+    )
+    # Cursor remains at 42 (no double-advance either).
+    sub = next(s for s in fb.subs if s["task_id"] == "t_direct")
+    assert sub["last_event_id"] == 42
+
+
+def test_accepted_dispatch_with_failed_cursor_write_enters_backoff_without_immediate_replay(
+    notifications_module, monkeypatch, caplog
+):
+    """Direct unit test of ``mod._process_chat`` using dependency injection,
+    verifying that a cursor-write failure after an accepted dispatch enters
+    chat backoff and does NOT re-dispatch on the next immediate call.
+    """
+    import logging
+
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+
+    notifications_module.register_session("chat-bz", profile="default")
+    fb.add_task(FakeTask(id="t_bz", title="Backoff on cursor fail", status="done"))
+    fb.add_event("t_bz", "completed", {"status": "done"}, event_id=42)
+    fb.add_sub(
+        FakeSub(
+            task_id="t_bz",
+            platform="webui",
+            chat_id="chat-bz",
+            notifier_profile="default",
+        )
+    )
+
+    state = {
+        "schema_by_board": {
+            "default": {
+                "has_updated_at": True,
+                "required_ok": True,
+                "profile_column": "notifier_profile",
+            }
+        }
+    }
+
+    candidate = {
+        "task_id": "t_bz",
+        "chat_id": "chat-bz",
+        "profile": "default",
+        "profile_column": "notifier_profile",
+        "last_event_id": 0,
+        "event": {
+            "id": 42,
+            "task_id": "t_bz",
+            "kind": "completed",
+            "payload": {"status": "done"},
+        },
+        "event_id": 42,
+        "board": "default",
+    }
+
+    def _noop_board_conn(board=None):
+        return None
+
+    def _noop_close():
+        pass
+
+    def _fake_get_task(board, task_id):
+        return {"id": "t_bz", "title": "Backoff on cursor fail", "status": "done"}
+
+    dispatched_chats: list[str] = []
+
+    with caplog.at_level(logging.WARNING, logger="api.kanban_notifications"):
+        mod._process_chat(
+            "chat-bz",
+            [candidate],
+            state,
+            dispatched_chats,
+            _noop_board_conn,
+            _noop_close,
+            mod._classify_terminal,
+            mod._build_prompt,
+            notifications_module.start_session_turn,
+            _fake_get_task,
+            lambda **kw: False,
+            mod._bump_backoff,
+        )
+
+    assert len(notifications_module.dispatched) == 1, (
+        f"expected exactly 1 accepted dispatch, got "
+        f"{len(notifications_module.dispatched)}: {notifications_module.dispatched!r}"
+    )
+    call = notifications_module.dispatched[0]
+    assert call["chat_id"] == "chat-bz"
+
+    sub_row = next(s for s in fb.subs if s["task_id"] == "t_bz")
+    assert sub_row["last_event_id"] == 0, (
+        f"cursor advanced despite failed cursor write: "
+        f"{sub_row['last_event_id']!r}"
+    )
+
+    warning_records = [
+        r for r in caplog.records if r.levelno >= logging.WARNING
+    ]
+    assert warning_records, (
+        "expected at least one WARNING log record; got none. "
+        f"records={caplog.records!r}"
+    )
+    matched = False
+    for r in warning_records:
+        msg = r.getMessage().lower()
+        if any(
+            signal in msg
+            for signal in ("cursor persist", "cursor advance", "advance")
+        ):
+            assert "chat-bz" in r.getMessage(), (
+                f"warning missing chat_id token: {r.getMessage()!r}"
+            )
+            assert "t_bz" in r.getMessage(), (
+                f"warning missing task_id token: {r.getMessage()!r}"
+            )
+            matched = True
+            break
+    assert matched, (
+        "no WARNING with advance/persist failure signal + task/chat "
+        f"identity; got {[r.getMessage() for r in warning_records]!r}"
+    )
+
+    chat_backoff = state.get("chat_backoff") or {}
+    assert "chat-bz" in chat_backoff, (
+        f"chat-bz missing from chat_backoff after cursor-write fail: "
+        f"{chat_backoff!r}"
+    )
+    backoff_entry = chat_backoff["chat-bz"]
+    assert backoff_entry.get("backoff_until", 0.0) > mod._mono(), (
+        f"backoff_until must be in the future; got "
+        f"{backoff_entry.get('backoff_until')!r} vs now={mod._mono()!r}"
+    )
+
+    pre_dispatched = len(notifications_module.dispatched)
+    mod._process_chat(
+        "chat-bz",
+        [candidate],
+        state,
+        dispatched_chats,
+        _noop_board_conn,
+        _noop_close,
+        mod._classify_terminal,
+        mod._build_prompt,
+        notifications_module.start_session_turn,
+        _fake_get_task,
+        lambda **kw: False,
+        mod._bump_backoff,
+    )
+    assert len(notifications_module.dispatched) == pre_dispatched, (
+        f"second invocation produced extra dispatch while backoff was "
+        f"still active: "
+        f"{[c.get('chat_id') for c in notifications_module.dispatched]!r}"
+    )
+    assert len(notifications_module.dispatched) == 1, (
+        f"expected exactly 1 total dispatch across both invocations, "
+        f"got {len(notifications_module.dispatched)}: "
+        f"{[c.get('chat_id') for c in notifications_module.dispatched]!r}"
+    )
+
+
+def test_null_notifier_profile_cursor_update_does_not_touch_nonnull_profile_row(
+    notifications_module, real_kanban_kb, monkeypatch
+):
+    """Real-SQLite regression for the NULL-discriminator contract in
+    ``_update_cursor_row``: when the production helper is invoked
+    with ``profile_column='notifier_profile'`` and ``profile_value=None``,
+    the resulting SQL must use ``IS NULL`` so a captured-NULL row is
+    advanced without touching a non-null row sharing the same
+    ``(task_id, platform, chat_id)``.
+
+    This test exercises REAL SQLite SQL via the
+    ``real_kanban_kb`` / ``notifications_module.open_conn`` patterns
+    that already exist in this file (it must NOT use FakeConn SQL
+    parsing — the contract being asserted is the production SQL
+    string itself, validated by SQLite's row-update semantics).
+
+    Two rows on the SAME (task_id, platform, chat_id) — one with
+    ``notifier_profile IS NULL`` at ``last_event_id = 0`` and one with
+    ``notifier_profile = 'teamA'`` at ``last_event_id = 0``. After
+    ``_update_cursor_row`` advances to 77 scoped by ``IS NULL``:
+
+      * The NULL row advances to 77.
+      * The ``teamA`` row remains at 0 (UNTOUCHED).
+    """
+    import sqlite3
+
+    p = real_kanban_kb.path
+    # Build the schema the partial fix targets: notifier_profile +
+    # last_event_id + updated_at alongside task_id / platform / chat_id.
+    with sqlite3.connect(str(p)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE kanban_notify_subs (
+                task_id TEXT,
+                platform TEXT,
+                chat_id TEXT,
+                notifier_profile TEXT,
+                last_event_id INTEGER,
+                updated_at INTEGER
+            );
+            """
+        )
+        # Two rows on the SAME (task, platform, chat) — one NULL
+        # profile at event 0, one ``teamA`` at event 0.
+        conn.execute(
+            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?)",
+            ("t_null", "webui", "chat-null", None, 0, None),
+        )
+        conn.execute(
+            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?)",
+            ("t_null", "webui", "chat-null", "teamA", 0, None),
+        )
+        conn.commit()
+
+    # Route kb.kanban_db_path at our tmp DB so notifications_module.open_conn
+    # opens THIS file (not the FakeKanbanDB list).
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: real_kanban_kb.kb)
+
+    # Invoke the production ``_update_cursor_row`` with profile-column
+    # metadata and profile value None for event 77. The helper MUST
+    # generate ``... AND notifier_profile IS NULL`` so the teamA row
+    # is left untouched.
+    with notifications_module.open_conn("default") as conn:
+        conn.row_factory = sqlite3.Row
+        rowcount = notifications_module.mod._update_cursor_row(
+            conn,
+            task_id="t_null",
+            chat_id="chat-null",
+            new_cursor=77,
+            profile_column="notifier_profile",
+            profile_value=None,
+            has_updated_at=True,
+        )
+    # Result must be True / 1 (positive result); the partial fix
+    # returns ``True`` from the modern-shape branch when ``rowcount``
+    # is positive.
+    assert rowcount == 1, (
+        f"NULL-profile update must touch exactly one row; got "
+        f"rowcount={rowcount}"
+    )
+
+    # Verify BOTH rows from a fresh SQLite connection.
+    with sqlite3.connect(str(p)) as verify:
+        verify.row_factory = sqlite3.Row
+        rows = {
+            r["notifier_profile"]: r["last_event_id"]
+            for r in verify.execute(
+                "SELECT notifier_profile, last_event_id FROM kanban_notify_subs "
+                "WHERE task_id = ? AND chat_id = ?",
+                ("t_null", "chat-null"),
+            ).fetchall()
+        }
+    assert rows.get(None) == 77, (
+        f"NULL-profile row did not advance to 77: rows={rows!r}"
+    )
+    assert rows.get("teamA") == 0, (
+        f"non-null-profile row cursor was modified by a NULL-scoped "
+        f"UPDATE: rows={rows!r}"
+    )
+
+
+
 
 
 # Use the same prompt-prefix constant the production module uses so the

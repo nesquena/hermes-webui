@@ -20879,6 +20879,7 @@ def _start_chat_stream_for_session(
     )
     thr.start()
     response = {
+        "_status": 200,
         "stream_id": stream_id,
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
@@ -21282,6 +21283,10 @@ def start_session_turn(
         source=turn_source,
         route="start_session_turn",
     )
+
+    if isinstance(resp, dict) and resp.get("_status") is None and str(resp.get("stream_id") or "").strip():
+        resp = dict(resp)
+        resp["_status"] = 200
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is
