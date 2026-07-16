@@ -1635,7 +1635,7 @@ class TestUpdateSummaryRouteModelSelection:
         assert '"update_summary"' not in src
         assert 'main_runtime=main_runtime' in src
         assert 'update summary auxiliary model failed; falling back to main model' in src
-        assert 'from run_agent import AIAgent' in src
+        assert 'require_ai_agent_class()' in src
 
     def test_summary_route_auxiliary_model_uses_active_profile_env(self, monkeypatch, tmp_path):
         import api.config as cfg

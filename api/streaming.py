@@ -564,10 +564,13 @@ def _prewarm_skill_tool_modules():
 
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
-try:
-    from run_agent import AIAgent
-except ImportError:
-    AIAgent = None
+from api.agent_runtime import ensure_agent_runtime_current, get_ai_agent_class
+
+
+# Eagerly attempt the import at startup, matching the pre-guard behavior. If
+# dependencies are not ready yet, _get_ai_agent() retries when a chat starts.
+AIAgent = get_ai_agent_class()
+
 
 def _get_ai_agent():
     """Return AIAgent class, retrying the import if the initial attempt failed.
@@ -575,15 +578,13 @@ def _get_ai_agent():
     auto_install_agent_deps() in server.py may install missing packages after
     this module is first imported (common in Docker with a volume-mounted agent).
     Re-attempting the import here picks up the newly installed packages without
-    requiring a server restart.
+    requiring a server restart. The shared runtime guard also refuses to reuse
+    cached Agent modules after the source checkout changes.
     """
     global AIAgent
+    ensure_agent_runtime_current()
     if AIAgent is None:
-        try:
-            from run_agent import AIAgent as _cls  # noqa: PLC0415
-            AIAgent = _cls
-        except ImportError:
-            pass
+        AIAgent = get_ai_agent_class()
     return AIAgent
 
 
@@ -7296,6 +7297,7 @@ def _run_agent_streaming(
             logger.debug("register_process_session failed", exc_info=True)
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
+        ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
