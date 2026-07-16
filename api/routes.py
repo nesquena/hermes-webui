@@ -26083,7 +26083,82 @@ def _parse_mcp_enabled(value) -> bool:
     return True
 
 
-def _mcp_runtime_status_by_name() -> dict[str, dict]:
+def _mcp_profile_home_key(value) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(Path(value).expanduser().resolve())
+    except Exception:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return str(Path(text).expanduser().resolve())
+        except Exception:
+            return text
+
+
+def _mcp_runtime_entry_owner_key(entry) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    for key in ("profile_home", "hermes_home", "home", "profile_dir"):
+        value = entry.get(key)
+        if value:
+            owner_key = _mcp_profile_home_key(value)
+            if owner_key:
+                return owner_key
+    profile_name = str(entry.get("profile") or entry.get("profile_name") or "").strip()
+    if profile_name:
+        try:
+            from api.profiles import get_hermes_home_for_profile
+
+            return _mcp_profile_home_key(get_hermes_home_for_profile(profile_name))
+        except Exception:
+            return ""
+    return ""
+
+
+def _mcp_runtime_status_key(entry) -> tuple[str, str] | None:
+    if not isinstance(entry, dict):
+        return None
+    server_name = str(entry.get("name") or "").strip()
+    if not server_name:
+        return None
+    return (_mcp_runtime_entry_owner_key(entry), server_name)
+
+
+def _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key: str):
+    if not isinstance(runtime_by_name, dict):
+        return
+    active_home_key = _mcp_profile_home_key(active_home_key)
+    for raw_key, runtime in runtime_by_name.items():
+        if not isinstance(runtime, dict):
+            continue
+        owner_key = ""
+        server_name = ""
+        if isinstance(raw_key, tuple) and len(raw_key) >= 2:
+            owner_key = _mcp_profile_home_key(raw_key[0])
+            server_name = str(raw_key[1] or "").strip()
+        else:
+            server_name = str(raw_key or "").strip()
+        server_name = str(runtime.get("name") or server_name).strip()
+        owner_key = owner_key or _mcp_runtime_entry_owner_key(runtime)
+        if not owner_key or owner_key != active_home_key or not server_name:
+            continue
+        yield server_name, runtime
+
+
+def _mcp_runtime_status_for_server(runtime_by_name, active_home_key: str, server_name: str):
+    target = str(server_name or "").strip()
+    if not target:
+        return None
+    for name, runtime in _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key):
+        if name == target:
+            return runtime
+    return None
+
+
+def _mcp_runtime_status_by_name() -> dict[tuple[str, str], dict]:
     """Return already-known MCP runtime status without starting servers.
 
     ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
@@ -26097,11 +26172,12 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
         return {}
     if not isinstance(statuses, list):
         return {}
-    return {
-        str(entry.get("name")): entry
-        for entry in statuses
-        if isinstance(entry, dict) and entry.get("name")
-    }
+    out = {}
+    for entry in statuses:
+        key = _mcp_runtime_status_key(entry)
+        if key is not None:
+            out[key] = entry
+    return out
 
 
 def _server_summary(name, cfg, runtime_status=None):
@@ -26258,16 +26334,15 @@ def _active_profile_mcp_config_path() -> Path:
     return Path(get_active_hermes_home()).expanduser() / "config.yaml"
 
 
-def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
+def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries, active_home_key: str):
     """Read detailed MCP tool payloads from runtime status when available."""
     tools = []
     if not isinstance(runtime_by_name, dict):
         return tools
-    for server_name, runtime in runtime_by_name.items():
-        server_name = str(server_name)
+    for server_name, runtime in _mcp_runtime_entries_for_active_profile(
+        runtime_by_name, active_home_key
+    ):
         if server_name not in server_summaries:
-            continue
-        if not isinstance(runtime, dict):
             continue
         raw_tools = runtime.get("tools")
         if not isinstance(raw_tools, list):
@@ -26283,7 +26358,52 @@ def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
     return tools
 
 
-def _mcp_tools_from_registry(server_summaries):
+def _mcp_registry_tool_owner_key(registry, tool_name: str) -> str:
+    """Return a registered MCP tool's owning profile home, if known."""
+    for method_name in (
+        "get_profile_home_for_tool",
+        "get_tool_profile_home",
+        "get_hermes_home_for_tool",
+        "get_tool_hermes_home",
+    ):
+        method = getattr(registry, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            owner_key = _mcp_profile_home_key(method(tool_name))
+        except Exception:
+            owner_key = ""
+        if owner_key:
+            return owner_key
+
+    for method_name in ("get_tool_metadata", "get_metadata", "get_tool_info"):
+        method = getattr(registry, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            metadata = method(tool_name)
+        except Exception:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("profile_home", "hermes_home", "home", "profile_dir"):
+            owner_key = _mcp_profile_home_key(metadata.get(key))
+            if owner_key:
+                return owner_key
+        profile_name = str(
+            metadata.get("profile") or metadata.get("profile_name") or ""
+        ).strip()
+        if profile_name:
+            try:
+                from api.profiles import get_hermes_home_for_profile
+
+                return _mcp_profile_home_key(get_hermes_home_for_profile(profile_name))
+            except Exception:
+                return ""
+    return ""
+
+
+def _mcp_tools_from_registry(server_summaries, active_home_key: str):
     """Read already-registered MCP tool schemas without probing MCP servers."""
     try:
         from tools.registry import registry
@@ -26295,6 +26415,9 @@ def _mcp_tools_from_registry(server_summaries):
     except Exception:
         return []
     for tool_name in names:
+        owner_key = _mcp_registry_tool_owner_key(registry, tool_name)
+        if not owner_key or owner_key != _mcp_profile_home_key(active_home_key):
+            continue
         try:
             toolset = registry.get_toolset_for_tool(tool_name)
         except Exception:
@@ -26312,19 +26435,25 @@ def _mcp_tools_from_registry(server_summaries):
 
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
-    cfg = get_config_for_profile_home(get_active_hermes_home())
+    active_home = get_active_hermes_home()
+    active_home_key = _mcp_profile_home_key(active_home)
+    cfg = get_config_for_profile_home(active_home)
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
     server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+        str(name): _server_summary(
+            str(name),
+            scfg,
+            _mcp_runtime_status_for_server(runtime, active_home_key, str(name)),
+        )
         for name, scfg in servers.items()
     }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+    tools = _mcp_tools_from_runtime_status(runtime, server_summaries, active_home_key)
     source = "mcp_runtime_status"
     if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
+        tools = _mcp_tools_from_registry(server_summaries, active_home_key)
         source = "tool_registry" if tools else "none"
     tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
     unavailable_servers = [
@@ -26511,7 +26640,9 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
 
 def _handle_notes_sources_list(handler):
     """List note/knowledge MCP sources for the WebUI Notes drawer."""
-    cfg = get_config()
+    active_home = get_active_hermes_home()
+    active_home_key = _mcp_profile_home_key(active_home)
+    cfg = get_config_for_profile_home(active_home)
     if not _external_notes_sources_enabled(cfg):
         return j(handler, {
             "enabled": False,
@@ -26527,13 +26658,17 @@ def _handle_notes_sources_list(handler):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
     server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+        str(name): _server_summary(
+            str(name),
+            scfg,
+            _mcp_runtime_status_for_server(runtime, active_home_key, str(name)),
+        )
         for name, scfg in servers.items()
     }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+    tools = _mcp_tools_from_runtime_status(runtime, server_summaries, active_home_key)
     source = "mcp_runtime_status"
     if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
+        tools = _mcp_tools_from_registry(server_summaries, active_home_key)
         source = "tool_registry" if tools else "none"
     return j(handler, {
         "enabled": True,
@@ -26826,13 +26961,19 @@ def _handle_notes_item(handler, parsed):
 
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
-    cfg = get_config_for_profile_home(get_active_hermes_home())
+    active_home = get_active_hermes_home()
+    active_home_key = _mcp_profile_home_key(active_home)
+    cfg = get_config_for_profile_home(active_home)
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
     result = [
-        _server_summary(name, scfg, runtime.get(str(name)))
+        _server_summary(
+            name,
+            scfg,
+            _mcp_runtime_status_for_server(runtime, active_home_key, str(name)),
+        )
         for name, scfg in servers.items()
     ]
     return j(handler, {

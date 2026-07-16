@@ -84,8 +84,9 @@ class TestMcpList:
     @patch('api.routes._mcp_runtime_status_by_name')
     @patch('api.routes.get_config_for_profile_home')
     @patch('api.routes.get_active_hermes_home')
-    def test_list_payload_includes_status_tool_counts_and_safe_invalid_config(self, mock_home, mock_cfg, mock_runtime):
-        mock_home.return_value = object()
+    def test_list_payload_includes_status_tool_counts_and_safe_invalid_config(self, mock_home, mock_cfg, mock_runtime, tmp_path):
+        profile_home = tmp_path / "profiles" / "work"
+        mock_home.return_value = profile_home
         mock_cfg.return_value = {
             'mcp_servers': {
                 'searxng': {'command': 'mcp-searxng', 'args': ['--port', '8888']},
@@ -98,8 +99,8 @@ class TestMcpList:
             }
         }
         mock_runtime.return_value = {
-            'searxng': {'connected': True, 'tools': 3},
-            'web-reader': {'connected': False, 'tools': 0},
+            'searxng': {'profile_home': str(profile_home), 'connected': True, 'tools': 3},
+            'web-reader': {'profile_home': str(profile_home), 'connected': False, 'tools': 0},
         }
         h = _make_handler()
         _handle_mcp_servers_list(h)

@@ -31,8 +31,10 @@ class TestMcpToolInventoryApi:
     @patch("api.routes._mcp_runtime_status_by_name")
     @patch("api.routes.get_config_for_profile_home")
     @patch("api.routes.get_active_hermes_home")
-    def test_endpoint_returns_sanitized_registered_mcp_tools(self, mock_home, mock_cfg, mock_runtime):
-        mock_home.return_value = sentinel_home = object()
+    def test_endpoint_returns_sanitized_registered_mcp_tools(
+        self, mock_home, mock_cfg, mock_runtime, tmp_path
+    ):
+        mock_home.return_value = sentinel_home = tmp_path / "profiles" / "work"
         mock_cfg.return_value = {
             "mcp_servers": {
                 "web-reader": {"url": "http://localhost:3001/mcp", "headers": {"Authorization": "Bearer secret-token"}},
@@ -41,6 +43,7 @@ class TestMcpToolInventoryApi:
         }
         mock_runtime.return_value = {
             "web-reader": {
+                "profile_home": str(sentinel_home),
                 "connected": True,
                 "tools": [
                     {
@@ -57,7 +60,11 @@ class TestMcpToolInventoryApi:
                     }
                 ],
             },
-            "disabled": {"connected": False, "tools": 0},
+            "disabled": {
+                "profile_home": str(sentinel_home),
+                "connected": False,
+                "tools": 0,
+            },
         }
         h = _make_handler()
         _handle_mcp_tools_list(h)

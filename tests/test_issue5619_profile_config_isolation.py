@@ -338,25 +338,37 @@ def test_profile_snapshot_expands_env_from_request_profile_raw_yaml(
         ),
         encoding="utf-8",
     )
+    harness.work_home.joinpath(".env").write_text("PROFILE_TOKEN=work-secret\n", encoding="utf-8")
     monkeypatch.setenv("PROFILE_TOKEN", "process-secret")
     harness.request_scope.profile = "work"
-    previous_env = getattr(config._thread_ctx, "env", None)
-    previous_block = getattr(config._thread_ctx, "block_process_env_fallback", False)
-    try:
-        config._thread_ctx.env = {"PROFILE_TOKEN": "work-secret"}
-        config._thread_ctx.block_process_env_fallback = True
-        snapshot = config.get_config_snapshot()
-    finally:
-        config._thread_ctx.block_process_env_fallback = previous_block
-        if previous_env is None:
-            try:
-                del config._thread_ctx.env
-            except AttributeError:
-                pass
-        else:
-            config._thread_ctx.env = previous_env
+    snapshot = config.get_config_snapshot()
 
     assert snapshot["providers"]["work-provider"]["api_key"] == "work-secret"
+
+
+def test_named_profile_snapshot_does_not_expand_missing_env_from_process(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    config = harness.config
+    harness.work_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": "work-provider", "default": "work-model"},
+                "providers": {"work-provider": {"api_key": "${PROFILE_TOKEN}"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROFILE_TOKEN", "process-secret")
+    harness.request_scope.profile = "work"
+
+    snapshot = config.get_config_snapshot()
+    explicit = config.get_config_for_profile_home(harness.work_home)
+
+    assert snapshot["providers"]["work-provider"]["api_key"] == "${PROFILE_TOKEN}"
+    assert explicit["providers"]["work-provider"]["api_key"] == "${PROFILE_TOKEN}"
 
 
 def test_model_resolution_uses_one_profile_snapshot_after_other_profile_reload(
@@ -414,6 +426,75 @@ def test_model_resolution_uses_one_profile_snapshot_after_other_profile_reload(
     assert base_url == "http://work-lmstudio.test/v1"
 
 
+def test_streaming_runtime_resolution_stays_inside_profile_scope():
+    from pathlib import Path
+
+    from api import streaming
+
+    source = Path(streaming.__file__).read_text(encoding="utf-8")
+    start = source.index(
+        'with profiles_api.profile_scope_for_detached_worker(\n'
+        '                _resolved_profile_name, "model/runtime resolution"'
+    )
+    end = source.index("            # Read per-profile config at call time", start)
+    block = source[start:end]
+
+    assert "resolve_runtime_provider_with_anthropic_env_lock" in block
+    assert "_resolve_custom_provider_runtime_overrides" in block
+    assert "config_data=_model_resolution_cfg" in block
+
+
+def test_credential_self_heal_resolves_with_named_profile_env(
+    profile_config_harness, monkeypatch
+):
+    from api import config, oauth, profiles, streaming
+
+    harness = profile_config_harness
+    harness.work_home.joinpath(".env").write_text("PROFILE_TOKEN=work-secret\n", encoding="utf-8")
+    monkeypatch.setenv("PROFILE_TOKEN", "process-secret")
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: harness.work_home if name == "work" else harness.default_home,
+    )
+    monkeypatch.setattr(oauth, "read_auth_json", lambda: {"auth": True})
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, **kwargs: resolver(**kwargs),
+    )
+    captured = {}
+
+    def resolve_runtime_provider(**kwargs):
+        captured["thread_env"] = dict(getattr(config._thread_ctx, "env", {}) or {})
+        captured["block_process_env_fallback"] = bool(
+            getattr(config._thread_ctx, "block_process_env_fallback", False)
+        )
+        return {
+            "provider": kwargs.get("requested"),
+            "api_key": captured["thread_env"].get("PROFILE_TOKEN"),
+        }
+
+    hermes_cli_mod = types.ModuleType("hermes_cli")
+    runtime_mod = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_mod.resolve_runtime_provider = resolve_runtime_provider
+    hermes_cli_mod.runtime_provider = runtime_mod
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_mod)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", runtime_mod)
+
+    result = streaming._attempt_credential_self_heal(
+        "custom:work",
+        "session-work",
+        None,
+        target_model="work-model",
+        profile_name="work",
+    )
+
+    assert result["api_key"] == "work-secret"
+    assert captured["thread_env"]["PROFILE_TOKEN"] == "work-secret"
+    assert captured["block_process_env_fallback"] is True
+
+
 def test_mcp_write_ignores_hermes_config_path_and_preserves_raw_placeholders(
     profile_config_harness, monkeypatch
 ):
@@ -458,13 +539,29 @@ def test_mcp_tools_inventory_filters_runtime_and_registry_to_active_profile(
 ):
     harness = profile_config_harness
     routes = harness.routes
+    _write_config(harness.default_home, provider="default-provider", mcp_server="shared-mcp")
+    _write_config(harness.work_home, provider="work-provider", mcp_server="shared-mcp")
     harness.request_scope.profile = "work"
+    work_key = str(harness.work_home.resolve())
+    default_key = str(harness.default_home.resolve())
     monkeypatch.setattr(
         routes,
         "_mcp_runtime_status_by_name",
         lambda: {
-            "work-mcp": {"tools": [{"name": "work_tool"}]},
-            "default-mcp": {"tools": [{"name": "default_tool"}]},
+            (work_key, "shared-mcp"): {
+                "name": "shared-mcp",
+                "profile_home": work_key,
+                "tools": [{"name": "work_tool"}],
+            },
+            (default_key, "shared-mcp"): {
+                "name": "shared-mcp",
+                "profile_home": default_key,
+                "tools": [{"name": "default_tool"}],
+            },
+            ("", "shared-mcp"): {
+                "name": "shared-mcp",
+                "tools": [{"name": "unowned_tool"}],
+            },
         },
     )
 
@@ -477,17 +574,29 @@ def test_mcp_tools_inventory_filters_runtime_and_registry_to_active_profile(
     fake_registry_mod = types.ModuleType("tools.registry")
 
     class _Registry:
-        def get_all_tool_names(self):
-            return ["work_registry_tool", "default_registry_tool"]
-
         def get_toolset_for_tool(self, name):
             return {
-                "work_registry_tool": "mcp-work-mcp",
-                "default_registry_tool": "mcp-default-mcp",
+                "work_registry_tool": "mcp-shared-mcp",
+                "default_registry_tool": "mcp-shared-mcp",
+                "unowned_registry_tool": "mcp-shared-mcp",
+            }[name]
+
+        def get_profile_home_for_tool(self, name):
+            return {
+                "work_registry_tool": work_key,
+                "default_registry_tool": default_key,
+                "unowned_registry_tool": "",
             }[name]
 
         def get_schema(self, name):
             return {"name": name}
+
+        def get_all_tool_names(self):
+            return [
+                "work_registry_tool",
+                "default_registry_tool",
+                "unowned_registry_tool",
+            ]
 
     fake_registry_mod.registry = _Registry()
     monkeypatch.setitem(sys.modules, "tools.registry", fake_registry_mod)
@@ -519,3 +628,11 @@ def test_strict_profile_cookie_rejects_invalid_and_unknown_profiles(
     unknown_handler = SimpleNamespace(headers={"Cookie": "hermes_profile=ghost"})
     with pytest.raises(InvalidProfileCookie):
         get_profile_cookie(unknown_handler, reject_invalid=True)
+
+    malformed_handler = SimpleNamespace(headers={"Cookie": "theme=dark; hermes_profile"})
+    with pytest.raises(InvalidProfileCookie):
+        get_profile_cookie(malformed_handler, reject_invalid=True)
+
+    empty_handler = SimpleNamespace(headers={"Cookie": "theme=dark; hermes_profile="})
+    with pytest.raises(InvalidProfileCookie):
+        get_profile_cookie(empty_handler, reject_invalid=True)

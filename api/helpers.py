@@ -1120,23 +1120,39 @@ def get_profile_cookie(handler, *, reject_invalid: bool = False) -> str | None:
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
-    import http.cookies as _hc
-    cookie = _hc.SimpleCookie()
-    try:
-        cookie.load(cookie_header)
-    except _hc.CookieError:
-        return None
     cookie_name = get_profile_cookie_name()
-    morsel = cookie.get(cookie_name)
-    if not (morsel and morsel.value):
-        return None
 
-    from api.profiles import _PROFILE_ID_RE
+    def _header_mentions_profile_cookie() -> bool:
+        prefix = f"{cookie_name}="
+        for part in str(cookie_header or "").split(";"):
+            token = part.strip()
+            if token == cookie_name or token.startswith(prefix):
+                return True
+            if "=" in token and token.split("=", 1)[0].strip() == cookie_name:
+                return True
+        return False
 
     def _invalid(reason: str) -> None:
         if reject_invalid:
             raise InvalidProfileCookie(reason)
         return None
+
+    has_profile_cookie = _header_mentions_profile_cookie()
+    import http.cookies as _hc
+    cookie = _hc.SimpleCookie()
+    try:
+        cookie.load(cookie_header)
+    except _hc.CookieError:
+        if has_profile_cookie:
+            return _invalid("Malformed active profile cookie")
+        return None
+    morsel = cookie.get(cookie_name)
+    if not (morsel and str(morsel.value or "").strip()):
+        if has_profile_cookie:
+            return _invalid("Empty active profile cookie")
+        return None
+
+    from api.profiles import _PROFILE_ID_RE
 
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))

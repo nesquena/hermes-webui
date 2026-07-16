@@ -532,7 +532,11 @@ def get_config_snapshot() -> dict:
 
 def _expanded_config_snapshot_from_path(config_path: Path) -> dict:
     raw = _load_yaml_config_file_raw(config_path, _copy=False)
-    snapshot = _expand_env_vars(raw) if isinstance(raw, dict) else {}
+    snapshot = (
+        _expand_env_vars_for_profile_home(raw, config_path.parent)
+        if isinstance(raw, dict)
+        else {}
+    )
     if not isinstance(snapshot, dict):
         snapshot = {}
     _apply_config_defaults(snapshot)
@@ -591,6 +595,58 @@ def _models_cache_source_fingerprint_for_snapshot(
         if "unexpected keyword argument" not in str(exc):
             raise
         return _models_cache_source_fingerprint()
+
+
+def _profile_home_requires_isolated_env(profile_home: Path | str | None) -> bool:
+    try:
+        home = Path(profile_home).expanduser()
+    except Exception:
+        return False
+    return bool(home.name) and home.parent.name == "profiles"
+
+
+def _expand_env_vars_for_profile_home(obj, profile_home: Path | str | None):
+    """Expand config placeholders against a profile home's own env.
+
+    Named profiles are isolated from the process environment: a missing
+    per-profile value leaves the original ``${VAR}`` placeholder intact instead
+    of borrowing another profile's process-global secret.
+    """
+    if not _profile_home_requires_isolated_env(profile_home):
+        return _expand_env_vars(obj)
+    try:
+        home = Path(profile_home).expanduser()
+    except Exception:
+        return _expand_env_vars(obj)
+
+    thread_env = {"HERMES_HOME": str(home)}
+    try:
+        from api.profiles import (
+            filter_runtime_env_for_gateway_parity,
+            get_profile_runtime_env,
+        )
+
+        thread_env.update(
+            filter_runtime_env_for_gateway_parity(get_profile_runtime_env(home))
+        )
+    except Exception:
+        logger.debug("Failed to load profile env for config expansion", exc_info=True)
+
+    previous_thread_env = getattr(_thread_ctx, "env", None)
+    previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+    try:
+        _set_thread_env(**thread_env)
+        _thread_ctx.block_process_env_fallback = True
+        return _expand_env_vars(obj)
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_thread_env is None:
+            try:
+                del _thread_ctx.env
+            except AttributeError:
+                pass
+        else:
+            _thread_ctx.env = previous_thread_env
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
@@ -836,7 +892,12 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    raw_profile_cfg = _load_yaml_config_file_raw(target / "config.yaml", _copy=False)
+    profile_cfg = (
+        _expand_env_vars_for_profile_home(raw_profile_cfg, target)
+        if isinstance(raw_profile_cfg, dict)
+        else {}
+    )
     _apply_config_defaults(profile_cfg)
     return profile_cfg
 
