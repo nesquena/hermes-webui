@@ -935,6 +935,14 @@ def test_server():
               last_event_id INTEGER,
               updated_at INTEGER
             );
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                status TEXT,
+                summary TEXT,
+                result TEXT,
+                block_reason TEXT
+            );
             """
         )
         _kanban_init_conn.commit()

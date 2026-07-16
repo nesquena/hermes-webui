@@ -3412,17 +3412,21 @@ def test_20_long_terminal_entries_char_budget_truncation_cursor_accuracy(
             )
 
 
-# ── Fix 2 regression: parameterized strict status acceptance ────────
+# ── Fix 1 regression: parameterized strict 2xx status acceptance ──
 
 
 @pytest.mark.parametrize(
     "resp,accepted,reason_part",
     [
-        # Accepted cases.
+        # Accepted cases: only 2xx responses with a stream ID.
         ({"_status": 200, "stream_id": "s1"}, True, "ok"),
         ({"_status": 201, "stream_id": "s1"}, True, "ok"),
-        ({"_status": 100, "stream_id": "s1"}, True, "ok"),
-        ({"_status": 399, "stream_id": "s1"}, True, "ok"),
+        # Rejected: informational and redirection statuses must not advance
+        # a cursor even when a stream ID is present.
+        ({"_status": 100, "stream_id": "s1"}, False, "status=100"),
+        ({"_status": 199, "stream_id": "s1"}, False, "status=199"),
+        ({"_status": 300, "stream_id": "s1"}, False, "status=300"),
+        ({"_status": 399, "stream_id": "s1"}, False, "status=399"),
         # Rejected: missing _status.
         ({"stream_id": "s1"}, False, "missing _status"),
         (None, False, "missing _status"),
@@ -3449,9 +3453,7 @@ def test_20_long_terminal_entries_char_budget_truncation_cursor_accuracy(
     ],
 )
 def test_is_dispatch_accepted_parameterized(resp, accepted, reason_part):
-    """Fix 2 parameterized regression. Every case above is a real
-    HTTP-like status (or near-miss) that the production dispatch
-    state machine must accept or reject deterministically."""
+    """Fix 1 regression: only 2xx responses with stream IDs are accepted."""
     from api import kanban_notifications as mod
 
     is_accepted, reason = mod._is_dispatch_accepted(resp or {})
@@ -3462,6 +3464,295 @@ def test_is_dispatch_accepted_parameterized(resp, accepted, reason_part):
         assert reason_part in reason, (
             f"resp={resp!r} expected reason containing {reason_part!r}, got {reason!r}"
         )
+
+
+# ── Fix 2 regression: preserve interleaved non-terminal events ────────
+
+
+def test_interleaved_non_terminal_remains_readable_after_two_terminals(
+    notifications_module,
+):
+    """A cursor must not jump over a comment between two delivered terminals.
+
+    Regression for the duplicate-delivery bug introduced by the cursor-ceiling
+    clamp: a terminal sitting above an interleaved non-terminal must NOT be
+    delivered on iteration 1 (cursor would otherwise race past the non-terminal
+    on success, or — with a clamp past the non-terminal — the delivered
+    terminal is thrown back into the candidate pool and re-delivered on
+    iteration 2). After iteration 1 the non-terminal must remain readable;
+    after iteration 2 the trailing terminal must be delivered exactly once
+    and the cursor must advance past everything.
+    """
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    fb.add_task(FakeTask(id="t_interleaved", title="Interleaved", status="done"))
+    fb.add_sub(
+        FakeSub(
+            task_id="t_interleaved",
+            platform="webui",
+            chat_id="chat-interleaved",
+        )
+    )
+
+    # Initialize before inserting live events so the pre-seeded baseline does
+    # not treat these rows as historical ghosts.
+    state = mod._initialize_baseline_state(["default"])
+    fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=10)
+    fb.add_event("t_interleaved", "commented", {"body": "still useful"}, event_id=15)
+    fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=20)
+
+    # Iteration 1: only event 10 must be delivered; the comment at 15 stays
+    # readable and event 20 must NOT be delivered (delivering it would either
+    # skip the comment or duplicate it on iteration 2).
+    mod._run_one_iteration(state)
+
+    sub = next(s for s in fb.subs if s["task_id"] == "t_interleaved")
+    assert sub["last_event_id"] <= 14
+
+    # Exactly one dispatch after iteration 1 — event 10 only.
+    assert len(notifications_module.dispatched) == 1, (
+        f"iteration 1 should deliver only event 10, got "
+        f"{len(notifications_module.dispatched)} dispatches"
+    )
+
+    # The next candidate scan must still be able to read the interleaved
+    # comment; a cursor of 20 would have skipped it permanently.
+    next_candidates = mod._candidate_rows("default", state)
+    next_event_ids = [candidate["event_id"] for candidate in next_candidates]
+    assert 15 in next_event_ids
+
+    # Iteration 2: the non-terminal at 15 advances, then event 20 is
+    # delivered exactly once. No duplicate dispatch of event 10.
+    mod._run_one_iteration(state)
+
+    assert len(notifications_module.dispatched) == 2, (
+        f"after iteration 2 expected 2 total dispatches (event 10 then event "
+        f"20), got {len(notifications_module.dispatched)} — possible "
+        f"duplicate delivery"
+    )
+    # Cursor must have advanced past every event we delivered.
+    assert sub["last_event_id"] == 20
+
+
+def test_interleaved_non_terminal_three_terminals_no_duplicate_delivery(
+    notifications_module,
+):
+    """3+ terminals interleaved with non-terminals: no duplicate terminal delivery.
+
+    Scenario: events [10(terminal), 12(non-term), 14(non-term),
+    20(terminal), 30(terminal)] for the same subscription.
+
+    Iteration 1:
+        * terminal 10 is delivered
+        * non-terminals 12, 14 stay readable (post-terminal non-terminals)
+        * terminals 20, 30 are FILTERED OUT (their event_ids are at or above
+          the min post-terminal non-terminal id of 12). They stay in the
+          candidate pool for the next iteration.
+
+    Iteration 2:
+        * non-terminals 12, 14 are now pre-terminal-or-no-terminal and
+          advance immediately
+        * terminals 20, 30 are delivered (no post-terminal non-terminal
+          remains to gate them).
+
+    Total dispatches across both iterations: 2 (iteration 1 = event 10,
+    iteration 2 = events 20 AND 30 in a single prompt). Final cursor = 30.
+    """
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    fb.add_task(
+        FakeTask(id="t_three_terminals", title="Three terminals", status="done")
+    )
+    fb.add_sub(
+        FakeSub(
+            task_id="t_three_terminals",
+            platform="webui",
+            chat_id="chat-three-terminals",
+        )
+    )
+
+    state = mod._initialize_baseline_state(["default"])
+    fb.add_event(
+        "t_three_terminals", "completed", {"status": "done"}, event_id=10
+    )
+    fb.add_event(
+        "t_three_terminals", "commented", {"body": "first comment"}, event_id=12
+    )
+    fb.add_event(
+        "t_three_terminals", "progress", {"percent": 25}, event_id=14
+    )
+    fb.add_event(
+        "t_three_terminals", "completed", {"status": "done"}, event_id=20
+    )
+    fb.add_event(
+        "t_three_terminals", "completed", {"status": "done"}, event_id=30
+    )
+
+    # Iteration 1.
+    mod._run_one_iteration(state)
+
+    sub = next(s for s in fb.subs if s["task_id"] == "t_three_terminals")
+    # Cursor must NOT have raced past the non-terminals (12, 14) — the
+    # clamp-or-filter invariant requires it stops at or below 11.
+    assert sub["last_event_id"] <= 11, (
+        f"iteration 1 cursor raced past interleaved non-terminals: "
+        f"last_event_id={sub['last_event_id']}"
+    )
+
+    # Iteration 1 must have delivered exactly ONE terminal (event 10).
+    # Terminals 20 and 30 must remain in the candidate pool.
+    assert len(notifications_module.dispatched) == 1, (
+        f"iteration 1 expected 1 dispatch (event 10 only), got "
+        f"{len(notifications_module.dispatched)}"
+    )
+
+    # Interleaved non-terminals must remain readable after iteration 1.
+    iter1_candidates = mod._candidate_rows("default", state)
+    iter1_event_ids = [c["event_id"] for c in iter1_candidates]
+    assert 12 in iter1_event_ids
+    assert 14 in iter1_event_ids
+    # Terminals 20 and 30 should still be in the candidate pool (not
+    # advanced past). The bug scenario delivered them in iteration 1 and
+    # then re-delivered them in iteration 2; we must verify they are NOT
+    # past the cursor yet.
+    assert 20 in iter1_event_ids
+    assert 30 in iter1_event_ids
+
+    # Iteration 2: non-terminals 12 and 14 advance, terminals 20 and 30
+    # are delivered in a SINGLE prompt (one dispatch for the pair).
+    mod._run_one_iteration(state)
+
+    # Total dispatches across both iterations = 2:
+    #   iteration 1: event 10
+    #   iteration 2: events 20 AND 30 (one prompt, one dispatch)
+    assert len(notifications_module.dispatched) == 2, (
+        f"after both iterations expected 2 dispatches total "
+        f"(iter1: event 10, iter2: events 20+30), got "
+        f"{len(notifications_module.dispatched)} — duplicate delivery "
+        f"regression"
+    )
+
+    # Final cursor must be at 30 (max of all delivered terminal ids).
+    assert sub["last_event_id"] == 30, (
+        f"final cursor expected 30, got {sub['last_event_id']}"
+    )
+
+    # Both delivered prompts must contain the right event ids. Iteration 2's
+    # prompt must include BOTH event 20 and event 30 — they were delivered
+    # together (no non-terminal between them to split the delivery).
+    iter2_prompt = notifications_module.dispatched[1]["prompt"]
+    assert "Delivery event: 20" in iter2_prompt
+    assert "Delivery event: 30" in iter2_prompt
+
+
+# ── Fix 3 regression: real task metadata reaches the wake prompt ─────
+
+
+def test_real_sqlite_iteration_prompt_includes_task_title_and_summary(
+    monkeypatch,
+    tmp_path,
+):
+    """The full SQLite watcher path reads task metadata for its prompt."""
+    import sqlite3
+
+    db_path = tmp_path / "kanban-with-tasks.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                status TEXT,
+                summary TEXT,
+                result TEXT,
+                block_reason TEXT
+            );
+            CREATE TABLE kanban_notify_subs (
+                task_id TEXT,
+                platform TEXT,
+                chat_id TEXT,
+                notifier_profile TEXT,
+                last_event_id INTEGER,
+                updated_at INTEGER
+            );
+            CREATE TABLE task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT,
+                kind TEXT,
+                payload TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "t_prompt_metadata",
+                "Metadata title",
+                "done",
+                "Metadata summary",
+                None,
+                None,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?)",
+            ("t_prompt_metadata", "webui", "chat-metadata", "teamA", 0, None),
+        )
+        conn.execute(
+            "INSERT INTO task_events VALUES (NULL, ?, ?, ?)",
+            ("t_prompt_metadata", "completed", '{"status": "done"}'),
+        )
+        conn.commit()
+
+    class _SqliteCM:
+        def __enter__(self):
+            self.conn = sqlite3.connect(str(db_path), isolation_level=None)
+            self.conn.row_factory = sqlite3.Row
+            return self.conn
+
+        def __exit__(self, exc_type, exc, tb):
+            self.conn.close()
+            return False
+
+    from api import kanban_notifications as mod
+
+    monkeypatch.setattr(mod, "_open_conn", lambda board=None: _SqliteCM())
+    monkeypatch.setattr(
+        mod,
+        "_get_session_for_target",
+        lambda sid: SimpleNamespace(profile="teamA"),
+    )
+    dispatched = []
+
+    def _start(chat_id, prompt, *, source="process_wakeup"):
+        dispatched.append(prompt)
+        return {"_status": 200, "stream_id": "metadata-stream"}
+
+    monkeypatch.setattr(mod, "start_session_turn", _start)
+    state = {
+        "boards": ["default"],
+        "baseline": {"default": 0},
+        "schema_ok": True,
+        "schema": {
+            "has_updated_at": True,
+            "required_ok": True,
+            "profile_column": "notifier_profile",
+        },
+        "schema_by_board": {
+            "default": {
+                "has_updated_at": True,
+                "required_ok": True,
+                "profile_column": "notifier_profile",
+            }
+        },
+        "marker_loaded": True,
+    }
+
+    mod._run_one_iteration(state)
+
+    assert len(dispatched) == 1
+    assert "Metadata title" in dispatched[0]
+    assert "Metadata summary" in dispatched[0]
 
 
 # ── Fix 3 regression: legacy no-updated_at full iteration path ──────

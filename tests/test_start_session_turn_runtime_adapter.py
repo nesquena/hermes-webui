@@ -184,7 +184,7 @@ def test_start_session_turn_direct_normalizes_response_with_status_200(
     assert resp.get("_status") == 200, (
         "start_session_turn direct-path response must include _status=200; "
         "kanban_notifications._is_dispatch_accepted requires an integer "
-        "_status in 100..399 to consider the dispatch accepted. Got: "
+        "_status in 200..299 to consider the dispatch accepted. Got: "
         f"{resp!r}"
     )
     assert resp["stream_id"] == "stream-direct-real"

@@ -84,11 +84,10 @@ _BACKOFF_MAX_SECONDS = 10.0
 _BACKOFF_INITIAL_SECONDS = 0.25
 # Per-chat retry backoff for the dispatch state machine (RFC §10 / H3).
 # Each chat_id that returns a non-2xx dispatch result backs off
-# exponentially up to ``_CHAT_BACKOFF_MAX_SECONDS``. A successful dispatch
-# (``status_code < 400``) resets the chat's failure state. The backoff is
-# tracked PER chat so a single misbehaving session does not block the
-# rest of the batch — every other chat_id is still scanned and dispatched
-# on the same iteration.
+# exponentially up to ``_CHAT_BACKOFF_MAX_SECONDS``. A successful 2xx dispatch
+# resets the chat's failure state. The backoff is tracked PER chat so a single
+# misbehaving session does not block the rest of the batch — every other chat_id
+# is still scanned and dispatched on the same iteration.
 _CHAT_BACKOFF_INITIAL_SECONDS = 1.0
 _CHAT_BACKOFF_MAX_SECONDS = 60.0
 
@@ -1877,11 +1876,66 @@ def _process_chat(
     if not dispatchable:
         return
 
+    # Compute the minimum post-terminal non-terminal event_id per
+    # subscription. Any dispatchable terminal whose event_id is AT OR
+    # ABOVE this minimum must stay in the candidate pool for the next
+    # iteration — delivering it now would either race past the
+    # interleaved non-terminal (if we don't clamp the cursor) or
+    # produce a duplicate delivery (if we clamp past the non-terminal
+    # and re-dispatch on the next iteration). Filtering BEFORE delivery
+    # is the correct invariant.
+    min_nt_by_sub: dict[tuple, int] = {}
+    for non_terminal in post_terminal_non_terminal:
+        non_terminal_key = (
+            non_terminal.get("board"),
+            non_terminal.get("task_id"),
+            non_terminal.get("chat_id"),
+            non_terminal.get("profile"),
+        )
+        non_terminal_id = int(non_terminal.get("event_id") or 0)
+        cur = min_nt_by_sub.get(non_terminal_key)
+        if cur is None or non_terminal_id < cur:
+            min_nt_by_sub[non_terminal_key] = non_terminal_id
+
     # Build terminal entries with task metadata. Bound metadata
     # reads to AT MOST _MAX_TASKS_PER_TURN tasks (the cap we are
     # about to evaluate) so a flood of pending terminals can't pin
     # SQLite reads against the budget.
     selected = dispatchable[:_MAX_TASKS_PER_TURN]
+    # A1: drop any entry whose event_id is AT OR ABOVE the minimum
+    # post-terminal non-terminal for its subscription. Those terminals
+    # stay in the candidate pool and will be delivered naturally on the
+    # next iteration, after the interleaved non-terminal has been
+    # consumed. Filtering here — instead of clamping the cursor after
+    # delivery — prevents the duplicate-dispatch regression where a
+    # clamp past the non-terminal puts the delivered terminal back into
+    # the candidate pool and gets it re-delivered next scan.
+    selected = [
+        entry
+        for entry in selected
+        if not (
+            min_nt_by_sub.get(
+                (
+                    entry.get("board"),
+                    entry.get("task_id"),
+                    entry.get("chat_id"),
+                    entry.get("profile"),
+                )
+            )
+            is not None
+            and int(entry.get("event_id") or 0)
+            >= min_nt_by_sub[
+                (
+                    entry.get("board"),
+                    entry.get("task_id"),
+                    entry.get("chat_id"),
+                    entry.get("profile"),
+                )
+            ]
+        )
+    ]
+    if not selected:
+        return
     delivered_entries: list[dict] = []
     for entry in selected:
         full_entry = dict(entry)
@@ -1910,10 +1964,9 @@ def _process_chat(
     _close_board_conns()
     resp = _dispatch(chat_id, prompt)
 
-    # A3: strict acceptance — real integer status in 100..399 AND a
-    # non-empty stream_id. A 201 with stream id is accepted; a
-    # 2xx/3xx without a stream id is NOT accepted (we don't know
-    # whether the agent actually started).
+    # A3: strict acceptance — real integer status in 200..299 AND a
+    # non-empty stream_id. A 2xx response with a stream id means the agent
+    # accepted and started the turn; other statuses are not accepted.
     accepted, reason = _is_dispatch_accepted(resp)
     if accepted:
         # A1 safe-adjacent advance: for each delivered terminal,
@@ -2140,16 +2193,15 @@ def _refresh_board_discovery(state: dict | None) -> float:
 
 
 def _is_dispatch_accepted(resp: dict) -> tuple[bool, str]:
-    """A3 / Fix 2: a dispatch response is accepted iff BOTH:
+    """A3 / Fix 1: a dispatch response is accepted iff BOTH:
 
       * ``_status`` is a real integer HTTP-like status in
-        ``100..399`` (informational, success, or redirection). Any
-        missing key, zero, negative, non-integer (bool, str, float,
-        None), or value ``>= 400`` is REJECTED — we will not advance
-        the cursor when we cannot tell whether the agent actually
-        started. This avoids the bug where a missing ``_status`` (which
-        previously fell back to ``0`` and was accepted as long as
-        ``stream_id`` was present) silently accepted a half-formed
+        ``200..299``. Any missing key, zero, negative, non-integer
+        (bool, str, float, None), or value outside that range is REJECTED —
+        we will not advance the cursor when we cannot tell whether the agent
+        accepted and started the turn. This avoids the bug where a missing
+        ``_status`` (which previously fell back to ``0`` and was accepted as
+        long as ``stream_id`` was present) silently accepted a half-formed
         response.
       * ``stream_id`` is a non-empty string (same as before).
 
@@ -2164,7 +2216,8 @@ def _is_dispatch_accepted(resp: dict) -> tuple[bool, str]:
     if isinstance(raw, bool) or not isinstance(raw, int):
         return False, f"non-integer _status={raw!r}"
     status_code = raw
-    if status_code < 100 or status_code >= 400:
+    # Only a 2xx response means the agent accepted and started the turn.
+    if status_code < 200 or status_code >= 300:
         return False, f"status={status_code}"
     stream_id = resp.get("stream_id")
     if not isinstance(stream_id, str) or not stream_id.strip():
