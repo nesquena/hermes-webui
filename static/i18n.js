@@ -24925,7 +24925,7 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Nút chế độ giọng nói rảnh tay',
     settings_desc_voice_mode: 'Hiển thị nút voice-mode (dạng sóng âm thanh) cạnh microphone đọc chính tả. Cho phép bạn nói tự nhiên — Hermes tự gửi sau khoảng dừng và đọc phản hồi thành tiếng. Yêu cầu trình duyệt hỗ trợ cả nhận diện giọng nói và TTS.',
-    settings_label_raw_audio: 'Gửi âm thanh thô thay vì chuyển thành văn bản',
+    settings_label_raw_audio: 'Gửi âm thanh gốc thay vì chuyển thành văn bản',
     settings_desc_raw_audio: 'Ghi và gửi file âm thanh gốc tới agent thay vì chuyển thành text trước. Agent sau đó có thể tự chuyển lời nói thành văn bản hoặc xử lý âm thanh gốc (cảm xúc, tiếng nền, STT tùy chỉnh). Tương tự hành vi voice message của Telegram.',
     settings_label_vu_style: 'Kiểu đồng hồ VU khi đọc chính tả',
     settings_desc_vu_style: 'Kiểu hiển thị của chỉ báo mức micro xuất hiện khi đọc chính tả. Hash URL #vu=fill hoặc #vu=bars sẽ ghi đè tạm thời cho phiên hiện tại.',
