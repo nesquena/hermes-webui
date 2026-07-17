@@ -20,6 +20,7 @@ fake Web Audio + DOM, and asserts the teardown contract directly:
   * a null stream is a no-op (browser SpeechRecognition exposes no MediaStream).
 """
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -29,6 +30,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 BOOT_JS_PATH = REPO_ROOT / "static" / "boot.js"
+INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -91,10 +93,19 @@ FakeCtx.prototype.createMediaStreamSource = function (_stream) {
   if (scenario === 'start_error_cleanup') throw new Error('boom');
   return { connect() { obs.srcConnected++; } };
 };
+// Render scenarios drive the analyser with a fixed byte level so the tick's
+// bar-height / fill-width / peak / clip maths are exercised against known input.
+const RENDER_LEVEL = {
+  render_bars_loud: 255, render_bars_quiet: 40,
+  render_fill_loud: 255, render_fill_quiet: 120,
+}[scenario];
 FakeCtx.prototype.createAnalyser = function () {
   return {
     fftSize: 0, smoothingTimeConstant: 0, frequencyBinCount: 8,
-    getByteFrequencyData() {},
+    getByteFrequencyData(buf) {
+      if (RENDER_LEVEL === undefined) return; // lifecycle scenarios: silence
+      for (let k = 0; k < buf.length; k++) buf[k] = RENDER_LEVEL;
+    },
     disconnect() { obs.analyserDisconnected++; },
   };
 };
@@ -108,9 +119,16 @@ const localStorage = {
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => { _store[k] = String(v); },
 };
-// Non-looping rAF: arm an id, never invoke the callback (we test lifecycle,
-// not the render tick).
-const requestAnimationFrame = () => { obs.rafRequested++; return 4242; };
+// Lifecycle scenarios: arm an id, never invoke the callback (we test teardown,
+// not rendering). Render scenarios: fire the rAF callback a bounded number of
+// times so the ACTUAL `_vuTick` render logic runs, then stop (the tick
+// re-arms rAF at its tail, so an unbounded fake would loop forever).
+let tickBudget = RENDER_LEVEL === undefined ? 0 : 1;
+const requestAnimationFrame = (cb) => {
+  obs.rafRequested++;
+  if (tickBudget > 0) { tickBudget--; cb(); }
+  return 4242;
+};
 const cancelAnimationFrame = (id) => { obs.rafCancelled++; obs.rafCancelledId = id; };
 
 const factory = new Function(
@@ -133,13 +151,44 @@ const api = factory($, status, window, documentFake, location, localStorage,
 const host = $('micVuMeter');
 const out = { obs, snapshots: {} };
 
+// The meter node is aria-hidden; the accessible "Listening…" state lives on the
+// separate #micStatus element. Capture whether it stays in the a11y tree
+// (display != none) and is visually hidden (sr-only) while the meter shows.
+const statusState = () => ({
+  display: status.style.display,
+  srOnly: status.classList.contains('sr-only'),
+});
+// Coerce untouched style props (undefined) to null so JSON.stringify keeps the
+// key — a dropped key would read as "not rendered" for the wrong reason.
+const barsSnapshot = () => els['micVuBars'].children.map((b) => ({
+  height: b.style.height ?? null, peak: b.classList.contains('peak'),
+}));
+const fillSnapshot = () => ({
+  width: els['micVuFillInner'].style.width ?? null,
+  clip: els['micVuFillInner'].classList.contains('clip'),
+});
+
 if (scenario === 'start_stop') {
   api.vuStart({ id: 'fake-stream' });
   out.snapshots.afterStart = api.state();
   out.snapshots.hostDisplayAfterStart = host.style.display;
+  out.snapshots.statusAfterStart = statusState();
   api.vuStop();
   out.snapshots.afterStop = api.state();
   out.snapshots.hostDisplayAfterStop = host.style.display;
+  out.snapshots.statusAfterStop = statusState();
+} else if (scenario.indexOf('render_bars') === 0) {
+  els['settingsVuStyle'].value = 'bars';
+  api.vuStart({ id: 'fake-stream' });
+  out.snapshots.bars = barsSnapshot();
+  out.snapshots.fill = fillSnapshot();
+  out.snapshots.activeStyle = api.state().activeStyle;
+} else if (scenario.indexOf('render_fill') === 0) {
+  els['settingsVuStyle'].value = 'fill';
+  api.vuStart({ id: 'fake-stream' });
+  out.snapshots.fill = fillSnapshot();
+  out.snapshots.bars = barsSnapshot();
+  out.snapshots.activeStyle = api.state().activeStyle;
 } else if (scenario === 'stop_idempotent') {
   api.vuStop();
   api.vuStop();
@@ -227,3 +276,81 @@ def test_null_stream_is_a_noop():
     assert r["obs"]["ctxCreated"] == 0
     assert r["snapshots"]["afterStart"]["hasCtx"] is False
     assert r["snapshots"]["afterStart"]["rafId"] == 0
+
+
+def test_meter_keeps_listening_state_accessible_to_screen_readers():
+    # Accessibility regression: the meter node is aria-hidden, so when it takes
+    # over the #micStatus slot the "Listening…" state must NOT be removed from
+    # the accessibility tree (display:none). It should be visually hidden
+    # (.sr-only) while remaining available to screen readers, then fully hidden
+    # again once the session ends.
+    r = _run("start_stop")
+    after_start = r["snapshots"]["statusAfterStart"]
+    assert after_start["display"] != "none", (
+        "showing the meter removed the Listening state from the a11y tree"
+    )
+    assert after_start["srOnly"] is True, (
+        "Listening text must be visually hidden but kept for screen readers"
+    )
+    after_stop = r["snapshots"]["statusAfterStop"]
+    assert after_stop["srOnly"] is False
+    assert after_stop["display"] == "none"
+
+
+def test_render_bars_draws_levels_and_flags_peaks():
+    # Loud input (255) must render full-height bars and flag them as peaks; the
+    # tick actually runs (rAF callback fired once) so removing the render body
+    # fails this. Trailing bars with no spectrum data collapse to the 2px floor.
+    r = _run("render_bars_loud")
+    bars = r["snapshots"]["bars"]
+    assert len(bars) == 16
+    assert bars[0]["height"] == "16px", bars
+    assert bars[0]["peak"] is True, bars
+    # frequencyBinCount is 8, so bars 8..15 receive no data → floor height, no peak.
+    assert bars[15]["height"] == "2px", bars
+    assert bars[15]["peak"] is False, bars
+    # 'bars' style must not touch the fill track.
+    assert not r["snapshots"]["fill"]["width"]
+
+
+def test_render_bars_quiet_stays_below_peak_threshold():
+    # Quiet input (40) renders a short-but-above-floor bar and never trips the
+    # >200 peak threshold — pins the height maths and the peak boundary.
+    r = _run("render_bars_quiet")
+    bars = r["snapshots"]["bars"]
+    assert bars[0]["height"] == "3px", bars
+    assert bars[0]["peak"] is False, bars
+
+
+def test_render_fill_tracks_level_and_flags_clip():
+    # Loud input fills the level bar to 100% and trips the >230 clip flag.
+    r = _run("render_fill_loud")
+    fill = r["snapshots"]["fill"]
+    assert fill["width"] == "100%", fill
+    assert fill["clip"] is True, fill
+    # 'fill' style must not touch the bar track.
+    assert all(not b["height"] for b in r["snapshots"]["bars"]), r["snapshots"]["bars"]
+    assert r["snapshots"]["activeStyle"] == "fill"
+
+
+def test_render_fill_quiet_below_clip_threshold():
+    # Mid-level input (120) → ~47% width, below the clip threshold.
+    r = _run("render_fill_quiet")
+    fill = r["snapshots"]["fill"]
+    assert fill["width"] == "47%", fill
+    assert fill["clip"] is False, fill
+
+
+def test_index_html_meter_is_aria_hidden_and_status_is_a_live_region():
+    # The visual meter is decorative and must be aria-hidden; the accessible
+    # recording state lives on #micStatus, which must be a live region so it is
+    # announced when it takes over from the meter's slot.
+    html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+    meter = re.search(r'<div class="mic-vu" id="micVuMeter"[^>]*>', html)
+    assert meter and 'aria-hidden="true"' in meter.group(0), (
+        "decorative VU meter must be aria-hidden"
+    )
+    status = re.search(r'<div class="mic-status" id="micStatus"[^>]*>', html)
+    assert status and 'role="status"' in status.group(0), (
+        "#micStatus must be a role=status live region for screen readers"
+    )

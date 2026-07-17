@@ -1003,8 +1003,11 @@ function _micToastKeyForRecognitionError(error){
     _vuActiveStyle=style;
     _vuHost.style.display='';
     _vuHost.dataset.style=style;
-    // Hide the static "Listening…" text in the same slot — meter replaces it.
-    if(status) status.style.display='none';
+    // The meter node is aria-hidden (decorative). Visually replace the static
+    // "Listening…" text with the meter, but keep #micStatus in the
+    // accessibility tree (`.sr-only`, not display:none) so screen-reader users
+    // on the MediaRecorder path still get the recording state.
+    if(status){status.classList.add('sr-only'); status.style.display='';}
     // Both visual modes live in the DOM; CSS shows the active one via
     // `data-style`. Keeps the layout stable when toggling.
   }
@@ -1014,9 +1017,13 @@ function _micToastKeyForRecognitionError(error){
     _vuHost.style.display='none';
     _vuHost.removeAttribute('data-style');
     _vuActiveStyle=null;
-    // Restore the "Listening…" text only if recording is still in progress
-    // (i.e. this is a transient hide, not the end of a session).
-    if(status&&window._micActive) status.style.display='';
+    // Drop the sr-only visual-hide. Restore the visible "Listening…" text only
+    // if recording is still in progress (a transient hide); otherwise leave it
+    // fully hidden (end of session).
+    if(status){
+      status.classList.remove('sr-only');
+      status.style.display=window._micActive?'':'none';
+    }
   }
 
   function _vuTick(){
@@ -1026,7 +1033,6 @@ function _micToastKeyForRecognitionError(error){
     if(_vuActiveStyle==='bars'){
       // Bucket the spectrum into 16 frequency bands and render bar heights.
       const step=Math.floor(buf.length/_vuBarsCount)||1;
-      let peakIdx=-1;
       for(let i=0;i<_vuBarsCount;i++){
         let sum=0;
         for(let j=0;j<step;j++) sum+=buf[i*step+j]||0;
@@ -1039,11 +1045,7 @@ function _micToastKeyForRecognitionError(error){
           if(isPeak&&!el.classList.contains('peak')) el.classList.add('peak');
           else if(!isPeak&&el.classList.contains('peak')) el.classList.remove('peak');
         }
-        if(avg>200) peakIdx=i;
       }
-      // Suppress unused warning by referencing peakIdx in a no-op
-      // so eslint --no-unused-vars doesn't fail the gate.
-      if(peakIdx<0){}
     }else{
       // Compute RMS-style peak across the spectrum, render as fill width.
       let peak=0;
