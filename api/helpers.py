@@ -623,8 +623,72 @@ def redact_session_data(session_dict: dict) -> dict:
     return result
 
 
+def _read_exact(rfile, n: int) -> bytes:
+    """Read exactly n bytes, tolerating short reads from the socket buffer."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = rfile.read(n - len(buf))
+        if not chunk:
+            break  # premature EOF
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _read_chunked_body(handler, max_bytes: int) -> bytes:
+    """Decode a ``Transfer-Encoding: chunked`` request body.
+
+    Python's ``http.server`` never populates Content-Length for chunked
+    requests and does not decode them, so ``rfile.read(Content-Length)`` reads
+    nothing. Reverse proxies that stream an HTTP/2 client request to an
+    HTTP/1.1 origin — notably Cloudflare Tunnel (cloudflared) — forward request
+    bodies this way, so without decoding here the server sees an empty body on
+    every proxied POST (login, settings, message send, …). See RFC 7230 §4.1.
+    """
+    rfile = handler.rfile
+    out = bytearray()
+    while True:
+        size_line = rfile.readline(65536)
+        if not size_line:
+            break  # premature EOF — return what we have
+        # A chunk-size line may carry ';'-delimited chunk extensions; drop them.
+        size_token = size_line.split(b';', 1)[0].strip()
+        try:
+            size = int(size_token, 16)
+        except ValueError:
+            handler.close_connection = True
+            raise ValueError(f'Malformed chunk size: {size_token!r}')
+        if size == 0:
+            # Consume optional trailer headers up to the terminating blank line.
+            while True:
+                trailer = rfile.readline(65536)
+                if trailer in (b'\r\n', b'\n', b''):
+                    break
+            break
+        if len(out) + size > max_bytes:
+            handler.close_connection = True
+            raise ValueError(f'Request body too large (> {max_bytes} bytes)')
+        out.extend(_read_exact(rfile, size))
+        rfile.readline(3)  # consume the CRLF that terminates the chunk data
+    return bytes(out)
+
+
 def read_body(handler) -> dict:
-    """Read and JSON-parse a POST request body (capped at 20MB)."""
+    """Read and JSON-parse a POST request body (capped at 20MB).
+
+    Handles both ``Content-Length`` and ``Transfer-Encoding: chunked`` framing.
+    The latter is required for bodies proxied by cloudflared / any HTTP/2 front
+    end, which forward to the HTTP/1.1 origin without a Content-Length header.
+    """
+    # RFC 7230 §3.3.3: Transfer-Encoding takes precedence over Content-Length;
+    # a chunked body has no Content-Length to read.
+    transfer_encoding = handler.headers.get('Transfer-Encoding', '') or ''
+    if 'chunked' in transfer_encoding.lower():
+        raw = _read_chunked_body(handler, MAX_BODY_BYTES) or b'{}'
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return {}
+
     raw_length = handler.headers.get('Content-Length', 0)
     try:
         length = int(raw_length)
