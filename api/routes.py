@@ -14770,6 +14770,20 @@ def handle_post(handler, parsed) -> bool:
         # via the 400ms debounced auto-save.
         _MAX_DRAFT_TEXT = 50_000  # 50 KB cap on textarea content
         _MAX_DRAFT_FILES = 50  # max number of attached file references
+
+        def _canonical_draft(value):
+            value = value if isinstance(value, dict) else {}
+            draft_text = value.get("text")
+            if not isinstance(draft_text, str):
+                draft_text = ""
+            draft_files = value.get("files")
+            if not isinstance(draft_files, list):
+                draft_files = []
+            return {
+                "text": draft_text[:_MAX_DRAFT_TEXT],
+                "files": draft_files[:_MAX_DRAFT_FILES],
+            }
+
         if text is not None and not isinstance(text, str):
             text = ""
         if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT:
@@ -14804,9 +14818,15 @@ def handle_post(handler, parsed) -> bool:
                 current_draft = dict(sidecar_draft)
             else:
                 current_draft = dict(getattr(s_meta, "composer_draft", {}) or {})
-            if clear_requested and isinstance(clear_expected, dict) and current_draft != clear_expected:
+            current_clear_draft = _canonical_draft(current_draft)
+            expected_clear_draft = _canonical_draft(clear_expected)
+            if (
+                clear_requested
+                and isinstance(clear_expected, dict)
+                and current_clear_draft != expected_clear_draft
+            ):
                 unchanged = True
-                saved_draft = current_draft
+                saved_draft = current_clear_draft
             elif clear_requested:
                 saved_draft = {"text": "", "files": []}
                 owner = get_session(sid)
