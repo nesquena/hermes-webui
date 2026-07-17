@@ -196,3 +196,40 @@ def test_read_jsonl_tail_line_numbers_correct_no_seek(tmp_path):
     assert len(malformed) == 1
     assert malformed[0]["line"] == 3, f"expected 3, got {malformed[0]['line']}"
 
+
+def test_terminal_state_correct_when_terminal_record_exceeds_tail_window(tmp_path):
+    """Regression: streaming.py journals the terminal `done` event with the FULL
+    transcript as its payload, so a large session's terminal record can be bigger
+    than the 4 MiB tail window. The tail reader used to seek into the middle of
+    that record, find its trailing newline as the only newline in the window,
+    slice to an empty string, and return NO events — so latest_run_summary
+    misclassified a COMPLETED run as `unknown` (a recovery bug). The fix recovers
+    the last complete line by scanning backward from EOF when the window yields
+    no whole parseable line."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES
+
+    writer = RunJournalWriter("session_1", "run_huge_done", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})
+    # Append the terminal `done` with a payload larger than the tail window —
+    # mirrors streaming.py journaling done with the full transcript.
+    huge_payload = {"text": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)}
+    writer.append_sse_event(
+        "done", {"session": {"session_id": "session_1"}, **huge_payload}
+    )
+
+    summary = latest_run_summary("session_1", "run_huge_done", session_dir=tmp_path)
+    # Before the fix: terminal_state was "unknown", terminal False, last_seq 0.
+    assert summary["terminal_state"] == "completed", (
+        f"a completed run must stay completed even when its terminal record "
+        f"exceeds the tail window; got {summary['terminal_state']!r}"
+    )
+    assert summary["terminal"] is True
+    assert summary["last_seq"] == 2  # 1 token + 1 done
+
+    # find_run_summary (the other summary reader) must agree.
+    found = find_run_summary("run_huge_done", session_dir=tmp_path)
+    assert found is not None
+    assert found["terminal_state"] == "completed"
+    assert found["last_seq"] == 2
+
+
