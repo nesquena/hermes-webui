@@ -233,3 +233,87 @@ def test_terminal_state_correct_when_terminal_record_exceeds_tail_window(tmp_pat
     assert found["last_seq"] == 2
 
 
+def test_oversized_done_followed_by_trailing_events_reports_correct_terminal(tmp_path):
+    """Regression (reviewer round 2): the production event order is
+    done(tool_limit_reached, oversized) -> metering -> stream_end. The first-round
+    fix only recovered the LAST complete line, so the oversized `done` in the
+    MIDDLE was skipped and the tail read reported `completed` (from the trailing
+    stream_end) while the authoritative full read reported `tool_limit_reached`.
+    The fix extracts the boundary-straddling oversized record's summary via a
+    bounded prefix and merges it before summarizing."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES
+
+    writer = RunJournalWriter("session_1", "run_oversized_middle", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})
+    # Oversized done in the MIDDLE with a non-completed terminal_state, followed
+    # by trailing complete records (the production order).
+    huge = {"text": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)}
+    writer.append_sse_event(
+        "done",
+        {"session": {"session_id": "session_1"}, "terminal_state": "tool_limit_reached", **huge},
+    )
+    writer.append_sse_event("metering", {"usage": {"input": 100}})
+    writer.append_sse_event("stream_end", {})
+
+    summary = latest_run_summary("session_1", "run_oversized_middle", session_dir=tmp_path)
+    # Authoritative full read (the whole point: tail must MATCH this).
+    path = _run_path_of(writer)
+    full_events, _ = read_events_via_full_read(path)
+    authoritative = _summary_from_events_pub("session_1", "run_oversized_middle", full_events)
+    assert summary["terminal_state"] == authoritative["terminal_state"] == "tool_limit_reached", (
+        f"tail={summary['terminal_state']!r} but authoritative={authoritative['terminal_state']!r}; "
+        "the oversized middle done must not be skipped"
+    )
+    assert summary["last_seq"] == authoritative["last_seq"]
+
+
+def test_oversized_record_summary_does_not_materialize_payload(tmp_path):
+    """Regression (reviewer round 2): the first-round fix recovered the oversized
+    record by reading the WHOLE last line (multi-MB), defeating the memory-bound
+    goal. The fix extracts ONLY the summary fields via a bounded prefix read —
+    the payload must NOT be materialized."""
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _extract_boundary_record_summary,
+        _find_record_start_before,
+    )
+
+    writer = RunJournalWriter("session_1", "run_oversized_last", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})
+    huge = {"text": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)}
+    writer.append_sse_event("done", {"session": {"session_id": "session_1"}, **huge})
+
+    path = _run_path_of(writer)
+    size = path.stat().st_size
+    read_bytes = min(size, _SESSION_REPLAY_MAX_BYTES)
+    seek_pos = size - read_bytes
+    record_start = _find_record_start_before(path, seek_pos)
+    summary = _extract_boundary_record_summary(path, record_start)
+    assert summary is not None
+    # The summary fields are present...
+    assert summary["terminal_state"] == "completed"
+    assert summary["seq"] == 2
+    assert summary.get("_summary_extracted_from_oversized_record") is True
+    # ...but the (multi-MB) payload was NOT materialized — replaced with {} .
+    assert summary["payload"] == {}, "payload must not be materialized for an oversized record"
+
+
+# ── tiny helpers so the regression tests read clearly ────────────────────────
+
+
+def _run_path_of(writer):
+    from api.run_journal import _run_path
+    return _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+
+
+def read_events_via_full_read(path):
+    from api.run_journal import _read_jsonl
+    return _read_jsonl(path)
+
+
+def _summary_from_events_pub(session_id, run_id, events):
+    from api.run_journal import _summary_from_events
+    return _summary_from_events(session_id, run_id, events)
+
+
+

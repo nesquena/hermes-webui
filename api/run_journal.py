@@ -242,6 +242,10 @@ def _read_last_complete_line(path: Path) -> str:
     / last_event_id), which is what the summary reader needs. Scans backward in
     bounded chunks so a huge single-line record doesn't have to be fully read to
     locate its start. Returns '' if the file has no complete line.
+
+    .. note:: This materializes the whole last line. When that line is an
+       oversized record (multi-MB payload), prefer ``_extract_boundary_record_summary``
+       which reads only a bounded prefix of the record's summary fields.
     """
     try:
         size = path.stat().st_size
@@ -274,6 +278,134 @@ def _read_last_complete_line(path: Path) -> str:
                 return fh.read(end - line_start).decode("utf-8", errors="replace")
             pos = read_from
     return ""
+
+
+# Bounded prefix read for oversized journal records. The record layout from
+# append_run_event puts ALL summary fields before the (potentially huge) payload:
+#   {"version","event_id","seq","run_id","session_id","event","type","created_at",
+#    "terminal","terminal_state","payload":{...huge...}}
+# So we can read a small prefix, truncate at the "payload" key, close the object,
+# and parse the summary fields WITHOUT materializing the payload. This bounds
+# memory even when a single record (e.g. the terminal `done` with the full
+# transcript) is many MB.
+_BOUNDARY_SUMMARY_PREFIX_BYTES = 8192
+
+
+def _find_record_start_before(path: Path, seek_pos: int) -> int:
+    """Return the byte offset where the JSONL record overlapping ``seek_pos``
+    begins, i.e. the byte just after the last newline strictly before seek_pos.
+    Returns 0 if there is no preceding newline (the record starts at byte 0).
+    Scans backward in bounded chunks."""
+    if seek_pos <= 0:
+        return 0
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return 0
+    pos = min(seek_pos, size)
+    with path.open("rb") as fh:
+        while pos > 0:
+            read_from = max(0, pos - chunk_size)
+            fh.seek(read_from)
+            block = fh.read(pos - read_from)
+            nl = block.rfind(b"\n")
+            if nl >= 0:
+                return read_from + nl + 1
+            pos = read_from
+    return 0
+
+
+def _extract_boundary_record_summary(path: Path, record_start: int) -> dict | None:
+    """Extract ONLY the summary fields of an oversized journal record that
+    straddles the tail-window boundary, without materializing its payload.
+
+    Reads a bounded prefix (``_BOUNDARY_SUMMARY_PREFIX_BYTES``) from
+    ``record_start``, locates the top-level ``"payload"`` key via a brace-depth
+    scan, truncates the JSON before it, closes the object, and parses. Returns
+    a dict with the summary fields (``event``/``seq``/``event_id``/``terminal``/
+    ``terminal_state``) or ``None`` if the layout is unexpected. The payload is
+    replaced with an empty dict so downstream consumers see the shape but not
+    the bytes.
+    """
+    try:
+        with path.open("rb") as fh:
+            fh.seek(record_start)
+            prefix_raw = fh.read(_BOUNDARY_SUMMARY_PREFIX_BYTES)
+    except (FileNotFoundError, OSError):
+        return None
+    text = prefix_raw.decode("utf-8", errors="replace")
+    # Find the top-level "payload" key (depth 1 inside the record object).
+    payload_pos = _find_top_level_payload_key(text)
+    if payload_pos is None:
+        # No payload key in the prefix — either the record is small enough that
+        # the whole thing fit (parse directly if it ends in this prefix), or the
+        # layout is unexpected. Try a direct parse of the prefix up to the first
+        # newline; if that fails, give up.
+        nl = text.find("\n")
+        candidate = text if nl < 0 else text[:nl]
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    # Truncate before "payload", strip trailing comma/whitespace, close object.
+    head = text[:payload_pos].rstrip()
+    if head.endswith(","):
+        head = head[:-1].rstrip()
+    head += "\n}"
+    try:
+        parsed = json.loads(head)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    # Replace the (unread) payload with an empty dict so the shape is consistent
+    # but no payload bytes are materialized.
+    parsed["payload"] = {}
+    parsed["_summary_extracted_from_oversized_record"] = True
+    return parsed
+
+
+def _find_top_level_payload_key(text: str) -> int | None:
+    """Return the byte offset of the top-level (depth-1) ``"payload"`` key in
+    a JSON object prefix, or None if not found. Mirrors the depth-tracking
+    approach of the session scanner but specialized for the journal record."""
+    depth = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            # Parse the string token to get its content + end.
+            i += 1
+            start = i
+            escaped = False
+            while i < n:
+                c = text[i]
+                if escaped:
+                    escaped = False
+                elif c == "\\":
+                    escaped = True
+                elif c == '"':
+                    break
+                i += 1
+            if i >= n:
+                return None
+            key = text[start:i]
+            if depth == 1 and key == "payload":
+                # Confirm it's a key (followed by optional ws + ':').
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j < n and text[j] == ":":
+                    return start - 1  # offset of the opening quote
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        i += 1
+    return None
 
 
 def _read_jsonl_tail(
@@ -309,33 +441,45 @@ def _read_jsonl_tail(
     except (FileNotFoundError, OSError):
         return events, malformed
     text = raw.decode("utf-8", errors="replace")
-    # If we sought into the middle of the file, the first "line" is a partial
-    # fragment — drop everything up to and including the first newline.
+    # If we sought into the middle of the file, the window's first "line" is a
+    # partial fragment of a record that STRADDLES the seek boundary. streaming.py
+    # journals the terminal `done` event with the FULL transcript as its payload,
+    # so that record can be many MB — bigger than the whole tail window. Two
+    # sub-cases, both of which must not drop the straddling record's summary
+    # (terminal_state / last_seq / last_event_id) or restart recovery misreports
+    # a finished run as still-running:
+    #   (a) nl >= 0: the straddling record's tail is at the start of the window
+    #       and is followed by more complete records (e.g. the production order
+    #       done(tool_limit_reached) -> metering -> stream_end). Slicing past
+    #       the first newline loses the straddling record but keeps the rest.
+    #   (b) nl < 0: the ENTIRE window is inside one oversized record (no newline
+    #       at all), so there are no complete records in the window.
+    # In both cases, recover the straddling record's summary via a BOUNDED prefix
+    # read (_extract_boundary_record_summary): the record layout puts all summary
+    # fields before "payload", so we read a few KB, truncate at "payload", and
+    # parse the summary WITHOUT materializing the (multi-MB) payload. The
+    # extracted summary is prepended to the events so _summary_from_events sees
+    # both the straddling record's terminal state AND any trailing events.
+    boundary_summary: dict | None = None
     if size > read_bytes:
+        seek_pos = size - read_bytes
+        record_start = _find_record_start_before(path, seek_pos)
+        # record_start is where the straddling record begins. Extract its summary
+        # via a bounded prefix read (never materializes the payload).
+        boundary_summary = _extract_boundary_record_summary(path, record_start)
+        # Now drop the partial first fragment from the window so we only parse
+        # the complete trailing records.
         nl = text.find("\n")
         if nl >= 0:
             text = text[nl + 1:]
-        # NOTE: falling through to the `_read_last_complete_line` fallback below
-        # covers BOTH truncated-window cases:
-        #  (a) nl < 0: the entire window is one truncated record (a single
-        #      record exceeds the tail window).
-        #  (b) text is empty after the slice: we seeked into the middle of a
-        #      giant FINAL record and its trailing newline was the only one in
-        #      the window, so text[nl+1:] is "". streaming.py journals the
-        #      terminal `done` event with the full transcript payload, so a
-        #      large session's terminal record can be bigger than the whole
-        #      tail window. In both cases giving up returns no events and
-        #      misclassifies a completed run as `unknown` (a recovery bug).
-    # If the window yielded no whole parseable line (empty after the partial-line
-    # drop, or the whole window was one truncated record), recover the LAST
-    # complete line by scanning backward from EOF for the final newline — that
-    # line holds the terminal record's summary fields (terminal_state / last_seq
-    # / last_event_id), which is exactly what the summary reader needs.
-    if not text.strip():
-        text = _read_last_complete_line(path)
-    if not text:
-        # No complete line recoverable at all (e.g. a single line with no
-        # trailing newline and no interior newline). Nothing whole to parse.
+        else:
+            text = ""  # entire window was inside the oversized record
+    if boundary_summary is not None:
+        events.append(boundary_summary)
+    if not text.strip() and boundary_summary is None:
+        # No straddling record recovered AND no complete lines in the window.
+        # (When boundary_summary was recovered we already have it; an empty text
+        # just means there were no trailing complete records, which is fine.)
         return events, malformed
     # 1-based line number of the first whole line in `text`, across the whole
     # file. The discarded prefix (size - read_bytes bytes) contains some number
