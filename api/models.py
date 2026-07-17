@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import stat
 import threading
 import time
 import uuid
@@ -1138,11 +1139,30 @@ def _json_loads_session(text):
 
 
 def _stream_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    """Hash a file without materializing a second multi-MB payload in memory."""
+    """Hash one stable regular-file generation without buffering it in memory."""
+    def identity(file_stat):
+        return (
+            file_stat.st_dev,
+            file_stat.st_ino,
+            stat.S_IFMT(file_stat.st_mode),
+            file_stat.st_size,
+            file_stat.st_mtime_ns,
+            file_stat.st_ctime_ns,
+        )
+
     digest = hashlib.sha256()
     with path.open('rb') as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError(f'refusing to hash non-regular session file: {path}')
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
+        after = os.fstat(handle.fileno())
+        if identity(before) != identity(after):
+            raise OSError(f'session file changed while hashing: {path}')
+        current = os.stat(path, follow_symlinks=False)
+        if identity(after) != identity(current):
+            raise OSError(f'session file identity changed while hashing: {path}')
     return digest.hexdigest()
 
 
