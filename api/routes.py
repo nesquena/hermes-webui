@@ -5809,7 +5809,7 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     return model, None
 
 
-def _validate_resolved_model(model: str, model_provider: str | None) -> str:
+def _validate_resolved_model(model: str, model_provider: str | None, profile_config: dict | None = None) -> str:
     """Fall back to the provider's default model if the resolved model is unknown.
 
     The fast path in _resolve_compatible_session_model_state passes bare model
@@ -5827,6 +5827,34 @@ def _validate_resolved_model(model: str, model_provider: str | None) -> str:
         return model
     _requested = str(model_provider or "").strip().lower()
     if not _requested:
+        return model
+    # Profile-aware validation: use profile config if provided
+    if profile_config is not None:
+        providers_cfg = profile_config.get("providers", {}) or {}
+        if _requested in providers_cfg:
+            _pcfg = providers_cfg[_requested]
+            if isinstance(_pcfg, dict):
+                _normalized = str(model).strip().lower()
+                
+                # Check both models and extra_models for profile-aware provider
+                for _m in _pcfg.get("models", []) + _pcfg.get("extra_models", []):
+                    if isinstance(_m, str) and _m.strip().lower() == _normalized:
+                        return model
+                    if isinstance(_m, dict):
+                        _mid = str(_m.get("id") or _m.get("name") or "").strip().lower()
+                        if _mid == _normalized:
+                            return model
+                
+                # Empty catalog for custom provider - pass through
+                if not _pcfg.get("models") and not _pcfg.get("extra_models"):
+                    return model
+                    
+                # Use provider's configured default
+                _default = _pcfg.get("default_model")
+                if _default:
+                    return _default
+        
+        # Provider not in profile - pass through (cloud provider case)
         return model
     try:
         from api.config import get_available_models
@@ -5847,7 +5875,7 @@ def _validate_resolved_model(model: str, model_provider: str | None) -> str:
         if group_provider != _requested:
             continue
         # Provider found in catalog — check if model is in its model list
-        for m in group.get("models", []):
+        for m in group.get("models", []) + group.get("extra_models", []):
             if not isinstance(m, dict):
                 continue
             mid = str(m.get("id") or "").strip().lower()
@@ -19633,7 +19661,7 @@ def start_session_turn(
         profile_config=_pp_cfg,
         prefer_cached_catalog=True,
     )
-    model = _validate_resolved_model(model, model_provider)
+    model = _validate_resolved_model(model, model_provider, profile_config=_pp_cfg)
     resp = _start_run(
         s,
         msg=msg,
@@ -19811,7 +19839,7 @@ def _handle_goal_command(handler, body):
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
         )
-        model = _validate_resolved_model(model, model_provider)
+        model = _validate_resolved_model(model, model_provider, profile_config=_pp_cfg)
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
@@ -19864,7 +19892,7 @@ def _handle_goal_command(handler, body):
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
             )
-            model = _validate_resolved_model(model, model_provider)
+            model = _validate_resolved_model(model, model_provider, profile_config=_pp_cfg)
         stream_response = _start_chat_stream_for_session(
             s,
             msg=kickoff_prompt,
@@ -20030,7 +20058,7 @@ def _handle_chat_start(handler, body, diag=None):
         # split) passes through _resolve_compatible_session_model_state's fast
         # path without validation and would 404 at the upstream API. Fall back
         # to the configured default when the model is not known.
-        model = _validate_resolved_model(model, model_provider)
+        model = _validate_resolved_model(model, model_provider, profile_config=_pp_cfg)
 
         if model_provider == "moa" and moa_config is None:
             if webui_gateway_chat_enabled(get_config()):
@@ -20149,7 +20177,7 @@ def _handle_chat_sync(handler, body):
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
         )[:2]
-        model = _validate_resolved_model(model, model_provider)
+        model = _validate_resolved_model(model, model_provider, profile_config=_pp_cfg)
         s.model = model
         s.model_provider = model_provider
     from api.streaming import _ENV_LOCK
