@@ -231,6 +231,51 @@ def _read_jsonl(
     return events, malformed
 
 
+def _read_last_complete_line(path: Path) -> str:
+    """Return the last complete line of a file (no trailing newline), found by
+    scanning backward from EOF for the final newline.
+
+    Used as a fallback when ``_read_jsonl_tail``'s whole tail window is a single
+    truncated record — i.e. one journal record (typically the terminal ``done``
+    event with a full-transcript payload) exceeds the tail window. The last
+    complete line holds that record's summary fields (terminal_state / last_seq
+    / last_event_id), which is what the summary reader needs. Scans backward in
+    bounded chunks so a huge single-line record doesn't have to be fully read to
+    locate its start. Returns '' if the file has no complete line.
+    """
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return ""
+    if size <= 0:
+        return ""
+    # Scan backward in chunks for the final newline. The line we want is the
+    # bytes between the final newline and EOF (or the whole file if there's no
+    # newline — but that case is "no complete line", handled by the caller).
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    with path.open("rb") as fh:
+        fh.seek(0, 2)  # EOF
+        end = fh.tell()
+        # If the last byte is a newline, the last complete line ends just before it.
+        if end > 0:
+            fh.seek(end - 1)
+            if fh.read(1) == b"\n":
+                end -= 1
+        pos = end
+        while pos > 0:
+            read_from = max(0, pos - chunk_size)
+            fh.seek(read_from)
+            block = fh.read(pos - read_from)
+            nl = block.rfind(b"\n")
+            if nl >= 0:
+                # The last complete line is from after this newline to `end`.
+                line_start = read_from + nl + 1
+                fh.seek(line_start)
+                return fh.read(end - line_start).decode("utf-8", errors="replace")
+            pos = read_from
+    return ""
+
+
 def _read_jsonl_tail(
     path: Path, *, max_bytes: int | None, max_rows: int | None
 ) -> tuple[list[dict], list[dict]]:
@@ -270,8 +315,28 @@ def _read_jsonl_tail(
         nl = text.find("\n")
         if nl >= 0:
             text = text[nl + 1:]
-        else:
-            text = ""  # entire window was one truncated line; nothing whole
+        # NOTE: falling through to the `_read_last_complete_line` fallback below
+        # covers BOTH truncated-window cases:
+        #  (a) nl < 0: the entire window is one truncated record (a single
+        #      record exceeds the tail window).
+        #  (b) text is empty after the slice: we seeked into the middle of a
+        #      giant FINAL record and its trailing newline was the only one in
+        #      the window, so text[nl+1:] is "". streaming.py journals the
+        #      terminal `done` event with the full transcript payload, so a
+        #      large session's terminal record can be bigger than the whole
+        #      tail window. In both cases giving up returns no events and
+        #      misclassifies a completed run as `unknown` (a recovery bug).
+    # If the window yielded no whole parseable line (empty after the partial-line
+    # drop, or the whole window was one truncated record), recover the LAST
+    # complete line by scanning backward from EOF for the final newline — that
+    # line holds the terminal record's summary fields (terminal_state / last_seq
+    # / last_event_id), which is exactly what the summary reader needs.
+    if not text.strip():
+        text = _read_last_complete_line(path)
+    if not text:
+        # No complete line recoverable at all (e.g. a single line with no
+        # trailing newline and no interior newline). Nothing whole to parse.
+        return events, malformed
     # 1-based line number of the first whole line in `text`, across the whole
     # file. The discarded prefix (size - read_bytes bytes) contains some number
     # of complete lines; the first whole line in the window is the next one. We
