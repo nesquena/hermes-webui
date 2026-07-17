@@ -654,9 +654,9 @@ def _read_chunked_body(handler, max_bytes: int) -> bytes:
         size_token = size_line.split(b';', 1)[0].strip()
         try:
             size = int(size_token, 16)
-        except ValueError:
+        except ValueError as err:
             handler.close_connection = True
-            raise ValueError(f'Malformed chunk size: {size_token!r}')
+            raise ValueError(f'Malformed chunk size: {size_token!r}') from err
         if size == 0:
             # Consume optional trailer headers up to the terminating blank line.
             while True:
