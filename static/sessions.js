@@ -1077,37 +1077,52 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
 
   // The run journal owns the Worklog projection. A same-stream browser tail
   // wins only when it advanced after the metadata snapshot was read.
-  const activeId=String(activeStreamId||serverLiveSnapshot.streamId||'').trim();
+  const requestedActiveId=String(activeStreamId||'').trim();
   const localId=String(localInflight.streamId||'').trim();
   const serverId=String(serverLiveSnapshot.streamId||'').trim();
+  const activeId=requestedActiveId||serverId;
   const selectDurableSnapshot=()=>{
     if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
       return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
     }
     return serverLiveSnapshot;
   };
-  if(activeId&&serverId&&serverId!==activeId) return localInflight;
+  if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
+    return localId===requestedActiveId?localInflight:null;
+  }
   if(activeId&&localId!==activeId) return selectDurableSnapshot();
-  if(!activeId&&serverId&&localId!==serverId) return selectDurableSnapshot();
 
   const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
   const serverSeq=Math.max(0,Number(serverLiveSnapshot.lastRunJournalSeq)||0);
   return serverSeq>=localSeq?selectDurableSnapshot():localInflight;
 }
 
-function _runtimeJournalAnchorActivitySceneForSession(sid){
+function _anchorActivitySceneStreamId(scene){
+  if(!scene||typeof scene!=='object') return '';
+  const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+  return String(scene.stream_id||scene.streamId||(identity&&(identity.stream_id||identity.streamId))||'').trim();
+}
+
+function _anchorActivitySceneMatchesStream(scene, activeStreamId){
+  const activeId=String(activeStreamId||'').trim();
+  if(!activeId) return true;
+  const sceneId=_anchorActivitySceneStreamId(scene);
+  return !sceneId||sceneId===activeId;
+}
+
+function _runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId){
   const inflight=INFLIGHT&&sid?INFLIGHT[sid]:null;
-  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'){
+  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(inflight.anchorActivityScene, activeStreamId)){
     return inflight.anchorActivityScene;
   }
   const snapshot=S.session&&S.session.runtime_journal_snapshot;
   const scene=snapshot&&(snapshot.anchor_activity_scene||snapshot.anchorActivityScene);
-  return scene&&scene.version==='activity_scene_v1'?scene:null;
+  return scene&&scene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(scene, activeStreamId)?scene:null;
 }
 
 function _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid){
   if(!activeStreamId||typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneSnapshotForStream!=='function') return false;
-  const scene=_runtimeJournalAnchorActivitySceneForSession(sid);
+  const scene=_runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId);
   if(!scene) return false;
   return !!window._renderLiveAnchorActivitySceneSnapshotForStream(activeStreamId, scene, sid);
 }
@@ -2067,8 +2082,13 @@ async function loadSession(sid){
   const serverLiveSnapshot=activeStreamId
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
+  const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
   if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
+  else if(hadLiveRecoveryInflight&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
 
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);

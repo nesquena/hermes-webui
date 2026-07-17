@@ -1106,6 +1106,16 @@ assert.strictEqual(
   _selectLiveRecoveryInflight(oldStreamLocal, server, 'stream-1'),
   server
 );
+const oldServer = {...server, streamId:'stream-old-server', lastRunJournalSeq:7};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(oldStreamLocal, oldServer, 'stream-1'),
+  null
+);
+const activeLocalWithOldServer = {...local, streamId:'stream-1', lastRunJournalSeq:99};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(activeLocalWithOldServer, oldServer, 'stream-1'),
+  activeLocalWithOldServer
+);
 const unidentifiedLocal = {...local};
 delete unidentifiedLocal.streamId;
 assert.strictEqual(
@@ -1159,6 +1169,49 @@ assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
     assert "INFLIGHT[activeSid].streamId=streamId" in attach_body
     assert "INFLIGHT[activeSid].lastRunJournalEventId=''" in attach_body
     assert "lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||''" in close_body
+
+
+def test_runtime_journal_scene_fallback_ignores_foreign_stream_snapshots():
+    """A stale Anchor scene must not render under the current stream owner."""
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneStreamId"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneMatchesStream"),
+            _function_decl(SESSIONS_JS, "_runtimeJournalAnchorActivitySceneForSession"),
+            """
+const activeScene = {
+  version:'activity_scene_v1',
+  identity:{stream_id:'stream-1'},
+  activity_rows:[{role:'tool'}],
+};
+const oldScene = {
+  version:'activity_scene_v1',
+  identity:{stream_id:'stream-old'},
+  activity_rows:[{role:'tool'}],
+};
+globalThis.INFLIGHT = {sid:{anchorActivityScene:oldScene}};
+globalThis.S = {session:{runtime_journal_snapshot:{anchor_activity_scene:activeScene}}};
+assert.strictEqual(
+  _runtimeJournalAnchorActivitySceneForSession('sid', 'stream-1'),
+  activeScene
+);
+globalThis.S = {session:{runtime_journal_snapshot:{anchor_activity_scene:oldScene}}};
+assert.strictEqual(
+  _runtimeJournalAnchorActivitySceneForSession('sid', 'stream-1'),
+  null
+);
+globalThis.INFLIGHT = {sid:{anchorActivityScene:activeScene}};
+assert.strictEqual(
+  _runtimeJournalAnchorActivitySceneForSession('sid', 'stream-1'),
+  activeScene
+);
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_reconnect_prefers_trimmed_live_message_over_stale_full_assistant_cache():
