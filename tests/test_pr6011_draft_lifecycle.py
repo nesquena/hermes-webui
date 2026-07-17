@@ -189,6 +189,34 @@ def test_clear_is_canonical_durable_and_does_not_clobber_newer_draft(session_env
     assert models.read_composer_draft_sidecar(sid) == newer
 
 
+def test_clear_canonicalizes_legacy_draft_without_files(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "draft-clear-legacy"
+    session = models.Session(
+        session_id=sid,
+        title="Legacy clear",
+        composer_draft={"text": "submitted"},
+    )
+    session.save(skip_index=True)
+
+    response = _post_draft(
+        monkeypatch,
+        {
+            "session_id": sid,
+            "clear": True,
+            "expected": {"text": "submitted", "files": []},
+        },
+    )
+
+    assert response["status"] == 200
+    assert response["payload"]["draft"] == {"text": "", "files": []}
+    assert "unchanged" not in response["payload"]
+    assert models.Session.load(sid).composer_draft == {"text": "", "files": []}
+    assert models.read_composer_draft_sidecar(sid) is None
+
+
 def test_compact_session_json_still_drives_parent_recovery_reader(session_env):
     from api import models
 
