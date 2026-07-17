@@ -330,9 +330,21 @@ function _clearComposerDraft(sid, text, files) {
   else _suppressComposerDraftRestoreAfterSubmit(sid);
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, '', []);
+    body: JSON.stringify({
+      session_id: sid,
+      clear: true,
+      expected: {
+        text: String(text || ''),
+        files: _composerDraftFilesForPersist(files),
+      },
+    }),
+  }).then((result) => {
+    const confirmed = result && result.draft;
+    _rememberComposerDraftPayloadState(
+      sid,
+      confirmed && typeof confirmed.text === 'string' ? confirmed.text : '',
+      confirmed && Array.isArray(confirmed.files) ? confirmed.files : [],
+    );
   }).catch(() => {});
 }
 
