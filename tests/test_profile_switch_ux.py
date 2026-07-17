@@ -128,6 +128,42 @@ class TestParallelizedFetches:
         )
         assert "existingDefaultOpt.dataset.provider = providerId" in fn
 
+    def test_all_profiles_existing_chat_keeps_sidebar_cache_during_cookie_switch(self):
+        """Cross-profile chat navigation must not blank/refetch a complete all-profile list."""
+        fn = self._get_switch_fn()
+        preserve_idx = fn.find("const _preserveAllProfilesSidebar =")
+        assert preserve_idx != -1
+        assert "_openingExistingSidebarSession" in fn[preserve_idx: preserve_idx + 300]
+        assert "_showAllProfiles" in fn[preserve_idx: preserve_idx + 300]
+
+        setup_guard = fn.find("if (!_preserveAllProfilesSidebar) {", preserve_idx)
+        switch_post = fn.find("await api('/api/profile/switch'")
+        assert preserve_idx < setup_guard < switch_post
+        guarded_setup = fn[setup_guard:switch_post]
+        assert "_invalidateSessionListRenders()" in guarded_setup
+        assert "_setProfileSwitchListEmbargo(true)" in guarded_setup
+        assert "showSessionListSkeleton(name)" in guarded_setup
+
+        branch_start = fn.find("if (sessionInProgress && _openingExistingSidebarSession)")
+        branch_end = fn.find("} else if (sessionInProgress)", branch_start)
+        branch = fn[branch_start:branch_end]
+        assert "if (!_preserveAllProfilesSidebar) {" in branch
+        assert "await renderSessionList();" in branch
+        assert "projects + sessions round trip" in branch
+
+    def test_existing_chat_profile_switch_defers_to_session_model_refresh(self):
+        """Opening a concrete chat must not start a second generic model rebuild."""
+        start = self.JS.find("function _refreshProfileSwitchBackground(gen)")
+        end = self.JS.find("\n}", start)
+        assert start != -1 and end != -1
+        helper = self.JS[start:end]
+        assert "openingExistingSidebarSession" in helper
+        assert "_profileSwitchOpeningExistingSession" in helper
+        assert (
+            "if (!openingExistingSidebarSession && "
+            "typeof window._ensureModelDropdownReady === 'function')"
+        ) in helper
+
     def test_workspace_load_is_awaited_only_when_visible(self):
         """Profile switches should not duplicate workspace-tree loads."""
         fn = self._get_switch_fn()

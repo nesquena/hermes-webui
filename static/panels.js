@@ -6543,7 +6543,15 @@ async function _profileSwitchPanelLoad(){
 
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
-  if (typeof window._ensureModelDropdownReady === 'function') {
+  // A cross-profile sidebar click immediately calls loadSession(), whose
+  // post-paint session_visit refresh is the authoritative model-catalog load.
+  // Starting the generic profile refresh here as well duplicates a potentially
+  // multi-second /api/models rebuild while the conversation is opening.
+  const openingExistingSidebarSession = !!(
+    typeof _profileSwitchOpeningExistingSession !== 'undefined'
+    && _profileSwitchOpeningExistingSession
+  );
+  if (!openingExistingSidebarSession && typeof window._ensureModelDropdownReady === 'function') {
     Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
   }
   Promise.resolve(loadWorkspaceList()).then(()=>{
@@ -6941,6 +6949,13 @@ async function switchToProfile(name) {
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  // In all-profiles mode the sidebar cache already contains the clicked target
+  // profile. Keep those valid rows visible while only the per-client profile
+  // cookie changes; loadSession() will patch the active row from cache after the
+  // target conversation arrives.
+  const _preserveAllProfilesSidebar = _openingExistingSidebarSession
+    && typeof _showAllProfiles !== 'undefined'
+    && _showAllProfiles;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -6987,12 +7002,14 @@ async function switchToProfile(name) {
     // so a pre-switch /api/sessions response (old profile's rows, issued before the
     // switch) can't resolve, pass the generation guard, clear the skeleton flag, and
     // paint stale rows. Must precede showSessionListSkeleton().
-    if (typeof _invalidateSessionListRenders === 'function') _invalidateSessionListRenders();
-    // ...and set the embargo so a render that STARTS during the switch window (after the
-    // skeleton, before the new-profile cookie is set) also can't paint the old profile's
-    // rows. Cleared right before the switch-owned renderSessionList() and on failure.
-    if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(true);
-    if (typeof showSessionListSkeleton === 'function') showSessionListSkeleton(name);
+    if (!_preserveAllProfilesSidebar) {
+      if (typeof _invalidateSessionListRenders === 'function') _invalidateSessionListRenders();
+      // ...and set the embargo so a render that STARTS during the switch window (after the
+      // skeleton, before the new-profile cookie is set) also can't paint the old profile's
+      // rows. Cleared right before the switch-owned renderSessionList() and on failure.
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(true);
+      if (typeof showSessionListSkeleton === 'function') showSessionListSkeleton(name);
+    }
     // invalidate any in-flight workspace-tree load UNCONDITIONALLY at switch start — even
     // when the panel is closed, loadDir('.') still runs later, and an empty-session switch
     // reuses the same session_id so loadDir's id guard alone can't reject a stale
@@ -7118,15 +7135,22 @@ async function switchToProfile(name) {
     // ── Session ────────────────────────────────────────────────────────────
     // Keep the all-profiles sidebar scope sticky across profile switches. It is
     // a navigation preference shared by the browser session, not a per-profile flag.
-    if (typeof animateNextSessionListRefresh === 'function') animateNextSessionListRefresh();
+    if (!_preserveAllProfilesSidebar && typeof animateNextSessionListRefresh === 'function') {
+      animateNextSessionListRefresh();
+    }
 
     if (sessionInProgress && _openingExistingSidebarSession) {
       // The caller will immediately load the clicked session after this profile
-      // cookie switch. Avoid creating/retagging an intermediate blank chat.
+      // cookie switch. Avoid creating/retagging an intermediate blank chat. In
+      // all-profiles mode the cached list remains authoritative across this
+      // cookie-only switch, so do not block the transcript behind another
+      // projects + sessions round trip.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_preserveAllProfilesSidebar) {
+        if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+        await renderSessionList();
+        if (_switchGen !== _profileSwitchGeneration) return false;
+      }
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {

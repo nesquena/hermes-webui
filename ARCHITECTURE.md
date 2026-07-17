@@ -457,6 +457,13 @@ Session management:
     deleteSession(sid)    POST /api/session/delete, handle active/inactive cases correctly
     renderSessionList()   GET /api/sessions, rebuild #sessionList DOM
 
+When the all-profiles sidebar opens an existing conversation owned by another
+profile, the profile cookie still switches before `loadSession()`, but the
+already-complete all-profiles list stays visible and is reused from browser
+cache. That path does not synchronously refetch projects/sessions or start the
+generic model-catalog refresh; `loadSession()` performs the single deferred
+session-specific model refresh after transcript first paint.
+
 Chat:
     send()                Main action: upload files, POST /api/chat/start, open EventSource
     uploadPendingFiles()  Upload each file in S.pendingFiles, return filenames array
