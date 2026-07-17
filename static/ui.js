@@ -8440,12 +8440,61 @@ function _splitForTTS(text, maxChars){
   return chunks.filter(Boolean);
 }
 
+// ── Response splitting (Preferences → "Response splitting") ────────────────
+// How replies are divided into TTS chunks: 'punctuation' (sentences, default —
+// starts playback sooner on slow self-hosted servers), 'paragraphs' (blank-line
+// blocks), or 'none' (one chunk). Browser speech always applies the length cap
+// on top (long single utterances stall Chrome's speechSynthesis).
+function _ttsSplitMode(){
+  const m=localStorage.getItem('hermes-tts-split');
+  return (m==='paragraphs'||m==='none')?m:'punctuation';
+}
+
+function _splitSentencesForTTS(text){
+  // Sentence boundaries incl. CJK punctuation; trailing quotes/brackets stay
+  // attached. Fragments under 4 chars (list numbers, stray "1.") merge into
+  // their neighbour so the TTS never speaks a lone period.
+  const parts=text.match(/[^.!?…。！？]+[.!?…。！？]+["')\]»]*\s*|[^.!?…。！？]+$/g)||[text];
+  const merged=[];
+  for(let p of parts){
+    p=p.trim();
+    if(!p) continue;
+    if(merged.length&&(p.length<4||merged[merged.length-1].length<4)) merged[merged.length-1]+=' '+p;
+    else merged.push(p);
+  }
+  // Hard-cap run-on sentences so a single chunk can't grow unbounded.
+  const out=[];
+  merged.forEach(function(m){
+    if(m.length>400) out.push.apply(out,_splitForTTS(m,300));
+    else out.push(m);
+  });
+  return out;
+}
+
+// Central chunker: takes the RAW (markdown) text — paragraph splitting must
+// happen before _stripForTTS collapses newlines — and returns clean chunks.
+function _ttsChunksFor(rawText){
+  const raw=String(rawText||'');
+  const mode=_ttsSplitMode();
+  if(mode==='paragraphs'){
+    return raw.split(/\n[ \t]*\n+/).map(function(p){return _stripForTTS(p);}).filter(Boolean);
+  }
+  const clean=_stripForTTS(raw);
+  if(!clean) return [];
+  if(mode==='none') return [clean];
+  return _splitSentencesForTTS(clean);
+}
+window._ttsChunksFor=_ttsChunksFor;
+
 let _ttsSpeaking=false;
 let _ttsCurrentUtterance=null;
 let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
+// Monotonic token: every stopTTS() invalidates in-flight chunk queues so a
+// stale onended/fetch callback can't resume a cancelled playback chain.
+let _ttsQueueToken=0;
 
 function _buildBrowserUtterance(text, btn){
   const utter=new SpeechSynthesisUtterance(text);
@@ -8481,67 +8530,81 @@ function _buildBrowserUtterance(text, btn){
   return utter;
 }
 
-function _playEdgeTtsChunked(text, btn){
+// Generic sequential chunk player for server TTS engines (/api/tts). Fetches
+// chunk i, plays it, and prefetches chunk i+1 while i is playing so slow
+// self-hosted synthesis doesn't pause between sentences. onDone(err|null) is
+// optional — voice mode uses it to resume listening.
+function _playServerTtsChunks(chunks, bodyFor, btn, label, onDone){
+  chunks=(chunks||[]).filter(Boolean);
+  if(!chunks.length){ if(onDone) onDone(null); return; }
+  const token=++_ttsQueueToken;
   _ttsSpeaking=true;
   if(btn) btn.dataset.speaking='1';
-  const chunks=_splitForTTS(text);
-  const _playOne=function(idx){
-    if(idx>=chunks.length){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      return;
-    }
-    const chunk=chunks[idx];
-    const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    let rate='', pitch='';
-    if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-    if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+  const _finish=function(err){
+    if(_ttsQueueToken===token){ _ttsSpeaking=false; _playingEdgeAudio=null; }
+    if(btn) btn.dataset.speaking='0';
+    if(onDone) onDone(err||null);
+    else if(err&&typeof showToast==='function') showToast(label+' failed: '+((err&&err.message)||err));
+  };
+  const _fetchChunk=function(idx){
+    return fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
-    })
-    .then(function(r){
+      body:JSON.stringify(bodyFor(chunks[idx]))
+    }).then(function(r){
       if(!r.ok){
         return r.json().catch(function(){return {};}).then(function(j){
           throw new Error((j&&j.error)||('TTS request failed: '+r.status));
         });
       }
       return r.blob();
-    })
-    .then(function(blob){
-      if(!_ttsSpeaking) return;
+    });
+  };
+  let nextFetch=null;
+  const _playOne=function(idx){
+    if(_ttsQueueToken!==token) return;
+    if(idx>=chunks.length){ _finish(null); return; }
+    (nextFetch||_fetchChunk(idx)).then(function(blob){
+      nextFetch=null;
+      if(_ttsQueueToken!==token) return;
+      if(idx+1<chunks.length){
+        const p=_fetchChunk(idx+1);
+        p.catch(function(){}); // handled when consumed; avoid unhandled-rejection noise
+        nextFetch=p;
+      }
       const url=URL.createObjectURL(blob);
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
-      audio.onended=function(){
+      const _step=function(err){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        if(_ttsSpeaking) _playOne(idx+1);
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        if(_ttsQueueToken!==token) return;
+        if(err) _finish(err);
+        else _playOne(idx+1);
       };
-      audio.onerror=function(){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
-      };
-      audio.play().catch(function(e){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
-        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
-      });
-    })
-    .catch(function(e){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
+      audio.onended=function(){ _step(null); };
+      audio.onerror=function(){ _step(new Error(label+' audio playback failed')); };
+      audio.play().catch(function(e){ _step(e||new Error(label+' audio play blocked')); });
+    }).catch(function(e){
+      nextFetch=null;
+      if(_ttsQueueToken===token) _finish(e);
     });
   };
   _playOne(0);
+}
+
+function _edgeTtsBodyBuilder(){
+  const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  let rate='', pitch='';
+  if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+  if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+  return function(chunk){ return {text:chunk, voice:voice, rate:rate, pitch:pitch}; };
+}
+
+function _playEdgeTtsChunked(text, btn){
+  _playServerTtsChunks(_ttsChunksFor(text), _edgeTtsBodyBuilder(), btn, 'Edge TTS');
 }
 
 function speakMessage(btn){
@@ -8559,36 +8622,24 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  // Server engines chunk internally via _ttsChunksFor — pass the RAW text so
+  // paragraph splitting still sees the blank lines _stripForTTS collapses.
   if(engine==='openai'){
-    _playOpenaiTts(clean, btn);
+    _playOpenaiTts(text, btn);
     return;
   }
   if(engine==='elevenlabs'){
-    _playElevenLabsTts(clean, btn);
+    _playElevenLabsTts(text, btn);
     return;
   }
   if(engine==='edge'){
-    _playEdgeTtsChunked(clean, btn);
+    _playEdgeTtsChunked(text, btn);
     return;
   }
   // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
   // via the extension, then play through the shared audio-buffer path.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-    if(btn) btn.dataset.speaking='1';
-    _ttsSpeaking=true;
-    const _failReg=function(msg){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn)btn.dataset.speaking='0';
-      if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-    };
-    const _opts={
-      voice: localStorage.getItem('hermes-tts-voice')||'',
-      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
-      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
-    };
-    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
-      .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
+    _playRegisteredTtsChunks(engine, _ttsChunksFor(text), btn);
     return;
   }
 
@@ -8597,7 +8648,7 @@ function speakMessage(btn){
     return;
   }
 
-  _ttsChunkQueue=_splitForTTS(clean);
+  _ttsChunkQueue=_browserTtsChunks(text);
   _ttsChunkIndex=0;
   _ttsActiveBtn=btn;
   _ttsSpeaking=true;
@@ -8608,58 +8659,63 @@ function speakMessage(btn){
   speechSynthesis.speak(utter);
 }
 
-function _playElevenLabsTts(text, btn){
-  if(btn) btn.dataset.speaking='1';
+// Browser speechSynthesis stalls on very long utterances, so the length cap
+// applies on top of whatever splitting mode the user chose.
+function _browserTtsChunks(rawText){
+  return _ttsChunksFor(rawText).reduce(function(acc,c){
+    return acc.concat(_splitForTTS(c));
+  },[]);
+}
+
+// Sequential chunk playback for extension-registered TTS engines: synthesize
+// chunk i, play it, then continue — same cancellation token as the server path.
+function _playRegisteredTtsChunks(engine, chunks, btn, onDone){
+  chunks=(chunks||[]).filter(Boolean);
+  if(!chunks.length){ if(onDone) onDone(null); return; }
+  const token=++_ttsQueueToken;
   _ttsSpeaking=true;
-  const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
-    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  if(btn) btn.dataset.speaking='1';
+  const _opts={
+    voice: localStorage.getItem('hermes-tts-voice')||'',
+    rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+    pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'elevenlabs'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+  const _finish=function(err){
+    if(_ttsQueueToken===token){ _ttsSpeaking=false; _playingEdgeAudio=null; }
+    if(btn) btn.dataset.speaking='0';
+    if(onDone) onDone(err||null);
+    else if(err&&typeof showToast==='function') showToast(((err&&err.message)||'TTS engine failed'),4000,'error');
+  };
+  const _playOne=function(idx){
+    if(_ttsQueueToken!==token) return;
+    if(idx>=chunks.length){ _finish(null); return; }
+    Promise.resolve(window._hermesTtsSynth(engine, chunks[idx], _opts))
+      .then(function(buf){
+        if(_ttsQueueToken!==token) return;
+        // _playAudioBuf resolves when playback ends (or fails to decode);
+        // it flips _ttsSpeaking itself, so re-assert while the queue runs.
+        return Promise.resolve(_playAudioBuf(buf, btn, 'TTS')).then(function(){
+          if(_ttsQueueToken!==token) return;
+          _ttsSpeaking=true;
+          if(btn) btn.dataset.speaking='1';
+          _playOne(idx+1);
+        });
+      })
+      .catch(function(e){ if(_ttsQueueToken===token) _finish(e); });
+  };
+  _playOne(0);
+}
+
+function _playElevenLabsTts(text, btn){
+  _playServerTtsChunks(_ttsChunksFor(text), function(chunk){
+    return {text:chunk, engine:'elevenlabs'};
+  }, btn, 'ElevenLabs TTS');
 }
 
 function _playOpenaiTts(text, btn){
-  if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
-  const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
-    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-  };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'openai'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'OpenAI TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
+  _playServerTtsChunks(_ttsChunksFor(text), function(chunk){
+    return {text:chunk, engine:'openai'};
+  }, btn, 'OpenAI TTS');
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -8705,6 +8761,7 @@ function _playAudioBuf(arrayBuffer, btn, label){
   });
 }
 function stopTTS(){
+  _ttsQueueToken++; // invalidate any in-flight chunk queue
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -8741,38 +8798,32 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  // Server engines chunk internally (_ttsChunksFor) — pass the RAW text so
+  // paragraph splitting still sees the blank lines _stripForTTS collapses.
   if(engine==='openai'){
-    _playOpenaiTts(clean, null);
+    _playOpenaiTts(text, null);
     return;
   }
   if(engine==='elevenlabs'){
-    _playElevenLabsTts(clean, null);
+    _playElevenLabsTts(text, null);
     return;
   }
   if(engine==='edge'){
-    _playEdgeTtsChunked(clean, null);
+    _playEdgeTtsChunked(text, null);
     return;
   }
   // Extension-registered TTS engine (window.registerHermesTtsEngine): synth via
   // the extension, then play through the shared audio-buffer path. Mirrors the
   // registered-engine branch in speakMessage() so auto-read honors the selection.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-    _ttsSpeaking=true;
-    const _opts={
-      voice: localStorage.getItem('hermes-tts-voice')||'',
-      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
-      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
-    };
-    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
-      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+    _playRegisteredTtsChunks(engine, _ttsChunksFor(text), null);
     return;
   }
   // Unknown/unregistered engine (e.g. an extension engine that's no longer
   // registered) — fall back to browser TTS only if it's available.
   if(!('speechSynthesis' in window)) return;
-  // Use chunked playback for browser TTS
-  _ttsChunkQueue=_splitForTTS(clean);
+  // Use chunked playback for browser TTS (mode-aware + length-capped)
+  _ttsChunkQueue=_browserTtsChunks(text);
   _ttsChunkIndex=0;
   _ttsSpeaking=true;
   const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);

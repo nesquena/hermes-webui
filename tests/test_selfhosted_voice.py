@@ -389,6 +389,39 @@ def test_boot_js_voice_mode_uses_server_stt():
     assert "form.append('language'" in src
 
 
+def test_response_splitting_preference_wired():
+    """Preferences → Response splitting (punctuation | paragraphs | none)
+    exists, persists, and drives chunked TTS playback in both playback paths."""
+    ui = (_STATIC / "ui.js").read_text(encoding="utf-8")
+    boot = (_STATIC / "boot.js").read_text(encoding="utf-8")
+    panels = (_STATIC / "panels.js").read_text(encoding="utf-8")
+    html = (_STATIC / "index.html").read_text(encoding="utf-8")
+    assert 'id="settingsTtsSplit"' in html
+    for val in ("punctuation", "paragraphs", "none"):
+        assert f'value="{val}"' in html
+    assert "_ttsSplitMode" in ui and "_ttsChunksFor" in ui
+    assert "_playServerTtsChunks" in ui
+    assert "_ttsQueueToken" in ui
+    # voice mode uses the shared chunked players
+    assert "_playServerTtsChunks(chunks" in boot
+    assert "_speakBrowserChunk" in boot
+    # preference persists via localStorage + server speech settings
+    assert "hermes-tts-split" in panels
+    assert "tts_split:'hermes-tts-split'" in panels
+    assert "['tts_split','hermes-tts-split']" in boot
+
+
+def test_stt_request_format_field_wired():
+    """STT Request format (multipart | JSON base64) is exposed in the
+    self-hosted section and persisted to stt.openai.request_format."""
+    html = (_STATIC / "index.html").read_text(encoding="utf-8")
+    panels = (_STATIC / "panels.js").read_text(encoding="utf-8")
+    assert 'id="settingsSttRequestFormat"' in html
+    assert 'value="json"' in html
+    assert "settingsSttRequestFormat" in panels
+    assert "request_format" in vc._STT_STR_FIELDS
+
+
 def test_panels_js_wires_voice_config():
     src = (_STATIC / "panels.js").read_text(encoding="utf-8")
     assert "_wireVoiceEndpoints" in src

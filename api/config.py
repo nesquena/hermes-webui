@@ -9139,6 +9139,7 @@ _SETTINGS_DEFAULTS = {
     "tts_voice": "",
     "tts_rate": 1.0,
     "tts_pitch": 1.0,
+    "tts_split": "punctuation",  # response splitting for TTS: punctuation | paragraphs | none
     "voice_mode_button": False,
     "voice_continuous": False,
     "voice_silence_ms": 1800,
@@ -9208,6 +9209,7 @@ _SETTINGS_SPEECH_KEYS = {
     "tts_voice",
     "tts_rate",
     "tts_pitch",
+    "tts_split",
     "voice_mode_button",
     "voice_continuous",
     "voice_silence_ms",
@@ -9415,6 +9417,7 @@ _SETTINGS_ENUM_VALUES = {
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "default_message_mode": {"queue", "interrupt", "steer"},
+    "tts_split": {"punctuation", "paragraphs", "none"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "hide_all_activity"},
     "structured_code_default_view": {"auto", "on", "off"},
 }

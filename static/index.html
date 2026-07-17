@@ -1261,6 +1261,9 @@
               </div>
             </div>
             <div class="settings-field">
+              <label for="settingsTtsSplit" data-i18n="settings_label_tts_split">Response splitting</label><select id="settingsTtsSplit" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="punctuation">By punctuation (sentences)</option><option value="paragraphs">By paragraphs</option><option value="none">No splitting (whole reply)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_split">How replies are divided into speech chunks. Sentence splitting starts playback sooner on slow TTS servers; browser speech always length-caps very long chunks.</div>
+            </div>
+            <div class="settings-field">
               <details id="settingsVoiceEndpoints" style="border:1px solid var(--border2);border-radius:6px;padding:8px 10px">
                 <summary style="cursor:pointer;font-weight:600">Self-hosted voice endpoints (Speech-to-Text / Text-to-Speech)</summary>
                 <div style="font-size:11px;color:var(--muted);margin:6px 0 10px">Point Dictate and TTS at your own OpenAI-compatible servers. Stored server-side in <code>config.yaml</code>. Editing requires <code>HERMES_WEBUI_ALLOW_VOICE_CONFIG_WRITE=1</code>; a private-LAN TTS base URL over http also needs <code>HERMES_WEBUI_TTS_ALLOW_LAN=1</code> + <code>HERMES_WEBUI_TTS_ALLOW_HOSTS</code>.</div>
@@ -1275,6 +1278,8 @@
                 <input type="password" id="settingsSttApiKey" autocomplete="off" placeholder="•••• (unchanged)" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
                 <label style="font-size:12px">Model</label>
                 <input type="text" id="settingsSttModel" placeholder="nemotron-3.5-asr-streaming" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Request format</label>
+                <select id="settingsSttRequestFormat" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="">Multipart upload (default)</option><option value="json">JSON (Base64)</option></select>
                 <label style="font-size:12px">Language (ISO-639-1, blank = auto)</label>
                 <input type="text" id="settingsSttLanguage" placeholder="de" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
                 <label style="font-size:12px">Supported MIME types (optional)</label>

@@ -26,7 +26,7 @@ from api.helpers import j, read_body
 
 # Fields we surface/accept per section. Anything else in config.yaml is left
 # untouched by writes.
-_STT_STR_FIELDS = ("provider", "base_url", "model", "response_format", "language", "mime_types")
+_STT_STR_FIELDS = ("provider", "base_url", "model", "response_format", "request_format", "language", "mime_types")
 _TTS_STR_FIELDS = ("provider", "base_url", "model", "voice", "response_format")
 
 _MAX_STR = 2048
@@ -140,7 +140,7 @@ def _apply_section(dst, payload: dict, str_fields, *, is_tts: bool):
         oai = {}
         dst["openai"] = oai
 
-    for field in ("base_url", "model", "voice", "response_format", "language"):
+    for field in ("base_url", "model", "voice", "response_format", "request_format", "language"):
         if field not in payload:
             continue
         val = _clean_str(payload.get(field))

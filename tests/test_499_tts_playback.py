@@ -61,12 +61,12 @@ class TestTtsUtilityFunctions:
         src = _read('ui.js')
         assert "if(engine==='openai')" in src, \
             "speakMessage must branch for the OpenAI TTS engine"
-        assert '_playOpenaiTts(clean, btn);' in src, \
+        assert '_playOpenaiTts(text, btn);' in src, \
             "speakMessage must route OpenAI TTS through _playOpenaiTts"
 
     def test_auto_read_routes_openai(self):
         src = _read('ui.js')
-        assert '_playOpenaiTts(clean, null);' in src, \
+        assert '_playOpenaiTts(text, null);' in src, \
             "autoReadLastAssistant must route OpenAI TTS through _playOpenaiTts"
 
 
