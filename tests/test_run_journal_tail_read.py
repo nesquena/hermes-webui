@@ -417,6 +417,67 @@ def test_oversized_done_closing_brace_without_newline_stays_nonterminal(tmp_path
     )
 
 
+def test_bare_carriage_return_terminator_rejected(tmp_path):
+    """Regression (reviewer round 5): a bare \\r (not \\r\\n) as the JSONL
+    terminator was accepted as a complete record — but a write interrupted after
+    a \\r (before the \\n of a CRLF pair) is crash-truncated. Only \\n or the
+    complete \\r\\n pair is a valid terminator."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    writer = RunJournalWriter("session_1", "run_bare_cr", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})
+    path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    # Append an oversized done terminated with bare \r (not \r\n).
+    huge = (
+        '{"version":1,"event_id":"run_bare_cr:2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * (_SESSION_REPLAY_MAX_BYTES + 50_000)
+        + '"}}\r'
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(huge)
+    summary = latest_run_summary(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    assert summary["terminal"] is False, (
+        f"bare-\\r terminator must not be accepted as terminal; "
+        f"got terminal_state={summary['terminal_state']!r}"
+    )
+
+
+def test_preceding_event_recovery_is_bounded(tmp_path):
+    """Regression (reviewer round 5): _read_last_complete_line_before used to
+    materialize the ENTIRE preceding record (verified at 4.27 MB), defeating the
+    memory-bound goal. The fix uses the bounded prefix extractor when the
+    preceding record is oversized, so the recovery path stays within the cap."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path, _read_last_complete_line_before
+
+    writer = RunJournalWriter("session_1", "run_bounded_preceding", session_dir=tmp_path)
+    # seq=1: an oversized but COMPLETE done (with newline)
+    huge = {"text": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)}
+    writer.append_sse_event("done", {"session": {"session_id": "session_1"}, **huge})
+    path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    # seq=2: crash-truncated done (no close/newline)
+    partial = (
+        '{"version":1,"event_id":"run_bounded_preceding:2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * (_SESSION_REPLAY_MAX_BYTES + 50_000)
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial)
+    size = path.stat().st_size
+    seek = size - min(size, _SESSION_REPLAY_MAX_BYTES)
+    record_start = __import__("api.run_journal", fromlist=["_find_record_start_before"])._find_record_start_before(path, seek)
+    result = _read_last_complete_line_before(path, record_start)
+    assert result is not None
+    # The preceding record's summary was extracted via bounded prefix, not materialized.
+    assert result.get("_summary_extracted_from_oversized_record") is True, (
+        "preceding oversized record was materialized instead of bounded-prefix extracted"
+    )
+    assert result["payload"] == {}, "payload should be empty (not materialized)"
+
+
+
 
 
 
