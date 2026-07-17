@@ -73,6 +73,8 @@ def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
         ("hex loopback", "http://0x7f.1/private.png"),
         ("abbreviated private", "http://10.1/private.png"),
         ("ipv6 loopback", "http://[::1]/private.png"),
+        ("ipv4-mapped private ipv6", "http://[::ffff:192.168.1.1]/private.png"),
+        ("ipv4-mapped loopback ipv6", "http://[::ffff:127.0.0.1]/private.png"),
         ("backslash media path", "https://hermes.example.test\\api\\media?path=/tmp/private.png"),
         (
             "double encoded media path",
@@ -100,6 +102,8 @@ def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
     assert "0177.0.0.1" not in content
     assert "0x7f.1" not in content
     assert "[::1]" not in content
+    assert "::ffff:192.168.1.1" not in content
+    assert "::ffff:127.0.0.1" not in content
     assert "\\api\\media" not in content
     assert "%2561pi" not in content
 

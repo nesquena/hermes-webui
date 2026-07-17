@@ -198,7 +198,10 @@ def _is_public_media_url(raw_ref: str) -> bool:
     if parsed.scheme.lower() not in {"http", "https"} or not hostname:
         return False
     try:
-        if not ipaddress.ip_address(hostname).is_global:
+        ip = ipaddress.ip_address(hostname)
+        if getattr(ip, "ipv4_mapped", None) is not None:
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
             return False
     except ValueError:
         if (
