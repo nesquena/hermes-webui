@@ -166,13 +166,13 @@ def test_streaming_py_imports_has_pending(cleanup_test_sessions):
 
 
 def test_aiagent_imported_in_streaming(cleanup_test_sessions):
-    """R2b: api/streaming.py must import AIAgent.
+    """R2b: api/streaming.py must resolve AIAgent through the runtime guard.
     When missing, the streaming thread crashed immediately after being spawned.
     """
     src = (REPO_ROOT / "api/streaming.py").read_text()
-    assert "AIAgent" in src, "AIAgent not referenced in api/streaming.py"
-    assert "from run_agent import AIAgent" in src or "import AIAgent" in src, \
-        "AIAgent must be imported in api/streaming.py"
+    assert "get_ai_agent_class" in src, "guarded AIAgent resolver not referenced in api/streaming.py"
+    assert "from api.agent_runtime import" in src and "get_ai_agent_class" in src, \
+        "AIAgent must be resolved through api.agent_runtime in api/streaming.py"
 
 
 # ── R5: SSE loop did not break on cancel event (Sprint 10 bug) ───────────────

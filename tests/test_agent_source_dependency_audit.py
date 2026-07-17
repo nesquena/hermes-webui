@@ -120,7 +120,7 @@ def test_audit_reports_runtime_agent_execution_imports():
     classes = _class_by_id(_run_audit())
     anchors = _anchors(classes["runtime_agent_execution"])
 
-    assert ("api/streaming.py", "run_agent") in anchors
+    assert ("api/agent_runtime.py", "run_agent") in anchors
     assert ("api/routes.py", "tools.skills_tool") in anchors
     assert ("api/streaming.py", "tools.approval") in anchors
     assert ("api/routes.py", "cron.jobs") in anchors

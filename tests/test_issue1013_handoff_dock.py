@@ -248,6 +248,60 @@ def test_no_api_key_handoff_summary_persists_fallback_summary(monkeypatch):
     assert persisted[0]["rounds"] == models.CONVERSATION_ROUND_THRESHOLD
 
 
+def test_stale_runtime_handoff_summary_returns_typed_409_without_persisting(monkeypatch):
+    """A stale runtime must remain retryable instead of becoming fallback success."""
+    import api.routes as routes
+    import api.models as models
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, extra_headers=None: {
+            "status": status,
+            "payload": payload,
+        },
+    )
+    monkeypatch.setattr(
+        models,
+        "count_conversation_rounds",
+        lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD,
+    )
+    monkeypatch.setattr(
+        models,
+        "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "Need a handoff", "timestamp": 1.0},
+            {"role": "assistant", "content": "Context is ready", "timestamp": 2.0},
+        ],
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_handoff_summary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale runtime persisted a fallback summary")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "ensure_agent_runtime_current",
+        lambda: (_ for _ in ()).throw(
+            routes.AgentRuntimeChangedError("restart required")
+        ),
+    )
+
+    response = routes._handle_handoff_summary(object(), {"session_id": "stale-handoff"})
+
+    assert response == {
+        "status": 409,
+        "payload": {
+            "error": "restart required",
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        },
+    }
+
+
 def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
     """Unhandled summary exception should still persist a fallback handoff marker."""
     import api.routes as routes

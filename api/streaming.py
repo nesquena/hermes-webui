@@ -564,10 +564,13 @@ def _prewarm_skill_tool_modules():
 
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
-try:
-    from run_agent import AIAgent
-except ImportError:
-    AIAgent = None
+from api.agent_runtime import ensure_agent_runtime_current, get_ai_agent_class
+
+
+# Eagerly attempt the import at startup, matching the pre-guard behavior. If
+# dependencies are not ready yet, _get_ai_agent() retries when a chat starts.
+AIAgent = get_ai_agent_class()
+
 
 def _get_ai_agent():
     """Return AIAgent class, retrying the import if the initial attempt failed.
@@ -575,15 +578,13 @@ def _get_ai_agent():
     auto_install_agent_deps() in server.py may install missing packages after
     this module is first imported (common in Docker with a volume-mounted agent).
     Re-attempting the import here picks up the newly installed packages without
-    requiring a server restart.
+    requiring a server restart. The shared runtime guard also refuses to reuse
+    cached Agent modules after the source checkout changes.
     """
     global AIAgent
+    ensure_agent_runtime_current()
     if AIAgent is None:
-        try:
-            from run_agent import AIAgent as _cls  # noqa: PLC0415
-            AIAgent = _cls
-        except ImportError:
-            pass
+        AIAgent = get_ai_agent_class()
     return AIAgent
 
 
@@ -6265,6 +6266,65 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
         )
 
 
+def _session_db_is_open(session_db) -> bool:
+    """True when *session_db* still has a live sqlite connection.
+
+    SessionDB.close() sets ``_conn = None``. Subagents capture the parent's
+    SessionDB object by reference at spawn time (delegate_tool), so closing
+    that object mid-parent-turn makes every subsequent child
+    ``append_message`` fail with
+    ``'NoneType' object has no attribute 'execute'``.
+    """
+    if session_db is None:
+        return False
+    return getattr(session_db, "_conn", None) is not None
+
+
+def _adopt_session_db_for_cached_agent(agent, new_session_db):
+    """Attach a SessionDB to a reused cached agent without breaking subagents.
+
+    Historical behaviour (PR #1421 FD-leak fix): create a fresh SessionDB every
+    stream request and close the previous handle before replacing
+    ``agent._session_db``. That stops EMFILE growth, but a server-side wakeup
+    / new turn for the same parent session will close the shared handle while
+    background subagents are still writing into it.
+
+    Policy now:
+    - If the cached agent already holds an *open* SessionDB, keep it and close
+      the unused new handle (no FD leak; live subagents keep working).
+    - If the existing handle is missing or already closed, adopt *new_session_db*.
+    - If *new_session_db* is None, leave the existing handle alone.
+    """
+    if agent is None:
+        return new_session_db
+    existing = getattr(agent, "_session_db", None)
+    if new_session_db is None:
+        return existing
+    if existing is new_session_db:
+        return existing
+    if _session_db_is_open(existing):
+        try:
+            new_session_db.close()
+        except Exception:
+            # Same observability as _replace_session_db_in_kwargs: a failed
+            # close here reintroduces the EMFILE pressure PR #1421 fixed.
+            logger.debug(
+                "Failed to close unused session_db handle in adopt helper",
+                exc_info=True,
+            )
+        return existing
+    if existing is not None:
+        try:
+            existing.close()
+        except Exception:
+            logger.debug(
+                "Failed to close previous session_db handle in adopt helper",
+                exc_info=True,
+            )
+    agent._session_db = new_session_db
+    return new_session_db
+
+
 def _build_session_db_for_stream(state_db_path):
     """Build a per-request SessionDB handle for WebUI session search.
 
@@ -6280,12 +6340,36 @@ def _build_session_db_for_stream(state_db_path):
 
 
 def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
-    """Build a fresh SessionDB and replace ``agent_kwargs['session_db']`` safely."""
+    """Build a fresh SessionDB and replace ``agent_kwargs['session_db']`` safely.
+
+    Does not close an existing open handle that may still be shared with live
+    subagents; only replaces when the prior handle is missing or already closed.
+    """
     if not isinstance(agent_kwargs, dict):
         return None
 
     _old_session_db = agent_kwargs.get("session_db")
     _next_session_db = _build_session_db_for_stream(state_db_path)
+    if _next_session_db is None:
+        # Replacement construction failed. Keep the prior handle only if it is
+        # still open (live subagents may hold it by reference); otherwise
+        # degrade cleanly to None — as master did — so the rebuilt agent lazily
+        # reinitialises its SessionDB instead of reusing a closed handle and
+        # failing every persist/search with
+        # "'NoneType' object has no attribute 'execute'".
+        if _session_db_is_open(_old_session_db):
+            return _old_session_db
+        agent_kwargs["session_db"] = None
+        return None
+    if _session_db_is_open(_old_session_db):
+        # Keep the live handle; discard the unused new one.
+        try:
+            if _next_session_db is not _old_session_db:
+                _next_session_db.close()
+        except Exception:
+            logger.debug("Failed to close unused session_db handle during self-heal")
+        agent_kwargs["session_db"] = _old_session_db
+        return _old_session_db
     if _old_session_db is not None and _old_session_db is not _next_session_db:
         try:
             _old_session_db.close()
@@ -7213,6 +7297,7 @@ def _run_agent_streaming(
             logger.debug("register_process_session failed", exc_info=True)
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
+        ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
@@ -8295,15 +8380,19 @@ def _run_agent_streaming(
                     if 'prefill_messages' in _agent_kwargs and hasattr(agent, 'prefill_messages'):
                         agent.prefill_messages = list(_agent_kwargs.get('prefill_messages') or [])
                     if _session_db is not None:
-                        # Close any previously held SessionDB connection before
-                        # replacing it. Without this, each streaming request creates
-                        # a new SessionDB whose WAL handles leak indefinitely,
-                        # eventually causing EMFILE crashes (#streaming FD leak).
-                        if hasattr(agent, '_session_db') and agent._session_db is not None:
-                            try:
-                                agent._session_db.close()
-                            except Exception:
-                                pass
+                        # Prefer reusing a still-open SessionDB on the cached
+                        # agent. Closing it mid-turn breaks background
+                        # subagents that hold a reference to the same object
+                        # (delegate_tool copies parent._session_db by ref) —
+                        # they then fail with
+                        # 'NoneType' object has no attribute 'execute'.
+                        # When the existing handle is already closed/missing,
+                        # adopt the fresh per-request SessionDB (and close the
+                        # dead one) so we still avoid the EMFILE FD-leak from
+                        # PR #1421.
+                        _session_db = _adopt_session_db_for_cached_agent(
+                            agent, _session_db
+                        )
                         agent._session_db = _session_db
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
