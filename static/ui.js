@@ -14342,6 +14342,10 @@ function renderCompressionUi(){
 // Keyed by session_id. Only used on cross-session navigation, never for
 // in-session updates (new messages, edits, stream events).
 const _sessionHtmlCache=new Map();
+const _SESSION_HTML_CACHE_MAX_ENTRIES=8;
+const _SESSION_HTML_CACHE_MAX_ENTRY_BYTES=2*1024*1024;
+const _SESSION_HTML_CACHE_MAX_TOTAL_BYTES=8*1024*1024;
+let _sessionHtmlCacheBytes=0;
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 // #5966 (Codex F3): persist which capped Transparent-Stream turns the user has
 // revealed, keyed by `${session_id}:${ownerRawIdx}`, so a switch-away/back or a
@@ -14353,9 +14357,46 @@ const _transparentRevealedTurns=new Set();
 function _transparentRevealKey(sessionId, ownerIdx){
   return String(sessionId||(S.session&&S.session.session_id)||'')+':'+String(ownerIdx);
 }
+function _sessionHtmlCacheEntryBytes(html){
+  // JS strings are UTF-16 in memory. This deliberately budgets the retained
+  // browser heap rather than UTF-8 wire size.
+  return String(html||'').length*2;
+}
+function _sessionHtmlCacheDelete(sid){
+  const cached=_sessionHtmlCache.get(sid);
+  if(!cached) return false;
+  _sessionHtmlCacheBytes=Math.max(0,_sessionHtmlCacheBytes-Number(cached.bytes||0));
+  return _sessionHtmlCache.delete(sid);
+}
+function _sessionHtmlCacheGet(sid){
+  const cached=_sessionHtmlCache.get(sid);
+  if(!cached) return null;
+  // Map insertion order is the LRU order; a successful read becomes newest.
+  _sessionHtmlCache.delete(sid);
+  _sessionHtmlCache.set(sid,cached);
+  return cached;
+}
+function _sessionHtmlCacheSet(sid,entry){
+  const bytes=_sessionHtmlCacheEntryBytes(entry&&entry.html);
+  _sessionHtmlCacheDelete(sid);
+  if(bytes>_SESSION_HTML_CACHE_MAX_ENTRY_BYTES) return false;
+  const cached={...entry,bytes};
+  _sessionHtmlCache.set(sid,cached);
+  _sessionHtmlCacheBytes+=bytes;
+  while(
+    _sessionHtmlCache.size>_SESSION_HTML_CACHE_MAX_ENTRIES||
+    _sessionHtmlCacheBytes>_SESSION_HTML_CACHE_MAX_TOTAL_BYTES
+  ){
+    const oldestSid=_sessionHtmlCache.keys().next().value;
+    if(oldestSid===undefined) break;
+    _sessionHtmlCacheDelete(oldestSid);
+  }
+  return _sessionHtmlCache.has(sid);
+}
 function clearMessageRenderCache(){
   _clearRenderCache();
   _sessionHtmlCache.clear();
+  _sessionHtmlCacheBytes=0;
   _sessionHtmlCacheSid=null;
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
@@ -15186,7 +15227,7 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
   if(_messageViewportIntersectsRenderedRow()) return false;
   if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
-    _sessionHtmlCache.delete(_sessionHtmlCacheSid);
+    _sessionHtmlCacheDelete(_sessionHtmlCacheSid);
   }
   _messageVirtualWindowKey='';
   renderMessages({preserveScroll:true,_virtualFallback:true});
@@ -15247,7 +15288,7 @@ function renderMessages(options){
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const renderSignature=_messageRenderCacheSignature();
     cachedRenderSignature=renderSignature;
-    const cached=_sessionHtmlCache.get(sid);
+    const cached=_sessionHtmlCacheGet(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
@@ -16745,12 +16786,8 @@ function renderMessages(options){
   const _keepOpenArmed=(typeof _isKeepSettledWorklogOpenArmed==='function')&&_isKeepSettledWorklogOpenArmed();
   if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_keepOpenArmed){
     const _html=inner.innerHTML;
-    // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
-    if(_html.length<300_000){
-      const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
-      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
-      if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
-    }
+    const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
+    _sessionHtmlCacheSet(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
