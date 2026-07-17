@@ -1059,6 +1059,108 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     assert 0 <= guard_pos < inflight_branch_pos
 
 
+def test_live_recovery_prefers_newer_durable_run_journal_snapshot():
+    """Recovery chooses by stream identity and durable journal progress."""
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
+            _function_decl(SESSIONS_JS, "_selectLiveRecoveryInflight"),
+            """
+const local = {
+  streamId:'stream-1',
+  lastRunJournalSeq:3,
+  lastAssistantText:'stale browser progress',
+};
+const server = {
+  streamId:'stream-1',
+  lastRunJournalSeq:5,
+  lastAssistantText:'newer durable progress',
+};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(local, server, 'stream-1'),
+  server
+);
+const newerLocal = {...local, lastRunJournalSeq:6};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(newerLocal, server, 'stream-1'),
+  newerLocal
+);
+const equalLocal = {...local, lastRunJournalSeq:5};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(equalLocal, server, 'stream-1'),
+  server
+);
+const localWithTodos = {
+  ...local,
+  todos:[{id:'todo-1', content:'live task', status:'in_progress'}],
+  todoStateMeta:{ts:123},
+};
+const selectedWithTodos = _selectLiveRecoveryInflight(localWithTodos, server, 'stream-1');
+assert.strictEqual(selectedWithTodos.lastAssistantText, server.lastAssistantText);
+assert.deepStrictEqual(selectedWithTodos.todos, localWithTodos.todos);
+assert.deepStrictEqual(selectedWithTodos.todoStateMeta, localWithTodos.todoStateMeta);
+const oldStreamLocal = {...local, streamId:'stream-old', lastRunJournalSeq:99};
+assert.strictEqual(
+  _selectLiveRecoveryInflight(oldStreamLocal, server, 'stream-1'),
+  server
+);
+const unidentifiedLocal = {...local};
+delete unidentifiedLocal.streamId;
+assert.strictEqual(
+  _selectLiveRecoveryInflight(unidentifiedLocal, server, 'stream-1'),
+  server
+);
+assert.strictEqual(_selectLiveRecoveryInflight(local, null, 'stream-1'), local);
+assert.strictEqual(_selectLiveRecoveryInflight(null, server, 'stream-1'), server);
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_run_journal_recovery_persists_stream_scoped_event_cursor():
+    """Hard reload must retain both halves of the run-aware replay cursor."""
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+            """
+const inflight = _serverLiveSnapshotInflight({
+  stream_id:'stream-1',
+  last_seq:7,
+  last_event_id:'run-a:7',
+  last_assistant_text:'durable progress',
+}, []);
+assert.strictEqual(inflight.streamId, 'stream-1');
+assert.strictEqual(inflight.lastRunJournalSeq, 7);
+assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+    load_body = _function_body(SESSIONS_JS, "loadSession")
+    attach_body = _function_body(MESSAGES_JS, "attachLiveStream")
+    close_body = _function_body(MESSAGES_JS, "closeLiveStream")
+    compact_body = _function_body(UI_JS, "_compactInflightState")
+    assert "streamId:String(stored.streamId||'')" in load_body
+    assert "stored.streamId||activeStreamId" not in load_body
+    assert "lastRunJournalEventId:String(stored.lastRunJournalEventId||'')" in load_body
+    assert "lastRunJournalEventId:state.lastRunJournalEventId||''" in compact_body
+    assert "inflight.lastRunJournalEventId||''" in attach_body
+    assert "INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId" in attach_body
+    assert "inflight.lastRunJournalEventId=raw" in attach_body
+    assert "INFLIGHT[activeSid].streamId=streamId" in attach_body
+    assert "INFLIGHT[activeSid].lastRunJournalEventId=''" in attach_body
+    assert "lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||''" in close_body
+
+
 def test_reconnect_prefers_trimmed_live_message_over_stale_full_assistant_cache():
     body = _function_body(MESSAGES_JS, "attachLiveStream")
     live_msg_pos = body.find("const _liveInflightAssistant")
