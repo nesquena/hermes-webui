@@ -184,6 +184,10 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+# Serialize each session's complete check/backup/replace sequence without an
+# unbounded per-session lock cache. A rare stripe collision only delays an
+# unrelated save and cannot affect correctness.
+_SESSION_SAVE_LOCK_STRIPES = tuple(threading.RLock() for _ in range(64))
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
@@ -1093,16 +1097,30 @@ def _json_dumps_session(obj) -> str:
     metadata-prefix scanner are both whitespace-agnostic).
 
     orjson is used when available and silently falls back to the stdlib for
-    payloads it cannot encode. Note one deliberate normalization: orjson
-    writes non-finite floats (NaN/Infinity) as ``null``, which is valid JSON,
-    while the stdlib emits the non-standard ``NaN`` literal.
+    payloads it cannot encode. Legacy session files may contain the stdlib's
+    non-standard NaN/Infinity literals; keep those float values stable instead
+    of letting orjson silently rewrite them to ``null``.
     """
-    if _orjson is not None:
+    if _orjson is not None and not _contains_nonfinite_float(obj):
         try:
             return _orjson.dumps(obj, option=_orjson.OPT_NON_STR_KEYS).decode('utf-8')
         except Exception:
             pass
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
+def _contains_nonfinite_float(value) -> bool:
+    """Return whether a JSON-shaped value contains NaN or either infinity."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(
+            _contains_nonfinite_float(key) or _contains_nonfinite_float(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_nonfinite_float(item) for item in value)
+    return False
 
 
 def _json_loads_session(text):
@@ -1117,6 +1135,19 @@ def _json_loads_session(text):
         except Exception:
             pass
     return json.loads(text)
+
+
+def _stream_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a file without materializing a second multi-MB payload in memory."""
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _session_save_lock(session_id):
+    return _SESSION_SAVE_LOCK_STRIPES[hash(str(session_id)) % len(_SESSION_SAVE_LOCK_STRIPES)]
 
 
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
@@ -1511,6 +1542,10 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        with _session_save_lock(self.session_id):
+            self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1590,21 +1625,29 @@ class Session:
         # ── No-op save skip (big-session hotpath, 2026-07-13) ───────────
         # Several periodic callers re-save byte-identical content (observed
         # as full 23 MB rewrites every ~15-30s on an idle large session).
-        # If this object produced the exact same payload it last wrote AND
-        # the on-disk file is untouched since that write (so no other
-        # writer's state can be clobbered or masked), skip the disk write.
+        # If this object produced the exact same payload it last wrote, verify
+        # the real on-disk bytes before skipping. The stat tuple is only a cache
+        # hint: same-size replacements can preserve/coarsen mtime, including an
+        # in-place overwrite. A freshly-loaded object has no digest cache, so it
+        # also verifies once and can retain the no-op optimization after restart.
         # touch_updated_at=True saves always differ (updated_at changed),
         # so recency semantics are unaffected.
-        payload_digest = hashlib.sha256(payload.encode('utf-8')).hexdigest()
-        if payload_digest == getattr(self, '_last_saved_digest', None):
+        payload_bytes = payload.encode('utf-8')
+        payload_digest = hashlib.sha256(payload_bytes).hexdigest()
+        last_saved_digest = getattr(self, '_last_saved_digest', None)
+        if last_saved_digest is None or payload_digest == last_saved_digest:
+            verified_stat = None
             try:
-                st = os.stat(self.path)
+                verified_stat = os.stat(self.path)
                 disk_unchanged = (
-                    (st.st_mtime_ns, st.st_size) == getattr(self, '_last_saved_stat', None)
+                    verified_stat.st_size == len(payload_bytes)
+                    and _stream_file_sha256(self.path) == payload_digest
                 )
             except OSError:
                 disk_unchanged = False
-            if disk_unchanged:
+            if disk_unchanged and verified_stat is not None:
+                self._last_saved_digest = payload_digest
+                self._last_saved_stat = (verified_stat.st_mtime_ns, verified_stat.st_size)
                 if not skip_index:
                     _write_session_index(updates=[self])
                 if self.messages:
