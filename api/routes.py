@@ -2126,6 +2126,8 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
         _diag("self_heal_webui_zero_message_orphan")
     if missing_webui_orphan_ids:
         for _sid in missing_webui_orphan_ids:
+            with get_composer_draft_lock(_sid):
+                delete_composer_draft_sidecar(_sid)
             try:
                 prune_session_from_index(_sid)
                 _diag("prune_orphaned_webui_zero_message")
@@ -14611,6 +14613,8 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         text = body.get("text")
         files = body.get("files")
+        clear_requested = body.get("clear") is True
+        clear_expected = body.get("expected")
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
@@ -14640,28 +14644,51 @@ def handle_post(handler, parsed) -> bool:
         # session/agent lock a running turn may hold.
         with get_composer_draft_lock(sid):
             _draft_mark("acquired_lock")
+            # Validation before this lock can race delete. Re-resolve ownership
+            # at the point of use so a late POST cannot recreate an orphan.
+            try:
+                s_meta = get_session(sid, metadata_only=True)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
             sidecar_draft = read_composer_draft_sidecar(sid)
             if sidecar_draft is not None:
                 current_draft = dict(sidecar_draft)
             else:
                 current_draft = dict(getattr(s_meta, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft and sidecar_draft is not None:
+            if clear_requested and isinstance(clear_expected, dict) and current_draft != clear_expected:
                 unchanged = True
                 saved_draft = current_draft
-            else:
-                # Draft persistence is not conversation activity: the sidecar
-                # write touches neither the session JSON, its updated_at, nor
-                # the sidebar index, so active-session external-refresh polls
-                # never force-reload the chat while the user is typing.
-                _draft_mark("before_save")
-                saved_draft = write_composer_draft_sidecar(sid, next_draft)
+            elif clear_requested:
+                saved_draft = {"text": "", "files": []}
+                owner = get_session(sid)
+                owner.composer_draft = dict(saved_draft)
+                owner.save(touch_updated_at=False)
+                delete_composer_draft_sidecar(sid)
                 update_cached_composer_draft(sid, saved_draft)
-                _draft_mark("after_save")
+            else:
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft and sidecar_draft is not None:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    # A memory-only new chat needs one durable owner record or
+                    # its sidecar becomes undiscoverable after restart.
+                    if not (SESSION_DIR / f"{sid}.json").exists() and (
+                        str(next_draft.get("text") or "") or next_draft.get("files")
+                    ):
+                        owner = get_session(sid)
+                        owner.composer_draft = dict(next_draft)
+                        owner.save(touch_updated_at=False)
+                    # Draft persistence is not conversation activity: existing
+                    # session JSON and sidebar metadata remain untouched.
+                    _draft_mark("before_save")
+                    saved_draft = write_composer_draft_sidecar(sid, next_draft)
+                    update_cached_composer_draft(sid, saved_draft)
+                    _draft_mark("after_save")
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
@@ -14780,31 +14807,34 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Delete from WebUI session store
-        with LOCK:
-            SESSIONS.pop(sid, None)
-        # Evict cached agent so turn count doesn't leak into a recycled session
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
         except Exception:
             return bad(handler, "Invalid session_id", 400)
+        # Delete from WebUI session store and its draft under the same draft
+        # lock used by POST /api/session/draft. Whichever operation wins, the
+        # final state cannot contain a draft without an owning session.
         sidecar_deleted = False
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session file %s", p)
-        sidecar_deleted = not p.exists()
-        try:
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-        try:
-            delete_composer_draft_sidecar(sid)
-        except Exception:
-            logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+        with get_composer_draft_lock(sid):
+            with LOCK:
+                SESSIONS.pop(sid, None)
+            # Evict cached agent so turn count doesn't leak into a recycled session
+            from api.config import _evict_session_agent
+            _evict_session_agent(sid)
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session file %s", p)
+            sidecar_deleted = not p.exists()
+            try:
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                delete_composer_draft_sidecar(sid)
+            except Exception:
+                logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
         try:
             prune_session_from_index(sid)
         except Exception:

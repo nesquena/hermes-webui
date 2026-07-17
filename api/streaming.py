@@ -3720,6 +3720,9 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
+    from api.models import migrate_composer_draft_sidecar
+
+    migrate_composer_draft_sidecar(old_sid, s.session_id)
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return
