@@ -1432,25 +1432,42 @@ def _read_text_bounded(
 
 
 def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) -> tuple[str, bool]:
-    """Read a cron output .md file with a head-then-tail bias.
+    """Read a cron output .md file with a head+tail bias that preserves BOTH the
+    frontmatter/usage block AND the response section.
 
-    Cron output layout is front-matter, ``## Prompt`` (potentially huge), then
-    ``## Response`` (the reply the UI most wants) as the LAST section. A pure
-    head cap drops ``## Response`` when the prompt is large, leaving the snippet/
-    window helpers to serve prompt bytes instead of the reply. So: read the head
-    first; if it contains the ``## Response`` marker, use it. Otherwise fall back
-    to a bounded TAIL read so the response survives. Returns ``(text, truncated)``.
+    Cron output layout is front-matter (model/timestamp/usage), then ``## Prompt``
+    (potentially huge), then ``## Response`` (the reply the UI most wants) as the
+    LAST section. A pure head cap drops ``## Response`` when the prompt is large;
+    a pure tail cap drops the frontmatter/usage block the detail endpoint parses.
+    So:
+      - File under cap: return whole text, not truncated.
+      - Over cap, response marker in head: the head already has both the
+        frontmatter and the response — return it.
+      - Over cap, response marker NOT in head (prompt exceeds cap): return a
+        HEAD + TAIL composite — bounded head (frontmatter/usage) joined to a
+        bounded tail (the response section) with a truncation marker between.
+        This keeps ``_cron_output_usage_metadata`` (reads the pre-``## Response``
+        head) AND ``_cron_output_snippet`` (reads after ``## Response``) working.
+    Returns ``(text, truncated)``.
     """
     text, truncated = _read_text_bounded(path, max_bytes=max_bytes)
     if not truncated:
         return text, False
-    # Over cap. If the response marker is in the head, the head is sufficient.
+    # Over cap. If the response marker is in the head, the head is sufficient
+    # (it carries both the frontmatter and the response).
     if _cron_response_marker_index(text) >= 0:
         return text, True
-    # Marker not in head → the response lives past the cap. Read the tail so the
-    # response section survives (the front-matter/prompt head is sacrificed).
+    # Marker not in head → the prompt pushed the response past the cap. Read the
+    # tail too and composite head + tail so BOTH frontmatter/usage (head) and
+    # the response (tail) survive. The giant prompt middle is omitted.
     tail_text, _tail_trunc = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
-    return tail_text, True
+    head_text = text
+    return (
+        head_text.rstrip()
+        + "\n\n--- [output truncated: large prompt section omitted] ---\n\n"
+        + tail_text,
+        True,
+    )
 
 
 def _cron_job_for_api(job: dict) -> dict:
@@ -20386,10 +20403,17 @@ def _handle_cron_output(handler, parsed):
                 st = f.stat()
             except OSError:
                 continue
-            if spent + st.st_size > total_budget:
+            # Charge the BOUNDED read size against the batch budget, not the
+            # full on-disk st_size: _read_cron_output_bounded reads at most one
+            # head cap + one tail cap (~2 * _FILE_READ_MAX_BYTES), so charging
+            # the full size would skip an oversized newest file entirely (blank
+            # output). Always admit at least the first (newest) file so the
+            # newest run is never blank.
+            charge = min(st.st_size, _FILE_READ_MAX_BYTES * 2)
+            if spent > 0 and spent + charge > total_budget:
                 truncated_files = True
                 break
-            spent += st.st_size
+            spent += charge
             try:
                 # Per-file bound with head-then-tail bias: a large prompt
                 # section pushes ## Response past a pure head cap, so use the
