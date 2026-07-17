@@ -1088,6 +1088,24 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
+def _read_top_level_json_value_from_head(text: str, key: str):
+    """Decode one top-level value from a bounded, possibly incomplete JSON prefix."""
+    key_pos = _find_top_level_json_key(text, key)
+    if key_pos is None:
+        return None
+    colon_pos = text.find(':', key_pos + len(json.dumps(key)))
+    if colon_pos < 0:
+        return None
+    value_pos = colon_pos + 1
+    while value_pos < len(text) and text[value_pos] in ' \t\r\n':
+        value_pos += 1
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text, value_pos)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value
+
+
 def _json_dumps_session(obj) -> str:
     """Serialize a session payload compactly (big-session hotpath, 2026-07-13).
 
@@ -1310,6 +1328,27 @@ def delete_composer_draft_sidecar(sid) -> None:
         p.unlink(missing_ok=True)
     except OSError:
         logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+
+
+def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
+    """Move draft ownership across a session-id rotation without clobbering a newer draft."""
+    old_sid = str(old_sid or '')
+    new_sid = str(new_sid or '')
+    if old_sid == new_sid or not is_safe_session_id(old_sid) or not is_safe_session_id(new_sid):
+        return
+    locks = sorted(
+        ((old_sid, get_composer_draft_lock(old_sid)), (new_sid, get_composer_draft_lock(new_sid))),
+        key=lambda item: item[0],
+    )
+    with locks[0][1]:
+        with locks[1][1]:
+            old_draft = read_composer_draft_sidecar(old_sid)
+            if old_draft is None:
+                return
+            if read_composer_draft_sidecar(new_sid) is None:
+                write_composer_draft_sidecar(new_sid, old_draft)
+                update_cached_composer_draft(new_sid, old_draft)
+            delete_composer_draft_sidecar(old_sid)
 
 
 def resolve_composer_draft(sid, legacy=None) -> dict:
@@ -3687,7 +3726,6 @@ def _has_compression_continuation(session) -> bool:
     # shallow JSON metadata scan; session files write parent_session_id before
     # the messages array, so this avoids loading multi-MB transcripts.
     try:
-        needle = f'"parent_session_id": "{sid}"'
         for path in SESSION_DIR.glob('*.json'):
             if path.name.startswith('_') or path.stem == sid:
                 continue
@@ -3701,7 +3739,7 @@ def _has_compression_continuation(session) -> bool:
                 head = _read_file_head(path, max_prefix_bytes=16384)[:4096]
             except OSError:
                 continue
-            if needle in head:
+            if _read_top_level_json_value_from_head(head, 'parent_session_id') == sid:
                 return True
     except Exception:
         logger.debug("Failed to scan session files for compression continuation", exc_info=True)
