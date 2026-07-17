@@ -24807,7 +24807,17 @@ def _handle_handoff_summary(handler, body):
             if getattr(agent, "api_mode", "") == "codex_responses":
                 codex_kwargs = agent._build_api_kwargs(api_messages)
                 codex_kwargs.pop("tools", None)
-                codex_kwargs["max_output_tokens"] = max_tokens
+                codex_provider = str(getattr(agent, "provider", "") or "").strip().lower()
+                codex_base_url = str(getattr(agent, "base_url", "") or "").strip().lower()
+                is_chatgpt_codex = (
+                    codex_provider == "openai-codex"
+                    or (
+                        urlsplit(codex_base_url).hostname == "chatgpt.com"
+                        and "/backend-api/codex" in codex_base_url
+                    )
+                )
+                if not is_chatgpt_codex:
+                    codex_kwargs["max_output_tokens"] = max_tokens
                 resp = agent._run_codex_stream(codex_kwargs)
                 assistant_message, _ = agent._normalize_codex_response(resp)
                 result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
