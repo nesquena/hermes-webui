@@ -18377,12 +18377,18 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "unauthorized", 401)
 
-    # High-quality per-client rate limiting for TTS.
+    # High-quality per-client rate limiting for TTS. Sliding window with burst
+    # capacity: sentence-split playback (Preferences → Response splitting)
+    # legitimately issues several small requests in quick succession — one
+    # request per fixed interval would 429 every chunk after the first — while
+    # a tight abuse loop still gets throttled at the window cap.
     if not hasattr(_handle_tts, "_tts_limiter"):
         import time as _time, threading as _threading
+        from collections import deque as _deque
         class _TtsRateLimiter:
-            def __init__(self, window_seconds=2.0, prune_interval=50):
+            def __init__(self, window_seconds=10.0, max_requests=12, prune_interval=50):
                 self.window = window_seconds
+                self.max_requests = max_requests
                 self.prune_interval = prune_interval
                 self._hits = {}
                 self._lock = _threading.Lock()
@@ -18404,18 +18410,25 @@ def _handle_tts(handler, parsed):
                 if session_cookie and "." in str(session_cookie):
                     key = str(session_cookie).split(".", 1)[0]
                 now = _time.time()
+                cutoff = now - self.window
                 with self._lock:
                     self._checks += 1
                     if self._checks % self.prune_interval == 0:
-                        cutoff = now - (self.window * 10)
-                        self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
-                    last = self._hits.get(key, 0)
-                    if now - last < self.window:
+                        self._hits = {
+                            k: v for k, v in self._hits.items()
+                            if v and v[-1] > cutoff
+                        }
+                    hits = self._hits.get(key)
+                    if hits is None:
+                        hits = self._hits[key] = _deque()
+                    while hits and hits[0] <= cutoff:
+                        hits.popleft()
+                    if len(hits) >= self.max_requests:
                         return False
-                    self._hits[key] = now
+                    hits.append(now)
                     return True
 
-        _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
+        _handle_tts._tts_limiter = _TtsRateLimiter()
 
     limiter = _handle_tts._tts_limiter
     if not limiter.check(handler, cv):

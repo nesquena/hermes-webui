@@ -145,22 +145,33 @@ def test_tts_accepts_ui_prosody_shape(monkeypatch):
     assert captured["kwargs"] == {"rate": "+10%", "pitch": "-5Hz"}
 
 
-def test_tts_rate_limits_second_immediate_request():
+def test_tts_rate_limits_burst_over_window_cap():
     # The limiter runs (and records the client) BEFORE the voice allowlist and
-    # before any edge-tts synthesis. Use an invalid voice so the first request
-    # still registers with the limiter but returns at the allowlist (400) without
-    # making a real network call; the second immediate request from the SAME
-    # client is then throttled (429). Unique client IP avoids any cross-test key
-    # collision (the autouse fixture also resets the limiter each test).
-    h1 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
-    routes._handle_tts(h1, None)
-    assert h1.status == 400  # rejected at allowlist, limiter recorded the client
-    h2 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
-    routes._handle_tts(h2, None)
-    assert h2.status == 429
+    # before any edge-tts synthesis. Use an invalid voice so each request still
+    # registers with the limiter but returns at the allowlist (400) without
+    # making a real network call. The sliding window allows a burst (sentence-
+    # split playback sends several small chunk requests in quick succession);
+    # only requests beyond the window cap are throttled (429). Unique client IP
+    # avoids any cross-test key collision (the autouse fixture also resets the
+    # limiter each test).
+    cap = routes._handle_tts._tts_limiter.max_requests if hasattr(routes._handle_tts, "_tts_limiter") else 12
+    first = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
+    routes._handle_tts(first, None)
+    assert first.status == 400  # rejected at allowlist, limiter recorded the client
+    cap = routes._handle_tts._tts_limiter.max_requests
+    for _ in range(cap - 1):
+        h = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
+        routes._handle_tts(h, None)
+        assert h.status == 400  # burst within the window cap stays allowed
+    over = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
+    routes._handle_tts(over, None)
+    assert over.status == 429
 
 
 def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default():
+    # Rotating X-Forwarded-For must not evade the limiter: without the
+    # trusted-proxy opt-in the key is the socket address, so all requests
+    # count against the same window regardless of the spoofed header.
     h1 = _post(
         {"text": "hello", "voice": "not-a-real-voice"},
         headers={"X-Forwarded-For": "203.0.113.10"},
@@ -169,13 +180,22 @@ def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default():
     routes._handle_tts(h1, None)
     assert h1.status == 400
 
-    h2 = _post(
+    cap = routes._handle_tts._tts_limiter.max_requests
+    for i in range(cap - 1):
+        h = _post(
+            {"text": "hello", "voice": "not-a-real-voice"},
+            headers={"X-Forwarded-For": f"203.0.113.{11 + i}"},
+            client="10.0.0.4",
+        )
+        routes._handle_tts(h, None)
+        assert h.status == 400
+    over = _post(
         {"text": "hello", "voice": "not-a-real-voice"},
-        headers={"X-Forwarded-For": "203.0.113.11"},
+        headers={"X-Forwarded-For": "203.0.113.99"},
         client="10.0.0.4",
     )
-    routes._handle_tts(h2, None)
-    assert h2.status == 429
+    routes._handle_tts(over, None)
+    assert over.status == 429
 
 
 def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
