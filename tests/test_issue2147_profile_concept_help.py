@@ -11,11 +11,13 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 # `en` locale block and ride the runtime fallback (`_locale[key] ?? LOCALES.en[key]`
 # in static/i18n.js) instead of being duplicated into every locale. Every
 # locale-parity test subtracts this set (each imports it as its own
-# PROFILE_CONCEPT_FALLBACK_KEYS), and test_i18n_keys_are_english_fallback_owned
-# pins each key to the en block and out of every other locale. Extend THIS one
-# list (GUIDELINES.md #8) when adding new English-only copy rather than pasting
-# translations into all 15 locale blocks. The name is historical (the mechanism
-# began with the profile-concept help card, #2147); it is not profile-specific.
+# PROFILE_CONCEPT_FALLBACK_KEYS), the static settings-page coverage gate uses it
+# to distinguish fallback-owned keys from translated keys, and
+# test_i18n_keys_are_english_fallback_owned pins each key to the en block and out
+# of every other locale. Extend THIS one list (GUIDELINES.md #8) when adding new
+# English-only copy rather than pasting translations into all 15 locale blocks.
+# The name is historical (the mechanism began with the profile-concept help
+# card, #2147); it is not profile-specific.
 PROFILE_CONCEPT_KEYS = [
     # Profiles-vs-workspaces concept help (#2147).
     "profile_concept_title",
