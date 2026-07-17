@@ -16,6 +16,7 @@ import json
 import math
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -198,6 +199,109 @@ def test_noop_skip_detects_same_stat_external_replacement(session_store, replace
 
     s.save(touch_updated_at=False, skip_index=True)
     assert json.loads(p.read_text(encoding="utf-8"))["title"] == "owned-title"
+
+
+def test_noop_skip_detects_atomic_replacement_after_digest_read(
+    session_store, monkeypatch
+):
+    s = _make_session("digest-race-atomic", 2)
+    s.title = "owned-A"
+    s.save(touch_updated_at=False, skip_index=True)
+    p = s.path
+    owned = p.read_bytes()
+    original_stat = p.stat()
+    replacement = owned.replace(b"owned-A", b"owned-B")
+    assert len(replacement) == len(owned)
+
+    original_open = Path.open
+    replacement_injected = False
+
+    class ReplaceAtDigestEof:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._stream.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._stream, name)
+
+        def read(self, *args, **kwargs):
+            nonlocal replacement_injected
+            chunk = self._stream.read(*args, **kwargs)
+            if chunk == b"" and not replacement_injected:
+                replacement_injected = True
+                external = p.with_suffix(".external")
+                external.write_bytes(replacement)
+                os.replace(external, p)
+                os.utime(p, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            return chunk
+
+    def injecting_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if path == p and args and args[0] == "rb" and not replacement_injected:
+            return ReplaceAtDigestEof(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", injecting_open)
+    s.save(touch_updated_at=False, skip_index=True)
+
+    assert replacement_injected, "test must replace the file after digest EOF"
+    assert p.read_bytes() == owned
+
+
+def test_noop_skip_detects_in_place_change_during_digest_read(
+    session_store, monkeypatch
+):
+    s = _make_session("digest-race-in-place", 2)
+    s.title = "owned-A"
+    s.messages[0]["content"] = "x" * (1024 * 1024 + 128)
+    s.save(touch_updated_at=False, skip_index=True)
+    p = s.path
+    owned = p.read_bytes()
+    original_stat = p.stat()
+    replacement = owned.replace(b"owned-A", b"owned-B")
+    assert len(replacement) == len(owned) > 1024 * 1024
+
+    original_open = Path.open
+    replacement_injected = False
+
+    class ReplaceAfterFirstChunk:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._stream.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._stream, name)
+
+        def read(self, *args, **kwargs):
+            nonlocal replacement_injected
+            chunk = self._stream.read(*args, **kwargs)
+            if chunk and not replacement_injected:
+                replacement_injected = True
+                p.write_bytes(replacement)
+                os.utime(p, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            return chunk
+
+    def injecting_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if path == p and args and args[0] == "rb" and not replacement_injected:
+            return ReplaceAfterFirstChunk(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", injecting_open)
+    s.save(touch_updated_at=False, skip_index=True)
+
+    assert replacement_injected, "test must replace the file during chunked digesting"
+    assert p.read_bytes() == owned
 
 
 def test_noop_resave_after_reload_skips_disk_write(session_store, monkeypatch):
