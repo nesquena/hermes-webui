@@ -403,3 +403,32 @@ def test_cron_output_batch_newest_oversized_file_still_returned(monkeypatch, tmp
     )
     assert entry.get("truncated") is True
 
+
+def test_cron_run_detail_response_marker_split_at_head_boundary(monkeypatch, tmp_path):
+    """Regression (reviewer round 2): when the ## Response marker ends right at
+    the head cap, a tail-ONLY read returned an empty snippet (the body was past
+    the cap and the seek split the marker line so neither head nor tail had it
+    intact). The fix composites head + tail and re-injects the marker if the seek
+    split it, so the snippet shows the reply body."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Construct so the ## Response marker is the LAST thing fitting in the head
+    # (its body is entirely past the cap) — the exact boundary case.
+    marker = "## Response\n"
+    filler_len = _FILE_READ_MAX_BYTES - len(marker.encode("utf-8"))
+    (out_dir / "run.md").write_text(
+        f"# Cron\n{'F' * filler_len}{marker}Reply body entirely past the cap here.\n",
+        encoding="utf-8",
+    )
+    fpath = out_dir / "run.md"
+    txt, truncated = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    snippet = _cron_output_snippet(txt)
+    # The reply body survives (was missing — empty/prompt snippet — before the fix).
+    assert "Reply body entirely past the cap" in snippet, (
+        f"response body lost at marker-boundary: snippet={snippet!r}"
+    )
+
+
