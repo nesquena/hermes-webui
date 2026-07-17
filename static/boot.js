@@ -1832,11 +1832,44 @@ window.renderTranscript=function(container, messages, opts){
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     _vmStopAudio();
+    _armThinkingWatchdog();
     // send() is global from boot.js
     if(typeof send==='function') send();
   }
 
+  // Recovery for a 'thinking' turn that never reaches the done→autoRead hook:
+  // a dropped SSE stream, a cancelled or errored agent run, or a settle that
+  // takes a different code path all leave voice mode stuck on the "thinking"
+  // indicator with the mic never re-arming. Poll S.busy — once the turn is no
+  // longer running, either speak the reply (if one landed) or drop back to
+  // listening. A hard ceiling bounds the wait so a wedged backend can't pin
+  // voice mode forever.
+  let _vmThinkTimer=null, _vmThinkStart=0;
+  function _clearThinkingWatchdog(){ if(_vmThinkTimer){ clearInterval(_vmThinkTimer); _vmThinkTimer=null; } }
+  function _armThinkingWatchdog(){
+    _clearThinkingWatchdog();
+    _vmThinkStart=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+    _vmThinkTimer=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='thinking'){ _clearThinkingWatchdog(); return; }
+      const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+      const busy=(typeof S!=='undefined')&&S.busy;
+      // Give the normal done→autoReadLastAssistant path a moment to fire first;
+      // only step in once the run has clearly stopped, or after a hard timeout.
+      if(!busy){
+        _clearThinkingWatchdog();
+        setTimeout(()=>{
+          if(_voiceModeActive&&_voiceModeState==='thinking') _speakResponse();
+        },600);
+      }else if(now-_vmThinkStart>180000){
+        _clearThinkingWatchdog();
+        if(typeof showToast==='function') showToast(t('voice_mode_timeout')||'Voice mode: no response, listening again',3000);
+        if(_voiceModeActive) _startListening();
+      }
+    },1000);
+  }
+
   function _speakResponse(){
+    _clearThinkingWatchdog();
     if(!_voiceModeActive) return;
     // Bail out if the user navigated to a different session between send and
     // stream completion. The patched autoReadLastAssistant fires globally;
@@ -2015,6 +2048,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _clearThinkingWatchdog();
     _vmStopAudio();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;

@@ -437,6 +437,48 @@ def _normalize_transcribe_language(raw):
     return ""
 
 
+def _configured_stt_mime_types():
+    """Return the parsed stt.mime_types allowlist (lowercased tokens) or []
+    when unset/unreadable — empty means accept anything."""
+    try:
+        from api.config import get_config
+        stt = (get_config() or {}).get('stt', {})
+        raw = str((stt.get('mime_types') if isinstance(stt, dict) else '') or '').strip()
+    except Exception:
+        return []
+    if not raw:
+        return []
+    import re as _re
+    return [t.strip().lower() for t in _re.split(r'[,;]', raw) if t.strip()]
+
+
+def _stt_mime_rejection(files, safe_name):
+    """Enforce the stt.mime_types allowlist. Returns an error string to reject
+    with (HTTP 415) or None to accept. Matches the upload's content-type — the
+    multipart part type when available, else guessed from the filename — against
+    exact tokens and ``type/*`` wildcards. Empty allowlist accepts anything."""
+    allow = _configured_stt_mime_types()
+    if not allow:
+        return None
+    import mimetypes
+    ctype = ''
+    entry = files.get('file') if isinstance(files, dict) else None
+    # parse_multipart may expose a 3-tuple (name, bytes, content_type); tolerate both.
+    if isinstance(entry, (list, tuple)) and len(entry) >= 3 and entry[2]:
+        ctype = str(entry[2]).split(';', 1)[0].strip().lower()
+    if not ctype:
+        guessed, _ = mimetypes.guess_type(safe_name)
+        ctype = (guessed or '').lower()
+    if not ctype:
+        # Can't determine the type — don't hard-fail a legit upload on that alone.
+        return None
+    top = ctype.split('/', 1)[0]
+    for tok in allow:
+        if tok == ctype or tok == top + '/*' or tok == '*/*':
+            return None
+    return 'Audio type "%s" is not in the allowed types (%s)' % (ctype, ', '.join(allow))
+
+
 def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None
@@ -452,6 +494,13 @@ def handle_transcribe(handler):
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
         safe_name = _sanitize_upload_name(filename)
+        # Optional operator-configured MIME allowlist (stt.mime_types, e.g.
+        # "audio/webm,audio/ogg"). Enforced here so the setting is real rather
+        # than advisory; empty/absent = accept anything. Matches on the upload's
+        # declared content-type, with a suffix fallback, and supports "audio/*".
+        _mime_reject = _stt_mime_rejection(files, safe_name)
+        if _mime_reject is not None:
+            return j(handler, {'error': _mime_reject}, status=415)
         suffix = Path(safe_name).suffix or '.webm'
         with tempfile.NamedTemporaryFile(prefix='webui-stt-', suffix=suffix, delete=False) as tmp:
             temp_path = tmp.name
@@ -476,9 +525,23 @@ def handle_transcribe(handler):
         result = transcribe_audio(temp_path, language=language) if language \
             else transcribe_audio(temp_path)
         if not result.get('success'):
-            msg = str(result.get('error') or 'Transcription failed')
-            status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400
-            return j(handler, {'error': msg}, status=status)
+            raw_msg = str(result.get('error') or 'Transcription failed')
+            low = raw_msg.lower()
+            status = 503 if 'unavailable' in low or 'not configured' in low else 400
+            # The provider error can embed server temp paths / ffmpeg build
+            # details (subprocess stderr). Log the full text server-side but
+            # return a category to the client instead of leaking filesystem
+            # internals. Known-safe categories keep useful UX.
+            print('[webui] transcribe provider error: ' + raw_msg, flush=True)
+            if 'unavailable' in low or 'not configured' in low:
+                client_msg = 'Speech-to-text is not available on this server'
+            elif 'timeout' in low or 'timed out' in low:
+                client_msg = 'Transcription timed out'
+            elif 'connection' in low:
+                client_msg = 'Could not reach the transcription server'
+            else:
+                client_msg = 'Could not transcribe the audio (unsupported or corrupt file)'
+            return j(handler, {'error': client_msg}, status=status)
         transcript = str(result.get('transcript') or '').strip()
         return j(handler, {'ok': True, 'transcript': transcript})
     except ValueError as e:

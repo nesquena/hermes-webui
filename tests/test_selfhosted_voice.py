@@ -454,6 +454,39 @@ def test_stt_request_format_field_wired():
     assert "request_format" in vc._STT_STR_FIELDS
 
 
+def test_stt_mime_types_allowlist_enforced(monkeypatch):
+    """stt.mime_types is enforced (415) instead of being advisory-only."""
+    import api.config as config
+    import api.upload as upload
+
+    monkeypatch.setattr(config, "get_config",
+                        lambda: {"stt": {"mime_types": "audio/webm,audio/ogg"}})
+    # exact match accepted
+    assert upload._stt_mime_rejection({"file": ("v.webm", b"x", "audio/webm")}, "v.webm") is None
+    # disallowed type rejected
+    rej = upload._stt_mime_rejection({"file": ("v.wav", b"x", "audio/wav")}, "v.wav")
+    assert rej and "not in the allowed types" in rej
+    # wildcard token
+    monkeypatch.setattr(config, "get_config", lambda: {"stt": {"mime_types": "audio/*"}})
+    assert upload._stt_mime_rejection({"file": ("v.mp3", b"x", "audio/mpeg")}, "v.mp3") is None
+    assert upload._stt_mime_rejection({"file": ("v.mp4", b"x", "video/mp4")}, "v.mp4")
+    # empty allowlist accepts anything
+    monkeypatch.setattr(config, "get_config", lambda: {"stt": {}})
+    assert upload._stt_mime_rejection({"file": ("v.wav", b"x", "audio/wav")}, "v.wav") is None
+
+
+def test_voice_mode_thinking_watchdog_present():
+    """Voice mode recovers from a 'thinking' turn that never reaches the
+    done→autoRead hook (dropped stream / cancel / error) instead of hanging."""
+    boot = (_STATIC / "boot.js").read_text(encoding="utf-8")
+    assert "_armThinkingWatchdog" in boot
+    assert "_clearThinkingWatchdog" in boot
+    # watchdog polls S.busy and recovers to listening / speaks the reply
+    assert "S.busy" in boot
+    # armed on send, cleared on speak + deactivate
+    assert boot.count("_clearThinkingWatchdog()") >= 2
+
+
 def test_panels_js_wires_voice_config():
     src = (_STATIC / "panels.js").read_text(encoding="utf-8")
     assert "_wireVoiceEndpoints" in src
