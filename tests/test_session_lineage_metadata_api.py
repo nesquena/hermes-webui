@@ -58,6 +58,27 @@ def _ensure_state_db(path):
     return conn
 
 
+def _ensure_messages_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        )
+        """
+    )
+
+
+def _insert_state_message(conn, sid, *, role, content, timestamp):
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        (sid, role, content, timestamp),
+    )
+    conn.commit()
+
+
 def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
     conn.execute(
         """
@@ -387,6 +408,194 @@ def test_generic_webui_title_gets_read_only_state_db_display_title(_isolate):
         assert row["title"] == "Hermes WebUI #8"
         assert row["display_title"] == "Hermes WebUI #177"
         assert row["_state_db_title"] == "Hermes WebUI #177"
+    finally:
+        conn.close()
+
+
+def test_generic_subagent_title_gets_goal_display_title(_isolate):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_subagent_goal", title="Subagent Session", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_goal",
+            title="Subagent Session",
+            source="subagent",
+            started_at=t0,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_goal",
+            role="user",
+            content="Find the root cause of the failing sidebar test",
+            timestamp=t0 + 1,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}["lineage_api_subagent_goal"]
+
+        assert row["title"] == "Subagent Session"
+        assert row["display_title"] == "Find the root cause of the failing sidebar test"
+    finally:
+        conn.close()
+
+
+def test_custom_subagent_title_stays_authoritative(_isolate):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_subagent_custom", title="Investigate auth", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_custom",
+            title="Investigate auth",
+            source="subagent",
+            started_at=t0,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_custom",
+            role="user",
+            content="A different goal",
+            timestamp=t0 + 1,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}["lineage_api_subagent_custom"]
+
+        assert row["title"] == "Investigate auth"
+        assert "display_title" not in row
+    finally:
+        conn.close()
+
+
+def test_generic_subagent_title_falls_back_without_first_user_message(_isolate):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_subagent_empty", title="Subagent Session", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_empty",
+            title="Subagent Session",
+            source="subagent",
+            started_at=t0,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_empty",
+            role="assistant",
+            content="Only assistant output",
+            timestamp=t0 + 1,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}["lineage_api_subagent_empty"]
+
+        assert row["title"] == "Subagent Session"
+        assert "display_title" not in row
+    finally:
+        conn.close()
+
+
+def test_generic_subagent_title_skips_null_first_user_message(_isolate):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_subagent_null_first", title="Subagent Session", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_null_first",
+            title="Subagent Session",
+            source="subagent",
+            started_at=t0,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_null_first",
+            role="user",
+            content=None,
+            timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_null_first",
+            role="user",
+            content="Recover the next usable delegated title",
+            timestamp=t0 + 2,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}["lineage_api_subagent_null_first"]
+
+        assert row["title"] == "Subagent Session"
+        assert row["display_title"] == "Recover the next usable delegated title"
+    finally:
+        conn.close()
+
+
+def test_generic_subagent_title_respects_sidebar_override_cap(_isolate, monkeypatch):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    older = time.time() - 200
+    newer = time.time() - 100
+    try:
+        monkeypatch.setenv("HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N", "1")
+        _save_webui_session("lineage_api_subagent_old", title="Subagent Session", updated_at=older)
+        _save_webui_session("lineage_api_subagent_new", title="Subagent Session", updated_at=newer)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_old",
+            title="Subagent Session",
+            source="subagent",
+            started_at=older,
+        )
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_new",
+            title="Subagent Session",
+            source="subagent",
+            started_at=newer,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_old",
+            role="user",
+            content="Older delegated title",
+            timestamp=older + 1,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_new",
+            role="user",
+            content="Newest delegated title",
+            timestamp=newer + 1,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}
+
+        assert rows["lineage_api_subagent_new"]["display_title"] == "Newest delegated title"
+        assert "display_title" not in rows["lineage_api_subagent_old"]
+    finally:
+        conn.close()
+def test_generic_subagent_title_falls_back_without_messages_table(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_subagent_no_messages", title="Subagent Session", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_no_messages",
+            title="Subagent Session",
+            source="subagent",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions(include_lineage_metadata=False)}["lineage_api_subagent_no_messages"]
+
+        assert row["title"] == "Subagent Session"
+        assert "display_title" not in row
     finally:
         conn.close()
 

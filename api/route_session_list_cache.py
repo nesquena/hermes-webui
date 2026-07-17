@@ -14,15 +14,16 @@ from api.profiles import _profiles_match
 
 _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # #4808: while a turn is actively streaming the frontend polls /api/sessions on a
-# fixed cadence (static/sessions.js `_streamingPollMs` = 5000ms). With the idle TTL
-# of 2.5s, every streaming poll lands in a fresh window and forces a full
-# all_sessions() rebuild on the hot path under the global store LOCK — pinning CPU
-# and starving token rendering on large stores (recurrence of #4672). Hold the
-# sidebar cache steady for longer than one poll interval while streaming; live
-# runtime state (active stream, sort order, pending flags) is overlaid on every
-# response regardless of cache, and structural/settings changes still evict
-# immediately via the source stamp.
-_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 10.0
+# fixed cadence (static/sessions.js `_streamingPollMs`). With the idle TTL of
+# 2.5s, the entry expires between streaming polls, so each poll can find it stale
+# and force a full all_sessions() rebuild on the hot path under the global store
+# LOCK — pinning CPU and starving token rendering on large stores (recurrence of
+# #4672). Hold the sidebar cache steady for longer than one poll interval while
+# streaming; live runtime state (active stream, sort order, pending flags) is
+# overlaid on every response regardless of cache, and structural/settings changes
+# still invalidate immediately. Keep this strictly greater than
+# `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
+_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -176,7 +177,7 @@ def _session_list_cache_get(
             _SESSIONS_CACHE.pop(key, None)
             return None, False
         # #4808: widen the freshness window while a turn is streaming so the fixed
-        # 5s streaming poll cadence doesn't force a full rebuild on every poll.
+        # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS

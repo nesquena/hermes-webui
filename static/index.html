@@ -200,7 +200,7 @@
           </button>
         </div>
       </div>
-      <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
+      <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" type="search" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
     </div>
     <!-- Tasks (cron) panel -->
@@ -225,7 +225,7 @@
         </div>
       </div>
       <div class="kanban-filter-stack">
-        <div class="sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="kanbanSearch" placeholder="Search tasks" data-i18n-placeholder="kanban_search_tasks" oninput="filterKanban()"></div>
+        <div class="sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="kanbanSearch" type="search" placeholder="Search tasks" data-i18n-placeholder="kanban_search_tasks" oninput="filterKanban()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"></div>
         <select id="kanbanAssigneeFilter" onchange="loadKanban(true)" aria-label="Assignee filter"></select>
         <select id="kanbanTenantFilter" onchange="loadKanban(true)" aria-label="Tenant filter"></select>
         <label class="kanban-check"><input id="kanbanIncludeArchived" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_include_archived">Include archived</span></label>
@@ -253,7 +253,7 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openSkillCreate()" data-tooltip="New skill" data-i18n-title="new_skill" aria-label="New skill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
-      <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
+      <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" type="search" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"></div>
       <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Memory panel -->
@@ -353,8 +353,9 @@
             <circle cx="11" cy="11" r="8"/>
             <path d="M21 21l-4.35-4.35"/>
           </svg>
-          <input id="settingsSearch" data-i18n-placeholder="settings_search_placeholder"
-            placeholder="Search settings…" oninput="filterSettings(this.value)" autocomplete="off">
+          <input id="settingsSearch" type="search" data-i18n-placeholder="settings_search_placeholder"
+            placeholder="Search settings…" oninput="filterSettings(this.value)" autocomplete="off"
+            data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other">
           <div id="settingsSearchResults" class="settings-search-results" style="display:none"></div>
         </div>
         <div class="settings-menu-items">
@@ -1541,11 +1542,20 @@
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
               <div id="settingsAuthStatus" style="margin-bottom:8px;display:none"></div>
-              <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <!-- These password inputs need an explicit <form> owner. Without one they are
+                   "unowned" fields, so Chromium groups every field in the document into a
+                   single synthetic password form and picks the first text input in the DOM
+                   (the sidebar conversation filter) as the form's username field — which it
+                   then autofills with the saved account name. display:contents keeps the
+                   layout byte-identical; onsubmit is neutralised because the panel saves via
+                   JS, not a form submit. -->
+              <form id="settingsPasswordForm" style="display:contents" autocomplete="off" onsubmit="return false">
+              <input type="password" id="settingsPassword" autocomplete="new-password" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
               <div id="settingsCurrentPasswordBlock" style="display:none;margin-top:6px">
                 <label for="settingsCurrentPassword" style="font-size:11px;display:block;margin-bottom:4px" data-i18n="current_password_label">Current Password</label>
-                <input type="password" id="settingsCurrentPassword" placeholder="Enter current password…" data-i18n-placeholder="current_password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <input type="password" id="settingsCurrentPassword" autocomplete="current-password" placeholder="Enter current password…" data-i18n-placeholder="current_password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
               </div>
+              </form>
               <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">The HERMES_WEBUI_PASSWORD environment variable is currently set and takes precedence. Unset it and restart the server to manage the password from here.</div>
             </div>
             <div id="settingsAuthDisabledWarning" style="display:none;margin-top:8px;padding:10px 12px;border-radius:8px;border:1px solid rgba(220,80,80,.35);background:rgba(220,80,80,.08)">
