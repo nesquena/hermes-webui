@@ -1424,47 +1424,60 @@ def _read_text_bounded(
         raw = fh.read(max_bytes)
     text = raw.decode("utf-8", errors="replace")
     if tail:
-        # Drop the partial first line at the seek boundary (it's a fragment).
+        # Drop the partial first line at the seek boundary — BUT only if doing so
+        # leaves something behind. If the whole window is a single line (no
+        # newline, or the only newline is the trailing one), the first line is a
+        # COMPLETE line (the seek landed on a line boundary) and must be kept;
+        # dropping it would return empty and lose the only content.
         nl = text.find("\n")
-        if nl >= 0:
+        if nl >= 0 and nl + 1 < len(text):
             text = text[nl + 1:]
     return text, True
 
 
 def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) -> tuple[str, bool]:
-    """Read a cron output .md file with a head+tail bias that preserves BOTH the
-    frontmatter/usage block AND the response section.
+    """Read a cron output .md file preserving BOTH the frontmatter/usage block
+    AND the response body, under a byte bound.
 
     Cron output layout is front-matter (model/timestamp/usage), then ``## Prompt``
     (potentially huge), then ``## Response`` (the reply the UI most wants) as the
-    LAST section. A pure head cap drops ``## Response`` when the prompt is large;
-    a pure tail cap drops the frontmatter/usage block the detail endpoint parses.
-    So:
+    LAST section. A head cap can drop or split the ``## Response`` marker/body;
+    a tail cap drops the frontmatter. So:
+
       - File under cap: return whole text, not truncated.
-      - Over cap, response marker in head: the head already has both the
-        frontmatter and the response — return it.
-      - Over cap, response marker NOT in head (prompt exceeds cap): return a
-        HEAD + TAIL composite — bounded head (frontmatter/usage) joined to a
-        bounded tail (the response section) with a truncation marker between.
-        This keeps ``_cron_output_usage_metadata`` (reads the pre-``## Response``
-        head) AND ``_cron_output_snippet`` (reads after ``## Response``) working.
+      - Over cap, marker fully in head: the head already carries the frontmatter
+        AND the marker + the leading body. Return it (if the body extends past
+        the cap, the snippet still shows the reply's start, which is the useful
+        preview).
+      - Over cap, marker NOT fully in head (the prompt pushed it past the cap,
+        OR the seek split the marker line): composite a bounded head (frontmatter)
+        with a bounded tail (the response body at EOF), re-injecting the marker
+        if the seek split it. This keeps ``_cron_output_usage_metadata`` (reads
+        the pre-``## Response`` head) and ``_cron_output_snippet`` (keys on the
+        marker) both working.
     Returns ``(text, truncated)``.
     """
     text, truncated = _read_text_bounded(path, max_bytes=max_bytes)
     if not truncated:
         return text, False
-    # Over cap. If the response marker is in the head, the head is sufficient
-    # (it carries both the frontmatter and the response).
+    # Over cap. If the ## Response marker is fully in the head, the head carries
+    # frontmatter + marker + leading body — return it.
     if _cron_response_marker_index(text) >= 0:
         return text, True
-    # Marker not in head → the prompt pushed the response past the cap. Read the
-    # tail too and composite head + tail so BOTH frontmatter/usage (head) and
-    # the response (tail) survive. The giant prompt middle is omitted.
-    tail_text, _tail_trunc = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
-    head_text = text
+    # Marker not fully in head: either the prompt pushed it past the cap, or the
+    # seek split the marker line. The tail contains the response body. Composite
+    # head (frontmatter/usage) + tail (body), re-injecting the marker if the seek
+    # split it (so _cron_output_snippet, which keys on the marker, can find the body).
+    # NOTE: _read_text_bounded(tail=True) already drops the partial first line at
+    # the seek boundary, so tail_text is clean complete lines — do NOT re-drop here.
+    tail_text, _ = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
+    # If the marker isn't in the tail either, the seek split it — re-inject.
+    # Safe: a response body at EOF implies a ## Response marker preceded it.
+    if _cron_response_marker_index(tail_text) < 0 and tail_text.strip():
+        tail_text = "## Response\n" + tail_text
     return (
-        head_text.rstrip()
-        + "\n\n--- [output truncated: large prompt section omitted] ---\n\n"
+        text.rstrip()
+        + "\n\n--- [output truncated: large section omitted] ---\n\n"
         + tail_text,
         True,
     )

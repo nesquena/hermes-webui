@@ -1484,6 +1484,8 @@ const LOCALES = {
     cron_script_badge_title: 'Script job (no agent)',
     cron_workdir_label: 'Working directory',
     cron_view_full_output: 'View full output',
+    cron_output_truncated_hint: 'Output is large; showing a bounded preview (front-matter + response). The full file is on disk.',
+    skill_file_truncated_hint: 'File is large; showing the first 512 KiB only.',
     cron_all_runs: 'All runs',
     cron_hide_runs: 'Hide runs',
     cron_no_runs_yet: '(no runs yet)',
