@@ -149,3 +149,21 @@ def test_active_and_lineage_sessions_never_use_detail_tail_cache():
     child = _session("lineage_cache_001", [])
     child.parent_session_id = "parent_001"
     assert routes._session_detail_tail_cache_eligible(child) is False
+
+
+def test_detail_tail_cache_hit_is_isolated_from_top_level_response_mutation():
+    key = ("detail-cache-copy",)
+    payload = {"session": {"session_id": "copy_001"}, "cached": True}
+    routes._clear_session_detail_tail_cache()
+    try:
+        routes._session_detail_tail_cache_set(key, payload)
+
+        first_hit = routes._session_detail_tail_cache_get(key)
+        assert first_hit is not None
+        first_hit["request_only"] = True
+
+        second_hit = routes._session_detail_tail_cache_get(key)
+        assert second_hit is not None
+        assert "request_only" not in second_hit
+    finally:
+        routes._clear_session_detail_tail_cache()

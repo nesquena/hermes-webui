@@ -9378,7 +9378,7 @@ def _session_detail_tail_cache_get(key: tuple | None) -> dict | None:
         if entry is None:
             return None
         _SESSION_DETAIL_TAIL_CACHE.move_to_end(key)
-        return entry[0]
+        return dict(entry[0])
 
 
 def _session_detail_tail_cache_set(key: tuple | None, payload: dict) -> None:
