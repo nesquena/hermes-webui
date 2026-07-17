@@ -13,7 +13,9 @@ Covers the changes that keep a multi-MB session usable:
 from __future__ import annotations
 
 import json
+import math
 import os
+import threading
 
 import pytest
 
@@ -58,6 +60,32 @@ def _make_session(sid, n_messages):
     s = Session(session_id=sid, title="hotpath test")
     s.messages = [_msg("user" if i % 2 == 0 else "assistant", f"msg {i}", i) for i in range(n_messages)]
     return s
+
+
+class _NullingFastJson:
+    """Minimal orjson-shaped codec that exposes its non-finite behaviour."""
+
+    OPT_NON_STR_KEYS = 1
+
+    @staticmethod
+    def dumps(obj, option=0):
+        def normalize(value):
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
+            if isinstance(value, list):
+                return [normalize(item) for item in value]
+            if isinstance(value, dict):
+                return {key: normalize(item) for key, item in value.items()}
+            return value
+
+        return json.dumps(normalize(obj), separators=(",", ":")).encode("utf-8")
+
+    @staticmethod
+    def loads(text):
+        def reject_nonfinite(value):
+            raise ValueError(f"non-finite literal {value}")
+
+        return json.loads(text, parse_constant=reject_nonfinite)
 
 
 def test_save_writes_compact_json_metadata_prefix_still_readable(session_store):
@@ -140,6 +168,133 @@ def test_noop_skip_defers_to_external_writer(session_store):
     # the skip must not fire, and this save must win with its own content.
     s.save(touch_updated_at=False, skip_index=True)
     assert json.loads(p.read_text(encoding="utf-8"))["title"] == "hotpath test"
+
+
+@pytest.mark.parametrize("replacement", ["atomic", "inplace"])
+def test_noop_skip_detects_same_stat_external_replacement(session_store, replacement):
+    s = _make_session(f"hotpath_same_stat_{replacement}", 1)
+    s.title = "owned-title"
+    s.save(touch_updated_at=False, skip_index=True)
+    p = s.path
+    original_stat = p.stat()
+    external = p.read_text(encoding="utf-8").replace("owned-title", "other-title")
+    assert len(external.encode("utf-8")) == original_stat.st_size
+
+    if replacement == "atomic":
+        replacement_path = p.with_suffix(".external")
+        replacement_path.write_text(external, encoding="utf-8")
+        os.replace(replacement_path, p)
+    else:
+        with p.open("r+", encoding="utf-8") as handle:
+            handle.write(external)
+            handle.flush()
+            os.fsync(handle.fileno())
+    os.utime(p, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    same_stat = p.stat()
+    assert (same_stat.st_mtime_ns, same_stat.st_size) == (
+        original_stat.st_mtime_ns,
+        original_stat.st_size,
+    )
+
+    s.save(touch_updated_at=False, skip_index=True)
+    assert json.loads(p.read_text(encoding="utf-8"))["title"] == "owned-title"
+
+
+def test_noop_resave_after_reload_skips_disk_write(session_store, monkeypatch):
+    _make_session("hotpath_restart", 2).save(touch_updated_at=False, skip_index=True)
+    reloaded = Session.load("hotpath_restart")
+    assert reloaded is not None
+    assert not hasattr(reloaded, "_last_saved_digest")
+
+    def unexpected_replace(*_args, **_kwargs):
+        raise AssertionError("a true no-op after cache loss must not rewrite the session")
+
+    monkeypatch.setattr(_models, "_safe_replace", unexpected_replace)
+    reloaded.save(touch_updated_at=False, skip_index=True)
+
+
+def test_same_session_saves_are_serialized(session_store, monkeypatch):
+    seed = _make_session("hotpath_locked", 1)
+    seed.save(touch_updated_at=False, skip_index=True)
+    first = Session.load("hotpath_locked")
+    second = Session.load("hotpath_locked")
+    assert first is not None and second is not None
+    first.title = "first-writer"
+    second.title = "second-writer"
+
+    original_replace = _models._safe_replace
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    call_lock = threading.Lock()
+    calls = 0
+
+    def controlled_replace(src, dst):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_entered.set()
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(_models, "_safe_replace", controlled_replace)
+    errors = []
+
+    def save(session):
+        try:
+            session.save(touch_updated_at=False, skip_index=True)
+        except Exception as exc:
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=save, args=(first,))
+    second_thread = threading.Thread(target=save, args=(second,))
+    first_thread.start()
+    assert first_entered.wait(timeout=5)
+    second_thread.start()
+    assert not second_entered.wait(timeout=0.2), (
+        "a second writer for the same session must wait for the first save"
+    )
+    release_first.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert not errors
+    assert second_entered.is_set()
+    assert json.loads(seed.path.read_text(encoding="utf-8"))["title"] == "second-writer"
+
+
+@pytest.mark.parametrize("fast_codec", [None, _NullingFastJson], ids=["stdlib", "fast-codec"])
+def test_nested_nonfinite_values_roundtrip_deterministically(session_store, monkeypatch, fast_codec):
+    monkeypatch.setattr(_models, "_orjson", fast_codec)
+    session = _make_session(f"hotpath_nonfinite_{'fast' if fast_codec else 'stdlib'}", 1)
+    session.estimated_cost = float("nan")
+    session.messages[0]["metrics"] = {
+        "positive": float("inf"),
+        "nested": [1.25, {"negative": float("-inf")}],
+    }
+    session.save(touch_updated_at=False, skip_index=True)
+    first_bytes = session.path.read_bytes()
+
+    reloaded = Session.load(session.session_id)
+    assert reloaded is not None
+    assert isinstance(reloaded.estimated_cost, float)
+    assert math.isnan(reloaded.estimated_cost)
+    assert reloaded.messages[0]["metrics"]["positive"] == float("inf")
+    assert reloaded.messages[0]["metrics"]["nested"][0] == 1.25
+    assert reloaded.messages[0]["metrics"]["nested"][1]["negative"] == float("-inf")
+    reloaded.save(touch_updated_at=False, skip_index=True)
+    assert reloaded.path.read_bytes() == first_bytes
+
+
+@pytest.mark.parametrize("fast_codec", [None, _NullingFastJson], ids=["stdlib", "fast-codec"])
+def test_malformed_session_json_fails_consistently(monkeypatch, fast_codec):
+    monkeypatch.setattr(_models, "_orjson", fast_codec)
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        _models._json_loads_session('{"messages": [}')
 
 
 def test_draft_sidecar_roundtrip_and_precedence(session_store):
