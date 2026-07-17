@@ -400,6 +400,14 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
+    _ssrf_bypass = os.getenv("OIDC_SSRF_ALLOW_PRIVATE", "").strip().lower()
+    if _ssrf_bypass in ("1", "true", "yes"):
+        logger.warning(
+            "OIDC_SSRF_ALLOW_PRIVATE is enabled — SSRF protection bypassed for %s. "
+            "This reduces security; only use on trusted networks.",
+            url,
+        )
+        return
     if _is_disallowed_oidc_host(hostname):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
