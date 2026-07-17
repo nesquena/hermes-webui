@@ -18508,6 +18508,7 @@ def _handle_tts(handler, parsed):
         # server (base_url, optional api_key, model, voice, response_format) works.
         cfg_api_key = cfg_base_url = cfg_model = cfg_voice = cfg_format = ""
         cfg_extra = {}
+        cfg_timeout = 30.0
         try:
             from api.config import get_config
             _tts_cfg = (get_config() or {}).get("tts", {})
@@ -18518,6 +18519,15 @@ def _handle_tts(handler, parsed):
                 cfg_model = str(_oai_cfg.get("model") or "").strip()
                 cfg_voice = str(_oai_cfg.get("voice") or "").strip()
                 cfg_format = str(_oai_cfg.get("response_format") or "").strip()
+                # Slow self-hosted synthesis (first-request model load, long
+                # inputs) can exceed the default 30s — tts.openai.timeout
+                # raises it, clamped to keep a stuck server from pinning the
+                # worker thread indefinitely.
+                try:
+                    cfg_timeout = float(_oai_cfg.get("timeout") or 30.0)
+                except (TypeError, ValueError):
+                    cfg_timeout = 30.0
+                cfg_timeout = min(max(cfg_timeout, 1.0), 300.0)
             if isinstance(_tts_cfg, dict) and isinstance(_tts_cfg.get("extra_params"), dict):
                 cfg_extra = _tts_cfg["extra_params"]
         except Exception:
@@ -18580,7 +18590,7 @@ def _handle_tts(handler, parsed):
         # bearer leaks and SSRF bounce redirects after hostname validation.
         audio_content_type = "audio/mpeg"
         try:
-            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), _PinnedHTTPSHandler())) as resp:
+            with _tts_open(req, timeout=cfg_timeout, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), _PinnedHTTPSHandler())) as resp:
                 # Forward the upstream audio type — self-hosted servers (e.g.
                 # Qwen3-TTS) often return WAV, not MP3; mislabelling it as
                 # audio/mpeg can break playback.

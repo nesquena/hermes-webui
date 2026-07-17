@@ -209,6 +209,38 @@ def test_openai_tts_env_key_still_used_for_public_host(monkeypatch):
     assert captured["auth"] == "Bearer sk-env-key"
 
 
+def test_openai_tts_timeout_configurable(monkeypatch):
+    """tts.openai.timeout reaches the proxy request (clamped 1..300);
+    default stays 30 — a whole-answer synthesis on a slow self-hosted
+    server timed out at the hard 30s before this."""
+    import api.config as config
+    captured = {}
+
+    def _fake_open(req, timeout=None, **kw):
+        captured["timeout"] = timeout
+        return _StreamOnceResponse([b"x"], headers={"Content-Type": "audio/wav"})
+
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "192.168.1.0/24")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": "http://192.168.1.50:8001/v1",
+                           "model": "m", "voice": "v", "timeout": 120}}
+    })
+    monkeypatch.setattr(routes, "_tts_open", _fake_open)
+    h = _post({"text": "Hallo", "engine": "openai"}, client="10.82.0.26")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+    assert captured["timeout"] == 120.0
+
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": "http://192.168.1.50:8001/v1",
+                           "model": "m", "voice": "v", "timeout": 99999}}
+    })
+    h = _post({"text": "Hallo", "engine": "openai"}, client="10.82.0.27")
+    routes._handle_tts(h, None)
+    assert captured["timeout"] == 300.0  # clamped
+
+
 def test_openai_tts_merges_extra_params(monkeypatch):
     """tts.extra_params reach the upstream JSON body; core fields win."""
     import api.config as config
