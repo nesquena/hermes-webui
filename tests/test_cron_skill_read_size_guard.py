@@ -327,3 +327,79 @@ def test_read_text_bounded_tail_mode_reads_trailing_bytes(tmp_path):
         f"first line looks like a partial fragment: {first_line!r}"
     )
 
+
+# ── head+tail preserves frontmatter/usage (regression) ────────────────────────
+
+
+def test_cron_run_detail_oversized_preserves_usage_and_response(monkeypatch, tmp_path):
+    """Regression (reviewer): when the prompt exceeds the cap and ## Response is
+    at the end, a tail-ONLY read dropped the frontmatter/usage block, so the
+    detail endpoint returned an empty usage object. The head+tail composite
+    preserves BOTH: usage parses from the head frontmatter, and the response
+    parses from the tail."""
+    from api.routes import _read_cron_output_bounded, _cron_output_usage_metadata
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    prompt_blob = "P" * (_FILE_READ_MAX_BYTES + 50000)
+    # Real cron output format the usage parser expects (bolded **Model:** etc.).
+    (out_dir / "run.md").write_text(
+        "# Cron Run\n\n**Model:** gpt-5\n**Tokens:** 1000 input, 500 output\n\n"
+        f"## Prompt\n{prompt_blob}\n\n## Response\nThe actual reply.\n",
+        encoding="utf-8",
+    )
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    fpath = out_dir / "run.md"
+    txt, truncated = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    # The response survives (tail).
+    assert "## Response" in txt
+    assert "actual reply" in txt
+    # The usage block survives (head frontmatter) — this was the regression.
+    usage = _cron_output_usage_metadata(txt)
+    assert usage.get("model") == "gpt-5", f"usage model lost: {usage}"
+    assert usage.get("input_tokens") == 1000, f"usage tokens lost: {usage}"
+
+    # End-to-end through the detail handler.
+    handler = _JSONHandler()
+    routes._handle_cron_run_detail(
+        handler, SimpleNamespace(query="job_id=job1&filename=run.md")
+    )
+    body = _payload(handler)
+    assert body["truncated"] is True
+    assert body["usage"].get("model") == "gpt-5"
+    assert "actual reply" in body["snippet"]
+
+
+def test_cron_output_batch_newest_oversized_file_still_returned(monkeypatch, tmp_path):
+    """Regression (reviewer): the batch endpoint charged the full on-disk
+    st_size against the budget before the bounded read, so a single oversized
+    NEWEST file exceeded the remaining budget and was skipped entirely (blank
+    output). The fix charges the BOUNDED read size and always admits at least
+    the newest file, so the newest run is never blank."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # One oversized file (well over the per-file cap) with a real response marker.
+    prompt_blob = "P" * (_FILE_READ_MAX_BYTES * 3)
+    (out_dir / "run-newest.md").write_text(
+        f"## Prompt\n{prompt_blob}\n\n## Response\nNewest run reply.\n",
+        encoding="utf-8",
+    )
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    # The newest file is returned (not skipped) with a bounded preview.
+    assert len(body["outputs"]) >= 1, f"newest file was skipped: {body}"
+    entry = body["outputs"][0]
+    assert entry["filename"] == "run-newest.md"
+    assert "Newest run reply." in entry["content"], (
+        f"newest file's response missing from batch output: {entry}"
+    )
+    assert entry.get("truncated") is True
+
