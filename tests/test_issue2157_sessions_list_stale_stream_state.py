@@ -86,6 +86,53 @@ def test_sessions_list_reconciles_stale_stream_state_before_serializing(monkeypa
     routes._session_list_cache_clear()
 
 
+def test_webui_sidebar_source_does_not_load_cli_sessions(monkeypatch):
+    """WebUI-only sidebar filter must not pay the CLI/agent session projection cost."""
+    routes._session_list_cache_clear()
+    cli_loaded = {"value": False}
+
+    def fake_all_sessions(diag=None, **_kwargs):
+        return [
+            {
+                "session_id": "webui-session",
+                "title": "WebUI Session",
+                "profile": "default",
+                "message_count": 1,
+                "updated_at": 1,
+                "last_message_at": 1,
+            }
+        ]
+
+    def fake_get_cli_sessions(*_args, **_kwargs):
+        cli_loaded["value"] = True
+        raise AssertionError("sidebar_source=webui must not load CLI sessions")
+
+    monkeypatch.setattr(routes, "all_sessions", fake_all_sessions)
+    monkeypatch.setattr(routes, "get_cli_sessions", fake_get_cli_sessions)
+    monkeypatch.setattr(
+        routes,
+        "load_settings",
+        lambda: {
+            "show_cli_sessions": True,
+            "show_claude_code_sessions": True,
+            "show_previous_messaging_sessions": True,
+            "show_cron_sessions": True,
+            "show_webhook_sessions": True,
+        },
+    )
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    handler = _FakeHandler()
+    parsed = urlparse("http://example.com/api/sessions?sidebar_source=webui")
+    routes.handle_get(handler, parsed)
+
+    assert handler.status == 200
+    payload = handler.json_body()
+    assert [s["session_id"] for s in payload["sessions"]] == ["webui-session"]
+    assert cli_loaded["value"] is False
+    routes._session_list_cache_clear()
+
+
 def test_reconcile_stale_stream_state_skips_live_stream_rows(monkeypatch):
     loaded = []
 

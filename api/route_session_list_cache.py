@@ -27,7 +27,7 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
-_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
+_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple[object, ...], dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
@@ -98,13 +98,14 @@ def _session_list_cache_active_stream_ids():
     return _active_stream_ids()
 
 
-def _session_list_cache_resolved_source_stamp(key: tuple):
+def _session_list_cache_resolved_source_stamp(key: tuple) -> tuple[object, ...]:
     try:
         import api.routes as _routes
 
         override = getattr(_routes, "_session_list_cache_source_stamp", None)
         if callable(override) and override is not _session_list_cache_source_stamp:
-            return override(key)
+            value = override(key)
+            return value if isinstance(value, tuple) else (value,)
     except Exception:
         pass
     return _session_list_cache_source_stamp(key)
@@ -338,15 +339,48 @@ def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
         return None
 
 
-def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
-    _cache_profile, _cache_all_profiles, _cache_show_cli_sessions, *_rest = key
+def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
+    (
+        _cache_profile,
+        _cache_all_profiles,
+        _cache_show_cli_sessions,
+        _cache_show_previous_messaging_sessions,
+        _cache_show_cron_sessions,
+        *_rest,
+    ) = key
+    try:
+        sidebar_source = key[10]
+    except Exception:
+        sidebar_source = None
     try:
         swv = _session_list_cache_settings_write_version()
     except Exception:
         swv = 0
+    # WebUI-only sidebar requests are intentionally driven by the JSON sidecar
+    # index + settings stamp, not by state.db/WAL/gateway churn. The builder no
+    # longer loads CLI/gateway sessions for sidebar_source=webui, so letting
+    # unrelated state.db writes invalidate this cache only turns lightweight
+    # sidebar refreshes into repeated full rebuilds (and browser timeouts) under
+    # active chat/cron/gateway load. Sidecar index changes still invalidate
+    # immediately; age-based staleness still refreshes in the background.
+    if sidebar_source == "webui":
+        marker = ("webui-sidebar",)
+        try:
+            session_index_path = _session_list_cache_session_dir() / "_index.json"
+        except Exception:
+            session_index_path = None
+        return (
+            marker,
+            marker,
+            marker,
+            _session_list_cache_path_stamp(session_index_path),
+            _session_list_cache_path_stamp(_session_list_cache_settings_file()),
+            marker,
+            swv,
+        )
     # WebUI-origin sessions can also receive settled rows in state.db when the
-    # official Hermes Desktop App continues the same agent session.  The sidebar
-    # therefore watches state.db even when the CLI/external-session tab is hidden.
+    # official Hermes Desktop App continues the same agent session.  The non-
+    # webui sidebar buckets therefore still watch state.db.
     #
     # Streaming hold-down (#4672): while a turn is in flight, collapse the
     # volatile state.db-derived components (db/WAL stat, gateway metadata, index

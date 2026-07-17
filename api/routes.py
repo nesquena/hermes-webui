@@ -2219,7 +2219,12 @@ def _build_session_list_cache_payload(
     show_cron_sessions = bool(show_cron_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-    if show_cli_sessions:
+    # A WebUI-only sidebar request must not pay the CLI/agent projection cost and
+    # then filter it away. On large state.db / Claude-Code stores that projection
+    # can exceed the browser timeout and block later lightweight WebUI refreshes
+    # behind the same cache rebuild path.
+    load_cli_sessions = show_cli_sessions and sidebar_source != "webui"
+    if load_cli_sessions:
         diag_stage("get_cli_sessions")
         if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
             cli = get_cli_sessions(
@@ -2365,6 +2370,25 @@ def _build_session_list_cache_payload(
             show_cron_sessions=show_cron_sessions,
             show_webhook_sessions=show_webhook_sessions,
         )
+    elif show_cli_sessions:
+        # sidebar_source == "webui": skip the external get_cli_sessions()
+        # bridge (22c4352e's perf win — that projection is the expensive
+        # part on large state.db / Claude-Code stores), but do NOT strip
+        # locally-sourced CLI-tagged rows out of webui_sessions. Those rows
+        # already came from all_sessions() above at zero extra cost, and
+        # _filter_sidebar_source() below still excludes them from the
+        # returned "sessions" list — dropping them here only zeroed out
+        # cli_session_count/archived_cli_count for the sidebar tab badges
+        # while sidebar_source=webui (#4766 regression: this branch used to
+        # run only for show_cli_sessions=False, where zero CLI counts are
+        # correct; the sidebar_source=="webui" shortcut hijacked the same
+        # branch and zeroed counts for the wrong reason).
+        diag_stage("filter_webui_sessions")
+        webui_sessions = _prune_orphaned_webui_zero_message_sessions(
+            webui_sessions,
+            diag_stage=diag_stage,
+        )
+        deduped_cli = []
     else:
         diag_stage("filter_webui_sessions")
         webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]

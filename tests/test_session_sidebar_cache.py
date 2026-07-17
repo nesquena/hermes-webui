@@ -702,6 +702,42 @@ def test_source_stamp_still_tracks_wal_when_idle(tmp_path, monkeypatch):
     assert after != before
 
 
+def test_webui_source_stamp_ignores_state_db_churn_when_idle(tmp_path, monkeypatch):
+    """WebUI-only sidebar cache must not be invalidated by unrelated state.db writes.
+
+    Browser sidebar requests use sidebar_source=webui and the builder skips
+    CLI/gateway projections. If state.db/WAL churn still changes this stamp, every
+    chat/cron/gateway write evicts the lightweight WebUI cache and reintroduces
+    multi-second rebuilds on the browser hot path.
+    """
+    _key, state_db_wal, settings_file, fingerprint = _build_stamp_env(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=True,
+        show_cron_sessions=True,
+        include_archived=False,
+        exclude_hidden=True,
+        visible_only=True,
+        show_webhook_sessions=True,
+        sidebar_source="webui",
+    )
+
+    before = routes._session_list_cache_source_stamp(key)
+    state_db_wal.write_text("wal-2-grew-a-lot", encoding="utf-8")
+    fingerprint["value"] = (2, 99)
+    after_state_churn = routes._session_list_cache_source_stamp(key)
+    settings_file.write_text('{"show_cli_sessions": true}', encoding="utf-8")
+    after_settings = routes._session_list_cache_source_stamp(key)
+
+    assert after_state_churn == before
+    assert after_settings != before
+
+
 def _streaming_ttl_key():
     return routes._session_list_cache_key(
         active_profile="default",
