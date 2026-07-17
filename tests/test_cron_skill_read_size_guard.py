@@ -405,30 +405,63 @@ def test_cron_output_batch_newest_oversized_file_still_returned(monkeypatch, tmp
 
 
 def test_cron_run_detail_response_marker_split_at_head_boundary(monkeypatch, tmp_path):
-    """Regression (reviewer round 2): when the ## Response marker ends right at
-    the head cap, a tail-ONLY read returned an empty snippet (the body was past
-    the cap and the seek split the marker line so neither head nor tail had it
-    intact). The fix composites head + tail and re-injects the marker if the seek
-    split it, so the snippet shows the reply body."""
+    """Regression (reviewer round 2): when the seek splits the ## Response marker
+    line so neither head nor tail has it intact, the composite must re-inject the
+    marker so the snippet shows the reply body. Byte-exact padding so the marker
+    straddles the cap (the round-1 fixture was off by 7 — it included '# Cron\\n'
+    in the content but not in the filler-length math, so the marker landed past
+    the cap rather than straddling it)."""
     from api.routes import _read_cron_output_bounded, _cron_output_snippet
 
     out_dir = tmp_path / "cron-out" / "job1"
     out_dir.mkdir(parents=True)
-    # Construct so the ## Response marker is the LAST thing fitting in the head
-    # (its body is entirely past the cap) — the exact boundary case.
     marker = "## Response\n"
-    filler_len = _FILE_READ_MAX_BYTES - len(marker.encode("utf-8"))
-    (out_dir / "run.md").write_text(
-        f"# Cron\n{'F' * filler_len}{marker}Reply body entirely past the cap here.\n",
-        encoding="utf-8",
-    )
+    # Byte-exact: frontmatter + filler + marker where filler fills exactly to
+    # the cap, so the marker starts AT the cap and straddles it (split marker).
+    frontmatter = "# Cron\n"
+    filler_len = _FILE_READ_MAX_BYTES - len(frontmatter.encode("utf-8"))
+    content = frontmatter + ("F" * filler_len) + marker + "Split-marker reply body.\n"
+    (out_dir / "run.md").write_text(content, encoding="utf-8")
     fpath = out_dir / "run.md"
     txt, truncated = _read_cron_output_bounded(fpath)
     assert truncated is True
     snippet = _cron_output_snippet(txt)
-    # The reply body survives (was missing — empty/prompt snippet — before the fix).
-    assert "Reply body entirely past the cap" in snippet, (
-        f"response body lost at marker-boundary: snippet={snippet!r}"
+    assert "Split-marker reply body." in snippet, (
+        f"response body lost at split-marker boundary: snippet={snippet!r}"
     )
+
+
+def test_cron_run_detail_marker_ends_exactly_at_boundary(monkeypatch, tmp_path):
+    """Regression (reviewer round 3): when the COMPLETE ## Response heading ends
+    EXACTLY at the head cap (preceded by a newline so it's recognized, but zero
+    body bytes follow it in the head), marker presence used to trigger an early
+    head-only return → snippet: "(empty)". The fix tail-splices the body when the
+    head has the marker but no body, de-duplicating the marker so it appears once."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    marker_b = b"## Response\n"
+    body = "Reply body entirely past the boundary.".encode("utf-8")
+    frontmatter = b"# Cron\n"
+    pre_marker_newline = b"\n"  # so _cron_response_marker_index recognizes it
+    # frontmatter + filler + newline + marker == exactly cap bytes (marker ends at cap)
+    filler = b"F" * (_FILE_READ_MAX_BYTES - len(frontmatter) - len(pre_marker_newline) - len(marker_b))
+    head_portion = frontmatter + filler + pre_marker_newline + marker_b
+    assert len(head_portion) == _FILE_READ_MAX_BYTES, len(head_portion)
+    (out_dir / "run.md").write_bytes(head_portion + body + b"\n")
+    fpath = out_dir / "run.md"
+    txt, truncated = _read_cron_output_bounded(fpath)
+    assert truncated is True
+    snippet = _cron_output_snippet(txt)
+    # Body survives (was "(empty)" before the round-3 fix).
+    assert "Reply body entirely past the boundary." in snippet, (
+        f"response body lost when marker ends exactly at boundary: snippet={snippet!r}"
+    )
+    # Marker appears exactly once (de-duplicated, not duplicated by the splice).
+    assert txt.count("## Response") == 1, (
+        f"marker duplicated in splice: count={txt.count('## Response')}"
+    )
+
 
 
