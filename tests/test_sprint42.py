@@ -71,6 +71,15 @@ class TestSessionDBInjection(unittest.TestCase):
             "SessionDB init helper must use try/except for non-fatal error handling",
         )
 
+    def test_sessiondb_retry_only_targets_transient_sqlite_errors(self):
+        """Permanent constructor errors must leave the retry loop immediately."""
+        helper_start = STREAMING_PY.find("def _build_session_db_for_stream")
+        helper_end = STREAMING_PY.find("\n\ndef _attempt_credential_self_heal", helper_start)
+        helper_src = STREAMING_PY[helper_start:helper_end]
+        self.assertIn("except sqlite3.OperationalError as _db_err", helper_src)
+        self.assertIn('"locked" in _db_err_text or "busy" in _db_err_text', helper_src)
+        self.assertIn("raise _last_error or RuntimeError", helper_src)
+
     def test_sessiondb_failure_logs_warning(self):
         """A failure initializing SessionDB must print a WARNING (not silently drop the error)."""
         self.assertIn(
