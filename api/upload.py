@@ -412,6 +412,31 @@ def handle_upload_extract(handler):
         return j(handler, {'error': 'Archive extraction failed'}, status=500)
 
 
+def _normalize_transcribe_language(raw):
+    """Normalize a UI language hint to an ISO-639-1 primary subtag.
+
+    Accepts BCP-47 tags from the browser locale (e.g. ``"de-DE"`` → ``"de"``)
+    as ``str`` or ``bytes``. Returns ``""`` for empty/invalid input so callers
+    fall back to auto-detect.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8", "ignore")
+        except Exception:
+            return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    primary = text.replace("_", "-").split("-", 1)[0].lower()
+    # ISO-639-1 is two letters; anything else is passed through only if it
+    # looks like a bare language code, else dropped to auto-detect.
+    if primary.isalpha() and 2 <= len(primary) <= 3:
+        return primary
+    return ""
+
+
 def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None
@@ -435,7 +460,16 @@ def handle_transcribe(handler):
             from tools.transcription_tools import transcribe_audio
         except ImportError:
             return j(handler, {'error': 'Speech-to-text is unavailable on this server'}, status=503)
-        result = transcribe_audio(temp_path)
+        # Optional language hint from the UI locale (e.g. "de", "en-US"); the
+        # provider decides whether/how to use it. Empty/absent = auto-detect.
+        language = _normalize_transcribe_language(fields.get('language'))
+        try:
+            result = transcribe_audio(temp_path, language=language) if language \
+                else transcribe_audio(temp_path)
+        except TypeError:
+            # Older transcription_tools without the language kwarg — degrade
+            # gracefully to auto-detect rather than 500.
+            result = transcribe_audio(temp_path)
         if not result.get('success'):
             msg = str(result.get('error') or 'Transcription failed')
             status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400

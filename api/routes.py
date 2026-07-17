@@ -9553,6 +9553,11 @@ from api.upload import (
     handle_transcribe_capability,
     handle_workspace_upload,
 )
+from api.voice_config import (
+    handle_voice_config_get,
+    handle_voice_config_post,
+    handle_tts_capability,
+)
 from api.streaming import (
     _sse,
     _sse_set_write_deadline,
@@ -12382,6 +12387,12 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
 
+    if parsed.path == "/api/tts/capability":
+        return handle_tts_capability(handler)
+
+    if parsed.path == "/api/voice/config":
+        return handle_voice_config_get(handler)
+
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
         # reads display.show_reasoning and agent.reasoning_effort from
@@ -13842,6 +13853,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
+
+    if parsed.path == "/api/voice/config":
+        return handle_voice_config_post(handler)
 
     if parsed.path == "/api/client-events/log":
         if diag:
@@ -17996,6 +18010,89 @@ _TTS_PROXY_MAX_BYTES = 16 * 1024 * 1024
 _TTS_LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
+def _tts_lan_allowlist():
+    """Opt-in allowlist for self-hosted OpenAI-compatible TTS on private LANs.
+
+    By default the SSRF guard blocks http:// to anything but localhost and
+    https:// to any private/loopback/link-local/reserved target. A self-hosted
+    TTS server on a private LAN IP (e.g. http://192.168.1.50:8001/v1) is exactly
+    such a blocked target, so reaching it requires two independent opt-ins —
+    mirroring HERMES_WEBUI_TRUST_FORWARDED_FOR + HERMES_WEBUI_TRUSTED_PROXY_CIDRS:
+
+      * HERMES_WEBUI_TTS_ALLOW_LAN  — boolean gate (must be truthy), AND
+      * HERMES_WEBUI_TTS_ALLOW_HOSTS — comma/semicolon list of the specific
+        IPs, CIDRs, or hostnames that become reachable.
+
+    Returns ``(enabled, networks, names)``. ``enabled`` is False (fail-closed)
+    when the gate is off or the list is empty, so neither opt-in alone widens
+    the guard. Bearer tokens are sent in cleartext to http LAN targets — an
+    accepted trade-off of this explicit opt-in.
+    """
+    import ipaddress
+
+    if not _truthy_env("HERMES_WEBUI_TTS_ALLOW_LAN"):
+        return False, [], set()
+    raw = os.getenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "")
+    networks = []
+    names = set()
+    for tok in re.split(r"[,;]", raw):
+        tok = tok.strip().lower()
+        if not tok:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(tok, strict=False))
+        except ValueError:
+            names.add(tok)
+    return (bool(networks or names), networks, names)
+
+
+def _tts_host_in_lan_allowlist(hostname: str) -> bool:
+    """True if ``hostname`` (literal IP or exact name) is opted in via the LAN
+    allowlist. Hostname entries match by exact string; IP/CIDR entries match a
+    literal-IP host inside a listed network."""
+    import ipaddress
+
+    enabled, networks, names = _tts_lan_allowlist()
+    if not enabled:
+        return False
+    host = (hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in names:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(ip in net for net in networks)
+
+
+def _tts_addr_in_lan_allowlist(ip_str: str) -> bool:
+    """True if a resolved IP falls inside an allowlisted network (used by the
+    pinned-connection path so an allowlisted https LAN target isn't re-blocked
+    after DNS resolution)."""
+    import ipaddress
+
+    enabled, networks, _names = _tts_lan_allowlist()
+    if not enabled:
+        return False
+    try:
+        ip = ipaddress.ip_address((ip_str or "").strip())
+    except ValueError:
+        return False
+    return any(ip in net for net in networks)
+
+
+def _tts_base_url_is_self_hosted(base_url: str) -> bool:
+    """True when the (already-normalized) base_url points at localhost or an
+    allowlisted LAN target — i.e. a self-hosted server that is commonly keyless,
+    as opposed to a public host like api.openai.com."""
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(str(base_url or "")).hostname or "").strip().lower()
+    return host in _TTS_LOCALHOST_HOSTS or _tts_host_in_lan_allowlist(host)
+
+
 def _tts_addr_is_blocked(ip_str: str) -> bool:
     """Return True when IP is in a private or otherwise non-routable class.
 
@@ -18074,13 +18171,16 @@ def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except Exception as exc:
         raise ValueError("could not resolve OpenAI TTS base_url host") from exc
+    host_allowlisted = _tts_host_in_lan_allowlist(host)
     pinned_hosts = []
     for info in infos:
         sockaddr = info[4]
         if not sockaddr:
             continue
         pinned_host = str(sockaddr[0])
-        if _tts_addr_is_blocked(pinned_host):
+        if _tts_addr_is_blocked(pinned_host) and not (
+            host_allowlisted or _tts_addr_in_lan_allowlist(pinned_host)
+        ):
             raise ValueError("resolved OpenAI TTS target is not allowed")
         pinned_hosts.append(pinned_host)
     if not pinned_hosts:
@@ -18103,14 +18203,17 @@ def _normalized_openai_tts_base_url(base_url: str) -> str:
         raise ValueError("invalid OpenAI base_url in config")
     if not parsed.scheme or not parsed.netloc or parsed.query or parsed.fragment:
         raise ValueError("invalid OpenAI base_url in config")
+    allowlisted = _tts_host_in_lan_allowlist(hostname)
     if parsed.scheme == "https":
         # Public https hosts are allowed (a user's own OpenAI-compatible server),
         # but reject private/loopback/link-local/reserved targets to close the
-        # SSRF surface (e.g. https://169.254.169.254, https://10.x internal).
-        if _tts_host_is_blocked_target(hostname):
+        # SSRF surface (e.g. https://169.254.169.254, https://10.x internal) —
+        # unless the operator explicitly opted the target into the LAN allowlist.
+        if _tts_host_is_blocked_target(hostname) and not allowlisted:
             raise ValueError("invalid OpenAI base_url in config")
-    elif parsed.scheme == "http" and hostname in _TTS_LOCALHOST_HOSTS:
-        # Explicit localhost-over-http dev/self-hosted case only.
+    elif parsed.scheme == "http" and (hostname in _TTS_LOCALHOST_HOSTS or allowlisted):
+        # Explicit localhost-over-http dev/self-hosted case, or an operator-
+        # opted-in LAN target (HERMES_WEBUI_TTS_ALLOW_LAN + _ALLOW_HOSTS).
         pass
     else:
         raise ValueError("invalid OpenAI base_url in config")
@@ -18401,63 +18504,82 @@ def _handle_tts(handler, parsed):
 
     # ── OpenAI-compatible TTS ──────────────────────────────────────────
     if engine == "openai":
-        api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip()
-        if not api_key:
-            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        # Read tts.openai.* from config first so a self-hosted / OpenAI-compatible
+        # server (base_url, optional api_key, model, voice, response_format) works.
+        cfg_api_key = cfg_base_url = cfg_model = cfg_voice = cfg_format = ""
+        try:
+            from api.config import get_config
+            _tts_cfg = (get_config() or {}).get("tts", {})
+            _oai_cfg = _tts_cfg.get("openai", {}) if isinstance(_tts_cfg, dict) else {}
+            if isinstance(_oai_cfg, dict):
+                cfg_api_key = str(_oai_cfg.get("api_key") or "").strip()
+                cfg_base_url = str(_oai_cfg.get("base_url") or "").strip()
+                cfg_model = str(_oai_cfg.get("model") or "").strip()
+                cfg_voice = str(_oai_cfg.get("voice") or "").strip()
+                cfg_format = str(_oai_cfg.get("response_format") or "").strip()
+        except Exception:
+            pass
+
+        api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             try:
                 from api.onboarding import _load_env_file
                 from api.profiles import get_active_hermes_home
                 env_cfg = _load_env_file(get_active_hermes_home() / ".env")
-                api_key = env_cfg.get("VOICE_TOOLS_OPENAI_KEY", "") or env_cfg.get("OPENAI_API_KEY", "")
+                api_key = (env_cfg.get("VOICE_TOOLS_OPENAI_KEY", "") or env_cfg.get("OPENAI_API_KEY", "")).strip()
             except Exception:
                 pass
-        if not api_key:
-            from api.helpers import bad as _bad
-            return _bad(handler, "OpenAI API key not configured", 503)
+        # A config-supplied key wins (it targets the configured self-hosted server).
+        if cfg_api_key:
+            api_key = cfg_api_key
 
         from urllib.parse import urlunsplit as _urlunsplit
-
-        base_url = _urlunsplit(("https", "api.openai.com", "/v1", "", ""))
-        model = "gpt-4o-mini-tts"
-        oai_voice = "alloy"
+        default_base = _urlunsplit(("https", "api.openai.com", "/v1", "", ""))
         try:
-            from api.config import get_config
-            tts_cfg = (get_config() or {}).get("tts", {})
-            if isinstance(tts_cfg, dict):
-                oai_cfg = tts_cfg.get("openai", {})
-                if isinstance(oai_cfg, dict):
-                    base_url = _normalized_openai_tts_base_url(oai_cfg.get("base_url") or base_url)
-                    model = oai_cfg.get("model") or model
-                    oai_voice = oai_cfg.get("voice") or oai_voice
-                else:
-                    base_url = _normalized_openai_tts_base_url(base_url)
-            else:
-                base_url = _normalized_openai_tts_base_url(base_url)
+            base_url = _normalized_openai_tts_base_url(cfg_base_url or default_base)
         except ValueError:
             from api.helpers import bad as _bad
             return _bad(handler, "invalid OpenAI base_url in config", 400)
-        except Exception:
-            pass
+        model = cfg_model or "gpt-4o-mini-tts"
+        oai_voice = cfg_voice or "alloy"
+
+        # Self-hosted / localhost / allowlisted-LAN servers are commonly keyless;
+        # send a placeholder Bearer so they work without a dummy env var. A public
+        # host (api.openai.com etc.) still requires a real key.
+        if not api_key:
+            if _tts_base_url_is_self_hosted(base_url):
+                api_key = "sk-no-key-required"
+            else:
+                from api.helpers import bad as _bad
+                return _bad(handler, "OpenAI API key not configured", 503)
 
         url = f"{base_url}/audio/speech"
-        req_body = json.dumps({
-            "model": model,
-            "input": text,
-            "voice": oai_voice,
-        }).encode("utf-8")
+        payload = {"model": model, "input": text, "voice": oai_voice}
+        if cfg_format:
+            payload["response_format"] = cfg_format
+        req_body = json.dumps(payload).encode("utf-8")
 
         req = Request(url, data=req_body, headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
+            "Accept": "audio/*",
         })
 
         # Use a pinned HTTPS opener so the resolved address is the one that gets
         # dialed. Keep the no-redirect handler in the same chain to block
         # bearer leaks and SSRF bounce redirects after hostname validation.
+        audio_content_type = "audio/mpeg"
         try:
             with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), _PinnedHTTPSHandler())) as resp:
+                # Forward the upstream audio type — self-hosted servers (e.g.
+                # Qwen3-TTS) often return WAV, not MP3; mislabelling it as
+                # audio/mpeg can break playback.
+                try:
+                    _ct = (resp.headers.get("Content-Type") or "").strip()
+                    if _ct.startswith("audio/"):
+                        audio_content_type = _ct.split(";", 1)[0].strip()
+                except Exception:
+                    pass
                 audio_data = _buffer_tts_audio_response(resp)
         except ValueError:
             logger.warning("OpenAI TTS rejected an invalid upstream response", exc_info=True)
@@ -18469,7 +18591,7 @@ def _handle_tts(handler, parsed):
             return _bad(handler, "OpenAI TTS generation failed", 500)
 
         handler.send_response(200)
-        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Content-Type", audio_content_type)
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(audio_data)))
         handler.end_headers()
