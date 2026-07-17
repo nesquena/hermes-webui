@@ -13362,6 +13362,12 @@ def handle_get(handler, parsed) -> bool:
     if session_events_session_id is not None:
         return _handle_session_sse_stream_for_session(handler, parsed, session_events_session_id)
 
+    if parsed.path == "/api/notifications":
+        return _handle_notifications(handler, parsed)
+
+    if parsed.path == "/api/notifications/events":
+        return _handle_notifications_events(handler, parsed)
+
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
 
@@ -15274,6 +15280,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/terminal/close":
         return _handle_terminal_close(handler, body)
+
+    if parsed.path == "/api/notifications/read":
+        return _handle_notifications_read(handler, body)
+
+    if parsed.path == "/api/notifications/read-all":
+        return _handle_notifications_read_all(handler, parsed)
 
     # ── Cron API (POST) ──
     # See GET-side comment above: wrap in cron_profile_context so writes go
@@ -22517,6 +22529,93 @@ def _selected_profile_snapshot_updates(
     return updates
 
 
+def _handle_notifications(handler, parsed):
+    """Return profile-scoped WebUI/Hermex cron notifications."""
+    from api.cron_notifications import notification_summary
+
+    limit = _query_positive_int(parsed, "limit", default=50, maximum=200) or 50
+    unread_only = _query_flag(parsed, "unread_only")
+    return j(
+        handler,
+        notification_summary(
+            limit=limit,
+            unread_only=unread_only,
+            all_profiles=_all_profiles_enabled(parsed),
+        ),
+    )
+
+
+def _handle_notifications_events(handler, parsed):
+    """Polling SSE stream for new cron notifications."""
+    from api.cron_notifications import notification_summary, sse_event
+
+    all_profiles = _all_profiles_enabled(parsed)
+    once = _query_flag(parsed, "once")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "close")
+    end_sse_headers(handler)
+    try:
+        _sse_set_write_deadline(handler)
+    except Exception:
+        pass
+
+    try:
+        initial = notification_summary(limit=200, all_profiles=all_profiles)
+        seen = {str(row.get("id") or "") for row in initial.get("notifications", []) if row.get("id")}
+        if once:
+            handler.wfile.write(sse_event("snapshot", initial))
+            handler.wfile.flush()
+            return True
+
+        last_heartbeat = time.time()
+        while True:
+            # Cron completion is not latency-critical. Five seconds keeps the
+            # inbox responsive while bounding repeated JSONL scans per browser.
+            time.sleep(5)
+            current = notification_summary(limit=200, all_profiles=all_profiles)
+            new_rows = [
+                row for row in reversed(current.get("notifications", []))
+                if row.get("id") and str(row.get("id")) not in seen
+            ]
+            for row in new_rows:
+                seen.add(str(row.get("id")))
+                handler.wfile.write(sse_event("notification", row))
+                handler.wfile.flush()
+            now = time.time()
+            if now - last_heartbeat >= 25:
+                handler.wfile.write(b": notifications heartbeat\n\n")
+                handler.wfile.flush()
+                last_heartbeat = now
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass
+    return True
+
+
+def _handle_notifications_read(handler, body):
+    notification_id = str(body.get("id") or "").strip()
+    if not notification_id:
+        return bad(handler, "id required")
+    profile = body.get("profile") or None
+    from api.cron_notifications import mark_read, notification_summary
+
+    row = mark_read(notification_id, profile=profile)
+    if not row:
+        return bad(handler, "Notification not found", 404)
+    return j(handler, {"ok": True, "notification": row, "summary": notification_summary(limit=1)})
+
+
+def _handle_notifications_read_all(handler, parsed):
+    from api.cron_notifications import mark_all_read, notification_summary
+
+    all_profiles = _all_profiles_enabled(parsed)
+    result = mark_all_read(all_profiles=all_profiles)
+    result["summary"] = notification_summary(limit=1, all_profiles=all_profiles)
+    return j(handler, result)
+
+
 def _handle_cron_create(handler, body):
     try:
         require(body, "prompt", "schedule")
@@ -22565,6 +22664,7 @@ def _handle_cron_delivery_options(handler):
         _KNOWN_DELIVERY_PLATFORMS = frozenset()
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
+        {"value": "webui", "label": "Hermex/WebUI Inbox"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
     for name in sorted(_KNOWN_DELIVERY_PLATFORMS):

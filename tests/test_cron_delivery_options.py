@@ -30,9 +30,10 @@ def test_delivery_options_has_platforms():
     assert isinstance(platforms, list)
     assert len(platforms) > 0
 
-    # 'local' must always be present (it's the built-in default)
+    # 'local' and Hermex/WebUI inbox must always be present (built-in defaults)
     values = [p["value"] for p in platforms]
     assert "local" in values, f"'local' missing from delivery options: {values}"
+    assert "webui" in values, f"'webui' missing from delivery options: {values}"
 
 
 def test_delivery_options_structure():
@@ -65,3 +66,11 @@ def test_delivery_options_local_label():
     local_entry = next(p for p in result["platforms"] if p["value"] == "local")
     # Label should contain "Local" or be an i18n key — just verify it's non-empty
     assert local_entry["label"], "Local platform label is empty"
+
+
+def test_delivery_options_webui_label():
+    """Hermex/WebUI inbox has an explicit human label."""
+    result, status = get("/api/crons/delivery-options")
+    assert status == 200
+    entry = next(p for p in result["platforms"] if p["value"] == "webui")
+    assert entry["label"] == "Hermex/WebUI Inbox"
