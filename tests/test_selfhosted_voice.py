@@ -14,6 +14,8 @@ import pytest
 import api.routes as routes
 import api.voice_config as vc
 
+_STATIC = Path(__file__).resolve().parent.parent / "static"
+
 
 class _FakeHandler:
     def __init__(self, body: bytes = b"", command: str = "POST", headers=None, client="1.2.3.4"):
@@ -299,3 +301,31 @@ def test_transcribe_forwards_language(monkeypatch, tmp_path):
     upload.handle_transcribe(h)
     assert h.payload().get("transcript") == "hallo"
     assert calls["language"] == "de"
+
+
+# ── Frontend wiring (static source presence) ────────────────────────────────
+
+def test_boot_js_voice_mode_uses_server_stt():
+    src = (_STATIC / "boot.js").read_text(encoding="utf-8")
+    # voice mode gate no longer hard-requires browser SpeechRecognition
+    assert "_canRecordAudio" in src
+    assert "if((!hasSR&&!_canRecordAudio)||!hasTTS) return;" in src
+    # server-STT listening leg present and wired to /api/transcribe
+    assert "_startListeningServer" in src
+    assert "_useServerStt" in src
+    assert "_probeVoiceServerStt" in src
+    assert "form.append('language'" in src
+
+
+def test_panels_js_wires_voice_config():
+    src = (_STATIC / "panels.js").read_text(encoding="utf-8")
+    assert "_wireVoiceEndpoints" in src
+    assert "api/voice/config" in src
+
+
+def test_index_html_has_voice_endpoint_fields():
+    src = (_STATIC / "index.html").read_text(encoding="utf-8")
+    for el_id in ("settingsVoiceEndpoints", "settingsSttBaseUrl", "settingsSttModel",
+                  "settingsSttLanguage", "settingsTtsBaseUrl", "settingsTtsVoiceId",
+                  "settingsVoiceEndpointsSave"):
+        assert el_id in src, el_id

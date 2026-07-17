@@ -9381,6 +9381,72 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       };
     }
+    // Self-hosted STT/TTS endpoints (server-side config.yaml, via /api/voice/config).
+    _wireVoiceEndpoints();
+    function _wireVoiceEndpoints(){
+      const box=$('settingsVoiceEndpoints');
+      if(!box || box._wired) return;
+      box._wired=true;
+      const g=function(id){return $(id);};
+      const setVal=function(id,v){const el=g(id); if(el) el.value=(v==null?'':String(v));};
+      const status=g('settingsVoiceEndpointsStatus');
+      const roNote=g('settingsVoiceEndpointsRO');
+      const saveBtn=g('settingsVoiceEndpointsSave');
+      function fillSection(prefix,sec){
+        sec=sec||{};
+        if(prefix==='Stt'){
+          const eng=g('settingsSttEngine'); if(eng) eng.value=(sec.provider==='openai'||sec.provider==='local')?sec.provider:'';
+          setVal('settingsSttBaseUrl',sec.base_url);
+          setVal('settingsSttModel',sec.model);
+          setVal('settingsSttLanguage',sec.language);
+          setVal('settingsSttMimeTypes',sec.mime_types);
+          setVal('settingsSttResponseFormat',sec.response_format);
+          const k=g('settingsSttApiKey'); if(k){k.value=''; k.placeholder=sec.api_key_set?'•••• (set — leave blank to keep)':'(none)';}
+        } else {
+          const eng=g('settingsTtsEndpointEngine'); if(eng) eng.value=(sec.provider==='openai')?'openai':'';
+          setVal('settingsTtsBaseUrl',sec.base_url);
+          setVal('settingsTtsModel',sec.model);
+          setVal('settingsTtsVoiceId',sec.voice);
+          try{ setVal('settingsTtsExtraParams', sec.extra_params&&Object.keys(sec.extra_params).length?JSON.stringify(sec.extra_params):''); }catch(_e){}
+          const k=g('settingsTtsApiKey'); if(k){k.value=''; k.placeholder=sec.api_key_set?'•••• (set — leave blank to keep)':'(none)';}
+        }
+      }
+      fetch('api/voice/config',{headers:{'Accept':'application/json'}}).then(function(r){return r.json();}).then(function(d){
+        if(!d||d.ok!==true) return;
+        fillSection('Stt',d.stt); fillSection('Tts',d.tts);
+        const writable=d.writable===true;
+        if(roNote) roNote.style.display=writable?'none':'block';
+        if(saveBtn) saveBtn.disabled=!writable;
+      }).catch(function(){ if(status) status.textContent='Could not load current config'; });
+      if(saveBtn){
+        saveBtn.onclick=function(){
+          const val=function(id){const el=g(id); return el?String(el.value||'').trim():'';};
+          const stt={}, tts={};
+          const se=val('settingsSttEngine'); if(se) stt.provider=se;
+          stt.base_url=val('settingsSttBaseUrl'); stt.model=val('settingsSttModel');
+          stt.language=val('settingsSttLanguage'); stt.mime_types=val('settingsSttMimeTypes');
+          stt.response_format=val('settingsSttResponseFormat');
+          const sk=val('settingsSttApiKey'); if(sk) stt.api_key=sk;
+          const te=val('settingsTtsEndpointEngine'); if(te) tts.provider=te;
+          tts.base_url=val('settingsTtsBaseUrl'); tts.model=val('settingsTtsModel');
+          tts.voice=val('settingsTtsVoiceId');
+          const tk=val('settingsTtsApiKey'); if(tk) tts.api_key=tk;
+          const ep=val('settingsTtsExtraParams');
+          if(ep){ try{ tts.extra_params=JSON.parse(ep); }catch(_e){ if(status){status.style.color='var(--err,#c33)'; status.textContent='Extra parameters must be valid JSON';} return; } }
+          if(status){status.style.color='var(--muted)'; status.textContent='Saving…';}
+          fetch('api/voice/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stt:stt,tts:tts})})
+            .then(function(r){return r.json().then(function(b){return {ok:r.ok,body:b};});})
+            .then(function(res){
+              if(res.ok && res.body && res.body.ok){
+                if(status){status.style.color='var(--ok,#3a7)'; status.textContent='Saved.';}
+                fillSection('Stt',res.body.stt); fillSection('Tts',res.body.tts);
+              } else {
+                if(status){status.style.color='var(--err,#c33)'; status.textContent=(res.body&&res.body.error)||'Save failed';}
+              }
+            }).catch(function(){ if(status){status.style.color='var(--err,#c33)'; status.textContent='Save failed';} });
+        };
+      }
+    }
     // Populate voice selector based on engine
     const ttsVoiceSel=$('settingsTtsVoice');
     window._populateTtsVoices=function(){

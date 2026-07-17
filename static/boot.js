@@ -1478,11 +1478,15 @@ window.renderTranscript=function(container, messages, opts){
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  const hasSTT=!(!SpeechRecognition);
+  const hasSR=!(!SpeechRecognition);
+  const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
   const hasTTS=!!('speechSynthesis' in window);
 
-  // Need both STT and TTS for turn-based voice mode
-  if(!hasSTT||!hasTTS) return;
+  // Need TTS plus at least one STT path — the browser recognizer OR a
+  // MediaRecorder→server (/api/transcribe) capture. The latter lets voice mode
+  // run entirely on a self-hosted STT server, including on browsers with no
+  // SpeechRecognition (e.g. Firefox).
+  if((!hasSR&&!_canRecordAudio)||!hasTTS) return;
 
   const modeBtn=$('btnVoiceMode');
   const bar=$('voiceModeBar');
@@ -1578,6 +1582,151 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display=_voiceModeActive?(state==='idle'?'none':''):'none';
   }
 
+  // ── Server-STT listening leg (self-hosted /api/transcribe) ─────────────
+  // When a server STT provider is configured we keep the listening audio on
+  // the user's own server instead of the browser's cloud recognizer. Capture
+  // via MediaRecorder, end the utterance with simple energy-based silence
+  // detection (no Web Speech API), then POST the blob to /api/transcribe.
+  let _voiceServerStt=false, _voiceServerSttProbed=false;
+  let _vmStream=null, _vmRecorder=null, _vmChunks=[], _vmAudioCtx=null, _vmAnalyser=null, _vmVadRaf=null, _vmMaxTimer=null;
+
+  function _probeVoiceServerStt(){
+    if(_voiceServerSttProbed||!_canRecordAudio) return;
+    _voiceServerSttProbed=true;
+    try{
+      fetch('api/transcribe/capability',{headers:{'Accept':'application/json'}})
+        .then(r=>r&&r.ok?r.json():null)
+        .then(d=>{ _voiceServerStt=!!(d&&d.available); })
+        .catch(()=>{});
+    }catch(_){}
+  }
+  _probeVoiceServerStt();
+
+  // Prefer server STT when available; it's the only option when the browser
+  // has no SpeechRecognition.
+  function _useServerStt(){ return _canRecordAudio&&(_voiceServerStt||!hasSR); }
+
+  function _voiceLang(){
+    const tag=(typeof _locale!=='undefined'&&_locale._speech)||'';
+    const primary=String(tag).replace('_','-').split('-')[0].toLowerCase();
+    return (primary.length>=2&&primary.length<=3)?primary:'';
+  }
+
+  function _vmStopAudio(){
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    try{ if(_vmRecorder&&_vmRecorder.state!=='inactive') _vmRecorder.stop(); }catch(_){}
+    _vmRecorder=null;
+    try{ if(_vmStream) _vmStream.getTracks().forEach(tr=>tr.stop()); }catch(_){}
+    _vmStream=null;
+    try{ if(_vmAudioCtx&&_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){}
+    _vmAudioCtx=null; _vmAnalyser=null;
+  }
+
+  function _vmStopRecordingForSend(){
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    try{ if(_vmRecorder&&_vmRecorder.state!=='inactive') _vmRecorder.stop(); }catch(_){}
+  }
+
+  function _vmRunVad(){
+    if(!_vmAnalyser) return; // no analyser → rely on the max-duration timer
+    const buf=new Uint8Array(_vmAnalyser.fftSize);
+    let spoke=false, silenceStart=0;
+    const speechThresh=0.02; // RMS over [-1,1]
+    const tick=()=>{
+      if(!_voiceModeActive||_voiceModeState!=='listening'||!_vmAnalyser) return;
+      _vmAnalyser.getByteTimeDomainData(buf);
+      let sum=0;
+      for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
+      const rms=Math.sqrt(sum/buf.length);
+      const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+      if(rms>speechThresh){ spoke=true; silenceStart=0; }
+      else if(spoke){
+        if(!silenceStart){ silenceStart=now; }
+        else if(now-silenceStart>=_voiceSilenceMs()){ _vmStopRecordingForSend(); return; }
+      }
+      _vmVadRaf=requestAnimationFrame(tick);
+    };
+    _vmVadRaf=requestAnimationFrame(tick);
+  }
+
+  async function _startListeningServer(){
+    if(!_voiceModeActive) return;
+    _clearBrowserTtsRecovery();
+    _setState('listening');
+    let stream;
+    try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+    catch(e){
+      if(hasSR){ _voiceServerStt=false; if(_voiceModeActive) _startListening(); return; }
+      _deactivate();
+      const key=_micToastKeyForRecognitionError&&e?_micToastKeyForRecognitionError(e.name):null;
+      showToast(key?t(key):t('mic_error')+((e&&e.name)||''));
+      return;
+    }
+    if(!_voiceModeActive){ try{ stream.getTracks().forEach(tr=>tr.stop()); }catch(_){} return; }
+    _vmStream=stream; _vmChunks=[];
+    let mime='';
+    const prefs=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
+    for(let i=0;i<prefs.length;i++){ if(window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(prefs[i])){ mime=prefs[i]; break; } }
+    try{ _vmRecorder=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream); }
+    catch(_){ try{ _vmRecorder=new MediaRecorder(stream); }catch(__){ _vmStopAudio(); if(hasSR){ _voiceServerStt=false; _startListening(); } return; } }
+    _vmRecorder.ondataavailable=(ev)=>{ if(ev.data&&ev.data.size) _vmChunks.push(ev.data); };
+    _vmRecorder.onstop=()=>{ _vmFinishServerUtterance(); };
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(AC){
+        _vmAudioCtx=new AC();
+        const srcNode=_vmAudioCtx.createMediaStreamSource(stream);
+        _vmAnalyser=_vmAudioCtx.createAnalyser();
+        _vmAnalyser.fftSize=2048;
+        srcNode.connect(_vmAnalyser);
+      }
+    }catch(_){ _vmAnalyser=null; }
+    try{ _vmRecorder.start(); }
+    catch(_){ _vmStopAudio(); setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800); return; }
+    // Hard cap so a noisy room / missing analyser can't record forever.
+    _vmMaxTimer=setTimeout(()=>{ _vmStopRecordingForSend(); },20000);
+    _vmRunVad();
+  }
+
+  async function _vmFinishServerUtterance(){
+    const chunks=_vmChunks; _vmChunks=[];
+    try{ if(_vmStream) _vmStream.getTracks().forEach(tr=>tr.stop()); }catch(_){}
+    _vmStream=null;
+    try{ if(_vmAudioCtx&&_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){}
+    _vmAudioCtx=null; _vmAnalyser=null;
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    const rec=_vmRecorder; _vmRecorder=null;
+    if(!_voiceModeActive||_voiceModeState!=='listening') return;
+    const type=(rec&&rec.mimeType)||(chunks[0]&&chunks[0].type)||'audio/webm';
+    const blob=chunks.length?new Blob(chunks,{type}):null;
+    if(!blob||blob.size<1200){ // no speech / basically silence — listen again
+      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
+      return;
+    }
+    try{
+      const ext=(type.indexOf('ogg')>=0)?'ogg':'webm';
+      const form=new FormData();
+      form.append('file',new File([blob],'voice-input.'+ext,{type}));
+      const lang=_voiceLang(); if(lang) form.append('language',lang);
+      const res=await fetch('api/transcribe',{method:'POST',body:form});
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok){
+        if(hasSR){ _voiceServerStt=false; if(_voiceModeActive) _startListening(); return; }
+        if(_voiceModeActive) setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
+        return;
+      }
+      const transcript=String((data&&data.transcript)||'').trim();
+      if(!transcript){ setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250); return; }
+      ta.value=transcript; autoResize();
+      _voiceModeSend();
+    }catch(_){
+      if(_voiceModeActive) setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
+    }
+  }
+
   function _startListening(){
     if(!_voiceModeActive) return;
     if(_micOriginNeedsSecureContext()){
@@ -1585,6 +1734,7 @@ window.renderTranscript=function(container, messages, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    if(_useServerStt()){ _startListeningServer(); return; }
     _clearBrowserTtsRecovery();
     _setState('listening');
 
@@ -1670,6 +1820,7 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
+    _vmStopAudio();
     // send() is global from boot.js
     if(typeof send==='function') send();
   }
@@ -1960,6 +2111,7 @@ window.renderTranscript=function(container, messages, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    _probeVoiceServerStt();
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -1984,6 +2136,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _vmStopAudio();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
