@@ -2,6 +2,7 @@ import io
 import json
 import pathlib
 import sys
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -40,6 +41,56 @@ def _clear_attention_state(*session_ids):
             routes._gateway_queues.pop(sid, None)
     for sid in session_ids:
         clarify.clear_pending(sid)
+
+
+def test_attention_summary_purges_stale_gateway_mirror():
+    sid = "attention-stale-gateway-session"
+    _clear_attention_state(sid)
+    try:
+        approval = {
+            "approval_id": "stale-gateway-approval",
+            "command": "rm -rf /tmp/nope",
+            "description": "Danger",
+        }
+        with routes._lock:
+            routes._gateway_queues[sid] = [SimpleNamespace(data=dict(approval))]
+        routes.submit_gateway_pending_mirror(sid, approval)
+
+        with routes._lock:
+            assert routes._pending[sid]
+            routes._gateway_queues[sid].pop(0)
+            assert routes._pending[sid]
+
+        assert routes._session_attention_summary(sid) is None
+        with routes._lock:
+            assert sid not in routes._pending
+    finally:
+        _clear_attention_state(sid)
+
+
+def test_attention_summary_keeps_live_gateway_mirror():
+    sid = "attention-live-gateway-session"
+    _clear_attention_state(sid)
+    try:
+        approval = {
+            "approval_id": "live-gateway-approval",
+            "command": "touch /tmp/nope",
+            "description": "Also danger",
+        }
+        with routes._lock:
+            routes._gateway_queues[sid] = [SimpleNamespace(data=dict(approval))]
+        routes.submit_gateway_pending_mirror(sid, approval)
+
+        assert routes._session_attention_summary(sid) == {
+            "kind": "approval",
+            "count": 1,
+            "severity": "critical",
+        }
+        with routes._lock:
+            assert len(routes._pending[sid]) == 1
+            assert routes._pending[sid][0]["approval_id"] == approval["approval_id"]
+    finally:
+        _clear_attention_state(sid)
 
 
 def test_attention_summary_prefers_pending_approvals_over_clarify_questions():

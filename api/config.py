@@ -1351,6 +1351,46 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
+def _configured_model_ids(raw_models: object) -> list[str]:
+    """Return ordered model IDs from supported config allowlist shapes."""
+    if isinstance(raw_models, dict):
+        candidates = (key for key in raw_models if isinstance(key, str))
+    elif isinstance(raw_models, list):
+        candidates = raw_models
+    else:
+        return []
+
+    model_ids: list[str] = []
+    for item in candidates:
+        if isinstance(item, dict):
+            candidate = item.get("id") or item.get("model") or item.get("name")
+        else:
+            candidate = item
+        model_id = str(candidate or "").strip()
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return model_ids
+
+
+def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
+    """Return picker option rows from supported config allowlist shapes."""
+    labels: dict[str, str] = {}
+    if isinstance(raw_models, list):
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("id") or item.get("model") or item.get("name")
+            model_id = str(candidate or "").strip()
+            if not model_id or model_id in labels:
+                continue
+            label = str(item.get("label") or model_id).strip() or model_id
+            labels[model_id] = label
+    return [
+        {"id": model_id, "label": labels.get(model_id, model_id)}
+        for model_id in _configured_model_ids(raw_models)
+    ]
+
+
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
@@ -2376,12 +2416,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
         if str(model_cfg.get("default") or "").strip() == model:
             return True
         _declared = model_cfg.get("models")
-        if isinstance(_declared, dict) and model in _declared:
-            return True
-        if isinstance(_declared, list) and any(
-            (str(m.get("id") or "").strip() if isinstance(m, dict) else str(m or "").strip()) == model
-            for m in _declared
-        ):
+        if model in _configured_model_ids(_declared):
             return True
     # Named custom:<slug> — scan its custom_providers[] entry for a verbatim id.
     prov = str(config_provider or "").strip().lower()
@@ -2394,13 +2429,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
                 continue
             if str(entry.get("model") or "").strip() == model:
                 return True
-            _em = entry.get("models")
-            if isinstance(_em, dict) and model in _em:
-                return True
-            if isinstance(_em, list) and any(
-                (str(m.get("id") or "").strip() if isinstance(m, dict) else str(m or "").strip()) == model
-                for m in _em
-            ):
+            if model in _configured_model_ids(entry.get("models")):
                 return True
     return False
 
@@ -2664,16 +2693,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     continue
                 if _canon_config_provider == "copilot":
                     continue  # copilot.models is a settings map, not an allowlist
-                _own_models = _pdef.get('models')
-                if isinstance(_own_models, list):
-                    for _m in _own_models:
-                        _mid = str(_m.get('id') or '') if isinstance(_m, dict) else str(_m or '')
-                        if _mid.strip():
-                            _provider_models_set.add(_mid.strip())
-                elif isinstance(_own_models, dict):
-                    _provider_models_set.update(
-                        str(k).strip() for k in _own_models if isinstance(k, str) and str(k).strip()
-                    )
+                _provider_models_set.update(_configured_model_ids(_pdef.get('models')))
     _skip_custom_providers = (
         _is_explicit_non_custom_provider
         and (
@@ -2694,13 +2714,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids = set()
             if entry_model:
                 entry_model_ids.add(entry_model)
-            entry_models = entry.get('models')
-            if isinstance(entry_models, dict):
-                entry_model_ids.update(
-                    key.strip()
-                    for key in entry_models.keys()
-                    if isinstance(key, str) and key.strip()
-                )
+            entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
                 return model_id, provider_hint, entry_base_url or None
@@ -2734,20 +2748,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             # own providers: entry may match; skip all other slugs.
             if _skip_custom_providers and _canonicalise_provider_id(slug) != _active_slug:
                 continue
-            p_models = pdef.get('models')
-            if isinstance(p_models, list):
-                for m in p_models:
-                    mid = str(m.get('id') or '') if isinstance(m, dict) else str(m or '')
-                    if not mid:
-                        continue
-                    if mid.strip() == target:
-                        p_base_url = str(pdef.get('base_url') or '').strip()
-                        return model_id, slug, p_base_url or None
-            elif isinstance(p_models, dict):
-                for mid in p_models:
-                    if isinstance(mid, str) and mid.strip() == target:
-                        p_base_url = str(pdef.get('base_url') or '').strip()
-                        return model_id, slug, p_base_url or None
+            if target in _configured_model_ids(pdef.get('models')):
+                p_base_url = str(pdef.get('base_url') or '').strip()
+                return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
@@ -5103,20 +5106,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                         for key in ("api_key", "key_env", "base_url")
                     )
                     provider_models = provider_cfg.get("models")
-                    if isinstance(provider_models, dict):
-                        for model_id in provider_models:
-                            _append_model_id(canonical, model_id)
-                            has_local_signal = True
-                    elif isinstance(provider_models, list):
-                        for item in provider_models:
-                            if isinstance(item, dict):
-                                _append_model_id(
-                                    canonical,
-                                    item.get("id") or item.get("model") or item.get("name"),
-                                )
-                            else:
-                                _append_model_id(canonical, item)
-                            has_local_signal = True
+                    for model_id in _configured_model_ids(provider_models):
+                        _append_model_id(canonical, model_id)
+                        has_local_signal = True
                     if has_local_signal:
                         detected_providers.add(canonical)
 
@@ -5166,21 +5158,9 @@ def _static_models_catalog_without_live_probes() -> dict:
             model_id = str(entry.get("model") or "").strip()
             if model_id:
                 configured_ids.append(model_id)
-            raw_models = entry.get("models")
-            if isinstance(raw_models, dict):
-                for key in raw_models:
-                    if isinstance(key, str) and key.strip() and key.strip() not in configured_ids:
-                        configured_ids.append(key.strip())
-            elif isinstance(raw_models, list):
-                for item in raw_models:
-                    if isinstance(item, dict):
-                        candidate = str(
-                            item.get("id") or item.get("model") or item.get("name") or ""
-                        ).strip()
-                    else:
-                        candidate = str(item or "").strip()
-                    if candidate and candidate not in configured_ids:
-                        configured_ids.append(candidate)
+            for configured_id in _configured_model_ids(entry.get("models")):
+                if configured_id not in configured_ids:
+                    configured_ids.append(configured_id)
 
             for configured_id in configured_ids:
                 label = _get_label_for_model(configured_id, [])
@@ -5251,28 +5231,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                cfg_models = provider_cfg["models"]
-                if isinstance(cfg_models, dict):
-                    raw_models = [{"id": key, "label": key} for key in cfg_models.keys()]
-                elif isinstance(cfg_models, list):
-                    raw_models = []
-                    for item in cfg_models:
-                        if isinstance(item, dict):
-                            model_id = (
-                                item.get("id")
-                                or item.get("model")
-                                or item.get("name")
-                            )
-                            if not model_id:
-                                continue
-                            raw_models.append(
-                                {
-                                    "id": model_id,
-                                    "label": item.get("label", model_id),
-                                }
-                            )
-                        elif item:
-                            raw_models.append({"id": item, "label": item})
+                raw_models = _configured_model_options(provider_cfg["models"])
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
@@ -7132,21 +7091,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
                     _cp_model_ids.append(_cp_model)
-                _cp_models_dict = _cp.get("models")
-                if isinstance(_cp_models_dict, dict):
-                    for _m_id in _cp_models_dict:
-                        if isinstance(_m_id, str) and _m_id.strip() and _m_id not in _cp_model_ids:
-                            _cp_model_ids.append(_m_id.strip())
-                elif isinstance(_cp_models_dict, list):
-                    for _item in _cp_models_dict:
-                        if isinstance(_item, str):
-                            _mid = _item.strip()
-                            if _mid and _mid not in _cp_model_ids:
-                                _cp_model_ids.append(_mid)
-                        elif isinstance(_item, dict):
-                            _mid = str(_item.get("id") or _item.get("model") or _item.get("name") or "").strip()
-                            if _mid and _mid not in _cp_model_ids:
-                                _cp_model_ids.append(_mid)
+                for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                    if _cp_model_id not in _cp_model_ids:
+                        _cp_model_ids.append(_cp_model_id)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
@@ -7617,13 +7564,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
-                        cfg_models = provider_cfg["models"]
-                        if isinstance(cfg_models, dict):
-                            raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
-                        elif isinstance(cfg_models, list):
-                            raw_models = [{"id": k["id"] if isinstance(k, dict) else k,
-                                            "label": k.get("label", k["id"]) if isinstance(k, dict) else k}
-                                           for k in cfg_models]
+                        raw_models = _configured_model_options(provider_cfg["models"])
 
                     if not raw_models:
                         if pid == "moa":
@@ -8460,9 +8401,30 @@ class StreamChannel:
     # recoverable via the run journal by last_event_id. 8192 is generous enough
     # to hold a long multi-tool turn's backlog while capping worst-case memory to
     # a fixed number of small (event, data, id) tuples — deliberately far above
-    # SessionChannel's per-subscriber maxsize of 16 (that queue drops on a *slow*
-    # reader; this buffer must survive a legitimate reconnect gap).
+    # the per-subscriber queue cap below (that queue drops on a *slow* reader;
+    # this buffer must survive a legitimate reconnect gap).
     _OFFLINE_BUFFER_MAXLEN = 8192
+    # Per-subscriber queue cap (drop-oldest on full). Each connected tab gets its
+    # own queue; a slow/backpressured or backgrounded tab used to hold an
+    # UNBOUNDED queue.Queue that grew for the WHOLE turn (the producer is the
+    # agent token stream), an OOM risk with many tabs × long agentic turns. This
+    # caps the per-tab live-broadcast growth to a fixed bound.
+    #
+    # Bound is intentionally EQUAL to _OFFLINE_BUFFER_MAXLEN, not the much
+    # smaller SessionChannel per-subscriber cap of 16. StreamChannel carries the
+    # live chat token stream (thousands of frames per turn) and, unlike
+    # SessionChannel's low-frequency UI pings, has a reconnect-replay contract:
+    # a tab that briefly disconnected must receive the full retained offline
+    # tail on resubscribe. Capping below the offline buffer would truncate that
+    # replay and force every flaky-network reconnect through the run journal
+    # (disk reads) instead of the in-memory fast path. Matching the offline
+    # buffer bound preserves that contract while bounding live-broadcast memory
+    # to the SAME worst-case #4633 already accepted (a fixed number of small
+    # (event, data, id) tuples). The SSE write deadline
+    # (SSE_WRITE_DEADLINE_SECONDS) independently breaks a stuck socket within
+    # ~20s, so the overflow window is short; this cap bounds it by frame count
+    # too. Older frames stay recoverable via the run journal by last_event_id.
+    _SUBSCRIBER_QUEUE_MAXSIZE = _OFFLINE_BUFFER_MAXLEN
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -8483,6 +8445,9 @@ class StreamChannel:
         # Cumulative evictions over the channel's lifetime, never reset — for ops
         # visibility via diagnostic_snapshot().
         self._offline_dropped_total = 0
+        # Cumulative per-subscriber queue drops over the channel's lifetime
+        # (broadcast + replay paths), never reset — ops visibility for slow tabs.
+        self._subscriber_dropped_total = 0
         self._last_event_id: str | None = None
 
     def subscribe(self) -> queue.Queue:
@@ -8490,15 +8455,48 @@ class StreamChannel:
         return q
 
     def subscribe_with_snapshot(self) -> tuple[queue.Queue, dict[str, object]]:
-        q: queue.Queue = queue.Queue()
+        q: queue.Queue = queue.Queue(maxsize=self._SUBSCRIBER_QUEUE_MAXSIZE)
         with self._lock:
             # Replay buffered events to the new subscriber INSIDE the lock so a
             # concurrent put_nowait() can't broadcast a newer event before we
-            # finish replaying the older buffered tail. queue.Queue.put_nowait
-            # is non-blocking on an unbounded queue, so holding the lock here
-            # is safe. Per Opus advisor on stage-292.
+            # finish replaying the older buffered tail. The queue is bounded, so
+            # put_nowait raises queue.Full once the cap is reached — drop the
+            # OLDEST already-replayed frame and retry, keeping the most recent
+            # tail (a reconnecting tab needs the tail; older frames stay
+            # recoverable via the run journal by last_event_id). Holding the
+            # lock here is safe: no other put_nowait() can interleave. Per Opus
+            # advisor on stage-292.
+            replayed_dropped = 0
             for item in self._offline_buffer:
-                q.put_nowait(item)
+                while True:
+                    try:
+                        q.put_nowait(item)
+                        break
+                    except queue.Full:
+                        # Drop oldest to make room for the newer (more useful)
+                        # tail frame. The drained frame is the oldest in this
+                        # subscriber's replay window only.
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:
+                            # A concurrent consumer drained the queue between
+                            # our Full and get_nowait — the queue now has space,
+                            # so retry the put instead of dropping `item`. This
+                            # path runs under self._lock with a freshly-created
+                            # queue (no concurrent consumer), so it is not
+                            # reached in practice, but `continue` is the
+                            # correct, race-safe rule (see the broadcast path).
+                            continue
+                        replayed_dropped += 1
+            if replayed_dropped:
+                self._subscriber_dropped_total += replayed_dropped
+                logger.debug(
+                    "StreamChannel subscriber replay dropped %d oldest frames "
+                    "(cap=%d) while catching up on %d buffered events",
+                    replayed_dropped,
+                    self._SUBSCRIBER_QUEUE_MAXSIZE,
+                    len(self._offline_buffer),
+                )
             first = self._offline_buffer[0] if self._offline_buffer else None
             snapshot = {
                 "offline_buffered_events": len(self._offline_buffer),
@@ -8559,8 +8557,42 @@ class StreamChannel:
             # reports and logs its own truncation, not a stale carry-over.
             self._offline_buffer.clear()
             self._offline_dropped = 0
+        # Broadcast outside the lock so a slow put_nowait doesn't block other
+        # subscribers or producers. The queue is bounded; on queue.Full drop the
+        # OLDEST frame and retry so a slow/backpressured tab keeps its most
+        # recent tail instead of growing unbounded for the whole turn. Older
+        # frames stay recoverable via the run journal by last_event_id. Mirrors
+        # SessionChannel.emit's drop-on-full contract.
+        broadcast_dropped = 0
         for q in subscribers:
-            q.put_nowait(item)
+            while True:
+                try:
+                    q.put_nowait(item)
+                    break
+                except queue.Full:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        # A concurrent consumer (the SSE handler thread)
+                        # drained the queue between our Full and get_nowait.
+                        # The queue now has space — retry the put so `item` is
+                        # delivered. `break` here would silently discard `item`,
+                        # and if `item` is a terminal frame (stream_end/error/
+                        # cancel) the subscriber never receives it and the client
+                        # stays attached indefinitely (spinner-forever). Having
+                        # space is exactly the condition we want, so continue.
+                        continue
+                    broadcast_dropped += 1
+        if broadcast_dropped:
+            with self._lock:
+                self._subscriber_dropped_total += broadcast_dropped
+            logger.debug(
+                "StreamChannel broadcast dropped %d oldest frames across %d "
+                "subscriber queue(s) (cap=%d)",
+                broadcast_dropped,
+                len(subscribers),
+                self._SUBSCRIBER_QUEUE_MAXSIZE,
+            )
 
     def diagnostic_snapshot(self) -> dict[str, object]:
         """Return non-sensitive stream observation counters for health checks."""
@@ -8571,6 +8603,9 @@ class StreamChannel:
                 # Cumulative over the channel lifetime (ops visibility), vs. the
                 # per-cycle count subscribe_with_snapshot() reports for truncation.
                 "offline_dropped_events": self._offline_dropped_total,
+                # Cumulative per-subscriber queue drops (replay + broadcast) over
+                # the channel lifetime — surfaces slow/backpressured tabs.
+                "subscriber_dropped_events": self._subscriber_dropped_total,
             }
 
 

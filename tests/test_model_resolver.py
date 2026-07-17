@@ -800,6 +800,46 @@ def test_custom_provider_models_dict_routes_to_named_custom_provider():
     assert base_url == 'http://127.0.0.1:8080/v1'
 
 
+def test_custom_provider_models_string_list_routes_to_named_custom_provider_6121():
+    """#6121: picker-visible string-list models must route to their custom provider."""
+    model, provider, base_url = _resolve_with_config(
+        'qwen3.6:35b-a3b',
+        provider='anthropic',
+        default='claude-haiku-4-5',
+        custom_providers=[{
+            'name': 'storm-ollama',
+            'base_url': 'http://ollama.test:11434/v1',
+            'models': ['qwen3.6:35b-a3b', 'violet-lotus:latest'],
+        }],
+    )
+    assert model == 'qwen3.6:35b-a3b'
+    assert provider == 'custom:storm-ollama'
+    assert base_url == 'http://ollama.test:11434/v1'
+
+
+def test_custom_provider_models_object_list_routes_to_named_custom_provider_6121():
+    """#6121: resolver accepts the same object-list ids as the model picker."""
+    for model_entry in (
+        {'id': 'picker-model-id'},
+        {'model': 'picker-model-name'},
+        {'name': 'picker-model-label'},
+    ):
+        requested_model = next(iter(model_entry.values()))
+        model, provider, base_url = _resolve_with_config(
+            requested_model,
+            provider='anthropic',
+            default='claude-haiku-4-5',
+            custom_providers=[{
+                'name': 'Picker Parity',
+                'base_url': 'https://models.example.test/v1',
+                'models': [model_entry],
+            }],
+        )
+        assert model == requested_model
+        assert provider == 'custom:picker-parity'
+        assert base_url == 'https://models.example.test/v1'
+
+
 # ── Issue #2047: parenthesized local provider names with ports ────────────
 
 def test_custom_provider_name_with_parenthesized_port_uses_safe_slug():
@@ -966,6 +1006,45 @@ def test_default_provider_models_not_prefixed(monkeypatch):
         returned_ids = {m['id'] for m in groups['Anthropic']}
         assert "claude-sonnet-5.0" in returned_ids
         assert not any(mid.startswith('@anthropic:') for mid in returned_ids), returned_ids
+
+
+def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(monkeypatch):
+    """Provider allowlists in the live catalog accept id/model/name object keys."""
+    import api.config as _cfg
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'myprov',
+        'default': 'by-model-key',
+    }
+    _cfg.cfg['providers'] = {
+        'myprov': {
+            'models': [
+                {'model': 'by-model-key', 'label': 'By Model Key'},
+                {'name': 'by-name-key'},
+                {'id': 'by-id-key', 'label': 'By Id Key'},
+            ],
+        },
+    }
+    try:
+        _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+    except Exception:
+        _cfg._cfg_mtime = 0.0
+    monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda pid: [])
+    try:
+        result = _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+    groups = {group['provider_id']: group['models'] for group in result['groups']}
+    model_rows = groups.get('myprov') or []
+    model_ids = [row['id'] for row in model_rows]
+    assert 'by-model-key' in model_ids
+    assert 'by-name-key' in model_ids
+    assert 'by-id-key' in model_ids
+    labels = {row['id']: row['label'] for row in model_rows}
+    assert labels['by-model-key'] == 'By Model Key'
+    assert labels['by-id-key'] == 'By Id Key'
 
 
 # ── get_available_models(): phantom "Custom" group regression ─────────────

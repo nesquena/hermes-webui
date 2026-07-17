@@ -216,6 +216,28 @@ def _reset_password_hash_cache():
         _invalidate_password_hash_cache()
 
 
+@pytest.fixture(autouse=True)
+def _invalidate_providers_cache():
+    """Clear the /api/providers TTL cache around every test (#6010).
+
+    get_providers() caches its response for 30s keyed on profile home +
+    .env/config.yaml mtimes + config fingerprint. Tests that monkeypatch auth
+    state (e.g. test_issue1202_oauth_provider_status) without changing those
+    key inputs would receive a stale cached result from a sibling test,
+    breaking test hermeticity in the full sharded suite. Clear before AND after
+    each test so no cache entry leaks across the isolation boundary.
+    """
+    try:
+        from api.providers import invalidate_providers_cache
+    except Exception:
+        invalidate_providers_cache = None
+    if invalidate_providers_cache:
+        invalidate_providers_cache()
+    yield
+    if invalidate_providers_cache:
+        invalidate_providers_cache()
+
+
 _MISSING = object()  # sentinel: api.profiles module not loaded pre-test
 
 

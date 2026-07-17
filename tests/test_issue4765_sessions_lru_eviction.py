@@ -333,3 +333,83 @@ def test_eviction_skips_active_but_still_bounds_clean_entries(isolated_session_e
     # It may briefly sit slightly above cap because actives are non-evictable,
     # but it must NOT grow unbounded with the 40 churned sessions.
     assert len(SESSIONS) <= _cfg.SESSIONS_MAX + len(actives)
+
+
+def test_unsaved_new_session_survives_churn_and_stays_startable(isolated_session_env):
+    """A brand-new, never-persisted session must not be evicted.
+
+    ``new_session()`` keeps a session in RAM only until its first message
+    (#1171), so the cache is its ONLY copy. The original #4765 predicate treated
+    any zero-message session as evictable, reasoning that an empty shell "is
+    recreated on next access" — but ``get_session()`` has no recreate path and
+    raises ``KeyError``, so ``/api/session/draft`` and ``/api/chat/start`` both
+    404 and the session can never be started.
+
+    Real-world trigger: a browser password manager autofilled the sidebar
+    conversation filter, whose content search pulls every hit through
+    ``get_session()``. That churn blew past the cap and dropped the session the
+    user was composing in.
+    """
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import get_session, new_session
+
+    _cfg.SESSIONS_MAX = 5
+
+    composing = new_session()
+    sid = composing.session_id
+    assert not (_cfg.SESSION_DIR / f"{sid}.json").exists(), (
+        "precondition: new_session() must not persist before the first message"
+    )
+
+    # Content-search-style churn: far more persisted sessions than the cap.
+    for i in range(40):
+        _insert(_make_persisted_session(i))
+
+    assert sid in SESSIONS, "unsaved new session was evicted — its only copy is gone"
+
+    # The chokepoint both failing routes go through.
+    assert get_session(sid, metadata_only=True) is not None
+    assert get_session(sid).session_id == sid
+
+
+def test_stale_draftless_unsaved_shell_is_evictable(isolated_session_env):
+    """An OLD, empty, draftless, never-saved shell must NOT be immortal (#6083 follow-up).
+
+    The #6083 fix protects a fresh unsaved shell so a just-opened "New
+    Conversation" is not evicted mid-compose. But protecting EVERY zero-message
+    never-saved shell forever would let abandoned "New Conversation" tabs
+    accumulate past ``sessions_cache_max`` without bound (a slow leak / OOM).
+    A shell that is empty AND draftless AND older than the grace window is
+    treated as abandoned and becomes evictable again.
+    """
+    from api.models import _session_is_evictable, _UNSAVED_SHELL_GRACE_S, new_session
+
+    shell = new_session()
+    # Freshly created → protected (inside the grace window).
+    assert _session_is_evictable(shell) is False, (
+        "a fresh empty shell must be protected during the compose window"
+    )
+    # Age it past the grace window with no draft and no messages → abandoned.
+    shell.created_at = time.time() - (_UNSAVED_SHELL_GRACE_S + 60)
+    assert _session_is_evictable(shell) is True, (
+        "a stale, empty, draftless, never-saved shell must be evictable so these "
+        "shells cannot accumulate unbounded past the cache cap"
+    )
+
+
+def test_stale_unsaved_shell_with_draft_stays_resident(isolated_session_env):
+    """A stale shell the user is still composing (has a draft) stays protected.
+
+    Even past the grace window, a never-saved shell that carries a composer
+    draft is something the user is actively working on and must not be dropped —
+    its draft lives only in this cache entry until the first send.
+    """
+    from api.models import _session_is_evictable, _UNSAVED_SHELL_GRACE_S, new_session
+
+    shell = new_session()
+    shell.created_at = time.time() - (_UNSAVED_SHELL_GRACE_S + 60)
+    shell.composer_draft = {"text": "half-written thought", "files": []}
+    assert _session_is_evictable(shell) is False, (
+        "a stale shell with an active composer draft must stay resident"
+    )
