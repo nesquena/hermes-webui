@@ -86,31 +86,45 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
-# Matches a redaction mask run (three or more '*') OR a quoted value that
-# immediately follows a colon (e.g. the "value" in JSON-ish `"key":"value"`).
-# Both are collapsed to a single sentinel so a credential-redacted echo still
-# compares equal to its unredacted live-streamed twin.
+# A credential redaction mask run (three or more '*'). Only these placeholders
+# are treated as wildcards during echo comparison; every other character must
+# still match literally (see _redaction_tolerant_match).
 _ECHO_REDACTION_MASK_RE = re.compile(r'\*{3,}')
-_ECHO_QUOTED_VALUE_RE = re.compile(r'(:\s*")([^"]*)(")')
 
 
-def _compact_for_echo_compare_redaction_tolerant(value: str) -> str:
-    """Whitespace-fold text AND neutralize credential redaction differences.
+def _redaction_tolerant_match(candidate_text: str, visible_text: str, *, anchor_end: bool) -> bool:
+    """Match a credential-redacted echo against its unredacted live-streamed twin.
 
     The interim-assistant progress echo is credential-redacted before it is
-    journaled/queued, while the live token stream is not. A strict
-    whitespace-only compaction therefore treats `"password":"hunter2"` (tokens)
-    and `"password":"***"` (interim) as different text, so the echo is flagged
-    NOT-already-streamed and the same sentence gets appended a second time on
-    live render and on run-journal replay (the "repetition on navigate-back"
-    bug). Masking both `***` runs and quoted-after-colon values to a shared
-    sentinel makes a redaction-only difference compare equal so the echo is
-    correctly suppressed, without hiding genuinely different prose.
+    journaled/queued (`"password":"***"`), while the live token stream is not
+    (`"password":"hunter2"`). A strict whitespace-only compare therefore treats
+    them as different text, so the echo is flagged NOT-already-streamed and the
+    same sentence is appended a second time on live render and on run-journal
+    replay (the "repetition on navigate-back" bug).
+
+    This turns each redaction mask run (`***`) in the candidate into a bounded
+    wildcard (`[^"]*`) that matches the original value up to the closing quote,
+    while every OTHER character must still match literally. That neutralizes a
+    redaction-only difference WITHOUT masking genuinely different values: two
+    interims that share JSON structure but differ in a non-credential field —
+    e.g. `"action":"started"` vs `"action":"completed"` — still fail to match,
+    so a real status update is never silently suppressed as already-streamed.
+
+    ``anchor_end`` selects a suffix (tail-echo) match vs. a substring match.
     """
-    raw = str(value or '')
-    raw = _ECHO_REDACTION_MASK_RE.sub('\x00', raw)
-    raw = _ECHO_QUOTED_VALUE_RE.sub(lambda m: m.group(1) + '\x00' + m.group(3), raw)
-    return re.sub(r'\s+', '', raw)
+    cand = _compact_for_echo_compare(candidate_text)
+    # Only engage this relaxed path when the candidate actually carries a
+    # redaction mask; a mask-free candidate is fully handled by the strict path.
+    if not cand or not _ECHO_REDACTION_MASK_RE.search(cand):
+        return False
+    vis = _compact_for_echo_compare(visible_text)
+    if not vis:
+        return False
+    parts = _ECHO_REDACTION_MASK_RE.split(cand)
+    pattern = '[^"]*'.join(re.escape(part) for part in parts)
+    if anchor_end:
+        pattern += r'\Z'
+    return re.search(pattern, vis) is not None
 
 
 def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
@@ -7457,17 +7471,10 @@ def _run_agent_streaming(
                 # the live token stream is not (`"password":"hunter2"`). A strict
                 # compare then misses the echo, so the same sentence is appended a
                 # second time on live render and on run-journal replay. Retry the
-                # suffix match with a redaction-tolerant normalization so a
-                # redaction-only difference still counts as already-streamed.
-                candidate_rt = _compact_for_echo_compare_redaction_tolerant(text)
-                visible_tail_rt = _compact_for_echo_compare_redaction_tolerant(
-                    visible_window
-                )
-                if (
-                    candidate_rt
-                    and visible_tail_rt
-                    and visible_tail_rt.endswith(candidate_rt)
-                ):
+                # suffix match treating only the `***` mask runs as wildcards, so a
+                # redaction-only difference still counts as already-streamed while
+                # a genuinely different (non-credential) value still fails to match.
+                if _redaction_tolerant_match(text, visible_window, anchor_end=True):
                     return True
                 # Some runtimes can report a prefix of the already-streamed final
                 # answer through reasoning after visible output has completed. That
@@ -7480,14 +7487,7 @@ def _run_agent_streaming(
                 visible_compact = _compact_for_echo_compare(visible_output)
                 if visible_compact and candidate in visible_compact:
                     return True
-                visible_compact_rt = _compact_for_echo_compare_redaction_tolerant(
-                    visible_output
-                )
-                return bool(
-                    len(candidate_rt) >= 80
-                    and visible_compact_rt
-                    and candidate_rt in visible_compact_rt
-                )
+                return _redaction_tolerant_match(text, visible_output, anchor_end=False)
 
             def _strip_reasoning_output_echo(text: str) -> bool:
                 nonlocal _reasoning_segments

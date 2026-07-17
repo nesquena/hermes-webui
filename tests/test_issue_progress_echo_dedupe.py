@@ -539,24 +539,38 @@ def test_final_answer_prefix_reasoning_echo_is_not_journaled_or_merged(cleanup_t
     assert leaked_prefix not in str(assistant_messages[-1].get("reasoning_content") or "")
 
 
-def test_redaction_tolerant_echo_compare_neutralizes_credential_mask():
-    """Unit: a redaction-only difference must compare equal for echo detection.
+def test_redaction_tolerant_match_treats_only_mask_runs_as_wildcards():
+    """Unit: `***` mask runs are wildcards; every other char must match literally.
 
     The live token stream keeps the real secret; the interim progress echo is
-    credential-redacted. The redaction-tolerant normalizer masks both the `***`
-    run and the surviving quoted value so the two normalize identically, while
-    genuinely different prose still differs.
+    credential-redacted. `_redaction_tolerant_match` treats the `***` mask run as
+    a bounded wildcard over the original value, so a redaction-only difference
+    matches — while a genuinely different (non-credential) value still fails,
+    including non-credential *string* values (the false-positive boundary).
     """
     import api.streaming as streaming
 
-    streamed = 'seed with `{"username":"sam","password":"koreader1","matchMethod":1}`'
-    redacted = 'seed with `{"username":"sam","password":"***","matchMethod":1}`'
-    fn = streaming._compact_for_echo_compare_redaction_tolerant
-    assert fn(streamed) == fn(redacted), "redaction-only difference must fold to equal"
-    # A real content difference must NOT be masked away.
-    different = 'seed with `{"username":"sam","password":"***","matchMethod":9}`'
-    assert fn(streamed) != fn(different), "genuine value differences must stay distinct"
-    # The strict comparator (no redaction tolerance) must still see them as different.
+    match = streaming._redaction_tolerant_match
+
+    streamed = 'seed with `{"username":"sam","password":"koreader1","status":"pending"}`'
+    redacted = 'seed with `{"username":"sam","password":"***","status":"pending"}`'
+    # Redaction-only difference must be recognized as an echo (suffix + substring).
+    assert match(redacted, streamed, anchor_end=True), "redaction-only diff must match as tail echo"
+    assert match(redacted, streamed, anchor_end=False), "redaction-only diff must match as substring"
+
+    # A non-credential STRING value that differs alongside the credential must NOT
+    # match — otherwise a real status update would be silently dropped (P2 boundary).
+    streamed_started = 'seed with `{"password":"koreader1","status":"started"}`'
+    redacted_completed = 'seed with `{"password":"***","status":"completed"}`'
+    assert not match(redacted_completed, streamed_started, anchor_end=True), (
+        "a differing non-credential string value must NOT be masked away"
+    )
+    assert not match(redacted_completed, streamed_started, anchor_end=False)
+
+    # A mask-free candidate never engages the relaxed path (strict compare owns it).
+    assert not match(streamed, streamed, anchor_end=True)
+
+    # The strict comparator must still see the redacted vs. unredacted text as different.
     assert streaming._compact_for_echo_compare(streamed) != streaming._compact_for_echo_compare(redacted)
 
 
