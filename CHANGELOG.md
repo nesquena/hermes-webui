@@ -3,7 +3,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs: reconciled the assistant-reply lifecycle RFCs/contracts with shipped behavior.** The Stable Assistant Turn Anchors and Live-to-Final RFCs, `docs/CONTRACTS.md`, and the Phase 0 architecture inventory were updated from "proposed/scaffold" framing to "accepted/implemented" to match what actually ships (single assistant-turn owner projecting one `activity_scene_v1` into Compact Worklog / Transparent Stream / Final answer). Documentation-only — no runtime behavior or CI-gate change; the one code touch is a corrected comment header in `static/assistant_turn_anchors.js`. Remaining hardening stays tracked under #3400. Thanks @franksong2702. (#6144)
+
 ### Fixed
+
+- **Background subagents no longer fail to persist when the parent's cached agent is reused mid-turn.** A parent session's `SessionDB` handle is shared by reference with the background subagents it spawns (`delegate_tool`), but the cached-agent reuse path unconditionally closed that handle when the parent got a new turn / server-side wakeup — so every still-running child then failed `append_message` with `'NoneType' object has no attribute 'execute'` (observed 600+ times under one parent). The reuse path now keeps a still-open handle (closing only the unused fresh one, preserving the #1421 FD-leak fix) and only replaces a dead/missing one. The credential self-heal path was hardened the same way: if rebuilding the handle fails it degrades cleanly to a lazy reinit instead of reusing a closed handle. Thanks @carlotestor. (#6143)
+
+- **The CLI/cron session-list projection cache is now bounded.** `_CLI_SESSIONS_CACHE` was an unbounded plain dict of deep-copied session-list projections whose fingerprint-folded key advances on every streamed message, so orphaned heavy copies accumulated on a long-lived server until the next structural clear. It's now an `OrderedDict` capped at 8 entries with drop-oldest LRU eviction (recency refresh on hit), mirroring the existing `_CLAUDE_CODE_PARSE_CACHE` / `_SIDECAR_METADATA_CACHE` pattern; TTL stays the freshness control. Thanks @rh-id. (#6140)
 
 - **Models selected from a list-shaped custom-provider allowlist now route to the right provider.** A `custom_providers[].models` allowlist can be written as either a mapping or a list, and the model picker accepted both — but runtime routing only read mapping keys, so a model chosen from a *list*-shaped allowlist could silently stay on the active/default provider instead of its own. The supported-model-ID extraction is now centralized in one helper used by both catalog construction and routing, so the picker and runtime can no longer drift. Existing mapping-shaped and list-of-strings configs are unaffected. Thanks @franksong2702. (#6127, #6121)
 
