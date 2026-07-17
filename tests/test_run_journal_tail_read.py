@@ -316,4 +316,41 @@ def _summary_from_events_pub(session_id, run_id, events):
     return _summary_from_events(session_id, run_id, events)
 
 
+def test_crash_truncated_oversized_done_stays_nonterminal(tmp_path):
+    """Regression (reviewer round 3): a crash-truncated oversized `done` record
+    (write interrupted mid-payload: no closing brace, no newline terminator) must
+    NOT be fabricated into a terminal event. Origin/master reports `running` and
+    emits the recovery-control `apperror`; the prefix-summary approach without a
+    completeness check reported `completed` and suppressed that signal. The fix
+    validates the boundary record is structurally complete before trusting its
+    prefix summary — a truncated record is discarded and the run stays
+    nonterminal (its apperror recovery survives)."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    writer = RunJournalWriter("session_1", "run_crash_truncated", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})
+    # Append a PARTIAL oversized done: summary fields + partial payload, NO close.
+    path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    partial = (
+        '{"version":1,"event_id":"run_crash_truncated:2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * (_SESSION_REPLAY_MAX_BYTES + 50_000)
+    )  # no closing quote/brace/newline — crash mid-write
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial)
+
+    summary = latest_run_summary(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    # Must NOT be falsely terminal — the run was interrupted.
+    assert summary["terminal"] is False, (
+        f"a crash-truncated done must not be accepted as terminal; got "
+        f"terminal_state={summary['terminal_state']!r} terminal={summary['terminal']}"
+    )
+    # And not reported as completed (the dangerous false-positive).
+    assert summary["terminal_state"] != "completed", (
+        f"crash-truncated run misreported as completed: {summary['terminal_state']!r}"
+    )
+
+
+
 

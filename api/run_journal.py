@@ -231,55 +231,6 @@ def _read_jsonl(
     return events, malformed
 
 
-def _read_last_complete_line(path: Path) -> str:
-    """Return the last complete line of a file (no trailing newline), found by
-    scanning backward from EOF for the final newline.
-
-    Used as a fallback when ``_read_jsonl_tail``'s whole tail window is a single
-    truncated record — i.e. one journal record (typically the terminal ``done``
-    event with a full-transcript payload) exceeds the tail window. The last
-    complete line holds that record's summary fields (terminal_state / last_seq
-    / last_event_id), which is what the summary reader needs. Scans backward in
-    bounded chunks so a huge single-line record doesn't have to be fully read to
-    locate its start. Returns '' if the file has no complete line.
-
-    .. note:: This materializes the whole last line. When that line is an
-       oversized record (multi-MB payload), prefer ``_extract_boundary_record_summary``
-       which reads only a bounded prefix of the record's summary fields.
-    """
-    try:
-        size = path.stat().st_size
-    except (FileNotFoundError, OSError):
-        return ""
-    if size <= 0:
-        return ""
-    # Scan backward in chunks for the final newline. The line we want is the
-    # bytes between the final newline and EOF (or the whole file if there's no
-    # newline — but that case is "no complete line", handled by the caller).
-    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
-    with path.open("rb") as fh:
-        fh.seek(0, 2)  # EOF
-        end = fh.tell()
-        # If the last byte is a newline, the last complete line ends just before it.
-        if end > 0:
-            fh.seek(end - 1)
-            if fh.read(1) == b"\n":
-                end -= 1
-        pos = end
-        while pos > 0:
-            read_from = max(0, pos - chunk_size)
-            fh.seek(read_from)
-            block = fh.read(pos - read_from)
-            nl = block.rfind(b"\n")
-            if nl >= 0:
-                # The last complete line is from after this newline to `end`.
-                line_start = read_from + nl + 1
-                fh.seek(line_start)
-                return fh.read(end - line_start).decode("utf-8", errors="replace")
-            pos = read_from
-    return ""
-
-
 # Bounded prefix read for oversized journal records. The record layout from
 # append_run_event puts ALL summary fields before the (potentially huge) payload:
 #   {"version","event_id","seq","run_id","session_id","event","type","created_at",
@@ -314,6 +265,72 @@ def _find_record_start_before(path: Path, seek_pos: int) -> int:
                 return read_from + nl + 1
             pos = read_from
     return 0
+
+
+def _record_is_structurally_complete(path: Path, record_start: int) -> bool:
+    """Return True iff the JSONL record at ``record_start`` is structurally
+    complete — i.e. its JSON object is closed (brace depth returns to 0) AND
+    followed by a newline terminator — scanning forward in bounded chunks WITHOUT
+    materializing the (potentially multi-MB) payload.
+
+    Used to gate trusting a fabricated prefix summary: a crash-truncated
+    ``done`` (write interrupted mid-payload, no closing brace/newline) must NOT
+    be accepted as terminal, or an interrupted run is misreported as completed
+    and its recovery signal is silently dropped. Returns False if EOF is reached
+    at brace depth > 0 (the record was truncated mid-write).
+    """
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    depth = 0
+    pos = record_start
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return False
+    in_string = False
+    escaped = False
+    with path.open("rb") as fh:
+        fh.seek(record_start)
+        while pos < size:
+            chunk = fh.read(min(chunk_size, size - pos))
+            if not chunk:
+                break
+            chunk_len = len(chunk)
+            for ci in range(chunk_len):
+                b = chunk[ci]
+                pos += 1
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif b == 0x5C:  # backslash
+                        escaped = True
+                    elif b == 0x22:  # closing quote
+                        in_string = False
+                    continue
+                if b == 0x22:  # opening quote
+                    in_string = True
+                elif b == 0x7B:  # '{'
+                    depth += 1
+                elif b == 0x7D:  # '}'
+                    depth -= 1
+                    if depth == 0:
+                        # Object closed at position `pos` (1 past the '}').
+                        # The record is complete iff the byte(s) right after are a
+                        # newline terminator (\n or \r\n). Look at the next byte
+                        # in the current chunk first (avoid file-cursor drift),
+                        # else read fresh from the file.
+                        if ci + 1 < chunk_len:
+                            nb = chunk[ci + 1]
+                            return nb in (0x0A, 0x0D)  # \n or \r
+                        # Terminator is in the next chunk: read 1 byte from file.
+                        # (fh cursor is at pos + (chunk_len - ci - 1); seek to pos.)
+                        fh.seek(pos)
+                        nb = fh.read(1)
+                        return nb in (b"\n", b"\r") or (nb == b"" and pos >= size)
+                elif b == 0x0A and depth == 0:  # newline at depth 0 before close
+                    return False
+            # depth > 0 here means the record spans more chunks; keep scanning.
+        # Reached EOF: complete only if the object closed exactly at EOF (depth 0).
+        return depth == 0
 
 
 def _extract_boundary_record_summary(path: Path, record_start: int) -> dict | None:
@@ -465,8 +482,17 @@ def _read_jsonl_tail(
         seek_pos = size - read_bytes
         record_start = _find_record_start_before(path, seek_pos)
         # record_start is where the straddling record begins. Extract its summary
-        # via a bounded prefix read (never materializes the payload).
+        # via a bounded prefix read (never materializes the payload) — BUT only
+        # trust it as terminal if the record is structurally complete. A crash-
+        # truncated `done` (write interrupted mid-payload: no closing brace, no
+        # newline) must NOT be fabricated into a terminal event, or an interrupted
+        # run is misreported as completed and its apperror recovery signal is
+        # silently dropped. Stale-but-nonterminal is recoverable; falsely-terminal
+        # is not. If incomplete, discard the summary and fall through to the
+        # preceding complete records (the run stays nonterminal/`running`).
         boundary_summary = _extract_boundary_record_summary(path, record_start)
+        if boundary_summary is not None and not _record_is_structurally_complete(path, record_start):
+            boundary_summary = None  # crash-truncated record: don't trust its prefix
         # Now drop the partial first fragment from the window so we only parse
         # the complete trailing records.
         nl = text.find("\n")
