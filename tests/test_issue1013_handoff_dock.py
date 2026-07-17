@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -499,6 +501,105 @@ def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
     assert len(persisted) == 1
     assert persisted[0]["fallback"] is False
     assert persisted[0]["sid"] == "session-length-retry"
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url", "expects_output_cap", "expects_normalized_base_url"),
+    [
+        ("openai-codex", "https://chatgpt.com/backend-api/codex", False, False),
+        ("custom:chatgpt-codex", "https://chatgpt.com/backend-api/codex", False, False),
+        ("custom:chatgpt-codex", "  https://chatgpt.com/backend-api/codex  ", False, True),
+        ("custom:responses-proxy", "https://responses.example/v1", True, False),
+    ],
+)
+def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
+    monkeypatch, provider, base_url, expects_output_cap, expects_normalized_base_url,
+):
+    """ChatGPT Codex rejects the cap, while other Responses transports retain it."""
+    import api.config as cfg
+    import api.models as models
+    import api.routes as routes
+
+    if expects_normalized_base_url:
+        real_urlsplit = routes.urlsplit
+
+        def _strict_urlsplit(value):
+            assert value == value.strip()
+            return real_urlsplit(value)
+
+        monkeypatch.setattr(routes, "urlsplit", _strict_urlsplit)
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models,
+        "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "What remains to do?", "timestamp": 1.0},
+            {"role": "assistant", "content": "One review step remains.", "timestamp": 2.0},
+        ],
+    )
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None: ("gpt-test", provider, base_url),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_handoff_summary",
+        lambda *args, **kwargs: {"ok": True},
+    )
+
+    request_kwargs = []
+
+    class _CodexAgent:
+        api_mode = "codex_responses"
+
+        def __init__(self, *args, **kwargs):
+            self.model = kwargs.get("model")
+            self.provider = kwargs.get("provider")
+            self.base_url = kwargs.get("base_url")
+            self.reasoning_config = None
+
+        def _build_api_kwargs(self, *args, **kwargs):
+            return {"model": self.model, "instructions": "summary", "input": [], "store": False}
+
+        def _run_codex_stream(self, kwargs):
+            request_kwargs.append(kwargs)
+            return object()
+
+        def _normalize_codex_response(self, response):
+            return types.SimpleNamespace(content="- You should complete the remaining review."), "stop"
+
+        def release_clients(self):
+            return None
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _CodexAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "api_key": "x",
+        "provider": provider,
+        "base_url": base_url,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    response = routes._handle_handoff_summary(object(), {"session_id": "session-codex-summary"})
+
+    assert response["ok"] is True
+    assert response["fallback"] is False
+    assert len(request_kwargs) == 1
+    assert ("max_output_tokens" in request_kwargs[0]) is expects_output_cap
+    if expects_output_cap:
+        assert request_kwargs[0]["max_output_tokens"] == 700
 
 
 def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
