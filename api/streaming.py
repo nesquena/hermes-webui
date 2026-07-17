@@ -10759,6 +10759,10 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
+                    # Update the holder so the fallback-notice callback reads
+                    # the replacement agent's model/provider, not the stale
+                    # failed agent (greptile P1: stale-heal-metadata).
+                    _current_agent[0] = _heal_agent
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
