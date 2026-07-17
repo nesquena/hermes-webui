@@ -1460,20 +1460,43 @@ def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) ->
     text, truncated = _read_text_bounded(path, max_bytes=max_bytes)
     if not truncated:
         return text, False
-    # Over cap. If the ## Response marker is fully in the head, the head carries
-    # frontmatter + marker + leading body — return it.
-    if _cron_response_marker_index(text) >= 0:
-        return text, True
-    # Marker not fully in head: either the prompt pushed it past the cap, or the
-    # seek split the marker line. The tail contains the response body. Composite
-    # head (frontmatter/usage) + tail (body), re-injecting the marker if the seek
-    # split it (so _cron_output_snippet, which keys on the marker, can find the body).
+    # Over cap. If the ## Response marker is in the head AND has body content
+    # after it in the head, the head carries frontmatter + marker + leading body
+    # — return it. But finding the marker alone is NOT proof the body is present:
+    # when the marker heading ends exactly at the head boundary, zero body bytes
+    # follow it in the head and the early return would yield snippet: "(empty)".
+    # In that case fall through to the tail-splice so the body survives.
+    marker_idx = _cron_response_marker_index(text)
+    if marker_idx >= 0:
+        after_marker = text[marker_idx:]
+        # Is there real body content after the marker line in the head?
+        nl = after_marker.find("\n")
+        body_in_head = (after_marker[nl + 1:].strip()) if nl >= 0 else ""
+        if body_in_head:
+            return text, True
+        # Marker present but no body in head — fall through to tail-splice.
+    # Marker not in head (prompt pushed it past cap, or seek split it) OR marker
+    # at the boundary with no body. Composite head (frontmatter/usage) + tail
+    # (body), re-injecting the marker only if it isn't already in the head (to
+    # avoid showing it twice).
     # NOTE: _read_text_bounded(tail=True) already drops the partial first line at
     # the seek boundary, so tail_text is clean complete lines — do NOT re-drop here.
     tail_text, _ = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
-    # If the marker isn't in the tail either, the seek split it — re-inject.
-    # Safe: a response body at EOF implies a ## Response marker preceded it.
-    if _cron_response_marker_index(tail_text) < 0 and tail_text.strip():
+    marker_in_tail = _cron_response_marker_index(tail_text) >= 0
+    if marker_in_tail:
+        # The tail contains the marker. If the head ALSO has it (marker_idx >= 0,
+        # the boundary case), strip the marker (and anything before it) from the
+        # tail so the spliced result has exactly one marker. Otherwise keep the
+        # tail from its marker onward.
+        if marker_idx >= 0:
+            tm = _cron_response_marker_index(tail_text)
+            tail_text = tail_text[tm:]  # keep marker + body from the tail
+            # Drop the marker line itself since the head already has it; keep body.
+            tnl = tail_text.find("\n")
+            tail_text = tail_text[tnl + 1:] if tnl >= 0 else ""
+    elif tail_text.strip() and marker_idx < 0:
+        # Marker not in tail AND not in head: the seek split it — re-inject.
+        # Safe: a body at EOF implies a marker preceded it.
         tail_text = "## Response\n" + tail_text
     return (
         text.rstrip()
