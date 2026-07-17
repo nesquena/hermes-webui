@@ -4603,7 +4603,7 @@ async function toggleModelDropdown(){
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   if(typeof window._ensureModelDropdownReady==='function'){
-    const ready=window._ensureModelDropdownReady();
+    const ready=window._ensureModelDropdownReady({freshness:'session_visit'});
     if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;

@@ -1906,20 +1906,18 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
-  if(typeof populateModelDropdown==='function'){
-    const modelRefreshSid=sid;
-    const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
-    if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){
+  if(typeof window!=='undefined'){
+    if(!S._bootReady&&typeof window._startBootModelDropdown==='function'){
       Promise.resolve().then(()=>{
-        if(!isActiveModelRefreshSession()) return undefined;
+        if(!S.session||S.session.session_id!==sid) return undefined;
         return window._startBootModelDropdown();
       }).catch(()=>{});
     }else{
-      const modelRefreshPromise=_deferSessionSideEffect(modelRefreshSid,()=>{
-        if(!isActiveModelRefreshSession()) return undefined;
-        return populateModelDropdown({freshness:'session_visit'});
-      }).catch(()=>{});
-      if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
+      // Session metadata already carries the active model, and syncTopbar()
+      // injects a missing session-scoped option into the select. Mark the
+      // provider catalog stale here, but defer its bounded freshness check
+      // until the user actually opens the model picker.
+      window._modelDropdownReady=null;
     }
   }
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);

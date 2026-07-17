@@ -6543,10 +6543,10 @@ async function _profileSwitchPanelLoad(){
 
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
-  // A cross-profile sidebar click immediately calls loadSession(), whose
-  // post-paint session_visit refresh is the authoritative model-catalog load.
-  // Starting the generic profile refresh here as well duplicates a potentially
-  // multi-second /api/models rebuild while the conversation is opening.
+  // A cross-profile sidebar click immediately calls loadSession(), which marks
+  // the model catalog stale; the picker performs its bounded freshness check on
+  // demand. Starting the generic profile refresh here would instead trigger a
+  // potentially multi-second /api/models rebuild while the conversation opens.
   const openingExistingSidebarSession = !!(
     typeof _profileSwitchOpeningExistingSession !== 'undefined'
     && _profileSwitchOpeningExistingSession

@@ -3508,9 +3508,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
     return true;
   };
-  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({
+  const _hydrateModelDropdown=({redirectIfUnauth=null,freshness=null}={})=>populateModelDropdown({
     preferProfileDefaultOnFreshBoot:true,
     ...(redirectIfUnauth?{redirectIfUnauth}:{}),
+    ...(freshness?{freshness}:{}),
   }).then(()=>{
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
@@ -3550,10 +3551,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._modelDropdownReady=null;
     throw e;
   });
-  const _startModelDropdown=()=>{
+  const _startModelDropdown=(opts={})=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown();
+    const next=_hydrateModelDropdown(opts);
     window._modelDropdownReady=next;
     return next;
   };

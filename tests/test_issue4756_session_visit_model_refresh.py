@@ -670,39 +670,29 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
     assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 4
 
 
-def test_load_session_schedules_session_visit_model_refresh_before_message_load():
+def test_load_session_invalidates_picker_catalog_without_fetching_models():
     body = _extract_function_body(_read_static("sessions.js"), "async function loadSession(")
 
     assign_idx = body.index("S.session=data.session")
     message_load_idx = body.index("await _ensureMessagesLoaded(sid", assign_idx)
-    failure_return_idx = body.index("return;", message_load_idx)
-    model_block_idx = body.index("if(typeof populateModelDropdown==='function')", assign_idx)
-    guard_helper_idx = body.index("const isActiveModelRefreshSession", model_block_idx)
-    promise_idx = body.index("const modelRefreshPromise=_deferSessionSideEffect", model_block_idx)
-    ready_idx = body.index("window._modelDropdownReady=modelRefreshPromise", promise_idx)
-    refresh_idx = body.index("populateModelDropdown({freshness:'session_visit'})", promise_idx)
+    model_block_idx = body.index("if(typeof window!=='undefined')", assign_idx)
+    invalidate_idx = body.index("window._modelDropdownReady=null", model_block_idx)
 
-    assert assign_idx < model_block_idx < message_load_idx < failure_return_idx
-    assert model_block_idx < promise_idx < refresh_idx < ready_idx
-    assert guard_helper_idx < promise_idx
-    assert "_loadingSessionId!==modelRefreshSid" not in body[model_block_idx:ready_idx], (
-        "deferred model refresh must guard on the active session, not _loadingSessionId, "
-        "because loadSession clears _loadingSessionId when the first paint is complete"
-    )
+    assert assign_idx < model_block_idx < invalidate_idx < message_load_idx
+    assert "populateModelDropdown({freshness:'session_visit'})" not in body
+    assert "const modelRefreshPromise=_deferSessionSideEffect" not in body
+    assert "window._startBootModelDropdown()" in body
 
 
-def test_session_visit_model_refresh_is_deferred_until_after_first_paint():
-    sessions = _read_static("sessions.js")
-    defer_helper = _extract_function_body(sessions, "function _afterSessionFirstPaint(")
-    side_effect_helper = _extract_function_body(sessions, "function _deferSessionSideEffect(")
-    load_body = _extract_function_body(sessions, "async function loadSession(")
+def test_session_visit_model_refresh_runs_when_picker_opens():
+    ui = _read_static("ui.js")
+    boot = _read_static("boot.js")
+    toggle_body = _extract_function_body(ui, "async function toggleModelDropdown(")
 
-    assert "requestAnimationFrame(()=>requestAnimationFrame(run))" in defer_helper
-    assert "requestIdleCallback(invoke,{timeout:1500})" in defer_helper
-    assert "return _afterSessionFirstPaint(()=>" in side_effect_helper
-    assert "const modelRefreshPromise=_deferSessionSideEffect" in load_body
-    assert "isActiveModelRefreshSession()" in load_body
-    assert "return populateModelDropdown({freshness:'session_visit'});" in load_body
+    assert "window._ensureModelDropdownReady({freshness:'session_visit'})" in toggle_body
+    assert "const _startModelDropdown=(opts={})=>" in boot
+    assert "const next=_hydrateModelDropdown(opts)" in boot
+    assert "...(freshness?{freshness}:{})" in boot
 
 
 def test_boot_model_dropdown_clears_cached_ready_on_401():

@@ -461,8 +461,9 @@ When the all-profiles sidebar opens an existing conversation owned by another
 profile, the profile cookie still switches before `loadSession()`, but the
 already-complete all-profiles list stays visible and is reused from browser
 cache. That path does not synchronously refetch projects/sessions or start the
-generic model-catalog refresh; `loadSession()` performs the single deferred
-session-specific model refresh after transcript first paint.
+generic model-catalog refresh. Session navigation marks the model catalog stale
+without fetching it; opening the model picker performs the bounded
+session-specific freshness check on demand.
 
 Chat:
     send()                Main action: upload files, POST /api/chat/start, open EventSource
