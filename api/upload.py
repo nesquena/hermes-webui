@@ -462,14 +462,19 @@ def handle_transcribe(handler):
             return j(handler, {'error': 'Speech-to-text is unavailable on this server'}, status=503)
         # Optional language hint from the UI locale (e.g. "de", "en-US"); the
         # provider decides whether/how to use it. Empty/absent = auto-detect.
+        # Feature-detect the kwarg via the signature — older transcription_tools
+        # degrade gracefully to auto-detect. (Not except TypeError: that would
+        # swallow genuine TypeErrors from provider code and transcribe twice.)
         language = _normalize_transcribe_language(fields.get('language'))
-        try:
-            result = transcribe_audio(temp_path, language=language) if language \
-                else transcribe_audio(temp_path)
-        except TypeError:
-            # Older transcription_tools without the language kwarg — degrade
-            # gracefully to auto-detect rather than 500.
-            result = transcribe_audio(temp_path)
+        if language:
+            import inspect
+            try:
+                if 'language' not in inspect.signature(transcribe_audio).parameters:
+                    language = ''
+            except (TypeError, ValueError):
+                language = ''
+        result = transcribe_audio(temp_path, language=language) if language \
+            else transcribe_audio(temp_path)
         if not result.get('success'):
             msg = str(result.get('error') or 'Transcription failed')
             status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400

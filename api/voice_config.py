@@ -64,11 +64,14 @@ def _redacted_section(section: dict, str_fields, *, is_tts: bool) -> dict:
     if not is_tts:
         out["enabled"] = bool(section.get("enabled", True))
         out["mime_types"] = str(section.get("mime_types") or "").strip()
-    for field in ("base_url", "model", "voice", "response_format", "language"):
-        if field in str_fields or field in ("base_url", "model", "voice", "response_format", "language"):
-            val = oai.get(field)
-            if val is not None:
-                out[field] = str(val)
+    # openai-sub-block fields; section-level ones (provider, enabled,
+    # mime_types) are handled above.
+    for field in str_fields:
+        if field in ("provider", "enabled", "mime_types"):
+            continue
+        val = oai.get(field)
+        if val is not None:
+            out[field] = str(val)
     if is_tts:
         extra = section.get("extra_params")
         out["extra_params"] = extra if isinstance(extra, dict) else {}
@@ -263,10 +266,14 @@ def _write_config_atomic(config_path: Path, dump_yaml, data) -> None:
     import tempfile
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    old_mode = None
     if config_path.exists():
         try:
+            st = config_path.stat()
+            old_mode = st.st_mode & 0o777
+            # mtime_ns so rapid successive writes each keep their backup.
             backup = config_path.with_suffix(
-                config_path.suffix + ".voicebak-" + str(int(config_path.stat().st_mtime))
+                config_path.suffix + ".voicebak-" + str(st.st_mtime_ns)
             )
             if not backup.exists():
                 backup.write_bytes(config_path.read_bytes())
@@ -284,6 +291,11 @@ def _write_config_atomic(config_path: Path, dump_yaml, data) -> None:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        if old_mode is not None:
+            # mkstemp creates 0600; keep the original file's permissions so a
+            # previously group/other-readable config stays readable after an
+            # atomic replace.
+            os.chmod(tmp_name, old_mode)
         os.replace(tmp_name, config_path)
     finally:
         try:

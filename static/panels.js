@@ -9392,10 +9392,21 @@ async function loadSettingsPanel(){
       const status=g('settingsVoiceEndpointsStatus');
       const roNote=g('settingsVoiceEndpointsRO');
       const saveBtn=g('settingsVoiceEndpointsSave');
+      function selectProvider(sel,prov,known){
+        // Known providers select their fixed option; any other configured
+        // provider (e.g. a custom fork engine) is shown as a dynamic option
+        // instead of silently rendering as "(unchanged / not set)".
+        if(!sel) return;
+        if(!prov||known.indexOf(prov)>=0){ sel.value=prov||''; return; }
+        let opt=sel.querySelector('option[data-dynamic]');
+        if(!opt){ opt=document.createElement('option'); opt.setAttribute('data-dynamic','1'); sel.appendChild(opt); }
+        opt.value=prov; opt.textContent=prov+' (current)';
+        sel.value=prov;
+      }
       function fillSection(prefix,sec){
         sec=sec||{};
         if(prefix==='Stt'){
-          const eng=g('settingsSttEngine'); if(eng) eng.value=(sec.provider==='openai'||sec.provider==='local')?sec.provider:'';
+          selectProvider(g('settingsSttEngine'),String(sec.provider||''),['openai','local']);
           setVal('settingsSttBaseUrl',sec.base_url);
           setVal('settingsSttModel',sec.model);
           setVal('settingsSttLanguage',sec.language);
@@ -9403,7 +9414,7 @@ async function loadSettingsPanel(){
           setVal('settingsSttResponseFormat',sec.response_format);
           const k=g('settingsSttApiKey'); if(k){k.value=''; k.placeholder=sec.api_key_set?'•••• (set — leave blank to keep)':'(none)';}
         } else {
-          const eng=g('settingsTtsEndpointEngine'); if(eng) eng.value=(sec.provider==='openai')?'openai':'';
+          selectProvider(g('settingsTtsEndpointEngine'),String(sec.provider||''),['openai']);
           setVal('settingsTtsBaseUrl',sec.base_url);
           setVal('settingsTtsModel',sec.model);
           setVal('settingsTtsVoiceId',sec.voice);

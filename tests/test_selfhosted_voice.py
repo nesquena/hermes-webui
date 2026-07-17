@@ -166,6 +166,78 @@ def test_openai_tts_reads_config_api_key(monkeypatch):
     assert captured["auth"] == "Bearer sk-config-key"
 
 
+def test_openai_tts_env_key_not_sent_to_lan_target(monkeypatch):
+    """A real env OpenAI key (set for chat) must never travel to a
+    self-hosted LAN target — the placeholder Bearer is sent instead."""
+    import api.config as config
+    captured = {}
+
+    def _fake_open(req, **kw):
+        captured["auth"] = req.headers.get("Authorization")
+        return _StreamOnceResponse([b"x"], headers={"Content-Type": "audio/wav"})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-chat-key")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "192.168.1.0/24")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": "http://192.168.1.50:8001/v1",
+                           "model": "m", "voice": "v"}}
+    })
+    monkeypatch.setattr(routes, "_tts_open", _fake_open)
+    h = _post({"text": "Hallo", "engine": "openai"}, client="10.82.0.23")
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert captured["auth"] == "Bearer sk-no-key-required"
+
+
+def test_openai_tts_env_key_still_used_for_public_host(monkeypatch):
+    import api.config as config
+    captured = {}
+
+    def _fake_open(req, **kw):
+        captured["auth"] = req.headers.get("Authorization")
+        return _StreamOnceResponse([b"x"], headers={"Content-Type": "audio/mpeg"})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-key")
+    monkeypatch.setattr(config, "get_config", lambda: {"tts": {}})
+    monkeypatch.setattr(routes, "_tts_open", _fake_open)
+    h = _post({"text": "Hi", "engine": "openai"}, client="10.82.0.24")
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert captured["auth"] == "Bearer sk-env-key"
+
+
+def test_openai_tts_merges_extra_params(monkeypatch):
+    """tts.extra_params reach the upstream JSON body; core fields win."""
+    import api.config as config
+    captured = {}
+
+    def _fake_open(req, **kw):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _StreamOnceResponse([b"x"], headers={"Content-Type": "audio/wav"})
+
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "192.168.1.0/24")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {
+            "extra_params": {"speed": 1.2, "seed": 7, "model": "evil-override"},
+            "openai": {"base_url": "http://192.168.1.50:8001/v1",
+                       "model": "qwen3-tts", "voice": "spk"},
+        }
+    })
+    monkeypatch.setattr(routes, "_tts_open", _fake_open)
+    h = _post({"text": "Hallo", "engine": "openai"}, client="10.82.0.25")
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert captured["body"]["speed"] == 1.2
+    assert captured["body"]["seed"] == 7
+    assert captured["body"]["model"] == "qwen3-tts"  # core field wins
+    assert captured["body"]["voice"] == "spk"
+
+
 # ── /api/voice/config ───────────────────────────────────────────────────────
 
 def test_voice_config_get_redacts_key(monkeypatch):

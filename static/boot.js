@@ -1589,6 +1589,7 @@ window.renderTranscript=function(container, messages, opts){
   // detection (no Web Speech API), then POST the blob to /api/transcribe.
   let _voiceServerStt=false, _voiceServerSttProbed=false;
   let _vmStream=null, _vmRecorder=null, _vmChunks=[], _vmAudioCtx=null, _vmAnalyser=null, _vmVadRaf=null, _vmMaxTimer=null;
+  let _vmSpoke=false, _vmHadVad=false;
 
   function _probeVoiceServerStt(){
     if(_voiceServerSttProbed||!_canRecordAudio) return;
@@ -1596,9 +1597,12 @@ window.renderTranscript=function(container, messages, opts){
     try{
       fetch('api/transcribe/capability',{headers:{'Accept':'application/json'}})
         .then(r=>r&&r.ok?r.json():null)
-        .then(d=>{ _voiceServerStt=!!(d&&d.available); })
-        .catch(()=>{});
-    }catch(_){}
+        .then(d=>{
+          if(d){ _voiceServerStt=!!d.available; }
+          else{ _voiceServerSttProbed=false; } // transient failure — retry on next activation
+        })
+        .catch(()=>{ _voiceServerSttProbed=false; });
+    }catch(_){ _voiceServerSttProbed=false; }
   }
   _probeVoiceServerStt();
 
@@ -1641,7 +1645,7 @@ window.renderTranscript=function(container, messages, opts){
       for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
       const rms=Math.sqrt(sum/buf.length);
       const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
-      if(rms>speechThresh){ spoke=true; silenceStart=0; }
+      if(rms>speechThresh){ spoke=true; _vmSpoke=true; silenceStart=0; }
       else if(spoke){
         if(!silenceStart){ silenceStart=now; }
         else if(now-silenceStart>=_voiceSilenceMs()){ _vmStopRecordingForSend(); return; }
@@ -1665,7 +1669,7 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     if(!_voiceModeActive){ try{ stream.getTracks().forEach(tr=>tr.stop()); }catch(_){} return; }
-    _vmStream=stream; _vmChunks=[];
+    _vmStream=stream; _vmChunks=[]; _vmSpoke=false; _vmHadVad=false;
     let mime='';
     const prefs=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
     for(let i=0;i<prefs.length;i++){ if(window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(prefs[i])){ mime=prefs[i]; break; } }
@@ -1681,8 +1685,9 @@ window.renderTranscript=function(container, messages, opts){
         _vmAnalyser=_vmAudioCtx.createAnalyser();
         _vmAnalyser.fftSize=2048;
         srcNode.connect(_vmAnalyser);
+        _vmHadVad=true;
       }
-    }catch(_){ _vmAnalyser=null; }
+    }catch(_){ _vmAnalyser=null; _vmHadVad=false; }
     try{ _vmRecorder.start(); }
     catch(_){ _vmStopAudio(); setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800); return; }
     // Hard cap so a noisy room / missing analyser can't record forever.
@@ -1702,7 +1707,10 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive||_voiceModeState!=='listening') return;
     const type=(rec&&rec.mimeType)||(chunks[0]&&chunks[0].type)||'audio/webm';
     const blob=chunks.length?new Blob(chunks,{type}):null;
-    if(!blob||blob.size<1200){ // no speech / basically silence — listen again
+    // When the VAD ran and never saw speech (max-duration timer fired on a
+    // silent room), don't post 20s of silence to the STT server — just
+    // listen again. Without a working analyser we can't tell, so we post.
+    if(!blob||blob.size<1200||(_vmHadVad&&!_vmSpoke)){
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
       return;
     }
@@ -1720,6 +1728,9 @@ window.renderTranscript=function(container, messages, opts){
       }
       const transcript=String((data&&data.transcript)||'').trim();
       if(!transcript){ setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250); return; }
+      // Re-check after the server round-trip: the user may have deactivated
+      // voice mode (and started typing) while transcription was in flight.
+      if(!_voiceModeActive) return;
       ta.value=transcript; autoResize();
       _voiceModeSend();
     }catch(_){

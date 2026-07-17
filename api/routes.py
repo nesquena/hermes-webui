@@ -18507,6 +18507,7 @@ def _handle_tts(handler, parsed):
         # Read tts.openai.* from config first so a self-hosted / OpenAI-compatible
         # server (base_url, optional api_key, model, voice, response_format) works.
         cfg_api_key = cfg_base_url = cfg_model = cfg_voice = cfg_format = ""
+        cfg_extra = {}
         try:
             from api.config import get_config
             _tts_cfg = (get_config() or {}).get("tts", {})
@@ -18517,21 +18518,10 @@ def _handle_tts(handler, parsed):
                 cfg_model = str(_oai_cfg.get("model") or "").strip()
                 cfg_voice = str(_oai_cfg.get("voice") or "").strip()
                 cfg_format = str(_oai_cfg.get("response_format") or "").strip()
+            if isinstance(_tts_cfg, dict) and isinstance(_tts_cfg.get("extra_params"), dict):
+                cfg_extra = _tts_cfg["extra_params"]
         except Exception:
             pass
-
-        api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            try:
-                from api.onboarding import _load_env_file
-                from api.profiles import get_active_hermes_home
-                env_cfg = _load_env_file(get_active_hermes_home() / ".env")
-                api_key = (env_cfg.get("VOICE_TOOLS_OPENAI_KEY", "") or env_cfg.get("OPENAI_API_KEY", "")).strip()
-            except Exception:
-                pass
-        # A config-supplied key wins (it targets the configured self-hosted server).
-        if cfg_api_key:
-            api_key = cfg_api_key
 
         from urllib.parse import urlunsplit as _urlunsplit
         default_base = _urlunsplit(("https", "api.openai.com", "/v1", "", ""))
@@ -18543,21 +18533,41 @@ def _handle_tts(handler, parsed):
         model = cfg_model or "gpt-4o-mini-tts"
         oai_voice = cfg_voice or "alloy"
 
-        # Self-hosted / localhost / allowlisted-LAN servers are commonly keyless;
-        # send a placeholder Bearer so they work without a dummy env var. A public
-        # host (api.openai.com etc.) still requires a real key.
-        if not api_key:
-            if _tts_base_url_is_self_hosted(base_url):
-                api_key = "sk-no-key-required"
-            else:
+        # Key resolution. A config-supplied key always wins (it targets the
+        # configured server). For self-hosted targets (localhost or the
+        # allowlisted LAN) env keys are never attached — a real OpenAI chat
+        # key must not travel, in cleartext for http, to a server it was not
+        # issued for — the placeholder Bearer is sent instead. Only a public
+        # host (api.openai.com etc.) falls back to the env key chain and
+        # still requires a real key.
+        if cfg_api_key:
+            api_key = cfg_api_key
+        elif _tts_base_url_is_self_hosted(base_url):
+            api_key = "sk-no-key-required"
+        else:
+            api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
+            if not api_key:
+                try:
+                    from api.onboarding import _load_env_file
+                    from api.profiles import get_active_hermes_home
+                    env_cfg = _load_env_file(get_active_hermes_home() / ".env")
+                    api_key = (env_cfg.get("VOICE_TOOLS_OPENAI_KEY", "") or env_cfg.get("OPENAI_API_KEY", "")).strip()
+                except Exception:
+                    pass
+            if not api_key:
                 from api.helpers import bad as _bad
                 return _bad(handler, "OpenAI API key not configured", 503)
 
         url = f"{base_url}/audio/speech"
-        payload = {"model": model, "input": text, "voice": oai_voice}
+        # tts.extra_params (server-specific knobs, e.g. speed/seed) merge in
+        # first so the core fields can never be overridden by them.
+        payload = dict(cfg_extra)
+        payload.update({"model": model, "input": text, "voice": oai_voice})
         if cfg_format:
             payload["response_format"] = cfg_format
-        req_body = json.dumps(payload).encode("utf-8")
+        # default=str: hand-edited YAML extra_params may hold non-JSON types
+        # (dates, tags); stringify rather than 500 on serialization.
+        req_body = json.dumps(payload, default=str).encode("utf-8")
 
         req = Request(url, data=req_body, headers={
             "Authorization": f"Bearer {api_key}",
