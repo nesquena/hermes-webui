@@ -213,10 +213,20 @@ def _read_jsonl(
 
     # Unbounded whole-file read (original behavior).
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return events, malformed
-    for line_no, raw in enumerate(lines, start=1):
+    # A crash-truncated final record (write interrupted before its newline
+    # terminator) is silently accepted by splitlines(), which treats EOF as a
+    # line boundary. This must match the tail reader's completeness gate: if the
+    # file doesn't end with \n (or \r\n), the last line is unterminated and
+    # potentially crash-truncated — discard it so a finished run doesn't flip to
+    # a falsely-terminal state from a partial write. (#6139 round-5 alignment.)
+    ended_with_newline = lines.endswith("\n") or lines.endswith("\r")
+    lines_list = lines.splitlines()
+    if not ended_with_newline and lines_list:
+        lines_list = lines_list[:-1]  # drop the unterminated final line
+    for line_no, raw in enumerate(lines_list, start=1):
         if not raw.strip():
             continue
         try:
@@ -267,38 +277,45 @@ def _find_record_start_before(path: Path, seek_pos: int) -> int:
     return 0
 
 
-def _read_last_complete_line_before(path: Path, end_offset: int) -> str:
-    """Return the last complete JSONL line strictly before ``end_offset``.
+def _read_last_complete_line_before(path: Path, end_offset: int) -> dict | None:
+    """Return the summary of the last complete JSONL record strictly before
+    ``end_offset``, without materializing a multi-MB payload.
 
-    Scans backward from ``end_offset - 1`` for the final two newlines before it;
-    the line between them is the last complete record preceding the boundary
-    record. Used to retain the preceding valid event when a crash-truncated
-    boundary record is rejected, so last_seq/running survive and the apperror
-    recovery signal fires (matching master). Bounded backward chunk scan — never
-    materializes the whole file. Returns '' if there's no preceding complete line.
+    Finds the last complete line boundary before ``end_offset`` (two backward
+    newline scans), then uses ``_extract_boundary_record_summary`` (the bounded
+    prefix extractor) to read ONLY the record's summary fields. This keeps the
+    recovery path within the cap even when the preceding record is itself an
+    oversized multi-MB event. Returns the summary dict, or None if there's no
+    preceding complete record.
     """
     if end_offset <= 0:
-        return ""
-    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
-    # The byte at end_offset-1 is typically the newline terminating the preceding
-    # line (or the start of the boundary record). We want the line BEFORE that.
-    # Find the newline at or before end_offset-1, then the line before it.
+        return None
     try:
         size = path.stat().st_size
     except (FileNotFoundError, OSError):
-        return ""
+        return None
     scan_end = min(end_offset, size)
-    with path.open("rb") as fh:
-        # Step 1: find the last newline at or before scan_end (terminator of the
-        # preceding line).
-        first_nl = _rfind_byte_before(path, b"\n", scan_end)
-        if first_nl is None or first_nl == 0:
-            return ""
-        # Step 2: find the newline before that (start of the preceding line + 1).
-        second_nl = _rfind_byte_before(path, b"\n", first_nl)
-        line_start = (second_nl + 1) if second_nl is not None else 0
-        fh.seek(line_start)
-        return fh.read(first_nl - line_start).decode("utf-8", errors="replace")
+    # Find the newline at or before scan_end (terminator of the preceding line).
+    first_nl = _rfind_byte_before(path, b"\n", scan_end)
+    if first_nl is None or first_nl == 0:
+        return None
+    # Find the start of that line (newline before it, or byte 0).
+    second_nl = _rfind_byte_before(path, b"\n", first_nl)
+    line_start = (second_nl + 1) if second_nl is not None else 0
+    line_len = first_nl - line_start
+    # For a normal-sized preceding record, read and parse the whole line.
+    # For an oversized one, use the bounded prefix extractor.
+    if line_len <= _BOUNDARY_SUMMARY_PREFIX_BYTES:
+        try:
+            with path.open("rb") as fh:
+                fh.seek(line_start)
+                raw = fh.read(line_len)
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, OSError):
+            return None
+    # Oversized preceding record: bounded prefix extraction (no payload materialized).
+    return _extract_boundary_record_summary(path, line_start)
 
 
 def _rfind_byte_before(path: Path, byte: bytes, end_offset: int) -> int | None:
@@ -371,7 +388,15 @@ def _record_is_structurally_complete(path: Path, record_start: int) -> bool:
                         # else read fresh from the file.
                         if ci + 1 < chunk_len:
                             nb = chunk[ci + 1]
-                            return nb in (0x0A, 0x0D)  # \n or \r (CRLF handled below)
+                            if nb == 0x0A:  # \n — complete
+                                return True
+                            if nb == 0x0D:  # \r — need to check for \r\n
+                                if ci + 2 < chunk_len:
+                                    return chunk[ci + 2] == 0x0A
+                                # \r at chunk end: read from file to check for \n
+                                fh.seek(pos + 1)
+                                return fh.read(1) == b"\n"
+                            return False  # any other byte after } is not a terminator
                         # Terminator is in the next chunk: read up to 2 bytes
                         # from file to distinguish \r\n (CRLF) from a bare \r.
                         fh.seek(pos)
@@ -550,16 +575,11 @@ def _read_jsonl_tail(
             # so last_seq/running survive and the apperror recovery signal fires
             # (matching master). Without this, rejecting the boundary record also
             # drops the preceding valid event → event_count=0, last_seq=0, no
-            # recovery. Read a bounded prefix ending at record_start and take its
-            # last complete JSONL line.
+            # recovery. Read the last complete record's summary via bounded prefix
+            # extraction (never materializes a multi-MB payload).
             preceding = _read_last_complete_line_before(path, record_start)
-            if preceding:
-                try:
-                    parsed = json.loads(preceding)
-                    if isinstance(parsed, dict):
-                        events.append(parsed)
-                except json.JSONDecodeError:
-                    pass
+            if preceding is not None:
+                events.append(preceding)
         # Now drop the partial first fragment from the window so we only parse
         # the complete trailing records.
         nl = text.find("\n")
