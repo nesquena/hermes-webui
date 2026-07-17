@@ -475,6 +475,31 @@ def test_stt_mime_types_allowlist_enforced(monkeypatch):
     assert upload._stt_mime_rejection({"file": ("v.wav", b"x", "audio/wav")}, "v.wav") is None
 
 
+def test_voice_reply_tts_toggle_present():
+    """Voice mode has a spoken-reply toggle: STT+LLM with or without TTS.
+    Persisted per browser; when off, _speakResponse re-arms the mic instead
+    of synthesizing."""
+    boot = (_STATIC / "boot.js").read_text(encoding="utf-8")
+    html = (_STATIC / "index.html").read_text(encoding="utf-8")
+    i18n = (_STATIC / "i18n.js").read_text(encoding="utf-8")
+    assert 'id="btnVoiceReplyToggle"' in html
+    assert "hermes-voice-reply-tts" in boot
+    assert "_voiceReplyTts" in boot
+    # when off, _speakResponse skips synthesis and re-listens
+    assert "if(!_voiceReplyTts){" in boot
+    # i18n key present in every locale (parity)
+    assert i18n.count("voice_reply_toggle:") == i18n.count("voice_mode_toggle:")
+
+
+def test_completion_beep_suppressed_in_voice_mode():
+    """The completion chime is silenced while voice mode is active — the
+    spoken TTS reply is the done signal ('beep, then the reply')."""
+    messages = (_STATIC / "messages.js").read_text(encoding="utf-8")
+    fn = messages[messages.index("function playNotificationSound"):]
+    fn = fn[:fn.index("\n}")]
+    assert "window._voiceModeActive" in fn and "return" in fn
+
+
 def test_voice_mode_thinking_watchdog_present():
     """Voice mode recovers from a 'thinking' turn that never reaches the
     done→autoRead hook (dropped stream / cancel / error) instead of hanging."""

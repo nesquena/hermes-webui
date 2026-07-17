@@ -1520,6 +1520,32 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+
+  // Spoken-reply toggle: when off, voice mode still transcribes speech and
+  // sends it to the LLM, but the reply is only shown (not read aloud) — the
+  // mic re-arms as soon as the turn completes. Persisted per browser.
+  let _voiceReplyTts = (function(){
+    try{ return localStorage.getItem('hermes-voice-reply-tts')!=='false'; }catch(_){ return true; }
+  })();
+  const _voiceReplyBtn = $('btnVoiceReplyToggle');
+  function _renderVoiceReplyToggle(){
+    if(!_voiceReplyBtn) return;
+    _voiceReplyBtn.textContent = _voiceReplyTts ? '🔊 Reply' : '🔇 Silent';
+    _voiceReplyBtn.setAttribute('aria-pressed', _voiceReplyTts ? 'true' : 'false');
+  }
+  if(_voiceReplyBtn){
+    _renderVoiceReplyToggle();
+    _voiceReplyBtn.onclick=function(){
+      _voiceReplyTts=!_voiceReplyTts;
+      try{ localStorage.setItem('hermes-voice-reply-tts', _voiceReplyTts?'true':'false'); }catch(_){}
+      _renderVoiceReplyToggle();
+      // If turning silent mid-speech, stop the current utterance and re-listen.
+      if(!_voiceReplyTts && _voiceModeState==='speaking'){
+        if(typeof stopTTS==='function') stopTTS();
+        if(_voiceModeActive) _startListening();
+      }
+    };
+  }
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1882,6 +1908,13 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     _voiceModeThinkingSid=null;
+
+    // Spoken-reply toggle off → don't synthesize; the reply is on screen, just
+    // re-arm the mic for the next turn (STT + LLM, no TTS).
+    if(!_voiceReplyTts){
+      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
+      return;
+    }
     _setState('speaking');
 
     // Find last assistant message
