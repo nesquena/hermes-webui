@@ -352,5 +352,71 @@ def test_crash_truncated_oversized_done_stays_nonterminal(tmp_path):
     )
 
 
+def test_crash_truncated_oversized_done_retains_preceding_event(tmp_path):
+    """Regression (reviewer round 4): rejecting the crash-truncated boundary
+    record also dropped the preceding VALID event, so event_count=0 / last_seq=0
+    and stale_interrupted_event returned None → no apperror recovery emitted.
+    Master reports running/last_seq=1 and emits the recovery signal. The fix
+    retains the last complete event before the rejected boundary record."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    writer = RunJournalWriter("session_1", "run_trunc_preceding", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})  # seq=1, the preceding valid event
+    path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    partial = (
+        '{"version":1,"event_id":"run_trunc_preceding:2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * (_SESSION_REPLAY_MAX_BYTES + 50_000)
+    )  # no closing brace/newline — crash mid-write
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial)
+
+    summary = latest_run_summary(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    # The preceding token (seq=1) must survive — not falsely completed.
+    assert summary["terminal"] is False
+    assert summary["terminal_state"] != "completed"
+    assert summary["last_seq"] == 1, (
+        f"preceding event lost: last_seq={summary['last_seq']} (expected 1)"
+    )
+    assert summary["event_count"] >= 1, (
+        f"preceding event lost: event_count={summary['event_count']}"
+    )
+
+
+def test_oversized_done_closing_brace_without_newline_stays_nonterminal(tmp_path):
+    """Regression (reviewer round 4): an oversized `done` ending at EOF with a
+    closing `}` but NO JSONL newline terminator is a crash-truncated write
+    (interrupted after the brace, before the \\n), NOT a completed record. The
+    completeness scanner used to treat EOF-right-after-`}` as complete; it must
+    require an actual \\n terminator."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    writer = RunJournalWriter("session_1", "run_brace_no_newline", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hi"})
+    path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    # A record that closes with }} but has NO trailing newline.
+    huge = (
+        '{"version":1,"event_id":"run_brace_no_newline:2","seq":2,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * (_SESSION_REPLAY_MAX_BYTES + 50_000)
+        + '"}}'
+    )  # closes with }} but no \n — crash after the brace
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(huge)
+
+    summary = latest_run_summary(writer.session_id, writer.run_id, session_dir=writer.session_dir)
+    assert summary["terminal"] is False, (
+        f"a closing-brace-at-EOF-no-newline record must not be accepted as terminal; "
+        f"got terminal_state={summary['terminal_state']!r}"
+    )
+    assert summary["terminal_state"] != "completed", (
+        f"crash-truncated run (brace without newline) misreported as completed: "
+        f"{summary['terminal_state']!r}"
+    )
+
+
+
 
 
