@@ -7346,6 +7346,7 @@ def get_state_db_session_messages(
     profile=None,
     since_timestamp=None,
     include_inactive: bool = False,
+    limit=None,
 ) -> list:
     """Read messages for a Hermes session from state.db.
 
@@ -7361,6 +7362,14 @@ def get_state_db_session_messages(
     raw state.db scan to rows at or after a sidecar-derived timestamp floor while
     preserving the caller's normal merge/window logic.  Full-history callers must
     leave it unset.
+
+    ``limit`` is an optional defensive row cap (applied after ORDER BY as a SQL
+    LIMIT). It is a BACKSTOP against a pathological/huge state.db materializing
+    unbounded rows into a Python list, NOT a semantic window: the display path
+    counts visible rows post-reconciliation, so a true window LIMIT here would
+    corrupt the sidecar/state.db merge (see _state_db_since_timestamp_for_limited_display,
+    which deliberately does NOT SQL-LIMIT raw rows for that reason). Callers that
+    need the full history for model-context reconstruction leave this unset.
 
     When the messages table exposes an ``active`` column, inactive rows are
     compacted/archived history and are intentionally excluded by default. WebUI
@@ -7462,14 +7471,42 @@ def get_state_db_session_messages(
             active_clause = ""
             if 'active' in available and not include_inactive:
                 active_clause = " AND (active IS NULL OR active != 0)"
-            cur.execute(f"""
-                SELECT {', '.join(selected)}, session_id
-                FROM messages
-                WHERE session_id IN ({placeholders})
-                {since_clause}
-                {active_clause}
-                ORDER BY timestamp ASC, id ASC
-            """, params)
+            # Defensive row cap (backstop only — see docstring). Applied as a
+            # SQL LIMIT bound parameter (?) so the tail (newest) rows are
+            # retained and a pathological state.db can't materialize unbounded
+            # rows. None = unchanged full-history read for model-context callers.
+            limit_clause = ""
+            if limit is not None:
+                try:
+                    limit_int = max(1, int(limit))
+                except (TypeError, ValueError):
+                    limit_int = None
+                if limit_int is not None:
+                    # The query orders ASC (oldest first); to keep the NEWEST
+                    # rows under the cap, take a descending-ordered subquery and
+                    # re-sort ascending — a plain LIMIT would keep the oldest.
+                    limit_clause = " ORDER BY timestamp DESC, id DESC LIMIT ?"
+                    params.append(limit_int)
+            if limit_clause:
+                cur.execute(f"""
+                    SELECT * FROM (
+                        SELECT {', '.join(selected)}, session_id
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                        {since_clause}
+                        {active_clause}
+                        {limit_clause}
+                    ) ORDER BY timestamp ASC, id ASC
+                """, params)
+            else:
+                cur.execute(f"""
+                    SELECT {', '.join(selected)}, session_id
+                    FROM messages
+                    WHERE session_id IN ({placeholders})
+                    {since_clause}
+                    {active_clause}
+                    ORDER BY timestamp ASC, id ASC
+                """, params)
             msgs = []
             for row in cur.fetchall():
                 msg = {
