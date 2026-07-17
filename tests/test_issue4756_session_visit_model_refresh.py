@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -691,8 +693,69 @@ def test_session_visit_model_refresh_runs_when_picker_opens():
 
     assert "window._ensureModelDropdownReady({freshness:'session_visit'})" in toggle_body
     assert "const _startModelDropdown=(opts={})=>" in boot
-    assert "const next=_hydrateModelDropdown(opts)" in boot
+    assert "const requestedFreshness=opts&&opts.freshness?opts.freshness:null" in boot
+    assert "_modelDropdownReadyFreshness===requestedFreshness" in boot
+    assert "then(()=>_hydrateModelDropdown(opts))" in boot
     assert "...(freshness?{freshness}:{})" in boot
+
+
+def test_picker_freshness_is_queued_behind_incompatible_model_load():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+
+        pytest.skip("node not available")
+
+    boot = _read_static("boot.js")
+    definitions_start = boot.index(
+        "const _trackModelDropdownReady=(promise,freshness=null)=>"
+    )
+    definitions_end = boot.index(
+        "const _startBootModelDropdown=()=>",
+        definitions_start,
+    )
+    definitions = boot[definitions_start:definitions_end]
+    harness = f"""
+const window={{_modelDropdownReady:null}};
+let _modelDropdownReadyFreshness=null;
+const calls=[];
+let releaseGeneric;
+const genericGate=new Promise((resolve)=>{{releaseGeneric=resolve;}});
+const _hydrateModelDropdown=(opts={{}})=>{{
+  calls.push(opts.freshness||null);
+  return calls.length===1?genericGate:Promise.resolve();
+}};
+{definitions}
+(async()=>{{
+  const generic=_startModelDropdown();
+  const picker=_startModelDropdown({{freshness:'session_visit'}});
+  const duplicatePicker=_startModelDropdown({{freshness:'session_visit'}});
+  releaseGeneric();
+  await picker;
+  process.stdout.write(JSON.stringify({{
+    calls,
+    pickerQueued:picker!==generic,
+    duplicateCoalesced:duplicatePicker===picker,
+    readyIsPicker:window._modelDropdownReady===picker,
+  }}));
+}})().catch((error)=>{{
+  console.error(error);
+  process.exit(1);
+}});
+"""
+    proc = subprocess.run(
+        [node, "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert json.loads(proc.stdout) == {
+        "calls": [None, "session_visit"],
+        "pickerQueued": True,
+        "duplicateCoalesced": True,
+        "readyIsPicker": True,
+    }
 
 
 def test_boot_model_dropdown_clears_cached_ready_on_401():

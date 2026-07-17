@@ -3547,23 +3547,37 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
     if(S.session) syncTopbar();
     else if(typeof syncReasoningChip==='function') syncReasoningChip();
-  }).catch(e=>{
-    window._modelDropdownReady=null;
-    throw e;
   });
+  let _modelDropdownReadyFreshness=null;
+  const _trackModelDropdownReady=(promise,freshness=null)=>{
+    const tracked=Promise.resolve(promise).catch(e=>{
+      if(window._modelDropdownReady===tracked){
+        window._modelDropdownReady=null;
+        _modelDropdownReadyFreshness=null;
+      }
+      throw e;
+    });
+    window._modelDropdownReady=tracked;
+    _modelDropdownReadyFreshness=freshness||null;
+    return tracked;
+  };
   const _startModelDropdown=(opts={})=>{
+    const requestedFreshness=opts&&opts.freshness?opts.freshness:null;
     const ready=window._modelDropdownReady;
-    if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown(opts);
-    window._modelDropdownReady=next;
-    return next;
+    if(ready&&typeof ready.then==='function'){
+      if(!requestedFreshness||_modelDropdownReadyFreshness===requestedFreshness) return ready;
+      const queued=Promise.resolve(ready).catch(()=>{}).then(()=>_hydrateModelDropdown(opts));
+      return _trackModelDropdownReady(queued,requestedFreshness);
+    }
+    return _trackModelDropdownReady(_hydrateModelDropdown(opts),requestedFreshness);
   };
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth});
-    window._modelDropdownReady=next;
-    return next;
+    return _trackModelDropdownReady(
+      _hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth}),
+      null,
+    );
   };
   window._modelDropdownReady=null;
   window._startBootModelDropdown=_startBootModelDropdown;
