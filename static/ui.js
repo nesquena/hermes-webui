@@ -3214,6 +3214,16 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
+    const preferredProvider=String(preferredProviderId||'').trim().toLowerCase();
+    if(preferredProvider&&sel.options){
+      // Assigning select.value picks the first duplicate value. Restore the
+      // provider-specific option that the caller matched (#6131).
+      const preferredOption=Array.from(sel.options).find(o=>
+        String(o.value||'')===String(resolved)
+        && String(_getOptionProviderId(o)||'').trim().toLowerCase()===preferredProvider
+      );
+      if(preferredOption) preferredOption.selected=true;
+    }
     if(isRichPickerSelect){
       const resolvedState=typeof _modelStateForSelect==='function'
         ? _modelStateForSelect(sel, resolved)
