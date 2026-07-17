@@ -4662,6 +4662,31 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
+// Clear the unread badge for a session without opening it (#1748), used by the
+// sidebar "Mark as read" action.
+//
+// The viewed watermark must be the AUTHORITATIVE completed count, not just the
+// cached sidebar row's message_count. A background completion records its count
+// in the explicit completion-unread marker, and _hasUnreadForSession
+// short-circuits to "unread" on that marker regardless of the cached row. That
+// marker count can exceed the sidebar cache's message_count when the list has
+// not re-fetched the higher count yet. Persisting only the stale cached count
+// clears the badge now but lets the next /api/sessions refresh — which returns
+// the authoritative higher count — re-flag the session as unread, so the badge
+// disappears and reappears (#5900). Resolve one authoritative value here so the
+// code that decided the session was unread and the code that clears it agree.
+function _markSessionRead(session){
+  if(!session || !session.session_id) return;
+  const sid = session.session_id;
+  let viewedCount = Number(session.message_count || 0);
+  if(!Number.isFinite(viewedCount)) viewedCount = 0;
+  const marker = _getSessionCompletionUnread()[sid];
+  const markerCount = marker ? Number(marker.message_count) : NaN;
+  if(Number.isFinite(markerCount)) viewedCount = Math.max(viewedCount, markerCount);
+  _setSessionViewedCount(sid, viewedCount);
+  if(typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+}
+
 function _openSessionActionMenu(session, anchorEl){
   const isReadOnly = _isReadOnlySession(session);
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -4720,8 +4745,7 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.check,
       ()=>{
         closeSessionActionMenu();
-        _setSessionViewedCount(session.session_id, Number(session.message_count || 0));
-        renderSessionListFromCache();
+        _markSessionRead(session);
       }
     ));
   }
