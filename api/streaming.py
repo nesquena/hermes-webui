@@ -101,31 +101,186 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
-# Matches a redaction mask run (three or more '*') OR a quoted value that
-# immediately follows a colon (e.g. the "value" in JSON-ish `"key":"value"`).
-# Both are collapsed to a single sentinel so a credential-redacted echo still
-# compares equal to its unredacted live-streamed twin.
+# A credential redaction mask run (three or more '*'). Only these placeholders
+# are treated as wildcards during echo comparison; every other character must
+# still match literally (see _redaction_tolerant_match).
 _ECHO_REDACTION_MASK_RE = re.compile(r'\*{3,}')
-_ECHO_QUOTED_VALUE_RE = re.compile(r'(:\s*")([^"]*)(")')
+
+# Boundary characters that separate one scalar/token from the next. A redaction
+# mask replaces exactly ONE scalar, so the matcher tokenizes both texts on these
+# boundaries and a mask may only ever stand in for a single whole token/scalar —
+# never spanning a boundary into neighbouring status text. Quotes/backticks
+# close quoted strings; `,` `}` `]` `)` `:` `;` `|` close structured fields; a
+# space separates tokens. `;` and `|` are included so `a=***;b=x` cannot
+# masquerade as `a=secret;b=y;b=x` (an omitted delimiter would let the mask eat
+# the changed `b=y;` status field). Whitespace is folded to single spaces (not
+# stripped) so the token boundary survives.
+_ECHO_BOUNDARY_CHARS = frozenset('"`,}]):;| ')
 
 
-def _compact_for_echo_compare_redaction_tolerant(value: str) -> str:
-    """Whitespace-fold text AND neutralize credential redaction differences.
+def _fold_ws_for_redaction_match(value: str) -> str:
+    """Collapse whitespace runs to a single space (NOT stripped) and trim ends.
+
+    Distinct from _compact_for_echo_compare (which removes whitespace entirely):
+    the redaction matcher needs the inter-token space to survive so a mask can't
+    consume across a word boundary. Both texts are folded identically before
+    comparison, so a redaction-only difference still lines up.
+    """
+    return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def _tokenize_for_redaction_match(text: str) -> list[tuple[str, str]]:
+    """Split folded ``text`` into an ordered list of alignment units.
+
+    Each unit is ``('d', ch)`` for a single boundary character or ``('f', s)``
+    for a *field* — a maximal run of non-boundary characters (which may contain
+    redaction mask runs). Every structural delimiter becomes its own unit so
+    punctuation must line up exactly between candidate and visible; a mask lives
+    inside a field and can only ever be resolved against that one field.
+    """
+    units: list[tuple[str, str]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in _ECHO_BOUNDARY_CHARS:
+            units.append(("d", ch))
+            i += 1
+        else:
+            j = i + 1
+            while j < n and text[j] not in _ECHO_BOUNDARY_CHARS:
+                j += 1
+            units.append(("f", text[i:j]))
+            i = j
+    return units
+
+
+def _field_matches_redaction(cand_field: str, vis_field: str) -> bool:
+    """Compare one candidate FIELD (may contain mask runs) to one visible FIELD.
+
+    A field is boundary-free by construction, so any mask here stands for a run
+    of the *same* scalar — it only needs to consume >=1 character and the literal
+    parts around it must line up, anchored to both ends of the field. There is no
+    boundary to cross, so the boundary protection comes entirely from the unit
+    alignment in the caller (this field vs exactly one visible field).
+    """
+    if not _ECHO_REDACTION_MASK_RE.search(cand_field):
+        return cand_field == vis_field
+    parts = _ECHO_REDACTION_MASK_RE.split(cand_field)
+    # parts[0] = literal prefix, parts[-1] = literal suffix, masks sit between.
+    if not vis_field.startswith(parts[0]):
+        return False
+    pos = len(parts[0])
+    last = len(parts) - 1
+    for k in range(1, len(parts)):
+        lit = parts[k]
+        if k == last:
+            if lit == "":
+                # Trailing mask: must consume >=1 char through the field's end.
+                return (len(vis_field) - pos) >= 1
+            # Mask then a final literal that must terminate the field, with the
+            # mask consuming >=1 char before it.
+            end = len(vis_field) - len(lit)
+            if end < pos + 1:
+                return False
+            return vis_field.endswith(lit)
+        # Middle mask + literal: the literal must appear at least one char ahead
+        # (so the mask consumes >=1), searching forward only.
+        nxt = vis_field.find(lit, pos + 1)
+        if nxt == -1:
+            return False
+        pos = nxt + len(lit)
+    return pos == len(vis_field)
+
+
+def _unit_matches_redaction(cand_unit: tuple[str, str], vis_unit: tuple[str, str]) -> bool:
+    """One candidate unit vs one visible unit: kinds must match, then compare."""
+    ckind, cval = cand_unit
+    vkind, vval = vis_unit
+    if ckind != vkind:
+        return False
+    if ckind == "d":
+        return cval == vval
+    return _field_matches_redaction(cval, vval)
+
+
+def _redaction_tolerant_match(candidate_text: str, visible_text: str, *, anchor_end: bool) -> bool:
+    """Match a credential-redacted echo against its unredacted live-streamed twin.
 
     The interim-assistant progress echo is credential-redacted before it is
-    journaled/queued, while the live token stream is not. A strict
-    whitespace-only compaction therefore treats `"password":"hunter2"` (tokens)
-    and `"password":"***"` (interim) as different text, so the echo is flagged
-    NOT-already-streamed and the same sentence gets appended a second time on
-    live render and on run-journal replay (the "repetition on navigate-back"
-    bug). Masking both `***` runs and quoted-after-colon values to a shared
-    sentinel makes a redaction-only difference compare equal so the echo is
-    correctly suppressed, without hiding genuinely different prose.
+    journaled/queued (`"password":"***"`), while the live token stream is not
+    (`"password":"hunter2"`). A strict whitespace-only compare therefore treats
+    them as different text, so the echo is flagged NOT-already-streamed and the
+    same sentence is appended a second time on live render and on run-journal
+    replay (the "repetition on navigate-back" bug).
+
+    Both texts are folded (whitespace → single space) and tokenized into a unit
+    stream of boundary characters (`('d', ch)`) and boundary-free fields
+    (`('f', s)`). A match is a **1:1 alignment** of the candidate's unit run
+    against a contiguous run of visible units:
+
+      * a delimiter unit must equal the visible delimiter exactly;
+      * a field unit compares literally, except a redaction mask inside it may
+        stand for >=1 character of that one field (the same scalar) — it can
+        never reach across a boundary into a neighbouring field.
+
+    Because the alignment is unit-for-unit, a mask occupies exactly one whole
+    scalar/token, so genuinely different values are never masked away:
+
+      * `"status":"started"` vs `"status":"completed"` — the trailing field
+        differs literally, so no match: a real status update is never
+        suppressed as already-streamed.
+      * `Using token *** completed` vs `Using token sk-x failed then retried
+        and completed` — the mask aligns with the single field `sk-x`; the
+        following `token`/`completed` fields then fail to line up.
+      * `a=***;b=x` vs `a=secret;b=y;b=x` — `;` is a boundary, so the mask
+        cannot swallow the changed `b=y` field.
+
+    Complexity: tokenization is O(n); alignment tries each visible start once and
+    compares bounded units, so it is linear in ``len(visible_text)`` for a fixed
+    candidate — no per-offset ``str.find`` rescans, and thus none of the
+    super-linear backtracking of the earlier regex/segment implementations. Safe
+    to run inline on the synchronous streaming callback, including the unbounded
+    full-output substring path.
+
+    ``anchor_end`` selects a suffix (tail-echo) match vs. a substring match.
     """
-    raw = str(value or '')
-    raw = _ECHO_REDACTION_MASK_RE.sub('\x00', raw)
-    raw = _ECHO_QUOTED_VALUE_RE.sub(lambda m: m.group(1) + '\x00' + m.group(3), raw)
-    return re.sub(r'\s+', '', raw)
+    # Engage this relaxed path only when the candidate actually carries a mask;
+    # a mask-free candidate is fully handled by the strict compare upstream.
+    if "*" not in str(candidate_text or "") or not _ECHO_REDACTION_MASK_RE.search(str(candidate_text)):
+        return False
+    cand = _fold_ws_for_redaction_match(candidate_text)
+    if not cand or not _ECHO_REDACTION_MASK_RE.search(cand):
+        return False
+    vis = _fold_ws_for_redaction_match(visible_text)
+    if not vis:
+        return False
+
+    cand_units = _tokenize_for_redaction_match(cand)
+    vis_units = _tokenize_for_redaction_match(vis)
+    m = len(cand_units)
+    v = len(vis_units)
+    if m == 0 or m > v:
+        return False
+
+    def _match_at(vi: int) -> bool:
+        for k in range(m):
+            if not _unit_matches_redaction(cand_units[k], vis_units[vi + k]):
+                return False
+        return True
+
+    if anchor_end:
+        # Tail-echo: the candidate units must be exactly the LAST m visible units.
+        return _match_at(v - m)
+
+    # Substring: the candidate unit run must appear contiguously. Each start is
+    # attempted once with bounded per-unit work — linear in v for fixed m, with
+    # a fast first-unit reject when the anchor unit can't align (the adversarial
+    # leading-mask/absent-literal case fails in O(1) per start).
+    for vi in range(0, v - m + 1):
+        if _match_at(vi):
+            return True
+    return False
 
 
 def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
@@ -8488,17 +8643,10 @@ def _run_agent_streaming(
                 # the live token stream is not (`"password":"hunter2"`). A strict
                 # compare then misses the echo, so the same sentence is appended a
                 # second time on live render and on run-journal replay. Retry the
-                # suffix match with a redaction-tolerant normalization so a
-                # redaction-only difference still counts as already-streamed.
-                candidate_rt = _compact_for_echo_compare_redaction_tolerant(text)
-                visible_tail_rt = _compact_for_echo_compare_redaction_tolerant(
-                    visible_window
-                )
-                if (
-                    candidate_rt
-                    and visible_tail_rt
-                    and visible_tail_rt.endswith(candidate_rt)
-                ):
+                # suffix match treating only the `***` mask runs as wildcards, so a
+                # redaction-only difference still counts as already-streamed while
+                # a genuinely different (non-credential) value still fails to match.
+                if _redaction_tolerant_match(text, visible_window, anchor_end=True):
                     return True
                 # Some runtimes can report a prefix of the already-streamed final
                 # answer through reasoning after visible output has completed. That
@@ -8511,14 +8659,7 @@ def _run_agent_streaming(
                 visible_compact = _compact_for_echo_compare(visible_output)
                 if visible_compact and candidate in visible_compact:
                     return True
-                visible_compact_rt = _compact_for_echo_compare_redaction_tolerant(
-                    visible_output
-                )
-                return bool(
-                    len(candidate_rt) >= 80
-                    and visible_compact_rt
-                    and candidate_rt in visible_compact_rt
-                )
+                return _redaction_tolerant_match(text, visible_output, anchor_end=False)
 
             def _strip_reasoning_output_echo(text: str) -> bool:
                 nonlocal _reasoning_segments
