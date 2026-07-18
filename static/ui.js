@@ -2897,7 +2897,18 @@ function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
   const explicitProvider=_providerFromModelValue(value);
-  if(explicitProvider) return {model:value,model_provider:explicitProvider};
+  if(explicitProvider){
+    const selected=sel&&sel.options
+      ?Array.from(sel.options).find(o=>String(o.value||'')===value)
+      :null;
+    const routedModel=selected&&selected.dataset&&selected.dataset.model;
+    // Read the provider from the matched option's authoritative data-provider
+    // rather than re-parsing the value at its LAST colon: a colon-bearing model
+    // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
+    // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
+    const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
+    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+  }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
   // /tab switch or a model-list rebuild the dropdown transiently still has the
@@ -3287,19 +3298,33 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
-  if(applied) return applied;
-  const value=modelId;
+  const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
+  if(applied){
+    const appliedState=typeof _modelStateForSelect==='function'
+      ?_modelStateForSelect(sel,applied)
+      :{model:applied,model_provider:null};
+    if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
+  const rawModel=String(modelId||'');
+  const bareModel=explicitPrefix&&rawModel.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    ?rawModel.slice(explicitPrefix.length)
+    :rawModel;
+  const value=requestedProvider?`${explicitPrefix}${bareModel}`:rawModel;
   const opt=document.createElement('option');
-  opt.value=modelId;
+  opt.value=value;
   opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
   opt.dataset.custom='1';
   const badge=(window._configuredModelBadges||{})[value];
+  const rawBadge=(window._configuredModelBadges||{})[rawModel];
   if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
+  if(rawBadge&&rawBadge.provider) opt.dataset.provider=rawBadge.provider;
+  if(requestedProvider) opt.dataset.model=bareModel;
+  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)||_providerFromModelValue(value)||'';
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
-  sel.value=modelId;
+  sel.value=value;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
     _refreshOpenModelDropdown();
@@ -3308,7 +3333,7 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
     if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
-  return modelId;
+  return value;
 }
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
@@ -3689,6 +3714,30 @@ function _normalizeConfiguredModelKey(modelId){
     if(s.includes('/')) s=s.replace(/^[^/]+\//, '')||s;
   }
   return s.replace(/-/g,'.');
+}
+
+function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
+  const normalized=_normalizeConfiguredModelKey(modelId);
+  const provider=String(badge&&badge.provider||'').toLowerCase();
+  const matchingEntries=(entries||[]).filter(existing=>
+    _normalizeConfiguredModelKey(existing.value)===normalized
+  );
+  if(matchingEntries.some(existing=>{
+    const entryProvider=String(existing.providerId||'').toLowerCase();
+    return !provider||!entryProvider||entryProvider===provider;
+  })) return true;
+  // @provider:model is an equivalent routing spelling only when an existing
+  // picker row belongs to that same provider. This supports named custom
+  // providers (@custom:name:model) without collapsing matching model IDs from
+  // different providers.
+  const rawId=String(modelId||'');
+  const prefix=provider?`@${provider}:`:'';
+  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
+  const routedId=rawId.slice(prefix.length);
+  return (entries||[]).some(entry=>
+    String(entry.providerId||'').toLowerCase()===provider
+    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+  );
 }
 
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
@@ -4135,9 +4184,8 @@ function renderModelDropdown(){
       _groupMeta.get(groupKey).modelCount++;
     }
   }
-  const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
   for(const [modelId,badge] of Object.entries(_badgeMap)){
-    if(_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))) continue;
+    if(_isEquivalentConfiguredModelEntry(modelId,badge,_modelData)) continue;
     _modelData.push({
       value:modelId,
       name:esc(getModelLabel(modelId)),
@@ -4145,7 +4193,6 @@ function renderModelDropdown(){
       group:'',
       badge,
     });
-    _existingConfiguredKeys.add(_normalizeConfiguredModelKey(modelId));
   }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
@@ -4895,6 +4942,10 @@ if(document.readyState==='loading'){
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
+// Whether the model accepts the thinking on/off toggle when supported_efforts
+// is empty (GLM-4.5–5.1 on native zai). Undefined = unknown, treated as true
+// so the chip stays visible by default (prior behavior).
+let _currentReasoningToggleSupported=undefined;
 let _profileTransitionReasoningContext=null;
 
 function _normalizeReasoningEffort(eff){
@@ -4946,7 +4997,14 @@ function _applyReasoningOptions(supportedEfforts){
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
-    if(effort==='none'){
+    // 'none' (turn thinking off) and '' (Default = clear override, provider
+    // default = thinking on) are meta-options outside the effort ladder. They
+    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
+    // zai, where the ladder is empty) still has an operable two-state control:
+    // Default (on) + None (off). Without the Default option the toggle is
+    // one-way off-only — the user can disable thinking but cannot re-enable it.
+    // (#6219 round-3)
+    if(effort==='none'||effort===''){
       opt.style.display='';
       return;
     }
@@ -4965,6 +5023,15 @@ function _applyReasoningChip(eff){
   if(meta&&Array.isArray(meta.supported_efforts)){
     _currentReasoningEffortsSupported=meta.supported_efforts;
   }
+  // supports_thinking_toggle: the model accepts the thinking on/off toggle even
+  // when the effort ladder is empty (GLM-4.5–5.1 on native zai accept
+  // `thinking: {"type": ...}` but NOT `reasoning_effort`). Without honoring this
+  // flag, returning an empty supported_efforts hides the entire chip and
+  // silently regresses the working thinking on/off control for those models.
+  // Default true preserves prior behavior when the field is absent.
+  if(meta&&typeof meta.supports_thinking_toggle==='boolean'){
+    _currentReasoningToggleSupported=meta.supports_thinking_toggle;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
@@ -4974,9 +5041,15 @@ function _applyReasoningChip(eff){
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
     ?null
     :_currentReasoningEffortsSupported;
-  const supports=Array.isArray(supportedEfforts)
+  const toggleSupported=(typeof _currentReasoningToggleSupported==='undefined')
+    ?true
+    :_currentReasoningToggleSupported;
+  const hasEffortLadder=Array.isArray(supportedEfforts)
     ?supportedEfforts.length>0
     :true;
+  // Show the chip if there is an effort ladder OR a thinking toggle is still
+  // available. Only hide when the model supports neither.
+  const supports=hasEffortLadder||toggleSupported;
   if(!supports){
     wrap.style.display='none';
     if(mobileAction) mobileAction.style.display='none';
@@ -5029,7 +5102,7 @@ function fetchReasoningChip(keyOverride){
     // routine syncs retry after a genuine transient failure.
     if(seq!==_reasoningFetchSeq) return;
     _lastReasoningFetchKey=null;
-    _applyReasoningChip('', {supported_efforts:[]});
+    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   });
 }
 
@@ -5037,9 +5110,10 @@ function refreshProfileTransitionReasoningChip(model, provider){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
+  _currentReasoningToggleSupported=undefined;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
-  _applyReasoningChip('', {supported_efforts:[]});
+  _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
@@ -5134,12 +5208,19 @@ document.addEventListener('click',function(e){
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
-    if(effort){
+    // NOTE: effort may be the empty string for the "Default" option (clears
+    // the override). Check option presence, not truthiness — `if(effort)` would
+    // silently ignore the Default click and leave the toggle one-way off-only.
+    // (#6219 round-3)
+    if(opt){
       const payload=Object.assign({effort:effort},_reasoningEffortContext());
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          // For Default (effort=''), the returned reasoning_effort is '' (clear)
+          // — display 'Default' rather than an empty toast.
+          const display=(st&&st.reasoning_effort)||effort||'Default';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+          showToast('🧠 Reasoning effort set to '+display);
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
