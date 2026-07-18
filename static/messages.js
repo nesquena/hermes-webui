@@ -1986,6 +1986,7 @@ function closeLiveStream(sessionId, streamId, source){
         lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
         lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
         lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
+        lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||'',
         journalReplayFromStart:true,
         currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
         currentLiveSegmentSeq:INFLIGHT[sessionId].currentLiveSegmentSeq||0,
@@ -2030,6 +2031,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
   }
+  const _priorInflightStreamId=String(INFLIGHT[activeSid].streamId||'');
+  if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
+    INFLIGHT[activeSid].lastRunJournalSeq=0;
+    INFLIGHT[activeSid].lastRunJournalEventId='';
+  }
+  INFLIGHT[activeSid].streamId=streamId;
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
@@ -2245,6 +2252,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       lastAssistantText:inflight.lastAssistantText||'',
       lastReasoningText:inflight.lastReasoningText||'',
       lastRunJournalSeq:inflight.lastRunJournalSeq||0,
+      lastRunJournalEventId:inflight.lastRunJournalEventId||'',
       journalReplayFromStart:!!inflight.journalReplayFromStart,
       anchorActivityScene:inflight.anchorActivityScene||null,
       currentActivityBurstId:inflight.currentActivityBurstId||0,
@@ -2593,7 +2601,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _lastRunJournalSeq=reconnecting
     ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
     : 0;
-  let _lastRunJournalEventId='';
+  let _lastRunJournalEventId=reconnecting
+    ? String((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId)||'')
+    : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
   const _STREAM_FADE_DONE_MAX_MS=1000;
@@ -4907,6 +4917,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const inflight=INFLIGHT[activeSid];
       if(inflight){
         inflight.lastRunJournalSeq=seq;
+        inflight.lastRunJournalEventId=raw;
         if(typeof _throttledPersist==='function') _throttledPersist();
       }
     }
