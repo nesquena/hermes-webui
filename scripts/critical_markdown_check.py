@@ -137,9 +137,42 @@ def _scan_inline_dest(text: str, i: int) -> str:
     if c == ")":
         return "ok"
     if c in "\"'(":
-        # A title is present (may span newlines). Just require a closing ')' exists
-        # after it; we don't validate the title body (newlines inside titles are legal).
-        return "ok" if text.find(")", j) != -1 else "unclosed"
+        # A title is present. It ends at its matching delimiter — `"..."`, `'...'`, or
+        # a balanced `(...)`. Titles may span newlines. After the title, whitespace is
+        # allowed and then the link's OWN closing ')' MUST follow; otherwise the link
+        # is unclosed (e.g. `[x](foo (title)` — the sole ')' closes the title, not the
+        # link). Walk the title body honoring escapes.
+        openc = c
+        k = j + 1
+        if openc == "(":
+            # A parenthesized title must NOT contain an unescaped '(' — CommonMark
+            # forbids it, so `(a (b) c)` is not a valid title and the link won't render.
+            while k < n:
+                ch = text[k]
+                if ch == "\\" and k + 1 < n:
+                    k += 2
+                    continue
+                if ch == "(":
+                    return "unclosed"      # nested unescaped '(' → invalid title
+                if ch == ")":
+                    break
+                k += 1
+            if k >= n:
+                return "unclosed"          # parenthesized title never closed
+        else:
+            closec = openc                 # matching " or '
+            while k < n and text[k] != closec:
+                if text[k] == "\\" and k + 1 < n:
+                    k += 2
+                else:
+                    k += 1
+            if k >= n:
+                return "unclosed"          # quoted title never closed
+        # k is at the title's closing delimiter. After it: optional ws then the link ')'.
+        k = skip_ws(k + 1)
+        if k < n and text[k] == ")":
+            return "ok"
+        return "unclosed"
     # Anything else after the destination + whitespace is bare text → the inline link is
     # malformed and renders as literal characters. This is the catastrophic split, e.g.
     # `[x](https://exa\nmple.com)` or `[x](url\nmore)`.

@@ -57,6 +57,8 @@ CASES = [
     ("angle-dest",             "[x](<https://x.com>)",            False),
     ("angle-escaped-gt",       "[x](<foo\\>bar>)",                False),
     ("dq-title-inline",        '[x](url "title")',                False),
+    ("paren-title-closed",     "[x](foo (title))",                False),
+    ("dq-title-then-close",    '[x](foo "title")',                False),
     ("empty-dest",             "[x]()",                           False),
     ("plain-good",             "[l](https://x.com)",              False),
     ("two-links-line",         "[a](x) and [b](y)\n",             False),
@@ -70,6 +72,10 @@ CASES = [
     ("unclosed-newline-term",  "[x](https://a\n",                 True),
     ("angle-dest-split",       "[x](<https://x\n.com>)",          True),
     ("angle-escaped-newline",  "[x](<foo\\\n>)",                  True),
+    ("paren-title-unclosed",   "[x](foo (title)",                True),
+    ("angle-title-unclosed",   "[x](<foo> (title)",              True),
+    ("dq-title-unclosed",      '[x](foo "title"',                True),
+    ("nested-paren-title",     "[x](foo (a (b) c))",             True),
 ]
 
 # Bad markdown INSIDE code must never be flagged (it's an intentional example).
