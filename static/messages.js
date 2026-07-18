@@ -3575,14 +3575,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const row of projectedRows){
       if(row&&row.role==='terminal') orderedRows.push(row);
     }
-    const lastNonTerminalWorkRowIndex=orderedRows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
+    // #5758 gap: final-segment eligibility must be judged against the LIVE
+    // projection's own chronology. The settled per-message tool rows appended
+    // into orderedRows above re-list tools that ran EARLIER in the turn, so an
+    // index over the combined list pushes the "after the last tool row"
+    // boundary past the final segment's live-prose accumulator — its stale
+    // prefix snapshot then survives into the persisted scene and renders as a
+    // duplicate of the answer's beginning. A live-prose row belongs to the
+    // final segment iff no PROJECTED tool row follows it; pre-tool narration
+    // that happens to prefix the final answer stays protected.
+    const lastProjectedToolIndex=projectedRows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
+    const finalSegmentLiveProseRows=new WeakSet();
+    projectedRows.forEach((row,idx)=>{
+      if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
+    });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
     const pushRow=(row,rowIndex)=>{
       if(!row||typeof row!=='object') return;
+      const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
       if(!row||typeof row!=='object') return;
       const textKey=_anchorSceneTextKey(row.text);
-      if(rowIsLiveTokenFinalPrefix(row,textKey,rowIndex>lastNonTerminalWorkRowIndex)) return;
+      if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
       if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
