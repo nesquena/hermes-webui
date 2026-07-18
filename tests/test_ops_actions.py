@@ -423,15 +423,97 @@ def test_ops_actions_frontend_wiring_present():
     assert "/api/ops/backup" in panels
 
 
+_OPS_I18N_KEYS = (
+    "ops_maintenance_title",
+    "ops_maintenance_desc",
+    "ops_action_doctor",
+    "ops_action_security_audit",
+    "ops_action_backup",
+    "ops_status_idle",
+    "ops_status_running",
+    "ops_status_completed",
+    "ops_status_failed",
+    "ops_status_timeout",
+    "ops_view_log",
+    "ops_download_backup",
+    "ops_action_failed",
+    "ops_status_load_failed",
+    "ops_gate_disabled",
+    "ops_confirm_security_audit",
+    "ops_confirm_backup",
+)
+
+# Locales this repo enforces exact key-parity with `en` for — see the
+# dedicated tests/test_*_locale.py coverage tests. it/de/fr/pt have no such
+# test and may legitimately fall back to English.
+_OPS_I18N_ENFORCED_LOCALES = {
+    "cs": "\n  cs: {",
+    "ja": "\n  ja: {",
+    "ko": "\n  ko: {",
+    "pl": "\n  pl: {",
+    "ru": "\n  ru: {",
+    "es": "\n  es: {",
+    "tr": "\n  tr: {",
+    "vi": "\n  vi: {",
+    "zh": "\n  zh: {",
+    "zh-Hant": "\n  'zh-Hant': {",
+}
+
+
+def _extract_locale_block(src: str, marker: str) -> str:
+    """Return the `{ ... }` body of one locale object, brace-matched (a plain
+    substring search would stop at the first `}` inside a translated string)."""
+    start = src.index(marker)
+    open_brace = src.index("{", start)
+    pos = open_brace + 1
+    depth = 1
+    in_single = in_double = False
+    i = pos
+    while depth > 0:
+        ch = src[i]
+        if in_single:
+            if ch == "\\":
+                i += 1
+            elif ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                in_double = False
+        else:
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+        i += 1
+    return src[open_brace:i]
+
+
 def test_ops_actions_i18n_keys_exist():
     from pathlib import Path
 
     i18n = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
-    for key in (
-        "ops_maintenance_title",
-        "ops_action_doctor",
-        "ops_action_security_audit",
-        "ops_action_backup",
-        "ops_gate_disabled",
-    ):
+    for key in _OPS_I18N_KEYS:
         assert f"{key}:" in i18n
+
+
+def test_ops_actions_i18n_keys_translated_in_enforced_locales():
+    """Regression: an earlier version of this test only checked that ops_*
+    keys existed *somewhere* in i18n.js, which is trivially true once they're
+    added to `en` — it never caught them being missing from the ten locales
+    this repo enforces full key-parity for (a maintenance action button
+    silently rendering in English for those users). Verify each ops_ key is
+    present in every enforced locale's own block, not just `en`."""
+    from pathlib import Path
+
+    i18n = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+
+    for locale, marker in _OPS_I18N_ENFORCED_LOCALES.items():
+        block = _extract_locale_block(i18n, marker)
+        missing = [key for key in _OPS_I18N_KEYS if f"{key}:" not in block]
+        assert not missing, f"ops_ keys missing from {locale!r} locale: {missing}"
