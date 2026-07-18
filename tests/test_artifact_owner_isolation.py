@@ -13,8 +13,12 @@ import api.routes as routes
 
 
 class _Handler:
-    def __init__(self, cookie: str):
-        self.headers = {"Cookie": f"{auth.COOKIE_NAME}={cookie}"}
+    def __init__(self, cookie: str | None = None, *, headers=None, client_address=("127.0.0.1", 12345)):
+        self.headers = dict(headers or {})
+        if cookie:
+            self.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"
+        self.client_address = client_address
+        self.request = SimpleNamespace()
         self.rfile = io.BytesIO()
         self.wfile = io.BytesIO()
         self.status = None
@@ -55,6 +59,19 @@ def _request_owner(handler) -> str:
 def _publish(monkeypatch, handler, body):
     monkeypatch.setattr(routes, "read_body", lambda _handler: body)
     assert routes.handle_post(handler, urlparse("/api/artifact/publish")) is True
+
+
+def _trusted_auth_env(monkeypatch):
+    for key in (
+        "HERMES_WEBUI_TRUSTED_AUTH_HEADER",
+        "HERMES_WEBUI_TRUSTED_GROUPS_HEADER",
+        "HERMES_WEBUI_GROUP_PROFILE_MAP",
+        "HERMES_WEBUI_TRUSTED_PROXY_CIDRS",
+        "HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
 
 
 def test_auth_session_owner_scopes_list_revoke_republish_and_private_get(tmp_path, monkeypatch):
@@ -138,3 +155,58 @@ def test_public_pinned_artifact_stays_anonymous_with_auth_enabled(tmp_path, monk
     anonymous = SimpleNamespace(headers={})
     assert routes._handle_artifact_get(anonymous, urlparse(f"/artifact/{token}?v=1")) is True
     assert served["ok"] is True
+
+
+def test_trusted_header_reconciles_stale_cookie_before_private_artifact_authorization(tmp_path, monkeypatch):
+    """A proxy identity change cannot retain private artifact ownership via its old cookie."""
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", tmp_path / "artifacts")
+    monkeypatch.setattr(artifacts, "artifacts_enabled", lambda: True)
+    _trusted_auth_env(monkeypatch)
+    auth._sessions.clear()
+    captured = _capture_routes(monkeypatch)
+
+    alice = _Handler(headers={"Remote-User": "alice"})
+    alice_info = auth.ensure_trusted_auth_session(alice)
+    assert alice_info and alice_info["auth_type"] == "trusted"
+    alice_cookie = getattr(alice, "_trusted_auth_session_cookie_value")
+    source = tmp_path / "alice-private.txt"
+    source.write_text("Alice private bytes", encoding="utf-8")
+    _publish(monkeypatch, alice, {"path": str(source)})
+    published, status = captured.pop()
+    assert status == 200
+    token = published["artifact"]["token"]
+
+    # The stale Alice cookie arrives with Bob's current proxy identity. Every
+    # owner-sensitive route must use the reconciled Bob session, not Alice's
+    # cookie token; the private GET must not reach the byte-serving seam.
+    bob = _Handler(alice_cookie, headers={"Remote-User": "bob"})
+    served = {}
+    monkeypatch.setattr(routes, "_serve_file_bytes", lambda *_args, **_kwargs: served.setdefault("served", True))
+    assert routes._handle_artifact_get(bob, urlparse(f"/artifact/{token}")) is True
+    denied, status = captured.pop()
+    assert status == 404 and "served" not in served
+    assert auth.verify_session(alice_cookie) is False
+    assert routes._artifact_owner_for_request(bob) != alice_info["token"]
+
+    assert routes.handle_get(bob, urlparse("/api/artifact/list")) is True
+    listed, status = captured.pop()
+    assert status == 200 and listed["artifacts"] == []
+
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"token": token})
+    assert routes.handle_post(bob, urlparse("/api/artifact/revoke")) is True
+    denied, status = captured.pop()
+    assert status == 404 and denied["error"] == "unknown artifact token"
+
+    _publish(monkeypatch, bob, {"path": str(source), "token": token})
+    denied, status = captured.pop()
+    assert status == 404 and denied["error"] == "unknown artifact token"
+
+    # A pinned public-safe version remains anonymous and never asks the trusted
+    # auth layer to mint/reconcile a session or queue a response cookie.
+    public_source = tmp_path / "public.txt"
+    public_source.write_text("public-safe", encoding="utf-8")
+    public_token = artifacts.publish_artifact(str(public_source), public=True, owner=alice_info["token"])["token"]
+    anonymous = _Handler()
+    assert routes._handle_artifact_get(anonymous, urlparse(f"/artifact/{public_token}?v=1")) is True
+    assert served["served"] is True
+    assert not hasattr(anonymous, "_pending_set_cookies")

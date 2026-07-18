@@ -640,12 +640,23 @@ def _artifact_owner_for_request(handler) -> str | None:
     Auth-enabled requests fail closed unless the server can resolve a verified
     session; no-auth deployments retain historical shared artifact behavior.
     """
-    from api.auth import get_session_info, is_auth_enabled, parse_cookie
+    from api.auth import ensure_trusted_auth_session, get_session_info, is_auth_enabled, is_trusted_auth_enabled, parse_cookie
 
     if not is_auth_enabled():
         return None
-    cookie_value = parse_cookie(handler) or getattr(handler, "_trusted_auth_session_cookie_value", None)
-    info = get_session_info(cookie_value) if cookie_value else None
+    if is_trusted_auth_enabled():
+        # /artifact/ deliberately bypasses check_auth() so public-safe links
+        # remain anonymous. Reconcile first here before resolving a private
+        # artifact owner: a valid but stale trusted cookie must not retain the
+        # previous proxy identity's authority.
+        try:
+            info = ensure_trusted_auth_session(handler)
+        except Exception:
+            logger.warning("Trusted auth reconciliation failed for artifact owner", exc_info=True)
+            return None
+    else:
+        cookie_value = parse_cookie(handler) or getattr(handler, "_trusted_auth_session_cookie_value", None)
+        info = get_session_info(cookie_value) if cookie_value else None
     token = str((info or {}).get("token") or "").strip()
     return token or None
 
