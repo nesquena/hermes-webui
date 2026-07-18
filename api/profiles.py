@@ -79,12 +79,40 @@ def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
 
 def _skill_modules_support_profile_home(profile_home: Path) -> bool:
     """Return ``True`` when both skill modules resolve to this profile home."""
-    expected_dir = str((Path(profile_home) / 'skills').expanduser())
+    expected_dir = (Path(profile_home) / 'skills').expanduser()
 
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
         if module is None:
             logger.debug("Skill capability check: %s not pre-imported in sys.modules", module_name)
+            return False
+
+        if not hasattr(module, 'SKILLS_DIR'):
+            logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
+            return False
+
+        if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
+            logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
+            return False
+
+        try:
+            current_skills_dir = Path(module.SKILLS_DIR).expanduser()
+            import_skills_dir = Path(module._SKILLS_DIR_AT_IMPORT).expanduser()
+        except Exception:
+            logger.debug(
+                "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
+                module_name,
+                exc_info=True,
+            )
+            return False
+
+        if current_skills_dir != import_skills_dir:
+            logger.debug(
+                "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
+                module_name,
+                current_skills_dir,
+                import_skills_dir,
+            )
             return False
 
         skills_dir = getattr(module, '_skills_dir', None)
@@ -93,7 +121,7 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
             return False
 
         try:
-            resolved = str(Path(skills_dir()).expanduser())
+            resolved = Path(skills_dir()).expanduser()
         except Exception:
             logger.debug(
                 "Skill capability check: %s._skills_dir() failed",
@@ -106,8 +134,8 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
             logger.debug(
                 "Skill capability check: %s resolves %r instead of %r",
                 module_name,
-                resolved,
-                expected_dir,
+                str(resolved),
+                str(expected_dir),
             )
             return False
 
@@ -1138,6 +1166,8 @@ def profile_env_for_background_worker(
     session,
     purpose: str = "background worker",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    scope_skill_modules: bool = True,
 ):
     """Temporarily route detached worker config reads through a profile.
 
@@ -1228,7 +1258,8 @@ def profile_env_for_background_worker(
                 _home_override_token = None
                 _home_override_installed = False
 
-            if _home_override_installed:
+        if scope_skill_modules:
+            if _home_override_mod is not None and _home_override_installed:
                 try:
                     has_profile_skill_home = _skill_modules_support_profile_home(
                         profile_home_path
@@ -1242,22 +1273,23 @@ def profile_env_for_background_worker(
                     )
                     has_profile_skill_home = False
 
-        # #5567-fallback: if override is unavailable, or module-side
-        # profile resolution is missing/failed, serialize the full worker
-        # lifespan under the shared legacy patch lock.
-        should_restore_skill_modules = not (
-            _home_override_installed and has_profile_skill_home
-        )
-        if should_restore_skill_modules:
-            _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
-            _acquired_skill_home_patch_lock = True
+            # #5567-fallback: if override is unavailable, or module-side
+            # profile resolution is missing/failed, serialize the full worker
+            # lifespan under the shared legacy patch lock.
+            should_restore_skill_modules = not (
+                _home_override_installed and has_profile_skill_home
+            )
+            if should_restore_skill_modules:
+                _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
+                _acquired_skill_home_patch_lock = True
 
         with _ENV_LOCK:
-            if should_restore_skill_modules:
+            if scope_skill_modules and should_restore_skill_modules:
                 # Snapshot and patch before mutating process env so setup
                 # failures can unwind without leaking either state.
                 skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(profile_home_path)
+
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
                 safe_runtime_env,
