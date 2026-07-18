@@ -12078,8 +12078,12 @@ function _anchorSceneRowsForRendering(scene, opts){
   const live=!settled;
   const out=[];
   const byKey=new Map();
-  const liveProseTextKeys=new Map();
-  const proseTextKey=(value)=>String(value||'').replace(/\s+/g,' ').trim();
+  const liveProseScopeKeys=new Map();
+  const proseScopeKey=(row)=>{
+    const t=String(row.source_event_type||'').trim();
+    const l=String(row.local_id||'').trim();
+    return (t||l)?t+':'+l:'';
+  };
   const keyFor=(row)=>{
     if(!row) return '';
     if(row.role==='tool') return `tool:${_anchorSceneToolRowLogicalKey(row)||row.row_id||row.event_id||row.local_id||out.length}`;
@@ -12102,21 +12106,21 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(byKey.has(key)){
       const index=byKey.get(key);
       if(live&&row.role==='prose'){
-        const textKey=proseTextKey(text);
-        const duplicateIndex=textKey?liveProseTextKeys.get(textKey):undefined;
+        const scopeKey=proseScopeKey(row);
+        const duplicateIndex=scopeKey?liveProseScopeKeys.get(scopeKey):undefined;
         if(duplicateIndex!==undefined&&duplicateIndex!==index) continue;
-        const previousTextKey=proseTextKey(out[index]&&out[index].text);
-        if(previousTextKey&&previousTextKey!==textKey&&liveProseTextKeys.get(previousTextKey)===index){
-          liveProseTextKeys.delete(previousTextKey);
+        const previousScopeKey=proseScopeKey(out[index]);
+        if(previousScopeKey&&previousScopeKey!==scopeKey&&liveProseScopeKeys.get(previousScopeKey)===index){
+          liveProseScopeKeys.delete(previousScopeKey);
         }
-        if(textKey) liveProseTextKeys.set(textKey,index);
+        if(scopeKey) liveProseScopeKeys.set(scopeKey,index);
       }
       out[index]=row.role==='tool'?_anchorSceneMergeToolRows(out[index],row):row;
     }else{
       if(live&&row.role==='prose'){
-        const textKey=proseTextKey(text);
-        if(textKey&&liveProseTextKeys.has(textKey)) continue;
-        if(textKey) liveProseTextKeys.set(textKey,out.length);
+        const scopeKey=proseScopeKey(row);
+        if(scopeKey&&liveProseScopeKeys.has(scopeKey)) continue;
+        if(scopeKey) liveProseScopeKeys.set(scopeKey,out.length);
       }
       byKey.set(key,out.length);
       out.push(row);

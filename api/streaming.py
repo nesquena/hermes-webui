@@ -7521,13 +7521,28 @@ def _run_agent_streaming(
                 stats.setdefault('estimated', False)
                 put('metering', stats)
 
+            # Token tail cache — tracks a bounded visible-output suffix so echo
+            # detection uses event-emission-time state instead of re-scanning
+            # STREAM_PARTIAL_TEXT (which can change between callbacks).
+            # Rolling window trade-off: the 512-char floor catches most echo patterns
+            # (reasoning echoes are typically emitted as recent tokens), but very long
+            # early-reasoning text that has scrolled out of the window could be missed.
+            # A fixed larger window (e.g. 2048) reduces this risk at the cost of memory
+            # and compares for every token — 512 was chosen as a pragmatic balance
+            # given that the reasoning_echo signal from the model is the primary guard.
+            _token_tail_cache = ['']
+            # Signal guard: which reasoning-echo texts have already been stripped.
+            _reasoning_echo_stripped_segments: set = set()
+
             def _is_visible_output_echo(text: str) -> bool:
                 candidate = _compact_for_echo_compare(text)
                 if not candidate:
                     return False
-                visible_output = STREAM_PARTIAL_TEXT.get(stream_id, '')
+                visible_cache = _token_tail_cache[0]
+                if not visible_cache:
+                    return False
                 visible_tail = _compact_for_echo_compare(
-                    visible_output[-max(len(str(text)) * 2, 512):]
+                    visible_cache[-max(len(str(text)) * 2, 512):]
                 )
                 if visible_tail and visible_tail.endswith(candidate):
                     return True
@@ -7539,11 +7554,13 @@ def _run_agent_streaming(
                 # reasoning that happens to reuse an answer phrase.
                 if len(candidate) < 80:
                     return False
-                visible_compact = _compact_for_echo_compare(visible_output)
+                visible_compact = _compact_for_echo_compare(visible_cache)
                 return bool(visible_compact and candidate in visible_compact)
 
             def _strip_reasoning_output_echo(text: str) -> bool:
                 nonlocal _reasoning_segments
+                if text in _reasoning_echo_stripped_segments:
+                    return False
                 removed = False
                 if stream_id in STREAM_REASONING_TEXT:
                     next_text, did_remove = _strip_compact_echo_suffix(
@@ -7572,6 +7589,8 @@ def _run_agent_streaming(
                         _reasoning_segments.pop(idx, None)
                     removed = True
                     break
+                if removed:
+                    _reasoning_echo_stripped_segments.add(text)
                 return removed
 
             def on_token(text):
@@ -7607,6 +7626,10 @@ def _run_agent_streaming(
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
+                # Update token tail cache for echo comparison
+                text_str = str(text)
+                cache_window = max(len(text_str) * 2, 512)
+                _token_tail_cache[0] = (_token_tail_cache[0] + text_str)[-cache_window:]
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.

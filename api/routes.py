@@ -3178,12 +3178,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call["activitySegmentSeq"] = current_activity_burst_id
         tool_calls.append(call)
 
-    def reasoning_echo_tail_matches(text: str) -> bool:
-        candidate = _compact_for_echo_compare(text)
-        if not candidate:
-            return False
-        return _compact_for_echo_compare(reasoning_text).endswith(candidate)
-
     def strip_reasoning_echo_tail(text: str) -> bool:
         nonlocal reasoning_text, reasoning_first_tool_count
         next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
@@ -3212,7 +3206,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
             if visible:
-                if payload.get("reasoning_echo") or reasoning_echo_tail_matches(visible):
+                if payload.get("reasoning_echo"):
                     strip_reasoning_echo_tail(visible)
                 if payload.get("already_streamed"):
                     if not assistant_text:
