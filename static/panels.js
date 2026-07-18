@@ -13050,6 +13050,78 @@ function loadGatewayStatus(){
   if(!card) return;
   return api('/api/gateway/status').then(r=>_renderGatewayStatus(r)).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_status_load_failed'))}</div>`});
 }
+
+// ── Ops actions (Maintenance card): doctor / security audit / backup ────────
+const OPS_ACTIONS=['doctor','security_audit','backup'];
+const OPS_ACTION_PATHS={doctor:'/api/ops/doctor',security_audit:'/api/ops/security-audit',backup:'/api/ops/backup'};
+const OPS_ACTION_LABEL_KEYS={doctor:'ops_action_doctor',security_audit:'ops_action_security_audit',backup:'ops_action_backup'};
+const OPS_ACTION_CONFIRM_KEYS={security_audit:'ops_confirm_security_audit',backup:'ops_confirm_backup'};
+let _opsActionsPollTimer=null;
+function _opsActionStatusBadge(status){
+  const colors={idle:'#6b7280',running:'#3b82f6',completed:'#22c55e',failed:'#ef4444',timeout:'#ef4444'};
+  const color=colors[status]||'#6b7280';
+  return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--code-bg);border:1px solid var(--border2);color:${color}"><span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block"></span>${esc(t('ops_status_'+status)||status)}</span>`;
+}
+function _renderOpsActionsCard(data){
+  const card=$('opsActionsCard');
+  if(!card||!data) return;
+  if(!data.allowed){
+    card.innerHTML=`<div style="font-size:12px;color:var(--muted)">${esc(t('ops_gate_disabled').replace('{flag}','HERMES_WEBUI_ALLOW_OPS_ACTIONS'))}</div>`;
+    return;
+  }
+  const isRunning=data.status==='running';
+  const rows=OPS_ACTIONS.map(action=>{
+    const isActive=data.action===action;
+    const badge=isActive?_opsActionStatusBadge(data.status):'';
+    const downloadBtn=(action==='backup'&&data.backup_path&&!isRunning)
+      ?`<button type="button" class="sm-btn" onclick="downloadOpsBackup()" style="padding:5px 10px;font-size:12px" data-i18n="ops_download_backup">${esc(t('ops_download_backup'))}</button>`
+      :'';
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <button type="button" class="sm-btn ops-action-btn" data-ops-action="${esc(action)}" ${isRunning?'disabled':''} onclick="runOpsAction('${esc(action)}')" style="padding:6px 12px;font-size:12px">${esc(t(OPS_ACTION_LABEL_KEYS[action]))}</button>
+      ${badge}
+      ${downloadBtn}
+    </div>`;
+  }).join('');
+  const log=data.log||'';
+  const logBlock=log?`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:var(--muted)" data-i18n="ops_view_log">${esc(t('ops_view_log'))}</summary><pre style="max-height:240px;overflow:auto;font-size:11px;padding:8px;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;white-space:pre-wrap;word-break:break-word">${esc(log)}</pre></details>`:'';
+  const errorBlock=data.error?`<div style="font-size:11px;color:var(--error,#e05);margin-top:6px">${esc(data.error)}</div>`:'';
+  card.innerHTML=rows+logBlock+errorBlock;
+}
+function _syncOpsActionsPolling(data){
+  const shouldPoll=!!(data&&data.status==='running');
+  if(shouldPoll&&!_opsActionsPollTimer){
+    _opsActionsPollTimer=setInterval(loadOpsActionsStatus,2000);
+  }else if(!shouldPoll&&_opsActionsPollTimer){
+    clearInterval(_opsActionsPollTimer);
+    _opsActionsPollTimer=null;
+  }
+}
+function loadOpsActionsStatus(){
+  const card=$('opsActionsCard');
+  if(!card) return;
+  return api('/api/ops/status',{timeoutToast:false}).then(r=>{_renderOpsActionsCard(r);_syncOpsActionsPolling(r);return r;}).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('ops_status_load_failed'))}</div>`});
+}
+async function runOpsAction(action){
+  const confirmKey=OPS_ACTION_CONFIRM_KEYS[action];
+  if(confirmKey){
+    const confirmed=await showConfirmDialog({title:t(OPS_ACTION_LABEL_KEYS[action]),message:t(confirmKey),danger:action==='backup'?false:false});
+    if(!confirmed) return;
+  }
+  try{
+    const result=await api(OPS_ACTION_PATHS[action],{method:'POST',body:JSON.stringify({}),timeoutMs:15000,timeoutToast:false});
+    _renderOpsActionsCard(result);
+    _syncOpsActionsPolling(result);
+  }catch(e){
+    const msg=e&&e.message?e.message:String(e||'');
+    if(typeof showToast==='function') showToast(`${t('ops_action_failed')}${msg?': '+msg:''}`,5000,'error');
+    loadOpsActionsStatus();
+  }
+}
+function downloadOpsBackup(){
+  const rel='api/ops/backup/download';
+  const url=new URL(rel,document.baseURI||location.href);
+  window.open(url.href,'_blank');
+}
 async function _gatewayAction(action){
   if(_gatewayActionInFlight) return;
   _gatewayActionInFlight=true;
@@ -13071,7 +13143,8 @@ const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name, opts){
   _origSwitchSettings(name, opts);
   if(name==='preferences') updateNotificationPermissionStatus();
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();loadOpsActionsStatus();}
+  else if(_opsActionsPollTimer){clearInterval(_opsActionsPollTimer);_opsActionsPollTimer=null;}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

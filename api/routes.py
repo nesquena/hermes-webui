@@ -1193,6 +1193,15 @@ def _gateway_status_payload() -> dict:
     }
 
 
+_OPS_ACTION_BY_PATH = {
+    "/api/ops/doctor": "doctor",
+    "/api/ops/security-audit": "security_audit",
+    "/api/ops/backup": "backup",
+}
+_OPS_ACTIONS_GATE_MESSAGE = (
+    "Maintenance actions are disabled. Set HERMES_WEBUI_ALLOW_OPS_ACTIONS=1 to enable."
+)
+
 _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 
 # Server-side single-flight guard for gateway lifecycle actions. The client
@@ -13695,6 +13704,26 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/gateway/status":
         return j(handler, _gateway_status_payload())
 
+    # ── Ops actions (Maintenance card): status is always readable, even when
+    # gated off, so the frontend can render the disabled state with its flag
+    # name instead of silently hiding the card. ──
+    if parsed.path == "/api/ops/status":
+        from api.ops_actions import get_status
+
+        status = get_status()
+        status["allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS")
+        return j(handler, status)
+
+    if parsed.path == "/api/ops/backup/download":
+        if not _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS"):
+            return bad(handler, _OPS_ACTIONS_GATE_MESSAGE, 403)
+        from api.ops_actions import latest_backup_path
+
+        backup_path = latest_backup_path()
+        if not backup_path or not backup_path.exists():
+            return j(handler, {"error": "No backup available for download"}, status=404)
+        return _serve_file_bytes(handler, backup_path, "application/zip", "attachment", "no-store")
+
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
@@ -15537,6 +15566,23 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path in {"/api/gateway/start", "/api/gateway/stop", "/api/gateway/restart"}:
         return _handle_gateway_lifecycle(handler, parsed.path.rsplit("/", 1)[-1], body)
+
+    # ── Ops actions (Maintenance card): doctor / security audit / backup ──
+    if parsed.path in _OPS_ACTION_BY_PATH:
+        if not _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS"):
+            return j(
+                handler,
+                {"error": _OPS_ACTIONS_GATE_MESSAGE, "allowed": False},
+                status=403,
+            )
+        from api.ops_actions import start_action
+
+        try:
+            started, status = start_action(_OPS_ACTION_BY_PATH[parsed.path])
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        status["allowed"] = True
+        return j(handler, status, status=200 if started else 409)
 
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
