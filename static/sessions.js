@@ -2928,6 +2928,19 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// ============================================================================
+// COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
+// ============================================================================
+// This is a hand-mirrored copy of the backend's GET /api/session ?msg_limit=
+// ceiling. _loadOlderMessages grows its msg_limit tail window by
+// +_INITIAL_MSG_LIMIT each load; once growth would exceed this ceiling the
+// server clamps and the tail stops growing, so we switch to msg_before paging
+// (a fixed-size backward page keyed off _oldestIdx) instead. If you change the
+// backend _MAX_MSG_LIMIT, change this value to match — otherwise load-older
+// silently stalls again for long sessions. The durable fix (so this mirror
+// isn't needed) is to expose the ceiling in the /api/session metadata response
+// and read it here; see tracking issue for that follow-up.
+const _MSG_LIMIT_MAX = 500;
 let _sameSessionForceReloadHint = null;
 
 function _currentLoadedRenderableMessageCount(){
@@ -3032,11 +3045,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // A reload window above the server's msg_limit ceiling would be clamped by
+  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
+  // silently SHRINK an already-loaded transcript that had more than the ceiling
+  // of rows visible (rows 400–999 replaced by 500–999). When the requested
+  // window exceeds the ceiling, fall back to the bare full-transcript request
+  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
+  // already-loaded older rows (Codex gate #6154, silent row-loss).
+  const boundedReloadLimit = (reloadLimit && reloadLimit <= _MSG_LIMIT_MAX) ? reloadLimit : null;
+  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
@@ -3531,18 +3552,34 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    // Ask the server for a larger authoritative tail window instead of a
-    // separate msg_before page. The same /api/session contract handles both —
-    // post-#2716 the backend always runs the full append-only merge, so a
-    // larger msg_limit on the same call produces the same merged transcript
-    // we'd get by stitching pages, but without client-side index bookkeeping.
-    // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
-    // newly exposed head is what we expose to the user.
+    // Two strategies, chosen by whether the growing tail window still fits under
+    // the server's msg_limit ceiling (_MSG_LIMIT_MAX, mirroring backend
+    // _MAX_MSG_LIMIT):
+    //
+    //  - Below the ceiling: ask for a larger authoritative tail window
+    //    (currentLoaded + _INITIAL_MSG_LIMIT). Post-#2716 the backend runs the
+    //    full append-only merge, so a larger msg_limit produces the same merged
+    //    transcript we'd get by stitching pages, without client-side index
+    //    bookkeeping. The newly exposed head is what we expose to the user.
+    //
+    //  - At/above the ceiling: the server clamps msg_limit, so the tail window
+    //    stops growing and this strategy would stall (the same clamped tail is
+    //    returned, olderMsgs -> 0). Switch to msg_before paging — a fixed
+    //    _INITIAL_MSG_LIMIT backward page keyed off _oldestIdx — which is
+    //    bounded and never hits the ceiling, so the head stays reachable for
+    //    arbitrarily long transcripts. (This is the same paging request the
+    //    race-fallback below uses, proven correct there.)
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
-      {timeoutMs:120000}
-    );
+    const useBeforePaging = requestedLimit >= _MSG_LIMIT_MAX;
+    const data = useBeforePaging
+      ? await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        )
+      : await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
+          {timeoutMs:120000}
+        );
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -3569,7 +3606,14 @@ async function _loadOlderMessages() {
     // the server appended new messages (or merge filtered something) while we
     // were awaiting, the suffix won't line up — fall back to the legacy
     // msg_before page so we never drop visible older messages on the floor.
-    let tailMatches = expandedMsgs.length >= currentLen;
+    // When useBeforePaging is true, `data` is a bounded msg_before OLDER page,
+    // not a cumulative tail. A raw-row-heavy older page whose visible text
+    // repeats the current tail could otherwise pass the suffix check below and
+    // be wholesale-replaced AS IF it were the full tail — silently discarding
+    // the current (newer) rows and marking history complete. Gate the suffix
+    // heuristic on !useBeforePaging so every msg_before page is always treated
+    // as an older page and prepended (Codex gate #6154, silent row-loss).
+    let tailMatches = !useBeforePaging && expandedMsgs.length >= currentLen;
     if (tailMatches && currentLen > 0) {
       const start = expandedMsgs.length - currentLen;
       for (let i = 0; i < currentLen; i++) {
@@ -3583,18 +3627,22 @@ async function _loadOlderMessages() {
     let olderMsgs = expandedMsgs.slice(0, olderCount);
     let nextMessages = expandedMsgs;
     if (!tailMatches) {
-      // Race fallback: keep the legacy index-page request as the
-      // correctness-preserving alternative. Same guards reapplied because
-      // we just awaited again.
-      const fallback = await api(
-        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
-        {timeoutMs:120000}
-      );
-      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
-      if (!S.session || S.session.session_id !== sid) return;
-      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-      if (_messagesGeneration !== startGeneration) return;
-      responseSession = fallback.session;
+      // Race fallback (or the over-ceiling msg_before primary path): keep the
+      // legacy index-page request as the correctness-preserving alternative.
+      // When useBeforePaging is true we already fetched a msg_before page as
+      // the primary `data`, so reuse it instead of re-fetching. Same guards
+      // reapplied because we just awaited again (skipped for the reuse case).
+      if (!useBeforePaging) {
+        const fallback = await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        );
+        if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+        if (!S.session || S.session.session_id !== sid) return;
+        if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+        if (_messagesGeneration !== startGeneration) return;
+        responseSession = fallback.session;
+      }
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
