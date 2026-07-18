@@ -13,7 +13,7 @@ identical on CI (no checkout) and developer machines (real checkout present).
 
 import sys
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

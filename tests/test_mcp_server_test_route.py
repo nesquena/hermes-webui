@@ -177,9 +177,19 @@ class _FakeProbeAgent:
         hermes_cli = types.ModuleType("hermes_cli")
         hermes_cli.__path__ = []
 
+        # _probe_import() validates the same config contract used by all
+        # bridge operations before the route may call the probe.  Include it
+        # explicitly so these tests cannot accidentally import a developer's
+        # real hermes_cli.config module or silently exercise the 503 path.
+        config_mod = types.ModuleType("hermes_cli.config")
+        config_mod.load_config = lambda: {}
+        config_mod.save_config = lambda config, **kwargs: None
+        config_mod.save_env_value = lambda key, value: None
+
         self.modules = {
             "hermes_constants": hermes_constants,
             "hermes_cli": hermes_cli,
+            "hermes_cli.config": config_mod,
             "hermes_cli.mcp_config": mcp_mod,
         }
 
@@ -193,6 +203,7 @@ def fake_probe_agent(monkeypatch, tmp_path):
             monkeypatch.setitem(sys.modules, name, module)
         monkeypatch.setattr(bridge, "_AGENT_DIR", str(tmp_path / "agent"), raising=False)
         monkeypatch.setattr(bridge, "_import_state", None, raising=False)
+        assert bridge.bridge_available() is True
         return fake
     yield _activate
     bridge._import_state = None
