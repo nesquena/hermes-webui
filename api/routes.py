@@ -2125,8 +2125,22 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 )
         _diag("self_heal_webui_zero_message_orphan")
     if missing_webui_orphan_ids:
-        for _sid in missing_webui_orphan_ids:
+        for _sid in missing_webui_orphan_ids.copy():
             with get_composer_draft_lock(_sid):
+                # Re-read ownership at the destructive boundary. A WebUI
+                # session can intentionally have no transcript yet while its
+                # sidecar holds the user's durable composer draft.
+                owner = Session.load(_sid)
+                draft = resolve_composer_draft(
+                    _sid, getattr(owner, "composer_draft", None) if owner else None
+                )
+                has_draft = bool(
+                    isinstance(draft, dict)
+                    and (str(draft.get("text") or "") or draft.get("files"))
+                )
+                if owner is not None and has_draft:
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
                 delete_composer_draft_sidecar(_sid)
             try:
                 prune_session_from_index(_sid)
