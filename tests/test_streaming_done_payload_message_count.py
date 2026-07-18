@@ -99,3 +99,16 @@ def test_gateway_done_payload_uses_full_message_count_helper():
 
     assert "_session_payload_with_full_messages(s, tool_calls=[])" in block
     assert 's.compact() | {"messages": s.messages' not in block
+
+
+def test_run_agent_streaming_uses_resolved_model_name():
+    """Verify _run_agent_streaming references a resolved model_name local
+    (not a bare LOAD_GLOBAL that would NameError at runtime)."""
+    source = Path("api/streaming.py").read_text(encoding="utf-8")
+    assert "_turn_route_model or resolved_model or model or ''" in source, (
+        "_run_agent_streaming must use a fallback chain for model_name, "
+        "not a bare model_name reference that would NameError."
+    )
+    assert "_dm['model'] = _turn_route_model or resolved_model or model or ''" in source, (
+        "_run_agent_streaming periodic checkpoint must use the same fallback chain."
+    )
