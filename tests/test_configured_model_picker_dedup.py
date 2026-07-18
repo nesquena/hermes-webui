@@ -61,7 +61,7 @@ def test_picker_rows_preserve_provider_id_for_equivalence_check():
     assert "providerId,modelsEndpointError,badge:_getConfiguredModelBadge" in ui
     assert "providerId,\n          modelsEndpointError," in ui
     assert "if(_isEquivalentConfiguredModelEntry(modelId,badge,_modelData)) continue;" in ui
-    assert "_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))" not in ui
+    assert "_existingConfiguredKeys" not in ui
 
 
 def test_named_custom_provider_routing_id_does_not_duplicate_picker_row(tmp_path):
