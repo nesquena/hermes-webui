@@ -3090,6 +3090,48 @@ def _truncate_journal_snapshot_value(value, *, limit: int = 120):
     return value
 
 
+def _run_journal_snapshot_recovery_args(payload: dict | None):
+    if not isinstance(payload, dict):
+        return {}
+    args = payload.get("args")
+    return bound_run_journal_snapshot_args(args)
+
+
+def _run_journal_snapshot_arg_detail_score(value) -> int:
+    if value in (None, "", [], {}):
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(
+            len(str(key)) + _run_journal_snapshot_arg_detail_score(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return sum(_run_journal_snapshot_arg_detail_score(item) for item in value)
+    return 1
+
+
+def _run_journal_snapshot_merge_args(existing, incoming):
+    if not incoming:
+        return existing, False
+    if not isinstance(existing, dict) or not existing:
+        return incoming, True
+    if not isinstance(incoming, dict):
+        return existing, False
+    merged = copy.deepcopy(existing)
+    changed = False
+    for key, value in incoming.items():
+        current = merged.get(key)
+        if key not in merged or (
+            _run_journal_snapshot_arg_detail_score(value)
+            > _run_journal_snapshot_arg_detail_score(current)
+        ):
+            merged[key] = value
+            changed = True
+    return merged, changed
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3146,6 +3188,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call_id = _run_journal_snapshot_tool_id(call)
             if (tool_id and call_id == tool_id) or (not tool_id and name and call.get("name") == name):
                 call["done"] = True
+                merged_args, args_changed = _run_journal_snapshot_merge_args(
+                    call.get("args"),
+                    _run_journal_snapshot_recovery_args(payload),
+                )
+                if args_changed:
+                    call["args"] = merged_args
                 if payload.get("preview") is not None:
                     call["snippet"] = str(payload.get("preview") or "")
                     call["preview"] = call.get("preview") or call["snippet"]
@@ -3161,7 +3209,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "name": name,
             "preview": str(payload.get("preview") or ""),
             "snippet": str(payload.get("preview") or ""),
-            "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+            "args": _run_journal_snapshot_recovery_args(payload),
             "done": True,
             "_live": True,
             "_journal_snapshot": True,
@@ -3231,7 +3279,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call = {
                 "name": name,
                 "preview": str(payload.get("preview") or ""),
-                "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+                "args": _run_journal_snapshot_recovery_args(payload),
                 "done": False,
                 "_live": True,
                 "_journal_snapshot": True,
@@ -9518,6 +9566,7 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    bound_run_journal_snapshot_args,
     find_run_summary,
     read_run_events,
     read_session_run_events,

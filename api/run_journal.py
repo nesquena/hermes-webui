@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -34,6 +34,11 @@ _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_SNAPSHOT_ARGS_MAX_ITEMS = 64
+_SNAPSHOT_ARGS_MAX_DEPTH = 8
+_SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
+_SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
+_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
 
 
 def _default_session_dir() -> Path:
@@ -101,6 +106,65 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     except (TypeError, ValueError):
         return run_id or None, None
     return run_id or None, seq
+
+
+def _snapshot_args_take_budget(budget: dict[str, int], amount: int) -> int:
+    remaining = max(0, int(budget.get("remaining") or 0))
+    take = min(remaining, max(0, amount))
+    budget["remaining"] = remaining - take
+    return take
+
+
+def _bound_snapshot_args_string(value: str, budget: dict[str, int]) -> str:
+    max_chars = min(len(value), _SNAPSHOT_ARGS_MAX_STRING_CHARS)
+    take = _snapshot_args_take_budget(budget, max_chars)
+    out = value[:take]
+    if take < len(value):
+        suffix_take = _snapshot_args_take_budget(budget, len(_SNAPSHOT_ARGS_TRUNCATED_SUFFIX))
+        out += _SNAPSHOT_ARGS_TRUNCATED_SUFFIX[:suffix_take]
+    return out
+
+
+def _bound_run_journal_snapshot_value(value: Any, budget: dict[str, int], depth: int) -> Any:
+    if budget.get("remaining", 0) <= 0:
+        return None
+    if isinstance(value, str):
+        return _bound_snapshot_args_string(value, budget)
+    if isinstance(value, dict):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return {}
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _SNAPSHOT_ARGS_MAX_ITEMS or budget.get("remaining", 0) <= 0:
+                break
+            bounded_key = _bound_snapshot_args_string(str(key), budget)
+            if not bounded_key:
+                continue
+            out[bounded_key] = _bound_run_journal_snapshot_value(item, budget, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return []
+        return [
+            _bound_run_journal_snapshot_value(item, budget, depth + 1)
+            for item in value[:_SNAPSHOT_ARGS_MAX_ITEMS]
+            if budget.get("remaining", 0) > 0
+        ]
+    if isinstance(value, (bool, int, float)) or value is None:
+        try:
+            _snapshot_args_take_budget(budget, len(json.dumps(value)))
+        except (TypeError, ValueError):
+            return None
+        return value
+    return _bound_snapshot_args_string(str(value), budget)
+
+
+def bound_run_journal_snapshot_args(args: Any) -> Any:
+    """Return recovery tool args with realistic values intact and pathological payloads bounded."""
+    if args is None:
+        return {}
+    budget = {"remaining": _SNAPSHOT_ARGS_MAX_TOTAL_CHARS}
+    return _bound_run_journal_snapshot_value(args, budget, 0)
 
 
 def _next_seq(path: Path) -> int:
