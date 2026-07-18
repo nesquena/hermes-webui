@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import queue
+import random
 import re
 import shlex
 import sys
@@ -8188,7 +8189,52 @@ def _run_agent_streaming(
             # run_conversation() predates the moa_config kwarg.
             if moa_config is not None:
                 _run_conversation_kwargs["moa_config"] = moa_config
-            result = agent.run_conversation(**_run_conversation_kwargs)
+
+            # ── Retry loop for silent provider failures ──
+            # Retry up to 3 times with exponential backoff when provider returns
+            # no content and no error (silent failure), to handle transient issues
+            # like rate limits that don't return HTTP 429, temporary outages, etc.
+            _retry_state = {"attempt": 0, "max_retries": 3, "base_delay": 1.0}
+            _last_silent_failure = False
+
+            while True:
+                _retry_state["attempt"] += 1
+                result = agent.run_conversation(**_run_conversation_kwargs)
+
+                # Check if this was a silent provider failure
+                _last_err = ""
+                _has_messages = False
+                if result is not None:
+                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                    _has_messages = bool(result.get('messages'))
+                _is_silent_failure = not bool(_last_err) and not _has_messages
+
+                if _is_silent_failure and _retry_state["attempt"] < _retry_state["max_retries"]:
+                    # Calculate exponential backoff with jitter
+                    _delay = _retry_state["base_delay"] * (2 ** (_retry_state["attempt"] - 1))
+                    _delay = min(_delay, 30.0)  # Cap at 30 seconds
+                    _jitter = _delay * 0.2 * (random.random() - 0.5) * 2
+                    _delay = max(0, _delay + _jitter)
+
+                    logger.info(
+                        f"[PROVIDER-RETRY] Session {s.session_id} silent provider failure "
+                        f"(attempt {_retry_state['attempt']}/{_retry_state['max_retries']}), "
+                        f"retrying in {_delay:.1f}s"
+                    )
+
+                    # Wait before retry
+                    time.sleep(_delay)
+                    _last_silent_failure = True
+                    continue
+
+                # Either succeeded, not a silent failure, or retries exhausted
+                if _last_silent_failure and _retry_state["attempt"] >= _retry_state["max_retries"]:
+                    logger.warning(
+                        f"[PROVIDER-RETRY] Session {s.session_id} exhausted all retries "
+                        f"for silent provider failure"
+                    )
+                break
+
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
