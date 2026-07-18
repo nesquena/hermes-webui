@@ -156,6 +156,21 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
         "persistence — it should be removed from the codebase."
     )
 
+    # 6. The heal-success save path must ALSO flush _pending_fallback_notices.
+    # The except-path credential self-heal retries the conversation through its
+    # own session-save block (s.save() + early return) that runs BEFORE the
+    # normal pre-save metadata block above. Without a flush there, a fallback
+    # notice emitted during the heal's run_conversation() is lost on the next
+    # session switch / page reload (greptile P1: heal notices not saved).
+    heal_save_idx = src.find("self-heal (except path): retry succeeded")
+    assert heal_save_idx != -1, "heal-success save path marker not found"
+    heal_block = src[heal_save_idx - 4000:heal_save_idx]
+    assert "_dm['_fallbackNotice']" in heal_block, (
+        "The heal-success save path must flush _pending_fallback_notices onto "
+        "the final assistant message before its own s.save(), because it "
+        "returns before the normal pre-save metadata block runs."
+    )
+
 
 # ── 2: source-level pin: LRU eviction path also closes _session_db ──────────
 
