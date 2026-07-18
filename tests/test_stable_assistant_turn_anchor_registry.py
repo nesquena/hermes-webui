@@ -47,6 +47,34 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} body did not close")
 
 
+def _function_source(src: str, name: str) -> str:
+    start = src.find(f"function {name}")
+    assert start != -1, f"{name} not found"
+    params = src.find("(", start)
+    assert params != -1, f"{name} parameters not found"
+    depth = 0
+    close = -1
+    for idx in range(params, len(src)):
+        if src[idx] == "(":
+            depth += 1
+        elif src[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    assert close != -1, f"{name} parameters did not close"
+    brace = src.find("{", close)
+    depth = 0
+    for idx in range(brace, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"{name} body did not close")
+
+
 def _registry_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
     script = f"""
@@ -728,6 +756,53 @@ def test_live_state_saved_listener_attaches_side_effect_to_anchor():
     body = _event_listener_body(_read(MESSAGES_JS), "state_saved")
 
     assert "_applyToAnchor('state_saved',d,e,null,{render:false});" in body
+
+
+def test_invisible_anchor_outcome_applies_without_repainting_live_scene():
+    assert NODE, "node is required for assistant-turn ownership tests"
+    apply_source = _function_source(_read(MESSAGES_JS), "_applyToAnchor")
+    script = f"""
+const activeSid='sid-owned-outcome';
+const streamId='stream-owned-outcome';
+const _anchorRegistry={{anchor:{{}}}};
+const applied=[];
+const _anchorApi={{
+  applyAssistantTurnAnchorSourceEvent(registry,event,context){{
+    applied.push({{registry,event,context}});
+    return {{applied:true}};
+  }},
+}};
+let _anchorShadowWarned=false;
+let _assistantSegmentSeq=3;
+let _currentActivityBurstId=4;
+let renderCount=0;
+function _renderAnchorLiveScene(){{ renderCount+=1; return true; }}
+{apply_source}
+const renderOutcome={{}};
+const result=_applyToAnchor(
+  'state_saved',
+  {{kind:'memory',name:'session-state'}},
+  {{lastEventId:'run-owned-outcome:7'}},
+  renderOutcome,
+  {{render:false}}
+);
+console.log(JSON.stringify({{result,applied,renderCount,renderOutcome}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["result"] == {"applied": True}
+    assert data["renderCount"] == 0
+    assert data["renderOutcome"] == {"rendered": False}
+    assert data["applied"][0]["event"]["source_event_type"] == "state_saved"
+    assert data["applied"][0]["event"]["event_id"] == "run-owned-outcome:7"
+    assert data["applied"][0]["context"] == {
+        "session_id": "sid-owned-outcome",
+        "stream_id": "stream-owned-outcome",
+    }
 
 
 def test_side_effect_owner_survives_scene_settlement_and_reload():
