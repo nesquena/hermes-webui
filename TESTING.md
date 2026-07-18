@@ -102,7 +102,7 @@ transcript-backed `activity_scene_v1` persistence and zero unexpected browser
 errors. It uses isolated temporary state and no provider credentials.
 
 ```bash
-pip install playwright pyyaml
+pip install -r requirements.txt playwright
 python -m playwright install --with-deps chromium
 python tests/browser_conversation_lifecycle.py
 ```
