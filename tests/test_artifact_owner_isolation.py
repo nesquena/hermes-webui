@@ -168,7 +168,7 @@ def test_trusted_header_reconciles_stale_cookie_before_private_artifact_authoriz
     alice = _Handler(headers={"Remote-User": "alice"})
     alice_info = auth.ensure_trusted_auth_session(alice)
     assert alice_info and alice_info["auth_type"] == "trusted"
-    alice_cookie = getattr(alice, "_trusted_auth_session_cookie_value")
+    alice_cookie = alice.__dict__["_trusted_auth_session_cookie_value"]
     source = tmp_path / "alice-private.txt"
     source.write_text("Alice private bytes", encoding="utf-8")
     _publish(monkeypatch, alice, {"path": str(source)})
