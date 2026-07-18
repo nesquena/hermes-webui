@@ -18210,9 +18210,12 @@ def _normalized_openai_tts_base_url(base_url: str) -> str:
         # unless the operator explicitly opted the target into the LAN allowlist.
         if _tts_host_is_blocked_target(hostname) and not allowlisted:
             raise ValueError("invalid OpenAI base_url in config")
-    elif parsed.scheme == "http" and (hostname in _TTS_LOCALHOST_HOSTS or allowlisted):
-        # Explicit localhost-over-http dev/self-hosted case, or an operator-
-        # opted-in LAN target (HERMES_WEBUI_TTS_ALLOW_LAN + _ALLOW_HOSTS).
+    elif parsed.scheme == "http" and (
+        hostname in _TTS_LOCALHOST_HOSTS or _tts_addr_in_lan_allowlist(hostname)
+    ):
+        # HTTP has no pinned connection handler, so only explicit literal
+        # IP/CIDR opt-ins are safe here; hostname allowlist entries remain
+        # HTTPS-only and cannot be DNS-rebound after this validation.
         pass
     else:
         raise ValueError("invalid OpenAI base_url in config")

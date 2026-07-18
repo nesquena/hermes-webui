@@ -94,6 +94,36 @@ def test_lan_base_url_allowed_with_optin(monkeypatch):
     assert out == "http://192.168.1.50:8001/v1"
 
 
+def test_http_allowlisted_hostname_is_rejected_without_http_pinning(monkeypatch):
+    """HTTP self-hosting may opt in only literal IP/CIDR targets, never DNS names."""
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "voice.example")
+
+    with pytest.raises(ValueError, match="invalid OpenAI base_url"):
+        routes._normalized_openai_tts_base_url("http://voice.example/v1")
+
+
+def test_http_localhost_remains_allowed_without_lan_optin():
+    assert routes._normalized_openai_tts_base_url("http://localhost:8001/v1") == (
+        "http://localhost:8001/v1"
+    )
+
+
+def test_https_allowlisted_hostname_remains_accepted_and_pinned(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "voice.example")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [(0, 0, 0, "", ("1.1.1.1", 0))],
+    )
+
+    assert routes._normalized_openai_tts_base_url("https://voice.example/v1") == (
+        "https://voice.example/v1"
+    )
+    assert routes._tts_resolve_pinned_address("voice.example") == "1.1.1.1"
+
+
 def test_gate_without_hosts_is_fail_closed(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")  # no _ALLOW_HOSTS
     with pytest.raises(ValueError):
