@@ -187,7 +187,16 @@ console.log(JSON.stringify({withEffort, blankEffort, missingField}));
 
 
 class TestMoaSettingsI18n:
-    """New MoA i18n keys must exist in LOCALES.en only (per task scope)."""
+    """MoA i18n keys must be translated into every mandatory-parity locale.
+
+    This repo enforces exact key-parity between LOCALES.en and 10 locales
+    (zh, zh-Hant, cs, ja, ko, pl, ru, es, tr, vi) via dedicated coverage
+    tests (test_chinese_locale.py etc.) that fail hard on any EN-only key --
+    this package's keys were originally EN-only per the task's initial
+    scope, then translated (see the i18n(models) parity commit) so this
+    branch stays self-contained for an upstream PR. it/de/fr/pt have no
+    such coverage test and are intentionally left on the English fallback.
+    """
 
     REQUIRED_KEYS = [
         "settings_label_moa",
@@ -208,24 +217,32 @@ class TestMoaSettingsI18n:
         "settings_moa_other_presets_note",
     ]
 
+    # en + the 10 locales with mandatory parity coverage tests.
+    MANDATORY_PARITY_LOCALE_COUNT = 11
+
     def test_all_keys_present(self):
         for key in self.REQUIRED_KEYS:
             assert key in I18N_JS, f"Missing i18n key '{key}' in i18n.js"
 
-    def test_keys_only_added_to_english_locale(self):
-        """Task scope: new keys go in LOCALES.en only, not every locale."""
+    def test_keys_translated_in_all_mandatory_parity_locales(self):
+        """Each key must appear exactly once per locale that requires parity
+        (en + the 10 covered by test_*_locale.py), and nowhere else (no
+        accidental duplicate insertion, no drift into it/de/fr/pt)."""
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
-            assert count == 1, f"i18n key '{key}' found {count} times — expected exactly 1 (en only)"
+            assert count == self.MANDATORY_PARITY_LOCALE_COUNT, (
+                f"i18n key '{key}' found {count} times — expected exactly "
+                f"{self.MANDATORY_PARITY_LOCALE_COUNT} (en + the 10 mandatory-parity locales)"
+            )
 
-    def test_moa_keys_precede_de_locale_block(self):
-        """New keys must live inside LOCALES.en, not accidentally appended after it."""
+    def test_moa_keys_present_in_english_locale_block(self):
+        """Every key must (at minimum) live inside LOCALES.en."""
         en_start = I18N_JS.find("\n  en: {")
-        de_start = I18N_JS.find("\n  de: {")
-        assert en_start >= 0 and de_start > en_start
+        it_start = I18N_JS.find("\n  it: {")
+        assert en_start >= 0 and it_start > en_start
         for key in self.REQUIRED_KEYS:
             key_idx = I18N_JS.find(f"{key}:")
-            assert en_start < key_idx < de_start, f"'{key}' must be inside LOCALES.en"
+            assert en_start < key_idx < it_start, f"'{key}' must be inside LOCALES.en"
 
 
 class TestMoaBackendRoutes:
