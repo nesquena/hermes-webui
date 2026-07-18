@@ -217,22 +217,25 @@ class TestMoaSettingsI18n:
         "settings_moa_other_presets_note",
     ]
 
-    # en + the 10 locales with mandatory parity coverage tests.
-    MANDATORY_PARITY_LOCALE_COUNT = 11
+    # Every locale block in i18n.js. settings_label_moa/settings_desc_moa are
+    # referenced from index.html via data-i18n, and
+    # test_provider_quota_status.py::test_settings_label_and_description_i18n_keys_exist_for_all_locales
+    # requires such keys in ALL locale blocks — so the whole MoA key set keeps
+    # full parity rather than only the 10 locales with dedicated parity suites.
+    ALL_LOCALE_COUNT = 15
 
     def test_all_keys_present(self):
         for key in self.REQUIRED_KEYS:
             assert key in I18N_JS, f"Missing i18n key '{key}' in i18n.js"
 
-    def test_keys_translated_in_all_mandatory_parity_locales(self):
-        """Each key must appear exactly once per locale that requires parity
-        (en + the 10 covered by test_*_locale.py), and nowhere else (no
-        accidental duplicate insertion, no drift into it/de/fr/pt)."""
+    def test_keys_translated_in_all_locales(self):
+        """Each key must appear exactly once per locale block (no accidental
+        duplicate insertion, no locale left behind)."""
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
-            assert count == self.MANDATORY_PARITY_LOCALE_COUNT, (
+            assert count == self.ALL_LOCALE_COUNT, (
                 f"i18n key '{key}' found {count} times — expected exactly "
-                f"{self.MANDATORY_PARITY_LOCALE_COUNT} (en + the 10 mandatory-parity locales)"
+                f"{self.ALL_LOCALE_COUNT} (one per locale block)"
             )
 
     def test_moa_keys_present_in_english_locale_block(self):
