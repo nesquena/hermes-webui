@@ -80,14 +80,19 @@ def _scan_inline_dest(text: str, i: int) -> str:
     if j >= n:
         return "unclosed"
 
-    # Angle-bracket destination <...> — a raw newline inside it is invalid. Rare; handle
-    # conservatively (only report a clear break/unclosed, else treat as ok).
+    # Angle-bracket destination <...> — a raw newline inside it is invalid, but a
+    # backslash-escaped '>' does NOT terminate it. Scan honoring escapes.
     if text[j] == "<":
         k = j + 1
         while k < n and text[k] not in ">\n":
-            k += 1
-        if k >= n or text[k] == "\n":
-            return "unclosed" if k >= n else "split"
+            if text[k] == "\\" and k + 1 < n:
+                k += 2
+            else:
+                k += 1
+        if k >= n:
+            return "unclosed"
+        if text[k] == "\n":
+            return "split"
         j = k + 1
     else:
         # Bare destination: run of non-whitespace with balanced parens. It ends at the
@@ -109,6 +114,10 @@ def _scan_inline_dest(text: str, i: int) -> str:
             j += 1
         else:
             return "unclosed"             # ran off the end with no closing ')'
+        # Whitespace ended the bare destination. A bare dest must have BALANCED parens;
+        # if a '(' is still open, the destination is malformed and won't render.
+        if depth > 0:
+            return "split"
 
     # Destination token ended at whitespace. Skip it (a single newline here is legal),
     # then the next non-whitespace must be the close ')' or a title opener.
