@@ -3419,6 +3419,28 @@ def _filter_reasoning_efforts_for_provider(
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff != "max"]
+    # Z.AI / GLM (native zai endpoint only): the `reasoning_effort` intensity
+    # field is GLM-5.2+ exclusive per docs.z.ai — earlier GLM models accept the
+    # `thinking` on/off toggle but NOT the effort ladder, and GLM-4.7 uses forced
+    # thinking (cannot be disabled). Strip the whole ladder for non-5.2 GLM so the
+    # UI never offers values the endpoint will silently ignore and never offers
+    # 'none' for forced-thinking models. Aggregators (openrouter/kilocode/...) are
+    # untouched because they route through their own routers, not Z.AI's docs.
+    if provider == "zai" and "glm" in bare:
+        # GLM-4.7 family: forced thinking — reasoning is not configurable at all.
+        if bare.startswith("glm-4.7"):
+            return []
+        m = re.search(r"glm-(\d+)(?:\D+(\d+))?", bare)
+        if m:
+            major = int(m.group(1))
+            minor = int(m.group(2)) if m.group(2) else 0
+            # GLM-5.2+ keeps the full ladder: Z.AI's max/xhigh/high/medium/low/
+            # minimal values match VALID_REASONING_EFFORTS exactly ('max' is the
+            # Z.AI default and recommended for coding tasks).
+            if (major, minor) >= (5, 2):
+                return normalized
+        # Everything else (4.5, 4.5-flash, 5, 5.1, 5-turbo): no reasoning_effort.
+        return []
     return normalized
 
 
