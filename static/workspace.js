@@ -849,9 +849,40 @@ function setLargeMarkdownForceRenderVisible(visible){
 }
 
 function renderMarkdownPreviewContent(data){
+  // #5933: resolve relative image paths to /api/file/raw?… API URLs so
+  // images referenced in the markdown (e.g. ![alt](./img.png)) render inline
+  // in the workspace preview rather than showing broken links.
+  let content = data.content;
+  // basePath: the directory to resolve relative image paths against. Prefer
+  // an explicit data.baseDir (e.g. from the wiki browser, which has no
+  // _previewCurrentPath context) and fall back to _previewCurrentPath.
+  // Using a stale _previewCurrentPath for non-previewMd targets would resolve
+  // images against the wrong directory (#5933 F2).
+  const basePathSrc = (data && data.baseDir) ? data.baseDir : _previewCurrentPath;
+  if (basePathSrc && S.session) {
+    const dirPath = basePathSrc.includes('/')
+      ? basePathSrc.substring(0, basePathSrc.lastIndexOf('/') + 1)
+      : '';
+    // Stash fenced code blocks and inline-code spans BEFORE the image rewrite
+    // so ![alt](./img.png) inside `code` or ```fences``` is NOT rewritten —
+    // renderMd would otherwise render an <img> inside <code> (#5933 F1).
+    const _codeStash=[];
+    let work=content.replace(/```[^\n`]*\n[\s\S]*?\n```/g,m=>{_codeStash.push(m);return '\x00K'+(_codeStash.length-1)+'\x00';});
+    work=work.replace(/`[^`\n]+`/g,m=>{_codeStash.push(m);return '\x00K'+(_codeStash.length-1)+'\x00';});
+    work=work.replace(
+      /!\[([^\]]*)\]\((?!https?:\/\/|\/api\/|file:\/\/)([^\)]+)\)/g,
+      (_, alt, relPath) => {
+        const resolvedPath = _normalizeWorkspaceRelPath(dirPath + relPath);
+        const sessionId = encodeURIComponent(S.session.session_id);
+        const apiUrl = `/api/file/raw?session_id=${sessionId}&path=${encodeURIComponent(resolvedPath)}&inline=1`;
+        return `![${alt}](${apiUrl})`;
+      }
+    );
+    content=work.replace(/\x00K(\d+)\x00/g,(_,i)=>_codeStash[+i]);
+  }
   const target=data&&data.el?data.el:$('previewMd');
   if(!data||!data.el) showPreview('md');
-  target.innerHTML=renderMd(data.content);
+  target.innerHTML=renderMd(content);
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 

@@ -368,20 +368,20 @@ def test_workspace_calls_render_katex_after_preview():
 
 
 def test_workspace_renders_katex_after_file_open():
-    """workspace.js renderKatexBlocks call must come after the renderMd(data.content) assignment."""
-    preview_md_pos = WORKSPACE_JS.find("renderMd(data.content)")
+    """workspace.js renderKatexBlocks call must come after the renderMd(content) assignment."""
+    preview_md_pos = WORKSPACE_JS.find("renderMd(content)")
     # Use the actual call string (not a stray regex match on 'M' characters)
     katex_call_str = "renderKatexBlocks==='function'"
     katex_call_pos = WORKSPACE_JS.find(katex_call_str)
-    assert preview_md_pos != -1, "renderMd(data.content) not found in workspace.js"
+    assert preview_md_pos != -1, "renderMd(content) not found in workspace.js"
     assert katex_call_pos != -1, (
         "renderKatexBlocks guard (typeof renderKatexBlocks==='function') not found in workspace.js"
     )
-    # The call after 'renderMd(data.content)' — find the LAST occurrence
+    # The call after 'renderMd(content)' — find the LAST occurrence
     # (there may be an earlier one in the save path at line ~153)
     last_katex_pos = WORKSPACE_JS.rfind(katex_call_str)
     assert last_katex_pos > preview_md_pos, (
-        "renderKatexBlocks must be called AFTER renderMd(data.content) in workspace.js "
+        "renderKatexBlocks must be called AFTER renderMd(content) in workspace.js "
         f"(renderMd at {preview_md_pos}, last renderKatexBlocks at {last_katex_pos})"
     )
 
