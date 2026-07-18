@@ -342,6 +342,109 @@ def test_put_denylist_blocks_flat_webui_gateway_base_url_change(tmp_path, monkey
     assert "attacker.example.com" not in config_path.read_text(encoding="utf-8")
 
 
+# ── Denylist: ADD case (the key was absent, not merely changed) ───────────
+#
+# _find_denylist_violations walks the union of old and new top-level keys,
+# so a brand-new sensitive key should be caught the same way a changed one
+# is — but that path was only exercised implicitly, not by a dedicated test.
+# These pin it explicitly so a future rewrite of the walk (e.g. one that
+# only diffs keys already present in `old`) fails loudly instead of quietly
+# reopening the bypass for configs that never had the key to begin with.
+
+
+def test_put_denylist_blocks_flat_webui_oidc_add(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = (
+        "agent:\n  reasoning_effort: high\n"
+        "webui_oidc:\n  issuer: https://attacker.example.com\n  client_id: injected\n"
+    )
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(p.startswith("webui_oidc") for p in excinfo.value.extra.get("blocked_paths", []))
+    assert "attacker.example.com" not in config_path.read_text(encoding="utf-8")
+
+
+def test_put_denylist_blocks_flat_webui_prefill_messages_script_add(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = "agent:\n  reasoning_effort: high\nwebui_prefill_messages_script: /tmp/evil.sh\n"
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(
+        p.startswith("webui_prefill_messages_script") for p in excinfo.value.extra.get("blocked_paths", [])
+    )
+    assert "evil.sh" not in config_path.read_text(encoding="utf-8")
+
+
+def test_put_denylist_blocks_flat_webui_gateway_base_url_add(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = "agent:\n  reasoning_effort: high\nwebui_gateway_base_url: http://attacker.example.com\n"
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(
+        p.startswith("webui_gateway_base_url") for p in excinfo.value.extra.get("blocked_paths", [])
+    )
+    assert "attacker.example.com" not in config_path.read_text(encoding="utf-8")
+
+
+# ── Denylist: bare (non-webui_-prefixed) sensitive key ─────────────────────
+
+
+def test_put_denylist_blocks_bare_prefill_messages_script_change(tmp_path, monkeypatch):
+    """api/routes.py's _joplin_prefill_script_path() falls back to the bare
+    `prefill_messages_script` key alongside the webui_-prefixed one — not
+    exploitable via the current subprocess-executing path in
+    api/streaming.py, but semantically the same RCE-shaped setting, guarded
+    pre-emptively so a future change to the execution path can't silently
+    reopen it."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "prefill_messages_script: /opt/hermes/prefill.sh\nagent:\n  reasoning_effort: high\n",
+        encoding="utf-8",
+    )
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = "prefill_messages_script: /tmp/evil.sh\nagent:\n  reasoning_effort: high\n"
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(
+        p.startswith("prefill_messages_script") for p in excinfo.value.extra.get("blocked_paths", [])
+    )
+    assert "evil.sh" not in config_path.read_text(encoding="utf-8")
+
+
+def test_put_denylist_blocks_bare_prefill_messages_script_add(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = "agent:\n  reasoning_effort: high\nprefill_messages_script: /tmp/evil.sh\n"
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(
+        p.startswith("prefill_messages_script") for p in excinfo.value.extra.get("blocked_paths", [])
+    )
+    assert "evil.sh" not in config_path.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     "flat_key",
     [
@@ -355,6 +458,7 @@ def test_put_denylist_blocks_flat_webui_gateway_base_url_change(tmp_path, monkey
         "webui_gateway_base_url",
         "webui_gateway_use_runs_api",
         "webui_chat_backend",
+        "prefill_messages_script",
     ],
 )
 def test_is_denylisted_path_covers_sensitive_flat_webui_keys(flat_key):

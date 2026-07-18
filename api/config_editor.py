@@ -250,6 +250,22 @@ _SENSITIVE_WEBUI_FLAT_KEY_PREFIXES = (
     "webui_chat_backend",  # switches chat traffic into gateway-proxied mode (api/gateway_chat.py)
 )
 
+# Bare (non-webui_-prefixed) top-level keys with the same auth/execution/
+# routing sensitivity as one of the prefixes above, guarded pre-emptively.
+# `prefill_messages_script` is read as a fallback alongside
+# `webui_prefill_messages_script` by api/routes.py's Joplin-notes prefill
+# path (_joplin_prefill_script_path); it is not (yet) consumed by the actual
+# subprocess-executing path in api/streaming.py, so it is not exploitable
+# today, but it is semantically the same RCE-shaped setting and denylisting
+# only the webui_-prefixed sibling would silently stop protecting anything
+# the moment a future change makes streaming.py honor the bare fallback too.
+# A grep sweep for other bare/webui_-prefixed key pairs (oidc, gateway,
+# chat_backend, passkey, auth, security, trusted) found no other instance
+# of this pattern.
+_SENSITIVE_BARE_KEY_PREFIXES = (
+    "prefill_messages_script",
+)
+
 _MISSING = object()
 
 
@@ -268,6 +284,8 @@ def _is_denylisted_path(path: tuple) -> bool:
     ):
         return True
     if any(lowered[0].startswith(prefix) for prefix in _SENSITIVE_WEBUI_FLAT_KEY_PREFIXES):
+        return True
+    if any(lowered[0].startswith(prefix) for prefix in _SENSITIVE_BARE_KEY_PREFIXES):
         return True
     return False
 
