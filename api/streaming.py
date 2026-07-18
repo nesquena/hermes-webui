@@ -10829,6 +10829,19 @@ def _run_agent_streaming(
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
+                                # Persist fallback notices on the final
+                                # assistant message so they survive
+                                # renderMessages() rebuilds, session switches,
+                                # and page reloads (greptile P1: heal notices
+                                # not saved). The heal-success path has its
+                                # own save block that returns before the normal
+                                # pre-save metadata block runs, so flush
+                                # _pending_fallback_notices here too.
+                                if _pending_fallback_notices:
+                                    for _dm in reversed(s.messages):
+                                        if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                                            _dm['_fallbackNotice'] = _pending_fallback_notices[-1]
+                                            break
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
