@@ -1776,14 +1776,24 @@ class TestUpdateSummaryRouteModelSelection:
             'THREAD_HERMES_HOME': str(profile_home),
             'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
         }
-        assert captured['aux_env'] == {
-            'HERMES_HOME': str(profile_home),
-            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
-            'THREAD_HERMES_HOME': str(profile_home),
-            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
-            'SKILL_MODULE_HOME': profile_home,
-            'SKILL_MODULE_DIR': profile_home / 'skills',
-        }
+        if profiles._resolve_hermes_home_override() is not None:
+            assert captured['aux_env'] == {
+                'HERMES_HOME': str(profile_home),
+                'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+                'THREAD_HERMES_HOME': str(profile_home),
+                'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
+                'SKILL_MODULE_HOME': 'default-home',
+                'SKILL_MODULE_DIR': 'default-home/skills',
+            }
+        else:
+            assert captured['aux_env'] == {
+                'HERMES_HOME': str(profile_home),
+                'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+                'THREAD_HERMES_HOME': str(profile_home),
+                'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
+                'SKILL_MODULE_HOME': profile_home,
+                'SKILL_MODULE_DIR': profile_home / 'skills',
+            }
         assert captured['aux_create']['model'] == 'profile-compression-model'
         assert getattr(fake_skill_module, 'HERMES_HOME') == 'default-home'
         assert getattr(fake_skill_module, 'SKILLS_DIR') == 'default-home/skills'

@@ -13,6 +13,8 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
+import api.profiles as _profiles_api
+
 # Stub agent.auxiliary_client so it is importable in the test environment
 # (the real package lives in hermes-agent, which is not installed here).
 _agent_stub = types.ModuleType('agent')
@@ -785,8 +787,19 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
                 sys.modules['tools.skills_tool'] = original_skill_module
 
         self.assertEqual(captured.get('hermes_home'), 'profile-home')
-        self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
-        self.assertEqual(Path(str(captured.get('skill_module_dir'))), Path('profile-home') / 'skills')
+        _profile_override_available = _profiles_api._resolve_hermes_home_override() is not None
+        if _profile_override_available:
+            self.assertEqual(str(captured.get('skill_module_home')), 'default-home')
+            self.assertEqual(
+                str(captured.get('skill_module_dir')),
+                'default-home/skills',
+            )
+        else:
+            self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
+            self.assertEqual(
+                Path(str(captured.get('skill_module_dir'))),
+                Path('profile-home') / 'skills',
+            )
         self.assertEqual(captured.get('restored_hermes_home'), 'default-home')
         self.assertEqual(getattr(fake_skill_module, 'HERMES_HOME'), 'default-home')
         self.assertEqual(getattr(fake_skill_module, 'SKILLS_DIR'), 'default-home/skills')
