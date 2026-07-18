@@ -431,7 +431,9 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     # ceiling; an over-ceiling hint would be clamped by the backend and could
     # silently shrink an already-loaded transcript, so it falls back to the bare
     # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _MSG_LIMIT_MAX) ? reloadLimit : null;" in SESSIONS_JS
+    # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
+    # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
+    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
     assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
