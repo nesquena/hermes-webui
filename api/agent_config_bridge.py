@@ -200,6 +200,47 @@ def save_mcp_bearer_token(name: str, token: str, home: Path) -> Dict[str, str]:
         return _save_bearer_auth_token(name, token)
 
 
+def probe_mcp_server(name: str, home: Path, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+    """Connect to one MCP server, list its tools, disconnect.
+
+    Raises ``KeyError`` when *name* is not configured, and re-raises any
+    connection failure for the caller to map into an ``{ok: false}``
+    response. Mirrors the Dashboard's own ``POST /api/mcp/servers/{name}/test``
+    (``hermes_cli.web_server.test_mcp_server``) minus its ``asyncio.to_thread``
+    wrapper: that wrapper exists there only to keep FastAPI's single event
+    loop unblocked during the probe, but the WebUI's ``ThreadingHTTPServer``
+    already gives every request its own OS thread, so a direct, bounded call
+    is enough here.
+
+    ``timeout`` overrides the server's own ``connect_timeout`` when given.
+    Left at the default ``None``, the probe respects whatever the server's
+    config specifies (``_probe_single_server`` falls back to 30s itself) —
+    an earlier version hard-defaulted this to 15s, which cut off legitimately
+    slow connects (e.g. a cold ``npx`` stdio spawn) with a false "test
+    failed" instead of the server's configured budget. The Dashboard's own
+    probe route passes no timeout at all for the same reason.
+    """
+    from hermes_cli.mcp_config import _get_mcp_servers, _oauth_tokens_present, _probe_single_server
+
+    with scoped_agent_home(home):
+        servers = _get_mcp_servers()
+        if name not in servers:
+            raise KeyError(name)
+        cfg = servers[name]
+        needs_oauth_token = cfg.get("auth") == "oauth"
+        details: Dict[str, Any] = {}
+        probe_kwargs = {} if timeout is None else {"connect_timeout": timeout}
+        tools = _probe_single_server(name, cfg, details=details, **probe_kwargs)
+        token_present = _oauth_tokens_present(name) if needs_oauth_token else True
+    if not token_present:
+        raise RuntimeError("OAuth authentication required — no token found.")
+    return {
+        "tools_count": len(tools),
+        "prompts": details.get("prompts", 0),
+        "resources": details.get("resources", 0),
+    }
+
+
 # ── skills config (enable/disable lists) ─────────────────────────────────────
 
 def save_skills_config(skills_cfg: Dict[str, Any], home: Path) -> None:

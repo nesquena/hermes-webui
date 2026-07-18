@@ -1601,9 +1601,12 @@
             <!-- MCP Servers Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_servers_title">MCP Servers</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View Model Context Protocol servers configured in config.yaml.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">Manage Model Context Protocol servers used by the agent.</div>
               <div id="mcpServerList"></div>
-              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here for now. Edit config.yaml and restart Hermes for changes to take effect.</div>
+              <button type="button" class="sm-btn" id="mcpAddServerBtn" onclick="openMcpServerCreate()" data-i18n="mcp_add_server" style="margin-top:8px">+ Add Server</button>
+              <div id="mcpWriteCapabilityHint" class="mcp-restart-hint" style="display:none"></div>
+              <div id="mcpServerFormWrap" style="display:none;margin-top:12px"></div>
+              <div class="mcp-restart-hint" data-i18n="mcp_reload_hint">Changes take effect after the agent reloads its MCP servers.</div>
             </div>
             <!-- MCP Tools Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">

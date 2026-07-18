@@ -8,10 +8,13 @@ from api.routes import (
     _handle_mcp_server_delete,
     _handle_mcp_server_toggle,
     _mask_secrets,
+    _mcp_write_capability,
     _parse_mcp_enabled,
     _server_summary,
     _strip_masked_values,
 )
+from api import agent_config_bridge as bridge
+from tests.test_agent_config_bridge import fake_agent  # noqa: F401 — shared fixture, see TestMcpSaveBearerTokenRoundtrip
 
 
 def _make_handler():
@@ -176,6 +179,83 @@ class TestMcpList:
         active_home_saved = yaml.safe_load(active_home.joinpath('config.yaml').read_text(encoding='utf-8'))
         assert 'new-srv' in saved['mcp_servers']
         assert 'new-srv' not in active_home_saved['mcp_servers']
+
+
+class TestMcpWriteCapability:
+    """`writable` field on GET /api/mcp/servers — see routes._mcp_write_capability.
+
+    Convention: a GET response bearing on write capability carries a
+    `writable` bool; false only for the specific fail-closed case where an
+    agent checkout IS configured but its config layer failed to import (a
+    half-wired deployment, distinct from "no checkout at all" which writes
+    fine through the legacy YAML path).
+    """
+
+    def test_standalone_is_writable(self, monkeypatch):
+        # conftest.py sets HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE=1 and no
+        # agent dir is configured in the test env — legacy writer applies.
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+        result = _mcp_write_capability()
+        assert result == {'writable': True}
+
+    def test_bridge_available_is_writable(self, monkeypatch, tmp_path):
+        hermes_constants = types.ModuleType('hermes_constants')
+        hermes_constants.set_hermes_home_override = lambda path: object()
+        hermes_constants.reset_hermes_home_override = lambda token: None
+        config_mod = types.ModuleType('hermes_cli.config')
+        config_mod.load_config = lambda: {}
+        config_mod.save_config = lambda cfg, **kw: None
+        config_mod.save_env_value = lambda k, v: None
+        hermes_cli = types.ModuleType('hermes_cli')
+        hermes_cli.__path__ = []
+        monkeypatch.delenv('HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE', raising=False)
+        monkeypatch.setitem(sys.modules, 'hermes_constants', hermes_constants)
+        monkeypatch.setitem(sys.modules, 'hermes_cli', hermes_cli)
+        monkeypatch.setitem(sys.modules, 'hermes_cli.config', config_mod)
+        monkeypatch.setattr(bridge, '_AGENT_DIR', str(tmp_path / 'agent'), raising=False)
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+        try:
+            result = _mcp_write_capability()
+            assert result == {'writable': True}
+        finally:
+            bridge._import_state = None
+
+    def test_broken_checkout_is_not_writable(self, monkeypatch, tmp_path):
+        # Agent checkout configured but its config layer cannot import —
+        # must fail closed, not silently fall back to the legacy writer.
+        monkeypatch.delenv('HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE', raising=False)
+        for name in ('hermes_constants', 'hermes_cli', 'hermes_cli.config'):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        monkeypatch.setattr(bridge, '_AGENT_DIR', str(tmp_path / 'missing-agent'), raising=False)
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+
+        class _Blocker:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname in ('hermes_constants', 'hermes_cli', 'hermes_cli.config'):
+                    raise ImportError(f'{fullname} blocked by test')
+                return None
+
+        blocker = _Blocker()
+        sys.meta_path.insert(0, blocker)
+        try:
+            result = _mcp_write_capability()
+        finally:
+            sys.meta_path.remove(blocker)
+            bridge._import_state = None
+        assert result['writable'] is False
+        assert 'unavailable_reason' in result and result['unavailable_reason']
+
+    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes.get_active_hermes_home')
+    def test_list_payload_carries_write_capability(self, mock_home, mock_cfg, monkeypatch):
+        mock_home.return_value = object()
+        mock_cfg.return_value = {'mcp_servers': {}}
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert payload['writable'] is True
+        assert 'unavailable_reason' not in payload
 
 
 class TestMcpSave:

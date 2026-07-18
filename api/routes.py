@@ -13560,6 +13560,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
 
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.endswith("/test"):
+        name = parsed.path[len("/api/mcp/servers/"):-len("/test")]
+        return _handle_mcp_server_test(handler, name)
+
     # ── MCP Tools (GET) ──
     if parsed.path == "/api/mcp/tools":
         return _handle_mcp_tools_list(handler)
@@ -26444,6 +26448,25 @@ def _handle_notes_item(handler, parsed):
         return j(handler, {"source": "joplin", "error": str(exc)}, status=502)
 
 
+def _mcp_write_capability() -> dict:
+    """Report whether MCP config writes (add/edit/delete/toggle) can succeed
+    right now, for the frontend to disable write controls instead of letting
+    them fail. Mirrors the same fail-closed check ``_mcp_bridge_or_legacy``
+    performs before a write: an agent checkout that IS configured but whose
+    config layer failed to import must not offer write buttons that would
+    just 503 (a half-wired deployment problem, distinct from "no checkout at
+    all", which writes fine through the legacy YAML path)."""
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        return {"writable": True}
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return {"writable": False, "unavailable_reason": str(exc)}
+    return {"writable": True}
+
+
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
     cfg = get_config_for_profile_home(get_active_hermes_home())
@@ -26459,6 +26482,7 @@ def _handle_mcp_servers_list(handler):
         "servers": result,
         "toggle_supported": True,
         "reload_required": True,
+        **_mcp_write_capability(),
     })
 
 
@@ -26646,3 +26670,90 @@ def _handle_mcp_server_update(handler, name, body):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+def _standalone_mcp_url_probe(url: str) -> dict:
+    """Best-effort HTTP reachability check for an MCP HTTP server without an
+    agent checkout — a HEAD request, single hop (no redirect chain), 5s
+    timeout. This is NOT an MCP protocol handshake (that needs the agent's
+    MCP client, only reachable via the bridge); any HTTP response, even a
+    4xx/5xx, counts as reachable — only connection failures are unreachable.
+    """
+    class _NoRedirectMcpProbeHandler(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None  # stop after the first hop; the response itself proves reachability
+
+    opener = build_opener(_NoRedirectMcpProbeHandler)
+    req = Request(url, method="HEAD")
+    started = time.monotonic()
+    try:
+        with opener.open(req, timeout=5) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+    except HTTPError as exc:
+        status = exc.code
+    except (URLError, _socket.timeout, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        return {"ok": False, "error": str(reason)}
+    latency_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "ok": True,
+        "latency_ms": latency_ms,
+        "http_status": status,
+        "note": "HTTP reachability only — connect a Hermes agent checkout for a full MCP handshake",
+    }
+
+
+def _handle_mcp_server_test(handler, name):
+    """Connection test for one MCP server (GET /api/mcp/servers/{name}/test).
+
+    Read-only probe: no write gate needed. Auth/CSRF boundary matches the
+    neighboring MCP GET routes (enforced upstream in server.py).
+    """
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config_for_profile_home(get_active_hermes_home())
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict) or name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    server_cfg = servers[name]
+
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        home = get_active_hermes_home()
+        started = time.monotonic()
+        try:
+            result = _bridge.probe_mcp_server(name, home)
+        except KeyError:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        except Exception as exc:
+            return j(handler, {"ok": False, "error": str(exc)})
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return j(handler, {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "tools_count": result.get("tools_count"),
+            "prompts": result.get("prompts"),
+            "resources": result.get("resources"),
+        })
+
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return j(handler, {"ok": False, "error": f"Agent config layer unavailable: {exc}"}, status=503)
+
+    # Standalone fallback: no MCP client available here, so this can only
+    # check basic HTTP reachability for url servers and must say so for stdio.
+    if not isinstance(server_cfg, dict):
+        return j(handler, {"ok": False, "error": "invalid server configuration"})
+    if server_cfg.get("url"):
+        return j(handler, _standalone_mcp_url_probe(server_cfg["url"]))
+    if server_cfg.get("command"):
+        return j(handler, {
+            "ok": False,
+            "supported": False,
+            "reason": "stdio server connection tests require a Hermes agent checkout",
+        })
+    return j(handler, {"ok": False, "error": "invalid server configuration"})
