@@ -1862,30 +1862,30 @@ def _resolve_streaming_hermes_home_override():
 def _set_streaming_hermes_home_override(profile_home: str):
     """Install the context-local home override if available.
 
-    Returns ``(module, token)`` so callers can restore it with the matching
-    module in the inverse order.
+    Returns ``(module, token, installed)`` so callers can restore it with the
+    matching module in the inverse order.
     """
     if not profile_home:
-        return None, None
+        return None, None, False
 
     _home_override_mod = _resolve_streaming_hermes_home_override()
     if _home_override_mod is None:
-        return None, None
+        return None, None, False
 
     try:
         _token = _home_override_mod.set_hermes_home_override(profile_home)
-        return _home_override_mod, _token
+        return _home_override_mod, _token, True
     except Exception:
         logger.debug(
             "Failed to set streaming Hermes home override; continuing with os.environ mirror",
             exc_info=True,
         )
-        return None, None
+        return None, None, False
 
 
-def _reset_streaming_hermes_home_override(override_mod, override_token) -> None:
+def _reset_streaming_hermes_home_override(override_mod, override_token, override_installed: bool) -> None:
     """Reset the context-local home override if it was installed."""
-    if override_mod is None or override_token is None:
+    if override_mod is None or not override_installed:
         return
     try:
         override_mod.reset_hermes_home_override(override_token)
@@ -7280,7 +7280,10 @@ def _run_agent_streaming(
     _turn_session_identity_tokens = None
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
-    _streaming_hermes_home_override_ctx = (None, None)
+    _streaming_hermes_home_override_ctx = (None, None, False)
+    _streaming_skill_home_snapshot = None
+    _restore_streaming_skill_home_modules = False
+    _acquired_streaming_skill_home_patch_lock = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -7348,8 +7351,12 @@ def _run_agent_streaming(
             from api.profiles import (
                 filter_runtime_env_for_gateway_parity,
                 patch_skill_home_modules,
+                restore_skill_home_modules,
+                snapshot_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
+                _skill_modules_support_profile_home,
+                _SKILL_HOME_MODULE_PATCH_LOCK,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -7361,6 +7368,10 @@ def _run_agent_streaming(
             _profile_runtime_env = {}
             _safe_profile_runtime_env = {}
             patch_skill_home_modules = None
+            snapshot_skill_home_modules = None
+            restore_skill_home_modules = None
+            _skill_modules_support_profile_home = None
+            _SKILL_HOME_MODULE_PATCH_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -7426,11 +7437,41 @@ def _run_agent_streaming(
         ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
+
+        # Full-turn serialization is only needed for static/legacy skill-module
+        # resolution, where process-global skill-module globals are still used.
+        # Dynamic-capable modules continue concurrent execution.
+        _streaming_override_installed = bool(_streaming_hermes_home_override_ctx[2])
+        _streaming_modules_are_dynamic = False
+        if patch_skill_home_modules is not None and snapshot_skill_home_modules is not None:
+            if _streaming_override_installed and _skill_modules_support_profile_home is not None:
+                try:
+                    _streaming_modules_are_dynamic = bool(
+                        _skill_modules_support_profile_home(_profile_home_path)
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to evaluate streaming skill-module home capability for profile %r",
+                        _profile_home,
+                        exc_info=True,
+                    )
+                    _streaming_modules_are_dynamic = False
+
+            if not (_streaming_override_installed and _streaming_modules_are_dynamic):
+                _restore_streaming_skill_home_modules = True
+                _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
+                _acquired_streaming_skill_home_patch_lock = True
+
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
+            if _restore_streaming_skill_home_modules:
+                # Snapshot and patch before mutating process env so setup
+                # failures can unwind without leaking either state.
+                _streaming_skill_home_snapshot = snapshot_skill_home_modules()
+                patch_skill_home_modules(Path(_profile_home))
             old_profile_env = {key: os.environ.get(key) for key in _safe_profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
@@ -7454,13 +7495,10 @@ def _run_agent_streaming(
                 # In that mode, tools.skills_tool._skills_dir() and
                 # tools.skill_manager_tool._skills_dir() can resolve the active
                 # profile from get_hermes_home() and keep per-thread isolation
-                # without mutating module globals. If the override installation
-                # fails (older agents), retain the legacy process-cache patch
-                # fallback and keep issue-2024 coverage meaningful.
-                if patch_skill_home_modules is not None:
-                    _has_streaming_override = _streaming_hermes_home_override_ctx[1] is not None
-                    if not _has_streaming_override:
-                        patch_skill_home_modules(Path(_profile_home))
+                # without mutating module globals. If override installation
+                # succeeds for both modules, skip process-cache patching.
+                # If either module is static/missing/raises, the legacy path
+                # above has already snapshotted and patched under this lock.
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -10620,6 +10658,18 @@ def _run_agent_streaming(
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
+        if _restore_streaming_skill_home_modules and _streaming_skill_home_snapshot is not None:
+            with _ENV_LOCK:
+                if restore_skill_home_modules is not None:
+                    try:
+                        restore_skill_home_modules(_streaming_skill_home_snapshot)
+                    except Exception:
+                        logger.debug("Failed to restore skill module state for streaming profile", exc_info=True)
+                _streaming_skill_home_snapshot = None
+                _restore_streaming_skill_home_modules = False
+        if _acquired_streaming_skill_home_patch_lock:
+            _SKILL_HOME_MODULE_PATCH_LOCK.release()
+            _acquired_streaming_skill_home_patch_lock = False
         _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
