@@ -8,9 +8,12 @@ links do not leak local workspace paths, profile details, or raw tool payloads.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -109,6 +112,86 @@ def _redact_share_paths(text: str, extra_paths) -> str:
     return text
 
 
+# Regex matching local MEDIA:<path> and bare file://<path> references — same
+# patterns that _inlineMediaHtmlForRef() in ui.js handles when rendering
+# messages.  Excludes MEDIA: followed by http/https URLs so external images
+# (MEDIA:https://...) pass through unchanged to the frontend renderer.
+_SHARE_MEDIA_RE = re.compile(
+    r"(?:MEDIA:(?!https?://)([^\s\)\]>]+))"
+    r"|(?:((?:^|\s)file://)([^\s\)\]>]+))"
+)
+
+
+# Max size (in bytes) for files we'll embed as base64 in a share snapshot.
+_SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
+
+
+def _embed_share_media(text: str) -> str:
+    """Find local MEDIA:/file:// references and replace them with inline content.
+
+    Small image files are embedded as ``<img>`` tags with data URIs so the
+    public share is self-contained.  Other readable files under the size limit
+    are embedded as download links.  Unreadable or oversized references are
+    replaced with a static placeholder.
+
+    This runs BEFORE :func:`_redact_share_paths` so the concrete file path is
+    still available.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    def _replace_ref(m):
+        # Two alternative branches. Group 1: MEDIA:<local-path>.
+        # Groups 2-3: (whitespace)file://<path>
+        if m.group(1) is not None:
+            raw = m.group(1)
+        else:
+            raw = (m.group(3) or "").strip()
+        if not raw:
+            return m.group(0)
+        try:
+            p = Path(raw).resolve(strict=False)
+        except (OSError, ValueError, RuntimeError):
+            p = Path(raw)
+
+        if not p.is_file():
+            return "[*Local attachment omitted from public share*]"
+
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return "[*Local attachment omitted from public share*]"
+
+        if size > _SHARE_EMBED_MAX_BYTES:
+            return "[*Local attachment omitted from public share*]"
+
+        mime_type, _ = mimetypes.guess_type(str(p))
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        # For images, embed as an inline <img> — the renderMd() pipeline in
+        # ui.js preserves <img> tags (they are stashed/restored as \x00G tokens).
+        if mime_type.startswith("image/"):
+            try:
+                data = p.read_bytes()
+                b64 = base64.b64encode(data).decode("ascii")
+                name = p.name
+                return f'<img src="data:{mime_type};base64,{b64}" class="msg-media-img" alt="{name}" loading="lazy">'
+            except (OSError, MemoryError):
+                return "[*Local attachment omitted from public share*]"
+
+        # For other readable files, embed as a data-URI download link.
+        try:
+            data = p.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            name = p.name
+            return f'<a href="data:{mime_type};base64,{b64}" download="{name}">{name}</a>'
+        except (OSError, MemoryError):
+            return "[*Local attachment omitted from public share*]"
+
+    return _SHARE_MEDIA_RE.sub(_replace_ref, text)
+
+
 def _sanitize_message(message: dict, *, redact_paths=()) -> dict | None:
     if not isinstance(message, dict):
         return None
@@ -119,8 +202,12 @@ def _sanitize_message(message: dict, *, redact_paths=()) -> dict | None:
     if not text:
         return None
     # ALWAYS-ON hardening for the public boundary, independent of any setting:
-    # (1) force credential redaction, (2) strip known local paths.
+    # (1) force credential redaction, (2) embed local media, (3) strip known paths.
     text = _force_redact_credentials(text)
+    # Embed local media BEFORE path redaction so the concrete path is still
+    # available for file reads.  MEDIA:/file:// references become self-contained
+    # data URIs or a static placeholder — no authenticated /api/media calls.
+    text = _embed_share_media(text)
     text = _redact_share_paths(text, redact_paths)
     if not text.strip():
         return None
