@@ -1615,6 +1615,23 @@
               <div id="mcpToolPager" class="mcp-tool-pager" aria-label="MCP tools pagination" data-i18n-aria-label="mcp_tools_pagination_label"></div>
               <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
+            <!-- Raw config.yaml editor -->
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <details id="configEditorDetails">
+                <summary style="cursor:pointer;font-weight:600;font-size:13px" data-i18n="config_editor_title">Agent config (config.yaml)</summary>
+                <div style="font-size:11px;color:var(--muted);margin:8px 0" data-i18n="config_editor_desc">View and edit the active profile's raw config.yaml.</div>
+                <div class="mcp-restart-hint" style="color:#e8a030" data-i18n="config_editor_warning">Editing the raw agent config can break your agent. Values shown as •••REDACTED••• are hidden and cannot be saved.</div>
+                <div id="configEditorDisabledNotice" style="display:none;font-size:11px;color:var(--muted);margin:8px 0;padding:8px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px"></div>
+                <textarea id="configEditorTextarea" readonly spellcheck="false" rows="24" style="width:100%;margin-top:8px;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-family:var(--font-mono,monospace);font-size:12px;line-height:1.45;resize:vertical"></textarea>
+                <div id="configEditorStatus" class="settings-autosave-status" aria-live="polite"></div>
+                <div style="display:flex;gap:8px;margin-top:8px">
+                  <button type="button" class="sm-btn" id="configEditorReloadBtn" onclick="reloadConfigEditor()" data-i18n="config_editor_reload">Reload</button>
+                  <button type="button" class="sm-btn" id="configEditorEditBtn" onclick="toggleConfigEditorEdit()" data-i18n="config_editor_edit" style="display:none">Edit</button>
+                  <button type="button" class="sm-btn" id="configEditorCancelBtn" onclick="cancelConfigEditorEdit()" data-i18n="config_editor_cancel" style="display:none">Cancel</button>
+                  <button type="button" class="sm-btn" id="configEditorSaveBtn" onclick="saveConfigEditor()" style="display:none;font-weight:600" data-i18n="config_editor_save">Save</button>
+                </div>
+              </details>
+            </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
           </div>
           <div class="settings-pane" id="settingsPaneHelp">

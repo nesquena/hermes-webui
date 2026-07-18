@@ -12245,6 +12245,12 @@ def handle_get(handler, parsed) -> bool:
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
 
+    # ── Raw config.yaml viewer (System settings) ──
+    if parsed.path == "/api/config/raw":
+        from api.config_editor import get_config_raw
+
+        return j(handler, get_config_raw())
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
@@ -16410,6 +16416,13 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
+    if parsed.path == "/api/config/raw":
+        from api.config_editor import ConfigEditorError, put_config_raw
+
+        try:
+            return j(handler, put_config_raw(body.get("yaml")))
+        except ConfigEditorError as exc:
+            return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
