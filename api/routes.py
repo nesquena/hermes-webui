@@ -2130,10 +2130,19 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 # Re-read ownership at the destructive boundary. A WebUI
                 # session can intentionally have no transcript yet while its
                 # sidecar holds the user's durable composer draft.
-                owner = Session.load(_sid)
-                draft = resolve_composer_draft(
-                    _sid, getattr(owner, "composer_draft", None) if owner else None
-                )
+                try:
+                    owner = Session.load(_sid)
+                    draft = resolve_composer_draft(
+                        _sid, getattr(owner, "composer_draft", None) if owner else None
+                    )
+                except Exception:
+                    logger.warning(
+                        "Retaining webui zero-message row %s because durable owner reload failed",
+                        _sid,
+                        exc_info=True,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
                 has_draft = bool(
                     isinstance(draft, dict)
                     and (str(draft.get("text") or "") or draft.get("files"))
