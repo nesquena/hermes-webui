@@ -1705,9 +1705,21 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
+  // notifications so extensions always see the canonical session id, not the
+  // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+  }
+  // Extension pre-open hook — fires once per sidebar click, not on every call.
+  // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
+  // when loadSession runs the actual navigation inside it.
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
+    if(_preResult&&_preResult.cancel===true){
+      return;
+    }
   }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
@@ -1865,7 +1877,7 @@ async function loadSession(sid){
           return;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true});
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
       }
@@ -1976,8 +1988,8 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    if (_isCurrentLoad()) _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
+    _loadingSessionId=null;
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
@@ -2412,6 +2424,10 @@ async function loadSession(sid){
   } else {
     _hideHandoffHint();
   }
+  // Extension post-load hook
+  if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
+  }
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────
@@ -2494,12 +2510,21 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  // Extension pre-open hook — before any side-effects (external import, profile switching).
+  // Handler returns {cancel:true} to prevent the open.
+  if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
+    if(_preResult&&_preResult.cancel===true) return;
+  }
+  // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
+  if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
   await _ensureSidebarSessionProfile(session);
-  await loadSession(session.session_id, loadOpts);
+  // Tell loadSession to skip its pre-hook — we already ran it above.
+  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
 }
 
@@ -8168,8 +8193,6 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          // #5409: close mobile sidebar synchronously before navigation
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
         lineageList.appendChild(row);
@@ -8182,8 +8205,6 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
       const openChildSession=async(childSession)=>{
-        // #5409: close mobile sidebar synchronously before navigation
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -8811,11 +8832,6 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          // #5409: close mobile sidebar synchronously BEFORE awaiting _openSidebarSession
-          // so the user gets instant feedback that navigation is happening, even
-          // for large sessions where loadSession can take 3-15s (metadata fetch +
-          // message load + renderMessages DOM build on slow iOS WKWebView).
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');
