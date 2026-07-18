@@ -20,6 +20,7 @@ Degrades gracefully on agents without the override (skips with a clear reason).
 """
 import os
 import json
+import inspect
 import textwrap
 import contextlib
 import queue
@@ -216,6 +217,15 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
         def get_interval(self):
             return 11.0
 
+        def set_pending_started_at(self, stream_id, pending_started_at):
+            _events.setdefault("set_pending_started_at", []).append(
+                (stream_id, pending_started_at)
+            )
+
+        def get_ttft_ms(self, stream_id):
+            _events.setdefault("get_ttft_ms", []).append(stream_id)
+            return None
+
         def get_stats(self):
             return {}
 
@@ -273,7 +283,11 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(_streaming, "meter", lambda: _FakeMeter())
     monkeypatch.setattr(_streaming, "RunJournalWriter", lambda *a, **k: None)
     monkeypatch.setattr(_streaming, "_build_agent_thread_env", lambda *a, **k: {})
-    monkeypatch.setattr(_streaming, "resolve_model_provider", lambda model_with_provider_context: (model_with_provider_context, None, None))
+    monkeypatch.setattr(
+        _streaming,
+        "resolve_model_provider",
+        lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+    )
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
     import api.profiles as profiles_api
 
@@ -355,6 +369,15 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
         def get_interval(self):
             return 11.0
 
+        def set_pending_started_at(self, stream_id, pending_started_at):
+            _events.setdefault("set_pending_started_at", []).append(
+                (stream_id, pending_started_at)
+            )
+
+        def get_ttft_ms(self, stream_id):
+            _events.setdefault("get_ttft_ms", []).append(stream_id)
+            return None
+
         def get_stats(self):
             return {}
 
@@ -371,15 +394,39 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
     def _reset_override(mod, reset_token, override_installed):
         _events["reset_override"] = (mod, reset_token, override_installed)
 
-    def _snapshot_skill_home_modules():
-        _events["snapshot_skill_home_modules"] = {"snapshot": True}
-        return {"snapshot": True}
+    def _caller_info():
+        _frame = inspect.currentframe()
+        _wrapper = _frame.f_back if _frame is not None else None
+        _caller = _wrapper.f_back if _wrapper is not None else None
+        try:
+            if _caller is None:
+                return "<unknown>", "<unknown>", -1
+            return (
+                Path(_caller.f_code.co_filename).name,
+                _caller.f_code.co_name,
+                _caller.f_lineno,
+            )
+        finally:
+            del _wrapper
+            del _caller
+            del _frame
 
-    def _patch_skill_home_modules(*_):
-        _events["patch_skill_home_modules"] = _events.get("patch_skill_home_modules", 0) + 1
+    def _snapshot_skill_home_modules():
+        _events.setdefault("snapshot_skill_home_modules", []).append(
+            {"source": _caller_info(), "args": ()}
+        )
+        payload = {"snapshot": True}
+        return payload
+
+    def _patch_skill_home_modules(*args):
+        _events.setdefault("patch_skill_home_modules", []).append(
+            {"source": _caller_info(), "args": tuple(args)}
+        )
 
     def _restore_skill_home_modules(snapshot):
-        _events["restore_skill_home_modules"] = snapshot
+        _events.setdefault("restore_skill_home_modules", []).append(
+            {"source": _caller_info(), "snapshot": snapshot, "args": (snapshot,)}
+        )
 
     class _SentinelAgent:
         def __init__(self, *args, **kwargs):
@@ -412,7 +459,11 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
     monkeypatch.setattr(_streaming, "meter", lambda: _FakeMeter())
     monkeypatch.setattr(_streaming, "RunJournalWriter", lambda *a, **k: None)
     monkeypatch.setattr(_streaming, "_build_agent_thread_env", lambda *a, **k: {})
-    monkeypatch.setattr(_streaming, "resolve_model_provider", lambda model_with_provider_context: (model_with_provider_context, None, None))
+    monkeypatch.setattr(
+        _streaming,
+        "resolve_model_provider",
+        lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+    )
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
     import api.profiles as profiles_api
 
@@ -457,9 +508,29 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
     assert _events.get("set_override_home") == str(_home)
     assert _events.get("reset_override") == ("sentinel-module", None, True)
     assert _events.get("run_conversation") is True
-    assert _events.get("patch_skill_home_modules") == 1
-    assert _events.get("snapshot_skill_home_modules") == {"snapshot": True}
-    assert _events.get("restore_skill_home_modules") == {"snapshot": True}
+    # Two call paths can reach the legacy skill-module helpers now:
+    # 1) upstream runtime-refresh model-resolution scope, and
+    # 2) the PR-owned streaming fallback branch at _run_agent_streaming.
+    # Assert that the streaming-owned fallback still executes once and fully
+    # restores the snapshot it captured.
+    _streaming_patch_calls = [
+        entry["source"]
+        for entry in _events.get("patch_skill_home_modules", [])
+        if entry["source"][0] == "streaming.py"
+    ]
+    _streaming_snapshot_calls = [
+        entry["source"]
+        for entry in _events.get("snapshot_skill_home_modules", [])
+        if entry["source"][0] == "streaming.py"
+    ]
+    _streaming_restore_calls = [
+        entry["snapshot"]
+        for entry in _events.get("restore_skill_home_modules", [])
+        if entry["source"][0] == "streaming.py"
+    ]
+    assert len(_streaming_patch_calls) == 1
+    assert len(_streaming_snapshot_calls) == 1
+    assert _streaming_restore_calls == [{"snapshot": True}]
     assert _stream_id not in _streaming.STREAMS
 
 
