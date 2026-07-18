@@ -271,6 +271,62 @@ console.log(JSON.stringify({{
     }
 
 
+def test_snapshot_normalizes_mixed_legacy_outcomes_to_stable_run(monkeypatch):
+    from api import routes
+
+    stream_id = "stream_transport"
+    run_id = "run_stable"
+    session_id = "session_mixed"
+    events = [
+        {
+            "seq": 4,
+            "event": "artifact_reference",
+            "event_id": f"{run_id}:4",
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "payload": {"kind": "workspace_file", "path": "reports/final.md"},
+        },
+        {
+            "seq": 5,
+            "event": "state_saved",
+            "event_id": f"{stream_id}:5",
+            "stream_id": stream_id,
+            "payload": {
+                "session_id": session_id,
+                "kind": "skill",
+                "action": "updated",
+                "name": "release-notes",
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: {
+            "session_id": session_id,
+            "run_id": stream_id,
+            "last_seq": 5,
+            "last_event_id": f"{stream_id}:5",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _session_id, _run_id: {"events": events},
+    )
+
+    scene = routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]
+
+    assert scene["identity"]["run_id"] == run_id
+    assert scene["identity"]["stream_id"] == stream_id
+    outcomes = [*scene["artifacts"], *scene["side_effects"]]
+    assert [outcome["run_id"] for outcome in outcomes] == [run_id, run_id]
+    assert [outcome["event_id"] for outcome in outcomes] == [
+        f"{run_id}:4",
+        f"{run_id}:5",
+    ]
+
+
 @pytest.mark.skipif(not NODE, reason="node is required for Anchor hydration coverage")
 def test_outcome_only_scene_enters_inflight_and_replay_dedupes_in_real_registry():
     functions = "\n".join(

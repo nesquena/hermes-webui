@@ -3807,15 +3807,40 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "side_effects": anchor_side_effects,
         },
     }
+    outcome_events = [*anchor_artifacts, *anchor_side_effects]
     outcome_run_ids = {
         str(outcome.get("run_id") or "").strip()
-        for outcome in (*anchor_artifacts, *anchor_side_effects)
+        for outcome in outcome_events
         if str(outcome.get("run_id") or "").strip()
     }
+    stable_outcome_run_ids = {run_id for run_id in outcome_run_ids if run_id != stream_id}
+    scene_run_id = None
     if len(outcome_run_ids) == 1:
-        snapshot["anchor_activity_scene"]["identity"]["run_id"] = next(
-            iter(outcome_run_ids)
-        )
+        scene_run_id = next(iter(outcome_run_ids))
+    elif len(stable_outcome_run_ids) == 1 and outcome_run_ids <= {
+        stream_id,
+        next(iter(stable_outcome_run_ids)),
+    }:
+        # Mixed journals can contain new stable-run outcome events beside legacy
+        # stream-id-only events. Normalize those legacy envelopes to the single
+        # stable run so frontend recovery does not filter half the outcome set.
+        scene_run_id = next(iter(stable_outcome_run_ids))
+        seen_normalized_event_ids: set[str] = set()
+        for collection in (anchor_artifacts, anchor_side_effects):
+            kept: list[dict] = []
+            for outcome in collection:
+                if str(outcome.get("run_id") or "").strip() == stream_id:
+                    outcome["run_id"] = scene_run_id
+                    outcome["event_id"] = f"{scene_run_id}:{outcome.get('seq')}"
+                event_id = str(outcome.get("event_id") or "").strip()
+                if event_id and event_id in seen_normalized_event_ids:
+                    continue
+                if event_id:
+                    seen_normalized_event_ids.add(event_id)
+                kept.append(outcome)
+            collection[:] = kept
+    if scene_run_id:
+        snapshot["anchor_activity_scene"]["identity"]["run_id"] = scene_run_id
     return snapshot
 
 
