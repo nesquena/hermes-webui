@@ -4210,7 +4210,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
   const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\/|#|\?|\.|api|session\/)/i;
-  const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  // data:image/ is limited to raster+SVG subtypes; scripts never execute inside
+  // <img>, and every other data: scheme stays blocked (mirrors ui.js _DATA_IMAGE_RE).
+  const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.|data:image\/(?:png|jpe?g|gif|webp|avif|svg\+xml)[;,])/i;
   function _smdLinkHref(raw){
     const href=String(raw||'');
     if(/^session:\/\//i.test(href)){
