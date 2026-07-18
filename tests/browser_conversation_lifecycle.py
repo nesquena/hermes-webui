@@ -109,7 +109,7 @@ def _terminate_process(proc: subprocess.Popen | None) -> None:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait(timeout=5)
+        proc.wait()
 
 
 def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
