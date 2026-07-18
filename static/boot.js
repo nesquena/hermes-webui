@@ -2086,8 +2086,11 @@ window.renderTranscript=function(container, messages, opts){
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    // NOTE: the autoReadLastAssistant wrapper is installed once at init and
+    // left in place — it already delegates to the original whenever voice mode
+    // is inactive (the _voiceModeActive guard above). Restoring the original
+    // here used to break re-activation: after off→on the wrapper was never
+    // re-installed, so the spoken reply + listen-again loop silently stopped.
     // Clear textarea if it was only voice input
     ta.value='';
     autoResize();
