@@ -1,4 +1,5 @@
 """Regression tests for preserving live streams across session switches."""
+import json
 import re
 import shutil
 import subprocess
@@ -1178,6 +1179,123 @@ assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
     assert "INFLIGHT[activeSid].streamId=streamId" in attach_body
     assert "INFLIGHT[activeSid].lastRunJournalEventId=''" in attach_body
     assert "lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||''" in close_body
+
+
+def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
+    """Durable-wins recovery must not downgrade browser-visible tool details."""
+    assert NODE, "node not on PATH"
+    from api import routes
+
+    stream_id = "stream-long-tool-args"
+    long_command = "python -c " + repr("print('x')\n" * 24)
+    complete_only_command = "bash -lc " + repr("echo complete-only && " * 16)
+    events = [
+        {
+            "event": "tool",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-started",
+                "args": {"command": long_command},
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-started",
+                "preview": "started complete",
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-complete-only",
+                "args": {"command": complete_only_command},
+                "preview": "complete-only complete",
+            },
+        },
+    ]
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-1",
+            "run_id": sid,
+            "last_seq": 3,
+            "last_event_id": f"{sid}:3",
+        }
+        if sid == stream_id
+        else None,
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events}
+        if session_id == "session-1" and run_id == stream_id
+        else {"events": []},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    assert snapshot is not None
+    assert snapshot["tool_calls"][0]["args"]["command"] == long_command
+    assert snapshot["tool_calls"][1]["args"]["command"] == complete_only_command
+    tool_rows = [
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "tool"
+    ]
+    assert tool_rows[0]["tool"]["args"]["command"] == long_command
+    assert tool_rows[1]["tool"]["args"]["command"] == complete_only_command
+    assert tool_rows[0]["payload"]["args"]["command"] == long_command
+    assert tool_rows[1]["payload"]["args"]["command"] == complete_only_command
+
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+            _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
+            _function_decl(SESSIONS_JS, "_selectLiveRecoveryInflight"),
+            f"const snapshot={json.dumps(snapshot)};",
+            f"const longCommand={json.dumps(long_command)};",
+            f"const streamId={json.dumps(stream_id)};",
+            """
+const serverInflight = _serverLiveSnapshotInflight(snapshot, []);
+assert.strictEqual(serverInflight.streamId, streamId);
+assert.strictEqual(serverInflight.lastRunJournalSeq, 3);
+assert.strictEqual(serverInflight.toolCalls[0].args.command, longCommand);
+const localInflight = {
+  streamId,
+  lastRunJournalSeq: serverInflight.lastRunJournalSeq,
+  lastAssistantText: 'local equal-seq progress',
+  toolCalls: [{
+    name: 'terminal',
+    tid: 'call-started',
+    args: {command: 'local has a different full command'},
+  }],
+};
+const selected = _selectLiveRecoveryInflight(localInflight, serverInflight, streamId);
+assert.strictEqual(selected, serverInflight);
+assert.strictEqual(selected.lastRunJournalSeq, localInflight.lastRunJournalSeq);
+assert.strictEqual(selected.toolCalls[0].args.command, longCommand);
+assert.ok(selected.toolCalls[0].args.command.length > 120);
+assert.ok(!selected.toolCalls[0].args.command.endsWith('...'));
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_runtime_journal_scene_fallback_ignores_foreign_stream_snapshots():

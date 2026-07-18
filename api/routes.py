@@ -3090,6 +3090,13 @@ def _truncate_journal_snapshot_value(value, *, limit: int = 120):
     return value
 
 
+def _run_journal_snapshot_recovery_args(payload: dict | None):
+    if not isinstance(payload, dict):
+        return {}
+    args = payload.get("args")
+    return copy.deepcopy(args) if args is not None else {}
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3161,7 +3168,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "name": name,
             "preview": str(payload.get("preview") or ""),
             "snippet": str(payload.get("preview") or ""),
-            "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+            "args": _run_journal_snapshot_recovery_args(payload),
             "done": True,
             "_live": True,
             "_journal_snapshot": True,
@@ -3231,7 +3238,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call = {
                 "name": name,
                 "preview": str(payload.get("preview") or ""),
-                "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+                "args": _run_journal_snapshot_recovery_args(payload),
                 "done": False,
                 "_live": True,
                 "_journal_snapshot": True,
