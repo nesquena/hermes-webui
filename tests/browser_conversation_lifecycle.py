@@ -301,12 +301,12 @@ def _capture_anchor_scene_requests(page):
     def on_request_failed(request):
         if "/api/session/anchor-scene" not in request.url:
             return
-        failure = request.failure or {}
+        failure = request.failure or ""
         events.append({
             "type": "requestfailed",
             "method": request.method,
             "url": request.url,
-            "error": failure.get("errorText", ""),
+            "error": str(failure),
         })
 
     page.on("response", on_response)
