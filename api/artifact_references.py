@@ -9,10 +9,11 @@ from pathlib import Path
 
 
 _MUTATION_TOOL_NAMES = frozenset({'write_file', 'patch'})
-_IGNORED_PATH_PARTS = frozenset({
+_IGNORED_ANY_PATH_PARTS = frozenset({
     '.git', '.hg', '.svn', '.venv', 'venv', '__pycache__',
-    'node_modules', 'dist', 'build', '.next', '.cache',
+    'node_modules', '.next', '.cache',
 })
+_IGNORED_ROOT_PATH_PARTS = frozenset({'dist', 'build'})
 
 
 def _result_object(result):
@@ -92,7 +93,12 @@ def _workspace_relative_path(workspace, raw_path) -> str | None:
         relative = resolved.relative_to(root)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
-    if not relative.parts or any(part.lower() in _IGNORED_PATH_PARTS for part in relative.parts):
+    lowered_parts = tuple(part.lower() for part in relative.parts)
+    if (
+        not lowered_parts
+        or any(part in _IGNORED_ANY_PATH_PARTS for part in lowered_parts)
+        or lowered_parts[0] in _IGNORED_ROOT_PATH_PARTS
+    ):
         return None
     return relative.as_posix()
 

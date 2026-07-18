@@ -78,6 +78,8 @@ def test_successful_patch_keeps_result_order_dedupes_and_rejects_unsafe_paths(tm
     workspace.mkdir()
     outside = tmp_path / "outside.md"
     cache_path = workspace / "node_modules" / "generated.js"
+    root_build_path = workspace / "build" / "bundle.js"
+    nested_build_path = workspace / "docs" / "build" / "report.md"
     first = workspace / "src" / "app.py"
     second = workspace / "Makefile"
     result = json.dumps({
@@ -89,6 +91,8 @@ def test_successful_patch_keeps_result_order_dedupes_and_rejects_unsafe_paths(tm
             "../traversal.md",
             "https://example.com/not-a-file",
             str(cache_path),
+            str(root_build_path),
+            str(nested_build_path),
             {"path": str(workspace / "not-a-string.md")},
             str(second),
         ],
@@ -98,7 +102,11 @@ def test_successful_patch_keeps_result_order_dedupes_and_rejects_unsafe_paths(tm
         "patch", {"mode": "patch"}, result, workspace, tool_call_id="call-patch"
     )
 
-    assert [item["path"] for item in references] == ["src/app.py", "Makefile"]
+    assert [item["path"] for item in references] == [
+        "src/app.py",
+        "docs/build/report.md",
+        "Makefile",
+    ]
 
 
 def test_successful_patch_can_fall_back_to_v4a_targets(tmp_path):

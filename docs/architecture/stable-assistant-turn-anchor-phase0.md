@@ -342,9 +342,10 @@ The streaming producer emits a separate `artifact_reference` event after a
 canonical `write_file` or `patch` result proves that a mutation landed. The
 event contains only a normalized workspace-relative path, artifact kind, source
 tool, and tool-call id when available; raw tool arguments and result bodies do
-not cross that boundary. Failed, incomplete, read-only, workspace-escaping, and
-ignored build/cache paths are excluded. The browser attaches the event to the
-active Anchor without adding a Worklog row or repainting the live scene.
+not cross that boundary. Failed, incomplete, read-only, workspace-escaping,
+cache/dependency/VCS paths, and root-level build output paths are excluded. The
+browser attaches the event to the active Anchor without adding a Worklog row or
+repainting the live scene.
 
 ## Dedupe Invariant
 
