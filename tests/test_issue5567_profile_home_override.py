@@ -231,14 +231,12 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     def _set_thread_env(**kwargs):
         _events["set_thread_env"] = True
 
-    token = object()
-
     def _set_override(profile_home: str):
         _events["set_override_home"] = profile_home
-        return ("sentinel-module", token)
+        return ("sentinel-module", None, True)
 
-    def _reset_override(mod, reset_token):
-        _events["reset_override"] = (mod, reset_token)
+    def _reset_override(mod, reset_token, override_installed):
+        _events["reset_override"] = (mod, reset_token, override_installed)
 
     def _patch_skill_home_modules(*_):
         _events["patch_skill_home_modules"] = _events.get("patch_skill_home_modules", 0) + 1
@@ -277,14 +275,15 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(_streaming, "_build_agent_thread_env", lambda *a, **k: {})
     monkeypatch.setattr(_streaming, "resolve_model_provider", lambda model_with_provider_context: (model_with_provider_context, None, None))
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
+    import api.profiles as profiles_api
+
+    monkeypatch.setattr(profiles_api, "_skill_modules_support_profile_home", lambda profile_home: True)
     import api.config as _config_mod
     monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
     monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
     _fake_mcp_module = types.ModuleType("tools.mcp_tool")
     _fake_mcp_module.discover_mcp_tools = _discover_mcp_tools
     monkeypatch.setitem(sys.modules, "tools.mcp_tool", _fake_mcp_module)
-
-    import api.profiles as profiles_api
 
     monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda name: _home)
     monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
@@ -302,12 +301,439 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     )
 
     assert _events.get("set_override_home") == str(_home)
-    assert _events.get("reset_override") == ("sentinel-module", token)
+    assert _events.get("reset_override") == ("sentinel-module", None, True)
     assert _events.get("run_conversation") is True
     assert _events.get("discover_mcp_tools", 0) == 1
     assert _events.get("set_thread_env") is True
     assert _events.get("patch_skill_home_modules", 0) == 0
     assert _stream_id not in _streaming.STREAMS
+
+
+def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules(
+    tmp_path,
+    monkeypatch,
+):
+    """Streaming should use snapshot/patch/restore when skill modules are static."""
+
+    import api.streaming as _streaming
+
+    _session_id = "streaming-override-static-session"
+    _stream_id = "streaming-override-static-stream"
+    _workspace = tmp_path / "workspace"
+    _workspace.mkdir()
+    _home = tmp_path / "alpha"
+    _home.mkdir()
+
+    class _Session:
+        def __init__(self):
+            self.session_id = _session_id
+            self.workspace = str(_workspace)
+            self.profile = "alpha"
+            self.model = "gpt-4"
+            self.model_provider = "hermes"
+            self.messages = []
+            self.context_messages = []
+            self.path = str(_workspace / "session.json")
+            self.active_stream_id = _stream_id
+            self.pending_user_message = None
+            self.pending_started_at = None
+            self.pending_user_source = None
+            self.pending_attachments = []
+
+        def save(self, *args, **kwargs):
+            return None
+
+    _events = {}
+
+    class _FakeMeter:
+        def begin_session(self, *args, **kwargs):
+            _events["begin_session"] = (_events.get("begin_session", 0) + 1)
+
+        def end_session(self, *args, **kwargs):
+            _events["end_session"] = (_events.get("end_session", 0) + 1)
+
+        def get_interval(self):
+            return 11.0
+
+        def get_stats(self):
+            return {}
+
+    q = queue.Queue()
+    _streaming.STREAMS[_stream_id] = q
+
+    def _set_thread_env(**kwargs):
+        _events["set_thread_env"] = True
+
+    def _set_override(profile_home: str):
+        _events["set_override_home"] = profile_home
+        return ("sentinel-module", None, True)
+
+    def _reset_override(mod, reset_token, override_installed):
+        _events["reset_override"] = (mod, reset_token, override_installed)
+
+    def _snapshot_skill_home_modules():
+        _events["snapshot_skill_home_modules"] = {"snapshot": True}
+        return {"snapshot": True}
+
+    def _patch_skill_home_modules(*_):
+        _events["patch_skill_home_modules"] = _events.get("patch_skill_home_modules", 0) + 1
+
+    def _restore_skill_home_modules(snapshot):
+        _events["restore_skill_home_modules"] = snapshot
+
+    class _SentinelAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_conversation(self, *args, **kwargs):
+            _events["run_conversation"] = True
+            raise RuntimeError("streaming test sentinel")
+
+    def _get_ai_agent():
+        return _SentinelAgent
+
+    def _discover_mcp_tools():
+        _events["discover_mcp_tools"] = _events.get("discover_mcp_tools", 0) + 1
+
+    monkeypatch.setattr(_streaming, "register_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_streaming, "update_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_streaming, "get_session", lambda sid: _Session())
+    monkeypatch.setattr(_streaming, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(_streaming, "_set_streaming_hermes_home_override", _set_override)
+    monkeypatch.setattr(_streaming, "_reset_streaming_hermes_home_override", _reset_override)
+    monkeypatch.setattr(_streaming, "_set_thread_env", _set_thread_env)
+    monkeypatch.setattr(_streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr(_streaming, "_install_streaming_cronjob_profile_wrapper", lambda: None)
+    monkeypatch.setattr(_streaming, "_clear_thread_env", lambda: None)
+    monkeypatch.setattr(_streaming, "_get_ai_agent", _get_ai_agent)
+    monkeypatch.setattr(_streaming, "_materialize_pending_user_turn_before_error", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "_snapshot_and_append_partial_on_error", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "meter", lambda: _FakeMeter())
+    monkeypatch.setattr(_streaming, "RunJournalWriter", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "_build_agent_thread_env", lambda *a, **k: {})
+    monkeypatch.setattr(_streaming, "resolve_model_provider", lambda model_with_provider_context: (model_with_provider_context, None, None))
+    monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
+    import api.profiles as profiles_api
+
+    monkeypatch.setattr(profiles_api, "snapshot_skill_home_modules", _snapshot_skill_home_modules)
+    monkeypatch.setattr(profiles_api, "patch_skill_home_modules", _patch_skill_home_modules)
+    monkeypatch.setattr(profiles_api, "restore_skill_home_modules", _restore_skill_home_modules)
+
+    fake_skills_tool = types.ModuleType('tools.skills_tool')
+    fake_skills_tool.HERMES_HOME = 'default-home'
+    fake_skills_tool.SKILLS_DIR = 'default-home/skills'
+    fake_skill_manager_tool = types.ModuleType('tools.skill_manager_tool')
+    fake_skill_manager_tool.HERMES_HOME = 'default-home'
+    fake_skill_manager_tool.SKILLS_DIR = 'default-home/skills'
+    monkeypatch.setitem(sys.modules, 'tools.skills_tool', fake_skills_tool)
+    monkeypatch.setitem(sys.modules, 'tools.skill_manager_tool', fake_skill_manager_tool)
+
+    _fake_mcp_module = types.ModuleType("tools.mcp_tool")
+    _fake_mcp_module.discover_mcp_tools = _discover_mcp_tools
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", _fake_mcp_module)
+
+    import api.config as _config_mod
+    monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
+    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
+
+    monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda name: _home)
+    monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
+    monkeypatch.setattr(profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: {})
+    monkeypatch.setattr(
+        _streaming,
+        "_apply_profile_home_context_to_streaming_model",
+        lambda model, provider_context, profile_home, has_profile: (model, provider_context, False),
+    )
+
+    _streaming._run_agent_streaming(
+        session_id=_session_id,
+        msg_text="hi",
+        model="gpt-4",
+        workspace=str(_workspace),
+        stream_id=_stream_id,
+    )
+
+    assert _events.get("set_override_home") == str(_home)
+    assert _events.get("reset_override") == ("sentinel-module", None, True)
+    assert _events.get("run_conversation") is True
+    assert _events.get("patch_skill_home_modules") == 1
+    assert _events.get("snapshot_skill_home_modules") == {"snapshot": True}
+    assert _events.get("restore_skill_home_modules") == {"snapshot": True}
+    assert _stream_id not in _streaming.STREAMS
+
+
+def test_profile_env_for_background_worker_uses_static_modules_fallback_when_dynamic_checks_fail(
+    tmp_path,
+    monkeypatch,
+):
+    """Background worker falls back to module patching when dynamic checks fail."""
+
+    import api.profiles as _profiles_api
+
+    profile_home = tmp_path / "legacy-home"
+    profile_home.mkdir(parents=True, exist_ok=True)
+
+    events = {}
+    fake_skill_module = types.ModuleType("tools.skills_tool")
+    fake_skill_module.HERMES_HOME = "default-home"
+    fake_skill_module.SKILLS_DIR = "default-home/skills"
+    fake_skill_module._SKILLS_DIR_AT_IMPORT = "default-home/skills"
+
+    fake_skill_manager_module = types.ModuleType("tools.skill_manager_tool")
+    fake_skill_manager_module.HERMES_HOME = "default-home"
+    fake_skill_manager_module.SKILLS_DIR = "default-home/skills"
+    fake_skill_manager_module._SKILLS_DIR_AT_IMPORT = "default-home/skills"
+
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skill_module)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", fake_skill_manager_module)
+
+    fake_constants = types.SimpleNamespace()
+
+    def _set_override(profile_home: str):
+        events["set_override_home"] = str(profile_home)
+        return None
+
+    def _reset_override(token):
+        events["reset_token"] = token
+
+    fake_constants.set_hermes_home_override = _set_override
+    fake_constants.reset_hermes_home_override = _reset_override
+    monkeypatch.setattr(_profiles_api, "_resolve_hermes_home_override", lambda: fake_constants)
+    monkeypatch.setattr(_profiles_api, "_hermes_home_override_available", True)
+
+    def _snapshot_skill_home_modules():
+        events["snapshot"] = True
+        return {"snapshot": True}
+
+    def _patch_skill_home_modules(*_):
+        events["patch"] = events.get("patch", 0) + 1
+        fake_skill_module.HERMES_HOME = profile_home
+        fake_skill_module.SKILLS_DIR = profile_home / "skills"
+        fake_skill_manager_module.HERMES_HOME = profile_home
+        fake_skill_manager_module.SKILLS_DIR = profile_home / "skills"
+
+    def _restore_skill_home_modules(snapshot):
+        events["restore"] = snapshot
+        fake_skill_module.HERMES_HOME = "default-home"
+        fake_skill_module.SKILLS_DIR = "default-home/skills"
+        fake_skill_manager_module.HERMES_HOME = "default-home"
+        fake_skill_manager_module.SKILLS_DIR = "default-home/skills"
+
+    monkeypatch.setattr(_profiles_api, "snapshot_skill_home_modules", _snapshot_skill_home_modules)
+    monkeypatch.setattr(_profiles_api, "patch_skill_home_modules", _patch_skill_home_modules)
+    monkeypatch.setattr(_profiles_api, "restore_skill_home_modules", _restore_skill_home_modules)
+    monkeypatch.setattr(_profiles_api, "get_hermes_home_for_profile", lambda profile: profile_home)
+    monkeypatch.setattr(_profiles_api, "get_profile_runtime_env", lambda home: {})
+    monkeypatch.setattr(_profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: env)
+
+    with _profiles_api.profile_env_for_background_worker("legacy", "legacy worker"):
+        assert fake_skill_module.HERMES_HOME == profile_home
+        assert fake_skill_module.SKILLS_DIR == profile_home / "skills"
+        assert fake_skill_manager_module.HERMES_HOME == profile_home
+        assert fake_skill_manager_module.SKILLS_DIR == profile_home / "skills"
+
+    assert events.get("snapshot") is True
+    assert events.get("patch") == 1
+    assert events.get("restore") == {"snapshot": True}
+    assert events.get("reset_token") is None
+    assert fake_skill_module.HERMES_HOME == "default-home"
+    assert fake_skill_manager_module.SKILLS_DIR == "default-home/skills"
+
+
+def test_profile_env_for_background_worker_serializes_static_module_scope_with_lock(tmp_path, monkeypatch):
+    """`_SKILL_HOME_MODULE_PATCH_LOCK` serializes concurrent static module scopes."""
+
+    profile_alpha = tmp_path / "alpha"
+    profile_beta = tmp_path / "beta"
+    profile_alpha.mkdir()
+    profile_beta.mkdir()
+
+    fake_skill_module = types.ModuleType("tools.skills_tool")
+    fake_skill_module.HERMES_HOME = "default-home"
+    fake_skill_module.SKILLS_DIR = "default-home/skills"
+    fake_skill_manager_module = types.ModuleType("tools.skill_manager_tool")
+    fake_skill_manager_module.HERMES_HOME = "default-home"
+    fake_skill_manager_module.SKILLS_DIR = "default-home/skills"
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skill_module)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", fake_skill_manager_module)
+
+    events = {
+        "set": [],
+        "reset": [],
+    }
+
+    fake_constants = types.SimpleNamespace()
+
+    def _set_override(profile_home: str):
+        events["set"].append(str(profile_home))
+        return None
+
+    def _reset_override(reset_token):
+        events["reset"].append(reset_token)
+
+    fake_constants.set_hermes_home_override = _set_override
+    fake_constants.reset_hermes_home_override = _reset_override
+    monkeypatch.setattr(profiles_api, "_resolve_hermes_home_override", lambda: fake_constants)
+    monkeypatch.setattr(profiles_api, "_hermes_home_override_available", True)
+    monkeypatch.setattr(
+        profiles_api,
+        "get_hermes_home_for_profile",
+        lambda profile: profile_alpha if profile == "alpha" else profile_beta,
+    )
+    monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
+    monkeypatch.setattr(profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: env)
+
+    alpha_entered = threading.Event()
+    beta_entered = threading.Event()
+    alpha_release = threading.Event()
+    worker_errors: list[tuple[str, BaseException]] = []
+
+    def _worker_alpha() -> None:
+        try:
+            with profiles_api.profile_env_for_background_worker("alpha", "lock holder"):
+                assert fake_skill_module.HERMES_HOME == profile_alpha
+                assert fake_skill_module.SKILLS_DIR == profile_alpha / "skills"
+                assert fake_skill_manager_module.HERMES_HOME == profile_alpha
+                assert fake_skill_manager_module.SKILLS_DIR == profile_alpha / "skills"
+                alpha_entered.set()
+                assert alpha_release.wait(timeout=5)
+                raise RuntimeError("alpha worker sentinel")
+        except BaseException as exc:
+            worker_errors.append(("alpha", exc))
+
+    def _worker_beta() -> None:
+        try:
+            with profiles_api.profile_env_for_background_worker("beta", "lock waiter"):
+                beta_entered.set()
+                assert fake_skill_module.HERMES_HOME == profile_beta
+                assert fake_skill_module.SKILLS_DIR == profile_beta / "skills"
+                assert fake_skill_manager_module.HERMES_HOME == profile_beta
+                assert fake_skill_manager_module.SKILLS_DIR == profile_beta / "skills"
+        except BaseException as exc:
+            worker_errors.append(("beta", exc))
+
+    _thread_alpha = threading.Thread(target=_worker_alpha)
+    _thread_beta = threading.Thread(target=_worker_beta)
+
+    _thread_alpha.start()
+    assert alpha_entered.wait(timeout=5)
+
+    _thread_beta.start()
+    assert not beta_entered.wait(timeout=0.2)
+    alpha_release.set()
+    assert beta_entered.wait(timeout=5)
+
+    _thread_alpha.join(timeout=5)
+    _thread_beta.join(timeout=5)
+
+    assert not _thread_alpha.is_alive()
+    assert not _thread_beta.is_alive()
+
+    alpha_error = next((exc for name, exc in worker_errors if name == "alpha"), None)
+    beta_error = next((exc for name, exc in worker_errors if name == "beta"), None)
+    assert beta_error is None
+    assert isinstance(alpha_error, RuntimeError)
+    assert str(alpha_error) == "alpha worker sentinel"
+
+    assert fake_skill_module.HERMES_HOME == "default-home"
+    assert fake_skill_module.SKILLS_DIR == "default-home/skills"
+    assert fake_skill_manager_module.HERMES_HOME == "default-home"
+    assert fake_skill_manager_module.SKILLS_DIR == "default-home/skills"
+
+    assert sorted(events["set"]) == [str(profile_alpha), str(profile_beta)]
+    assert len(events["reset"]) == 2
+    assert all(token is None for token in events["reset"])
+
+    with profiles_api.profile_env_for_background_worker("alpha", "same-thread follow up"):
+        assert fake_skill_module.HERMES_HOME == profile_alpha
+        assert fake_skill_module.SKILLS_DIR == profile_alpha / "skills"
+        assert fake_skill_manager_module.HERMES_HOME == profile_alpha
+        assert fake_skill_manager_module.SKILLS_DIR == profile_alpha / "skills"
+
+    assert fake_skill_module.HERMES_HOME == "default-home"
+    assert fake_skill_module.SKILLS_DIR == "default-home/skills"
+    assert fake_skill_manager_module.HERMES_HOME == "default-home"
+    assert fake_skill_manager_module.SKILLS_DIR == "default-home/skills"
+
+
+def test_profile_env_for_background_worker_resets_override_when_dynamic_check_raises(
+    tmp_path,
+    monkeypatch,
+):
+    """A dynamic capability check exception must still clear the override state."""
+    import api.profiles as _profiles_api
+
+    profile_home = tmp_path / "legacy-home"
+    profile_home.mkdir(parents=True, exist_ok=True)
+
+    events = {}
+    fake_skill_module = types.ModuleType("tools.skills_tool")
+    fake_skill_module.HERMES_HOME = "default-home"
+    fake_skill_module.SKILLS_DIR = "default-home/skills"
+    fake_skill_manager_module = types.ModuleType("tools.skill_manager_tool")
+    fake_skill_manager_module.HERMES_HOME = "default-home"
+    fake_skill_manager_module.SKILLS_DIR = "default-home/skills"
+
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skill_module)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", fake_skill_manager_module)
+
+    fake_constants = types.SimpleNamespace()
+
+    def _set_override(profile_home: str):
+        events["set"] = str(profile_home)
+        return "override-token"
+
+    def _reset_override(reset_token):
+        events["reset"] = reset_token
+
+    fake_constants.set_hermes_home_override = _set_override
+    fake_constants.reset_hermes_home_override = _reset_override
+    monkeypatch.setattr(_profiles_api, "_resolve_hermes_home_override", lambda: fake_constants)
+    monkeypatch.setattr(_profiles_api, "_hermes_home_override_available", True)
+
+    def _snapshot_skill_home_modules():
+        events["snapshot"] = True
+        return {"snapshot": True}
+
+    def _patch_skill_home_modules(*_):
+        events["patch"] = events.get("patch", 0) + 1
+        fake_skill_module.HERMES_HOME = profile_home
+        fake_skill_module.SKILLS_DIR = profile_home / "skills"
+        fake_skill_manager_module.HERMES_HOME = profile_home
+        fake_skill_manager_module.SKILLS_DIR = profile_home / "skills"
+
+    def _restore_skill_home_modules(snapshot):
+        events["restore"] = snapshot
+        fake_skill_module.HERMES_HOME = "default-home"
+        fake_skill_module.SKILLS_DIR = "default-home/skills"
+        fake_skill_manager_module.HERMES_HOME = "default-home"
+        fake_skill_manager_module.SKILLS_DIR = "default-home/skills"
+
+    def _raise(*_):
+        raise RuntimeError("dynamic capability probe failed")
+
+    monkeypatch.setattr(_profiles_api, "snapshot_skill_home_modules", _snapshot_skill_home_modules)
+    monkeypatch.setattr(_profiles_api, "patch_skill_home_modules", _patch_skill_home_modules)
+    monkeypatch.setattr(_profiles_api, "restore_skill_home_modules", _restore_skill_home_modules)
+    monkeypatch.setattr(_profiles_api, "_skill_modules_support_profile_home", _raise)
+    monkeypatch.setattr(_profiles_api, "get_hermes_home_for_profile", lambda profile: profile_home)
+    monkeypatch.setattr(_profiles_api, "get_profile_runtime_env", lambda home: {})
+    monkeypatch.setattr(_profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: env)
+
+    with _profiles_api.profile_env_for_background_worker("legacy", "legacy worker"):
+        assert fake_skill_module.HERMES_HOME == profile_home
+        assert fake_skill_module.SKILLS_DIR == profile_home / "skills"
+
+    assert events.get("set") == str(profile_home)
+    assert events.get("reset") == "override-token"
+    assert events.get("snapshot") is True
+    assert events.get("patch") == 1
+    assert events.get("restore") == {"snapshot": True}
+    assert fake_skill_module.HERMES_HOME == "default-home"
+    assert fake_skill_module.SKILLS_DIR == "default-home/skills"
+    assert fake_skill_manager_module.HERMES_HOME == "default-home"
+    assert fake_skill_manager_module.SKILLS_DIR == "default-home/skills"
 
 
 @pytest.mark.skipif(
@@ -328,8 +754,9 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     import api.streaming as _streaming
     try:
         import tools.skills_tool as skills_tool
+        import tools.skill_manager_tool as skill_manager_tool
     except Exception as exc:  # pragma: no cover - hermes-agent dependency probe
-        pytest.skip(f"tools.skills_tool unavailable for this environment: {exc}")
+        pytest.skip(f"hermes-agent skill modules unavailable for this environment: {exc}")
 
     _home_alpha = tmp_path / "alpha"
     _home_beta = tmp_path / "beta"
@@ -363,11 +790,20 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     _baseline_env = os.environ.get("HERMES_HOME")
     _baseline_skill_dir = skills_tool.SKILLS_DIR
     _baseline_skill_home = getattr(skills_tool, "HERMES_HOME", None)
+    _baseline_manager_skill_dir = skill_manager_tool.SKILLS_DIR
+    _baseline_manager_skill_home = getattr(skill_manager_tool, "HERMES_HOME", None)
 
     # Force deterministic resolution path independent of previous suite side effects.
     skills_tool.SKILLS_DIR = skills_tool._SKILLS_DIR_AT_IMPORT
     if _baseline_skill_home is not None:
         skills_tool.HERMES_HOME = _baseline_skill_home
+    skill_manager_tool.SKILLS_DIR = getattr(
+        skill_manager_tool,
+        "_SKILLS_DIR_AT_IMPORT",
+        _baseline_manager_skill_dir,
+    )
+    if _baseline_manager_skill_home is not None:
+        skill_manager_tool.HERMES_HOME = _baseline_manager_skill_home
     os.environ["HERMES_HOME"] = str(_baseline_skill_home) if _baseline_skill_home else ""
 
     def _get_profile_home(name: str) -> Path:
@@ -380,6 +816,10 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     # Keep the helper and module state deterministic for this threaded race test.
     assert _baseline_override is None
     _baseline_skills_tuple = (skills_tool._SKILLS_DIR_AT_IMPORT, _baseline_skill_home)
+    _baseline_manager_tuple = (
+        getattr(skill_manager_tool, "_SKILLS_DIR_AT_IMPORT", _baseline_manager_skill_dir),
+        _baseline_manager_skill_home,
+    )
     monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", _get_profile_home)
 
     start_barrier = threading.Barrier(2)
@@ -390,6 +830,8 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     _post_reset_overrides: dict[str, object | None] = {}
     _post_reset_skill_dirs: dict[str, Path] = {}
     _post_reset_skill_homes: dict[str, object | None] = {}
+    _post_reset_manager_skill_dirs: dict[str, Path] = {}
+    _post_reset_manager_skill_homes: dict[str, object | None] = {}
     _beta_scope_snapshots: dict[str, dict[str, tuple[object | None, object | None]]] = {}
 
     def _parse_skills(raw: str) -> set[str]:
@@ -401,7 +843,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
         }
 
     def _worker_alpha() -> None:
-        mod_ctx, reset_token = _streaming._set_streaming_hermes_home_override(
+        mod_ctx, reset_token, override_installed = _streaming._set_streaming_hermes_home_override(
             str(_home_alpha)
         )
         try:
@@ -416,11 +858,17 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
             with _lock:
                 _worker_errors.append(("alpha", exc))
         finally:
-            _streaming._reset_streaming_hermes_home_override(mod_ctx, reset_token)
+            _streaming._reset_streaming_hermes_home_override(
+                mod_ctx,
+                reset_token,
+                override_installed,
+            )
             with _lock:
                 _post_reset_overrides["alpha"] = hermes_constants.get_hermes_home_override()
                 _post_reset_skill_dirs["alpha"] = skills_tool.SKILLS_DIR
                 _post_reset_skill_homes["alpha"] = getattr(skills_tool, "HERMES_HOME", None)
+                _post_reset_manager_skill_dirs["alpha"] = skill_manager_tool.SKILLS_DIR
+                _post_reset_manager_skill_homes["alpha"] = getattr(skill_manager_tool, "HERMES_HOME", None)
 
     def _worker_beta() -> None:
         pre_scope = (
@@ -454,6 +902,8 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
                 _post_reset_overrides["beta"] = hermes_constants.get_hermes_home_override()
                 _post_reset_skill_dirs["beta"] = skills_tool.SKILLS_DIR
                 _post_reset_skill_homes["beta"] = getattr(skills_tool, "HERMES_HOME", None)
+                _post_reset_manager_skill_dirs["beta"] = skill_manager_tool.SKILLS_DIR
+                _post_reset_manager_skill_homes["beta"] = getattr(skill_manager_tool, "HERMES_HOME", None)
 
     _thread_alpha = threading.Thread(target=_worker_alpha)
     _thread_beta = threading.Thread(target=_worker_beta)
@@ -484,8 +934,12 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
 
         assert _post_reset_skill_dirs["alpha"] == skills_tool._SKILLS_DIR_AT_IMPORT
         assert _post_reset_skill_dirs["beta"] == skills_tool._SKILLS_DIR_AT_IMPORT
+        assert _post_reset_manager_skill_dirs["alpha"] == _baseline_manager_tuple[0]
+        assert _post_reset_manager_skill_dirs["beta"] == _baseline_manager_tuple[0]
         assert _post_reset_skill_homes["alpha"] == _baseline_skill_home
         assert _post_reset_skill_homes["beta"] == _baseline_skill_home
+        assert _post_reset_manager_skill_homes["alpha"] == _baseline_manager_skill_home
+        assert _post_reset_manager_skill_homes["beta"] == _baseline_manager_skill_home
 
         beta_snapshot = _beta_scope_snapshots.get("beta")
         assert beta_snapshot is not None
@@ -499,3 +953,6 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
         skills_tool.SKILLS_DIR = _baseline_skill_dir
         if _baseline_skill_home is not None:
             skills_tool.HERMES_HOME = _baseline_skill_home
+        skill_manager_tool.SKILLS_DIR = _baseline_manager_skill_dir
+        if _baseline_manager_skill_home is not None:
+            skill_manager_tool.HERMES_HOME = _baseline_manager_skill_home

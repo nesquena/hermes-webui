@@ -33,3 +33,72 @@ def test_set_hermes_home_patches_both_skill_tool_module_caches(monkeypatch, tmp_
     assert skills_tool.SKILLS_DIR == new_home / "skills"
     assert skill_manager_tool.HERMES_HOME == new_home
     assert skill_manager_tool.SKILLS_DIR == new_home / "skills"
+
+
+def test_skill_modules_support_profile_home_returns_true_for_dynamic_modules(monkeypatch, tmp_path):
+    from api.profiles import _skill_modules_support_profile_home
+
+    profile_home = tmp_path / "profile"
+    expected = profile_home / "skills"
+
+    skills_tool = types.ModuleType("tools.skills_tool")
+    skills_tool._skills_dir = lambda: expected
+    skill_manager_tool = types.ModuleType("tools.skill_manager_tool")
+    skill_manager_tool._skills_dir = lambda: expected
+
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", skills_tool)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", skill_manager_tool)
+
+    assert _skill_modules_support_profile_home(profile_home) is True
+
+
+def test_skill_modules_support_profile_home_returns_false_when_module_is_static(monkeypatch, tmp_path):
+    from api.profiles import _skill_modules_support_profile_home
+
+    profile_home = tmp_path / "profile"
+    expected = profile_home / "skills"
+
+    skills_tool = types.ModuleType("tools.skills_tool")
+    skills_tool._skills_dir = expected
+    skill_manager_tool = types.ModuleType("tools.skill_manager_tool")
+    skill_manager_tool._skills_dir = lambda: expected
+
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", skills_tool)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", skill_manager_tool)
+
+    assert _skill_modules_support_profile_home(profile_home) is False
+
+
+def test_skill_modules_support_profile_home_returns_false_when_resolver_raises(monkeypatch, tmp_path):
+    from api.profiles import _skill_modules_support_profile_home
+
+    profile_home = tmp_path / "profile"
+    expected = profile_home / "skills"
+
+    def _raise():
+        raise RuntimeError("not callable")
+
+    skills_tool = types.ModuleType("tools.skills_tool")
+    skills_tool._skills_dir = _raise
+    skill_manager_tool = types.ModuleType("tools.skill_manager_tool")
+    skill_manager_tool._skills_dir = lambda: expected
+
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", skills_tool)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", skill_manager_tool)
+
+    assert _skill_modules_support_profile_home(profile_home) is False
+
+
+def test_skill_modules_support_profile_home_returns_false_when_module_missing(monkeypatch, tmp_path):
+    from api.profiles import _skill_modules_support_profile_home
+
+    profile_home = tmp_path / "profile"
+    expected = profile_home / "skills"
+
+    skill_manager_tool = types.ModuleType("tools.skill_manager_tool")
+    skill_manager_tool._skills_dir = lambda: expected
+
+    monkeypatch.delitem(sys.modules, "tools.skills_tool", raising=False)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", skill_manager_tool)
+
+    assert _skill_modules_support_profile_home(profile_home) is False
