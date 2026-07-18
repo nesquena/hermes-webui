@@ -59,6 +59,75 @@ def _blank_code(text: str) -> str:
     return "\n".join(out)
 
 
+def _scan_inline_dest(text: str, i: int) -> str:
+    """Given the index right after a link/image `[label](`, decide whether the inline
+    destination renders. Models the CommonMark inline-link grammar closely enough to
+    catch the two catastrophic shapes without false positives:
+        after '(':  [ws] destination [ws title] [ws] ')'
+    where destination is either `<...>` (angle, no raw newline) or a bare run of
+    non-whitespace with BALANCED parens, and title is "...", '...', or (...) (may span
+    newlines). Returns 'ok', 'split' (a newline breaks the destination token), or
+    'unclosed' (no closing ')').
+    """
+    n = len(text)
+
+    def skip_ws(j: int) -> int:
+        while j < n and text[j] in " \t\n":
+            j += 1
+        return j
+
+    j = skip_ws(i)                        # leading ws (incl newline) before dest is legal
+    if j >= n:
+        return "unclosed"
+
+    # Angle-bracket destination <...> — a raw newline inside it is invalid. Rare; handle
+    # conservatively (only report a clear break/unclosed, else treat as ok).
+    if text[j] == "<":
+        k = j + 1
+        while k < n and text[k] not in ">\n":
+            k += 1
+        if k >= n or text[k] == "\n":
+            return "unclosed" if k >= n else "split"
+        j = k + 1
+    else:
+        # Bare destination: run of non-whitespace with balanced parens. It ends at the
+        # first whitespace, or at the ')' that closes the link (depth 0).
+        depth = 0
+        while j < n:
+            c = text[j]
+            if c == "\\" and j + 1 < n:
+                j += 2
+                continue
+            if c in " \t\n":
+                break                     # whitespace terminates the destination token
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                if depth == 0:
+                    return "ok"           # this ')' closes the link — complete
+                depth -= 1
+            j += 1
+        else:
+            return "unclosed"             # ran off the end with no closing ')'
+
+    # Destination token ended at whitespace. Skip it (a single newline here is legal),
+    # then the next non-whitespace must be the close ')' or a title opener.
+    j = skip_ws(j)
+    if j >= n:
+        return "unclosed"
+    c = text[j]
+    if c == ")":
+        return "ok"
+    if c in "\"'(":
+        # A title is present (may span newlines). Just require a closing ')' exists
+        # after it; we don't validate the title body (newlines inside titles are legal).
+        return "ok" if text.find(")", j) != -1 else "unclosed"
+    # Anything else after the destination + whitespace is bare text → the inline link is
+    # malformed and renders as literal characters. This is the catastrophic split, e.g.
+    # `[x](https://exa\nmple.com)` or `[x](url\nmore)`.
+    return "split"
+
+
 def check_file(path: Path) -> list[str]:
     problems: list[str] = []
     raw = path.read_text(encoding="utf-8", errors="replace")
@@ -66,66 +135,14 @@ def check_file(path: Path) -> list[str]:
 
     # Locate each inline link/image opener `[label](` (label has no unescaped ] or newline).
     for m in re.finditer(r"!?\[(?:[^\]\n\\]|\\.)*\]\(", text):
-        dest_start = m.end()          # first char of the destination
-        close = text.find(")", dest_start)
-        nl = text.find("\n", dest_start)
         line_no = text.count("\n", 0, m.start()) + 1
-
-        # Case A — the close paren is on THIS line: fully-formed, nothing to flag.
-        if close != -1 and (nl == -1 or close < nl):
-            continue
-
-        # From here the ')' (if any) is on a later line, OR there's no ')' at all.
-        if nl == -1:
-            # No newline and (from Case A) no ')' → genuinely unclosed at EOF.
+        verdict = _scan_inline_dest(text, m.end())
+        if verdict == "split":
+            problems.append(
+                f"{path}:{line_no}: newline inside a link destination — the link will not render")
+        elif verdict == "unclosed":
             problems.append(
                 f"{path}:{line_no}: link/image destination never closed with ')' — renders broken")
-            continue
-
-        # A newline appears before any ')'. Once a space/newline ends the destination
-        # token, CommonMark expects either the closing ')' or a "title" (in quotes)
-        # then ')'. So after the newline, the next non-space content must be a title
-        # (`"`, `'`, or `(`) or the close `)`. If instead it's bare text, the inline
-        # link is malformed and does NOT render — that's the break we flag.
-        #
-        # Cases:
-        #   [x](url\n)             -> after nl: ')'      -> valid   (skip)
-        #   [x](url\n"title")      -> after nl: '"title' -> valid   (skip)
-        #   [x](\nurl)            -> dest starts next line-> valid   (skip)
-        #   [x](url\nmore)        -> after nl: 'more'    -> BROKEN  (flag)
-        #   [x](url<EOF, no ')')  -> unclosed            -> BROKEN  (flag)
-        rest = text[nl + 1:]
-        rest_stripped = rest.lstrip()
-        seg = text[dest_start:nl]
-
-        # If a title quote has already opened before the newline (e.g.
-        # `[x](url "multi\nline title")`), the newline is INSIDE the title string,
-        # which is legal CommonMark. Don't treat it as a destination break.
-        if ('"' in seg) or ("'" in seg):
-            continue
-
-        # Sub-case: the destination itself hasn't started yet (all whitespace before nl)
-        # AND resumes on the next line as a normal dest — legal.
-        if seg.strip() == "" and rest_stripped[:1] not in ("", ")"):
-            continue
-
-        # Is there any ')' at all after the newline? If not, it's unclosed -> broken.
-        if close == -1:
-            problems.append(
-                f"{path}:{line_no}: link/image destination never closed with ')' — renders broken")
-            continue
-
-        # There is a ')' later. Valid continuations after the newline: close ')',
-        # or a title opener (" ' or ( ). Anything else (bare text) => broken.
-        nxt = rest_stripped[:1]
-        if nxt in (")", '"', "'", "("):
-            continue                      # legal separator before title/close
-        # bare non-space text after the newline before the close => destination
-        # token is split across the line => the link will not render.
-        problems.append(
-            f"{path}:{line_no}: newline inside a link destination — the link will not render")
-        # else: whitespace ended the token before the newline, or the newline is
-        # immediately followed by ')'/space (trailing) → legal CommonMark, skip.
     return problems
 
 
