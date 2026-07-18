@@ -218,9 +218,9 @@ def validate_source_path(raw_path: str) -> Path:
     try:
         target = Path(raw_path).resolve(strict=True)
     except FileNotFoundError:
-        raise ValueError("file not found")
+        raise ValueError("file not found") from None
     except Exception:
-        raise ValueError("invalid path")
+        raise ValueError("invalid path") from None
     if not target.is_file():
         raise ValueError("path is not a regular file")
     if target.name.casefold() in {n.casefold() for n in _DENY_FILENAMES}:
@@ -256,20 +256,31 @@ def _load_meta(token: str) -> dict | None:
     return meta if isinstance(meta, dict) else None
 
 
-def _find_token_for_source(source: str) -> str | None:
-    """Existing non-revoked artifact for this resolved source path, if any."""
-    if not ARTIFACTS_DIR.is_dir():
-        return None
-    for meta_file in ARTIFACTS_DIR.glob("*/meta.json"):
-        try:
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(meta, dict) or meta.get("revoked_at"):
-            continue
-        if meta.get("source_path") == source:
-            return str(meta.get("token") or "") or None
-    return None
+def _source_index_path() -> Path:
+    return ARTIFACTS_DIR / "source_index.json"
+
+
+def _load_source_index() -> dict[str, str]:
+    """Load the canonical source-path index; malformed or missing state is empty."""
+    try:
+        raw = json.loads(_source_index_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(source): str(token)
+        for source, token in raw.items()
+        if isinstance(source, str) and isinstance(token, str) and _TOKEN_RE.match(token)
+    }
+
+
+def _set_source_index_entry(index: dict[str, str], source: str, token: str) -> None:
+    """Keep one current source path per token, matching ``meta.source_path``."""
+    for indexed_source, indexed_token in list(index.items()):
+        if indexed_token == token and indexed_source != source:
+            del index[indexed_source]
+    index[source] = token
 
 
 def publish_artifact(
@@ -295,14 +306,23 @@ def publish_artifact(
 
     with _ARTIFACTS_LOCK:
         ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        source_key = str(source)
+        source_index = _load_source_index()
         if token:
             token = str(token).strip()
             meta = _load_meta(token)
             if meta is None or meta.get("revoked_at"):
                 raise ValueError("unknown or revoked artifact token")
         else:
-            token = _find_token_for_source(str(source))
+            token = source_index.get(source_key)
             meta = _load_meta(token) if token else None
+            # The index is a performance accelerator, never authority: reject a
+            # stale or tampered mapping before it can select another artifact.
+            if meta is None or meta.get("revoked_at") or meta.get("source_path") != source_key:
+                if token:
+                    source_index.pop(source_key, None)
+                token = None
+                meta = None
         if meta is None:
             token = secrets.token_urlsafe(18)
             meta = {
@@ -319,6 +339,7 @@ def publish_artifact(
                 "versions": [],
             }
 
+        assert token is not None
         effective_public = bool(meta.get("public")) if public is None else bool(public)
 
         version = len(meta.get("versions") or []) + 1
@@ -336,7 +357,7 @@ def publish_artifact(
             try:
                 text = source.read_text(encoding="utf-8", errors="replace")
             except Exception as exc:
-                raise ValueError(f"could not read file: {exc}")
+                raise ValueError(f"could not read file: {exc}") from exc
             dest.write_text(_force_redact_credentials(text), encoding="utf-8")
             redacted = True
         else:
@@ -369,6 +390,8 @@ def publish_artifact(
         if session_id:
             meta["session_id"] = str(session_id)
         _write_json_atomic(_meta_path(token), meta)
+        _set_source_index_entry(source_index, source_key, token)
+        _write_json_atomic(_source_index_path(), source_index)
 
     return {
         "token": token,
@@ -420,7 +443,13 @@ def revoke_artifact(token: str) -> bool:
         if meta is None:
             return False
         meta["revoked_at"] = time.time()
-        _write_json_atomic(_meta_path(str(meta.get("token") or token)), meta)
+        canonical_token = str(meta.get("token") or token)
+        _write_json_atomic(_meta_path(canonical_token), meta)
+        source_index = _load_source_index()
+        for source, indexed_token in list(source_index.items()):
+            if indexed_token == canonical_token:
+                del source_index[source]
+        _write_json_atomic(_source_index_path(), source_index)
     return True
 
 

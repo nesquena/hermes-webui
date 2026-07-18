@@ -195,6 +195,52 @@ def test_png_serves_inline_without_csp(artifacts_on):
         os.unlink(src)
 
 
+def test_republish_uses_source_index_without_scanning_unrelated_metadata(tmp_path, monkeypatch):
+    """The publish lock must not serially read every artifact metadata file."""
+    from api import artifacts
+
+    artifact_dir = tmp_path / "artifacts"
+    source = tmp_path / "report.html"
+    source.write_text("<p>updated</p>", encoding="utf-8")
+    token = "targettoken123"
+    target_dir = artifact_dir / token
+    target_dir.mkdir(parents=True)
+    (target_dir / "meta.json").write_text(json.dumps({
+        "token": token,
+        "source_path": str(source.resolve()),
+        "filename": source.name,
+        "mime": "text/html",
+        "title": source.name,
+        "public": False,
+        "created_at": 1,
+        "updated_at": 1,
+        "revoked_at": None,
+        "versions": [],
+    }), encoding="utf-8")
+    for i in range(40):
+        other = artifact_dir / f"othertoken{i:03d}"
+        other.mkdir()
+        (other / "meta.json").write_text(json.dumps({"token": other.name, "source_path": f"/tmp/{i}.html"}), encoding="utf-8")
+    (artifact_dir / "source_index.json").write_text(
+        json.dumps({str(source.resolve()): token}), encoding="utf-8",
+    )
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
+
+    read_paths = []
+    original_read_text = Path.read_text
+
+    def counted_read_text(path, *args, **kwargs):
+        if path.name == "meta.json":
+            read_paths.append(path)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    result = artifacts.publish_artifact(str(source))
+
+    assert result["token"] == token
+    assert len(read_paths) == 1, "indexed re-publish must read only its own metadata"
+
+
 class TestAuditFixes:
     """Regression coverage for the 18.07.2026 audit findings."""
 

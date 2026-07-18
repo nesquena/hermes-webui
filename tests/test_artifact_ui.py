@@ -199,6 +199,48 @@ class TestAuditFixes:
         occurrences = len(re.findall(r"^\s*artifact_make_public:", I18N_JS, re.M))
         assert occurrences >= 2
 
+    @pytest.mark.parametrize("confirmed, expected_posts", [(False, 0), (True, 1)])
+    def test_revoke_requires_confirmation_and_posts_once(self, confirmed, expected_posts):
+        """Exercise the product click handler: cancel is a no-op; confirm revokes once."""
+        start = UI_JS.index("let _artifactHandlersBound=false;")
+        end = UI_JS.index("function renderMermaidBlocks", start)
+        handler_source = UI_JS[start:end]
+        driver = f"""
+const source = {handler_source!r};
+const apiCalls = [];
+const confirmCalls = [];
+const toasts = [];
+let clickHandler = null;
+const document = {{
+  addEventListener(type, handler) {{ if (type === 'click') clickHandler = handler; }},
+  baseURI: 'http://example.test/',
+}};
+const showConfirmDialog = async options => {{ confirmCalls.push(options); return {str(confirmed).lower()}; }};
+const api = async (path, options) => {{ apiCalls.push({{path, options}}); return {{ok:true}}; }};
+const t = key => key;
+const showToast = message => toasts.push(message);
+const S = {{}};
+new Function('document', 'showConfirmDialog', 'api', 't', 'showToast', 'S', source + '; _bindArtifactHandlers();')(document, showConfirmDialog, api, t, showToast, S);
+const row = {{ removed:false, remove() {{ this.removed = true; }} }};
+const revoke = {{
+  dataset: {{token:'artifact-token'}},
+  closest(selector) {{ return selector === '.artifact-revoke-btn' ? this : (selector === '.artifact-row' ? row : null); }},
+}};
+(async () => {{
+  await clickHandler({{target:revoke, preventDefault() {{}}}});
+  console.log(JSON.stringify({{apiCalls, confirmCalls, rowRemoved:row.removed, toasts}}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+        assert NODE is not None
+        result = subprocess.run([NODE, "-e", driver], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        payload = __import__("json").loads(result.stdout)
+        assert len(payload["confirmCalls"]) == 1
+        assert payload["confirmCalls"][0]["confirmLabel"] == "artifact_revoke"
+        assert payload["confirmCalls"][0]["danger"] is True
+        assert len(payload["apiCalls"]) == expected_posts
+        assert payload["rowRemoved"] is (confirmed is True)
+
 
 class TestBarePathProbes:
     """WP5: bare local paths become probe placeholders (deliverable parity)."""

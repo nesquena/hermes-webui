@@ -19120,6 +19120,14 @@ function _bindArtifactHandlers(){
     const revoke=ev.target&&ev.target.closest&&ev.target.closest('.artifact-revoke-btn');
     if(revoke){
       ev.preventDefault();
+      const confirmed=await showConfirmDialog({
+        title:t('artifact_revoke_confirm_title'),
+        message:t('artifact_revoke_confirm_message'),
+        confirmLabel:t('artifact_revoke'),
+        danger:true,
+        focusCancel:true,
+      });
+      if(!confirmed) return;
       try{
         const d=await api('/api/artifact/revoke',{
           method:'POST',

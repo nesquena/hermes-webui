@@ -148,6 +148,8 @@ const LOCALES = {
     artifact_copy: 'Copy link',
     artifact_copied: 'Link copied',
     artifact_revoke: 'Revoke',
+    artifact_revoke_confirm_title: 'Revoke artifact?',
+    artifact_revoke_confirm_message: 'This will make the artifact link unavailable to everyone.',
     artifact_revoked: 'Artifact revoked',
     artifact_public: 'public',
     artifact_make_public: 'Make public (redacted copy, anyone with the link)',
