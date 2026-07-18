@@ -242,6 +242,11 @@ def _activity_snapshot(page) -> dict:
             .map(el => el.innerText.trim()).filter(Boolean) : [];
           return {
             live: Boolean(document.querySelector('#liveAssistantTurn')),
+            clientState: {
+              busy: Boolean(typeof S !== 'undefined' && S.busy),
+              activeStreamId: (typeof S !== 'undefined' && S.activeStreamId) || null,
+              sessionId: (typeof S !== 'undefined' && S.session && S.session.session_id) || null,
+            },
             groupCount: groups.length,
             summary: groups.map(group => ({
               label: (group.querySelector('.tool-worklog-label,.tool-call-group-label') || {}).textContent || '',
@@ -439,7 +444,8 @@ def main() -> int:
         )
         gateway.release_terminal.set()
         page.wait_for_function(
-            """text => !document.querySelector('#liveAssistantTurn') &&
+            """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
+              !document.querySelector('#liveAssistantTurn') &&
               (document.querySelector('#msgInner') || {}).innerText?.includes(text)""",
             arg=FINAL_TEXT,
             timeout=15000,
