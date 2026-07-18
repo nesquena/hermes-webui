@@ -42,10 +42,14 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_for_health(base_url: str, timeout: float = 30.0, process=None) -> bool:
+def _wait_for_health(
+    base_url: str,
+    timeout: float = 30.0,
+    proc: subprocess.Popen | None = None,
+) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if process is not None and process.poll() is not None:
+        if proc is not None and proc.poll() is not None:
             return False
         try:
             with urllib.request.urlopen(base_url + "/health", timeout=2) as response:
@@ -71,18 +75,17 @@ def _wait_for_persisted_scene(base_url: str, session_id: str, timeout: float = 1
         try:
             last_payload = _get_json(url)
             last_error = None
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as error:
-            last_error = error
-            time.sleep(0.1)
+        except (json.JSONDecodeError, TimeoutError, urllib.error.URLError, OSError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.2)
             continue
         session = last_payload.get("session") if isinstance(last_payload, dict) else None
         messages = session.get("messages", []) if isinstance(session, dict) else []
         assistants = [message for message in messages if message.get("role") == "assistant"]
         if assistants and assistants[-1].get("_anchor_activity_scene"):
             return assistants[-1]["_anchor_activity_scene"]
-        time.sleep(0.1)
-    payload = last_payload if isinstance(last_payload, dict) else {}
-    session = payload.get("session")
+        time.sleep(0.2)
+    session = last_payload.get("session") if isinstance(last_payload, dict) else None
     messages = session.get("messages", []) if isinstance(session, dict) else []
     summary = [
         {
@@ -92,41 +95,54 @@ def _wait_for_persisted_scene(base_url: str, session_id: str, timeout: float = 1
         for message in messages
         if isinstance(message, dict)
     ]
-    error_detail = f"; last request error: {last_error}" if last_error else ""
+    error_note = f"; last read error: {last_error}" if last_error else ""
     raise AssertionError(
-        f"anchor scene was not persisted before reload; message summary: {summary!r}"
-        f"{error_detail}"
+        f"anchor scene was not persisted before reload; message summary: {summary!r}{error_note}"
     )
 
 
-def _stop_process(process) -> None:
-    if process.poll() is not None:
+def _terminate_process(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
         return
-    process.terminate()
+    proc.terminate()
     try:
-        process.wait(timeout=5)
+        proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        proc.kill()
+        proc.wait(timeout=5)
 
 
-def _start_webui_server(repo_root: Path, env: dict, log, attempts: int = 3):
-    """Start the real server, retrying the narrow free-port handoff race."""
-    for _attempt in range(attempts):
-        port = _free_port()
-        attempt_env = {**env, "HERMES_WEBUI_PORT": str(port)}
-        process = subprocess.Popen(
+def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
+    requested_port = str(os.environ.get("LIFECYCLE_PORT") or "").strip()
+    attempts = 1 if requested_port else 5
+    last_tail = ""
+    last_port = None
+    for attempt in range(attempts):
+        port = int(requested_port) if requested_port else _free_port()
+        last_port = port
+        base_url = f"http://127.0.0.1:{port}"
+        run_env = dict(env)
+        run_env["HERMES_WEBUI_PORT"] = str(port)
+        suffix = "" if attempts == 1 else f"-attempt-{attempt + 1}"
+        log_path = artifact_dir / f"server{suffix}.log"
+        log = log_path.open("w", encoding="utf-8")
+        proc = subprocess.Popen(
             [sys.executable, str(repo_root / "server.py")],
             cwd=repo_root,
-            env=attempt_env,
+            env=run_env,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        base_url = f"http://127.0.0.1:{port}"
-        if _wait_for_health(base_url, process=process):
-            return process, base_url
-        _stop_process(process)
-    raise RuntimeError(f"WebUI server did not become healthy after {attempts} attempts")
+        if _wait_for_health(base_url, proc=proc):
+            return proc, log, log_path, base_url
+        _terminate_process(proc)
+        log.close()
+        if log_path.exists():
+            last_tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+    detail = f" on port {last_port}" if last_port else ""
+    if last_tail:
+        detail += f"; last server log tail:\n{last_tail}"
+    raise RuntimeError(f"WebUI server did not become healthy{detail}")
 
 
 class DeterministicGateway:
@@ -270,6 +286,34 @@ def _capture_page_errors(page):
     return errors
 
 
+def _capture_anchor_scene_requests(page):
+    events = []
+
+    def on_response(response):
+        if "/api/session/anchor-scene" not in response.url:
+            return
+        events.append({
+            "type": "response",
+            "status": response.status,
+            "url": response.url,
+        })
+
+    def on_request_failed(request):
+        if "/api/session/anchor-scene" not in request.url:
+            return
+        failure = request.failure or {}
+        events.append({
+            "type": "requestfailed",
+            "method": request.method,
+            "url": request.url,
+            "error": failure.get("errorText", ""),
+        })
+
+    page.on("response", on_response)
+    page.on("requestfailed", on_request_failed)
+    return events
+
+
 def _activity_snapshot(page) -> dict:
     return page.evaluate(
         """() => {
@@ -298,6 +342,10 @@ def _activity_snapshot(page) -> dict:
               duration: (group.querySelector('.tool-call-group-duration') || {}).textContent || '',
               live: group.getAttribute('data-live-tool-call-group'),
               settled: group.getAttribute('data-anchor-settled-scene-owner'),
+              classes: group.className,
+              deferred: group.getAttribute('data-worklog-rows-deferred'),
+              expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
+                .getAttribute?.('aria-expanded') || '',
             })),
             rows: rows.map(row => ({
               role: row.getAttribute('data-anchor-row-role'),
@@ -314,18 +362,26 @@ def _activity_snapshot(page) -> dict:
 
 
 def _expand_settled_worklog(page) -> None:
-    page.evaluate(
+    page.wait_for_function(
         """() => {
           const group = Array.from(document.querySelectorAll(
             '.assistant-turn [data-anchor-settled-scene-owner="1"]'
           )).pop();
           if (!group) return false;
-          if (group.classList.contains('tool-call-group-collapsed')) {
-            const summary = group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
-            if (summary) summary.click();
+          const summary = group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+          if (group.classList.contains('tool-call-group-collapsed') && summary) {
+            if (typeof _toggleActivityGroup === 'function') _toggleActivityGroup(summary);
+            else summary.click();
           }
-          return true;
-        }"""
+          if (
+            group.getAttribute('data-worklog-rows-deferred') === '1' &&
+            typeof _materializeDeferredWorklogRows === 'function'
+          ) {
+            _materializeDeferredWorklogRows(group);
+          }
+          return Boolean(group.querySelector('[data-anchor-scene-row="1"]'));
+        }""",
+        timeout=10000,
     )
 
 
@@ -378,8 +434,13 @@ def main() -> int:
         return 2
 
     repo_root = Path(__file__).resolve().parent.parent
-    state_dir = Path(tempfile.mkdtemp(prefix="hermes-lifecycle-gate-"))
-    artifact_dir = Path(os.environ.get("LIFECYCLE_ARTIFACT_DIR", state_dir / "artifacts"))
+    state_tmp = tempfile.TemporaryDirectory(prefix="hermes-lifecycle-gate-")
+    state_dir = Path(state_tmp.name)
+    artifact_env = str(os.environ.get("LIFECYCLE_ARTIFACT_DIR") or "").strip()
+    artifact_dir_owned = not bool(artifact_env)
+    artifact_dir = Path(artifact_env) if artifact_env else Path(
+        tempfile.mkdtemp(prefix="hermes-lifecycle-artifacts-")
+    )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     gateway = DeterministicGateway()
     gateway.start()
@@ -418,17 +479,17 @@ def main() -> int:
         "NO_PROXY": "127.0.0.1,localhost",
         "no_proxy": "127.0.0.1,localhost",
     })
-    log_path = artifact_dir / "server.log"
-    log = log_path.open("w")
     proc = None
-    base_url = None
+    log = None
+    log_path = None
     exit_code = 1
     playwright = None
     browser = None
     page = None
     errors = []
+    anchor_scene_requests = []
     try:
-        proc, base_url = _start_webui_server(repo_root, env, log)
+        proc, log, log_path, base_url = _start_webui_server(repo_root, env, artifact_dir)
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(
             headless=True,
@@ -436,6 +497,7 @@ def main() -> int:
         )
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
+        anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE == "drop-anchor-persistence":
             page.route(
                 "**/api/session/anchor-scene",
@@ -543,6 +605,7 @@ def main() -> int:
                         "scenario": "normal-live-to-final",
                         "test_bite": TEST_BITE or None,
                         "browser_errors": errors,
+                        "anchor_scene_requests": anchor_scene_requests,
                         "gateway_events": gateway.emitted_events,
                         "dom": _activity_snapshot(page),
                     }, indent=2),
@@ -551,6 +614,7 @@ def main() -> int:
         except Exception as artifact_error:
             print(f"Could not capture browser artifacts: {artifact_error}", file=sys.stderr)
         print(f"Artifacts: {artifact_dir}", file=sys.stderr)
+        exit_code = 1
         return 1
     finally:
         gateway.close()
@@ -558,18 +622,18 @@ def main() -> int:
             browser.close()
         if playwright is not None:
             playwright.stop()
-        if proc is not None:
-            _stop_process(proc)
-        log.close()
+        _terminate_process(proc)
+        if log is not None:
+            log.close()
         if proc is not None and proc.returncode not in (None, 0, -15):
             print(f"WebUI server exit code: {proc.returncode}", file=sys.stderr)
-        if log_path.exists():
+        if log_path is not None and log_path.exists():
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
             if tail and proc is not None and proc.returncode not in (None, 0, -15):
                 print(tail, file=sys.stderr)
-        artifact_is_inside_state = artifact_dir.resolve().is_relative_to(state_dir.resolve())
-        if exit_code == 0 or not artifact_is_inside_state:
-            shutil.rmtree(state_dir, ignore_errors=True)
+        state_tmp.cleanup()
+        if artifact_dir_owned and exit_code == 0:
+            shutil.rmtree(artifact_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

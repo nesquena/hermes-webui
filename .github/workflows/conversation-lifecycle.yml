@@ -22,6 +22,7 @@ jobs:
           cache-dependency-path: |
             **/requirements*.txt
             **/pyproject.toml
+            .github/workflows/conversation-lifecycle.yml
 
       - name: Install browser gate dependencies
         run: |
