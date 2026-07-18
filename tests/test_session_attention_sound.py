@@ -200,6 +200,73 @@ setTimeout(() => {{
     return json.loads(completed.stdout)
 
 
+def _run_bounded_attention_retry_probe() -> dict:
+    """Exercise repeated sidebar syncs against real product notification bodies."""
+    if NODE is None:  # pragma: no cover - node is installed in CI
+        pytest.skip("node not on PATH")
+    functions = "\n".join(
+        (
+            _function_source(MESSAGES_JS, "_attentionSoundKey"),
+            _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_clearAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_deliverAttentionNotification"),
+            _function_source(MESSAGES_JS, "sendBrowserNotification"),
+            _function_source(SESSIONS_JS, "_sessionAttentionSoundSignature"),
+            _function_source(SESSIONS_JS, "_syncSessionAttentionSoundState"),
+        )
+    )
+    script = f"""
+global.window = global;
+global.document = {{hidden: true}};
+global.location = {{origin: 'https://example.test', href: 'https://example.test/'}};
+global.S = {{session: {{session_id: 'other'}}}};
+global._notificationsEnabled = true;
+global._isBackgroundedForBrowserNotification = () => true;
+global._sessionUrlForSid = sid => `/?session=${{sid}}`;
+global.assistantDisplayName = () => 'Hermes';
+global.requestNotificationPermission = () => Promise.resolve('granted');
+const shown = [];
+function Notification() {{ throw new Error('direct fallback should not run'); }}
+Notification.permission = 'granted';
+global.Notification = Notification;
+global._showPwaNotification = (title, body, options) => new Promise((resolve, reject) => {{
+  shown.push({{sid: options.sid, title}});
+  setTimeout(() => reject(new Error('delivery failed')), 0);
+}});
+global.playAttentionSound = () => {{}};
+let _sessionAttentionSoundPrimed = true;
+const _sessionAttentionSoundState = new Map();
+{functions}
+const attention = count => [{{session_id:'target',title:'Build',attention:{{kind:'approval',count}}}}];
+const sync = payload => new Promise(resolve => {{
+  _syncSessionAttentionSoundState(payload);
+  setTimeout(resolve, 10);
+}});
+(async () => {{
+  await sync(attention(1));
+  await sync(attention(1));
+  await sync(attention(1));
+  await sync(attention(1));
+  const unchangedAttempts = shown.length;
+  const unchangedPending = window._attentionNotificationPendingKeys.get('target') || null;
+  const unchangedDelivered = _hasAttentionNotificationKey('target', 'approval', 1);
+  await sync(attention(2));
+  const changedCountAttempts = shown.length;
+  await sync([]);
+  await sync(attention(1));
+  console.log(JSON.stringify({{
+    unchangedAttempts, unchangedPending, unchangedDelivered,
+    changedCountAttempts, totalAttempts: shown.length,
+  }}));
+}})();
+"""
+    completed = subprocess.run(
+        [NODE, "-e", script], cwd=REPO, check=True, text=True, capture_output=True
+    )
+    return json.loads(completed.stdout)
+
+
 def _run_active_switch_before_delivery_probe() -> dict:
     if NODE is None:  # pragma: no cover - node is installed in CI
         pytest.skip("node not on PATH")
@@ -366,13 +433,23 @@ def test_failed_attention_delivery_releases_claim_for_a_retry():
     assert result["pending"] is None
 
 
+def test_failed_attention_delivery_retries_once_then_rearms_for_new_attention():
+    result = _run_bounded_attention_retry_probe()
+
+    assert result["unchangedAttempts"] == 2
+    assert result["unchangedPending"] is None
+    assert result["unchangedDelivered"] is False
+    assert result["changedCountAttempts"] == 3
+    assert result["totalAttempts"] == 4
+
+
 def test_switching_back_to_target_before_service_worker_delivery_cancels_alert():
     result = _run_active_switch_before_delivery_probe()
 
     assert result["shown"] == []
     assert result["delivered"] is False
     assert result["pending"] is None
-    assert result["retry"] == "target:approval:1"
+    assert result["retry"] == {"key": "target:approval:1", "attempts": 1}
 
 
 def test_active_session_attention_never_uses_background_delivery_seam():

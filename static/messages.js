@@ -8601,8 +8601,12 @@ function _deliverAttentionNotification(sid,kind,count,title,body){
   window._attentionNotificationPendingKeys=pending;
   window._attentionNotificationRetryKeys=retry;
   if(pending.get(safeSid)===key) return false;
+  const priorRetry=retry.get(safeSid);
+  const priorRetryKey=typeof priorRetry==='string'?priorRetry:(priorRetry&&priorRetry.key);
+  const priorRetryAttempts=typeof priorRetry==='string'?1:Math.max(0,Number(priorRetry&&priorRetry.attempts)||0);
+  if(priorRetryKey===key&&priorRetryAttempts>=2) return false;
   pending.set(safeSid,key);
-  if(retry.get(safeSid)===key) retry.delete(safeSid);
+  if(priorRetryKey===key) retry.delete(safeSid);
   const release=()=>{
     if(pending.get(safeSid)===key) pending.delete(safeSid);
   };
@@ -8613,7 +8617,7 @@ function _deliverAttentionNotification(sid,kind,count,title,body){
   };
   const failed=()=>{
     release();
-    retry.set(safeSid,key);
+    retry.set(safeSid,{key,attempts:priorRetryKey===key?priorRetryAttempts+1:1});
   };
   try{
     return sendBrowserNotification(title,body,{

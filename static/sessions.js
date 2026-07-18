@@ -5286,8 +5286,11 @@ function _syncSessionAttentionSoundState(sessions){
     const [kind,countRaw]=String(sig).split(':');
     const count=Number(countRaw)||1;
     const retry=window._attentionNotificationRetryKeys;
-    const shouldRetry=retry instanceof Map&&typeof _attentionSoundKey==='function'
-      &&retry.get(sid)===_attentionSoundKey(sid,kind,count);
+    const retryState=retry instanceof Map?retry.get(sid):null;
+    const retryKey=typeof retryState==='string'?retryState:(retryState&&retryState.key);
+    const retryAttempts=typeof retryState==='string'?1:Number(retryState&&retryState.attempts)||0;
+    const shouldRetry=typeof _attentionSoundKey==='function'
+      &&retryKey===_attentionSoundKey(sid,kind,count)&&retryAttempts===1;
     if(prev!==sig||shouldRetry){
       const s=(Array.isArray(sessions)?sessions:[]).find(item=>item&&item.session_id===sid)||{session_id:sid};
       const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;
