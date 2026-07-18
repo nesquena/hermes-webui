@@ -12405,26 +12405,17 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
 
-    # ── Plugin lifecycle (install/update/remove) -- always readable, even
-    # when the write gate is closed, so the UI can render the disabled state
-    # with its flag name instead of silently hiding the card (mirrors
-    # /api/ops/status's allowed:false pattern). ──
-    if parsed.path == "/api/plugins/installed":
-        from api.plugin_lifecycle import list_installed_plugins
-        payload = list_installed_plugins()
-        payload["write_allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE")
-        return j(handler, payload)
+    # ── Plugin lifecycle (install/update/remove) -- status is always
+    # readable, even when the write gate is closed or no agent checkout is
+    # available, so the UI can render the disabled/unavailable state with a
+    # clear reason instead of silently hiding the card (mirrors an
+    # /api/ops/status-style allowed:false pattern). ──
+    if parsed.path == "/api/plugins/lifecycle/status":
+        from api.plugin_lifecycle import get_status
+        status = get_status()
+        status["writable"] = _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE")
+        return j(handler, status)
 
-    if parsed.path == "/api/plugins/resolve":
-        from api.plugin_lifecycle import PluginLifecycleUnavailable, resolve_plugin_source
-        query = parse_qs(parsed.query)
-        identifier = (query.get("identifier", [""])[0] or "").strip()
-        try:
-            return j(handler, resolve_plugin_source(identifier))
-        except ValueError as exc:
-            return bad(handler, str(exc), status=400)
-        except PluginLifecycleUnavailable as exc:
-            return bad(handler, str(exc), status=503)
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
@@ -14509,13 +14500,20 @@ def handle_post(handler, parsed) -> bool:
         return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Plugin lifecycle (install/update/remove) -- HIGHEST-RISK write
-    # surface in Settings: installing a plugin clones and imports arbitrary
-    # Python from a Git repo into the running agent process. Fail-closed gate
-    # (HERMES_WEBUI_ALLOW_PLUGIN_WRITE), same _truthy_env pattern as the ops
-    # actions (Maintenance) card. ──
-    if parsed.path == "/api/plugins/install" or (
-        parsed.path.startswith("/api/plugins/") and parsed.path.endswith(("/update", "/remove"))
-    ):
+    # surface in Settings: a successful install pulls arbitrary Python (and
+    # its dependencies) from a Git repo and runs it as part of the agent.
+    # Every action here spawns an isolated `hermes plugins ...` subprocess
+    # (api/plugin_lifecycle.py) rather than importing anything in-process, so
+    # a malicious/broken plugin can never touch the WebUI server's own
+    # memory. Fail-closed gate (HERMES_WEBUI_ALLOW_PLUGIN_WRITE, same
+    # _truthy_env pattern used elsewhere), checked BEFORE the
+    # agent-checkout-availability check so a closed gate always wins. ──
+    _PLUGIN_LIFECYCLE_ACTIONS = {
+        "/api/plugins/lifecycle/install": "install",
+        "/api/plugins/lifecycle/update": "update",
+        "/api/plugins/lifecycle/remove": "remove",
+    }
+    if parsed.path in _PLUGIN_LIFECYCLE_ACTIONS:
         if not _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE"):
             return j(
                 handler,
@@ -14525,39 +14523,56 @@ def handle_post(handler, parsed) -> bool:
                         "Plugin install/update/remove is disabled. "
                         "Set HERMES_WEBUI_ALLOW_PLUGIN_WRITE=1 to enable."
                     ),
-                    "allowed": False,
+                    "writable": False,
                 },
                 status=403,
             )
 
         from api.plugin_lifecycle import (
-            PluginLifecycleUnavailable,
-            install_plugin,
-            remove_plugin,
-            update_plugin,
+            PluginSourceError,
+            is_available,
+            list_installed_plugins,
+            start_action,
+            validate_plugin_name,
+            validate_source,
         )
-        from urllib.parse import unquote
 
+        if not is_available():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Plugin management requires a Hermes agent checkout (no `hermes` CLI found).",
+                    "writable": True,
+                },
+                status=501,
+            )
+
+        action = _PLUGIN_LIFECYCLE_ACTIONS[parsed.path]
         try:
-            if parsed.path == "/api/plugins/install":
-                identifier = str(body.get("identifier") or "").strip()
+            if action == "install":
+                source = validate_source(body.get("source") or "")
                 force = bool(body.get("force"))
-                enable = body.get("enable")
-                enable = True if enable is None else bool(enable)
-                result = install_plugin(identifier, force=force, enable=enable)
-            elif parsed.path.endswith("/update"):
-                name = unquote(parsed.path[len("/api/plugins/"):-len("/update")])
-                result = update_plugin(name)
+                enable_raw = body.get("enable")
+                enable = None if enable_raw is None else bool(enable_raw)
+                started, status = start_action("install", source, force=force, enable=enable)
             else:
-                name = unquote(parsed.path[len("/api/plugins/"):-len("/remove")])
-                result = remove_plugin(name)
-        except ValueError as exc:
+                try:
+                    installed = list_installed_plugins()
+                except RuntimeError as exc:
+                    return bad(handler, str(exc), status=500)
+                try:
+                    name = validate_plugin_name(body.get("name") or "", installed)
+                except LookupError as exc:
+                    return bad(handler, str(exc), status=404)
+                started, status = start_action(action, name)
+        except PluginSourceError as exc:
             return bad(handler, str(exc), status=400)
-        except PluginLifecycleUnavailable as exc:
-            return bad(handler, str(exc), status=503)
 
-        result["allowed"] = True
-        return j(handler, result, status=200 if result.get("ok") else 400)
+        status["writable"] = True
+        if not started:
+            status["error"] = "Another plugin action is already running."
+        return j(handler, status, status=200 if started else 409)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":

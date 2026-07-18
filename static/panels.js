@@ -10561,7 +10561,7 @@ async function loadPluginsPanel(){
     // tab stays visible even at zero plugins, so the Install form (the one
     // thing that would ever change that) stays reachable.
     const tabBtn=document.querySelector('[data-settings-section="plugins"]');
-    const lifecycleWriteAllowed=!!(lifecycleData&&lifecycleData.write_allowed);
+    const lifecycleWriteAllowed=!!(lifecycleData&&lifecycleData.writable);
     if(tabBtn) tabBtn.style.display=(data&&data.empty&&!lifecycleWriteAllowed)?'none':'';
     list.innerHTML='';
     if(plugins.length===0){
@@ -10678,92 +10678,60 @@ const enabled=plugin&&plugin.enabled!==false;
 }
 
 // ── Plugin lifecycle (install/update/remove) ────────────────────────────────
-// Backend: api/plugin_lifecycle.py + GET /api/plugins/installed,
-// GET /api/plugins/resolve, POST /api/plugins/install,
-// POST /api/plugins/<name>/{update,remove}. Fail-closed gate:
-// HERMES_WEBUI_ALLOW_PLUGIN_WRITE (see write_allowed on the GET payload).
-async function loadPluginLifecyclePanel(){
- try{
-  const data=await api('/api/plugins/installed');
-  _renderPluginLifecycle(data);
-  return data;
- }catch(e){
-  _renderPluginLifecycle({plugins:[],unavailable:true,write_allowed:false,error:(e&&e.message)||String(e)});
-  return {plugins:[],unavailable:true,write_allowed:false};
- }
-}
+// Backend: api/plugin_lifecycle.py spawns an isolated `hermes plugins
+// install/update/remove` subprocess (never in-process) + GET
+// /api/plugins/lifecycle/status, POST /api/plugins/lifecycle/{install,
+// update,remove}. Fail-closed gate: HERMES_WEBUI_ALLOW_PLUGIN_WRITE (see
+// `writable` on the status payload); `available` reflects whether a
+// `hermes` CLI could be found at all (false for a standalone WebUI with no
+// agent checkout). Every write action requires the double-confirmation
+// modal below (source/name + an explicit "executes third-party code"
+// acknowledgement) in addition to the browser having writable+available.
+let _pluginLifecyclePollTimer=null;
+let _pluginLifecycleData=null;
 
-function _renderPluginLifecycle(data){
- const gateNote=$('pluginLifecycleGateNote');
- const form=$('pluginLifecycleForm');
- const writeAllowed=!!(data&&data.write_allowed);
- if(gateNote){
-  if(writeAllowed){
-   gateNote.style.display='none';
-  }else{
-   gateNote.style.display='';
-   gateNote.textContent=(data&&data.unavailable&&data.error)
-    ? data.error
-    : (t('settings_plugin_lifecycle_gate_disabled')||'Plugin install/update/remove is disabled. Set HERMES_WEBUI_ALLOW_PLUGIN_WRITE=1 to enable.');
+function _pluginConfirmModal(opts){
+ return new Promise(resolve=>{
+  let overlay=$('pluginLifecycleConfirmOverlay');
+  if(!overlay){
+   overlay=document.createElement('div');
+   overlay.id='pluginLifecycleConfirmOverlay';
+   overlay.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(5,7,15,.68);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:20px';
+   overlay.innerHTML='<div role="alertdialog" aria-modal="true" aria-labelledby="pluginConfirmTitle" style="width:min(480px,calc(100vw - 32px));background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:18px">'
+    +'<div id="pluginConfirmTitle" style="font-weight:700;font-size:16px;margin-bottom:8px"></div>'
+    +'<div id="pluginConfirmMsg" style="font-size:13px;color:var(--text);white-space:pre-wrap;line-height:1.4;margin-bottom:14px"></div>'
+    +'<label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--text);cursor:pointer;margin-bottom:16px">'
+    +'<input type="checkbox" id="pluginConfirmAck" style="width:15px;height:15px;accent-color:var(--accent);margin-top:1px">'
+    +'<span id="pluginConfirmAckLabel"></span>'
+    +'</label>'
+    +'<div style="display:flex;justify-content:flex-end;gap:8px">'
+    +'<button type="button" id="pluginConfirmCancel" style="font-size:12px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-weight:600"></button>'
+    +'<button type="button" id="pluginConfirmOk" disabled style="font-size:12px;padding:7px 12px;border-radius:8px;border:1px solid #ef4444;background:#ef4444;color:#fff;cursor:pointer;font-weight:700;opacity:.5"></button>'
+    +'</div>'
+    +'</div>';
+   document.body.appendChild(overlay);
   }
- }
- if(form) form.style.display=writeAllowed?'':'none';
- if(!writeAllowed) return;
-
- const list=$('pluginLifecycleList');
- const empty=$('pluginLifecycleEmpty');
- if(!list) return;
- list.innerHTML='';
- const plugins=(Array.isArray(data&&data.plugins)?data.plugins:[]).filter(p=>p&&p.removable);
- if(plugins.length===0){
-  if(empty) empty.style.display='';
-  return;
- }
- if(empty) empty.style.display='none';
- for(const plugin of plugins){
-  list.appendChild(_buildPluginLifecycleRow(plugin));
- }
+  const title=$('pluginConfirmTitle'),msg=$('pluginConfirmMsg'),ackLabel=$('pluginConfirmAckLabel'),
+    ack=$('pluginConfirmAck'),okBtn=$('pluginConfirmOk'),cancelBtn=$('pluginConfirmCancel');
+  title.textContent=opts.title||'';
+  msg.textContent=opts.message||'';
+  ackLabel.textContent=opts.ackLabel||t('settings_plugin_confirm_ack')||'I understand this executes third-party code.';
+  ack.checked=false;
+  okBtn.disabled=true;
+  okBtn.style.opacity='.5';
+  okBtn.textContent=opts.confirmLabel||t('confirm')||'Confirm';
+  cancelBtn.textContent=t('cancel')||'Cancel';
+  ack.onchange=()=>{okBtn.disabled=!ack.checked;okBtn.style.opacity=ack.checked?'1':'.5';};
+  const close=(result)=>{overlay.style.display='none';resolve(result);};
+  okBtn.onclick=()=>{if(ack.checked) close(true);};
+  cancelBtn.onclick=()=>close(false);
+  overlay.onclick=(ev)=>{if(ev.target===overlay) close(false);};
+  overlay.style.display='flex';
+  setTimeout(()=>ack.focus(),0);
+ });
 }
 
-function _buildPluginLifecycleRow(plugin){
- const row=document.createElement('div');
- row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border2);border-radius:6px;flex-wrap:wrap';
- const info=document.createElement('div');
- info.style.cssText='flex:1;min-width:160px;font-size:12px';
- info.innerHTML='<div style="font-weight:600;color:var(--text)">'+esc(plugin.name||plugin.key)+(plugin.version?' <span style="color:var(--muted);font-weight:400">v'+esc(plugin.version)+'</span>':'')+'</div>'+(plugin.description?'<div style="color:var(--muted);font-size:11px">'+esc(plugin.description)+'</div>':'');
- row.appendChild(info);
-
- if(plugin.updatable){
-  const updateBtn=document.createElement('button');
-  updateBtn.type='button';
-  updateBtn.className='settings-btn';
-  updateBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px';
-  updateBtn.textContent=t('settings_plugin_btn_update')||'Update';
-  updateBtn.addEventListener('click',()=>_updateInstalledPlugin(plugin.key||plugin.name,updateBtn));
-  row.appendChild(updateBtn);
- }
-
- const removeBtn=document.createElement('button');
- removeBtn.type='button';
- removeBtn.className='settings-btn';
- removeBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px;color:#ef4444';
- removeBtn.textContent=t('settings_plugin_btn_remove')||'Remove';
- removeBtn.addEventListener('click',()=>_removeInstalledPlugin(plugin.key||plugin.name,removeBtn));
- row.appendChild(removeBtn);
-
- return row;
-}
-
-let _pluginResolveTimer=null;
 function _bindPluginLifecycleControls(){
- const input=$('pluginInstallIdentifier');
- if(input&&!input._bound){
-  input._bound=true;
-  input.addEventListener('input',()=>{
-   clearTimeout(_pluginResolveTimer);
-   _pluginResolveTimer=setTimeout(_previewPluginSource,400);
-  });
- }
  const installBtn=$('btnPluginInstall');
  if(installBtn&&!installBtn._bound){
   installBtn._bound=true;
@@ -10771,109 +10739,180 @@ function _bindPluginLifecycleControls(){
  }
 }
 
-async function _previewPluginSource(){
- const input=$('pluginInstallIdentifier');
- const preview=$('pluginResolvePreview');
- if(!input||!preview) return;
- const identifier=(input.value||'').trim();
- if(!identifier){preview.style.display='none';return;}
+async function loadPluginLifecyclePanel(){
  try{
-  const r=await api('/api/plugins/resolve?identifier='+encodeURIComponent(identifier));
-  const insecure=r.insecure_scheme?(' — '+(t('settings_plugin_insecure_scheme')||'insecure URL scheme')):'';
-  preview.textContent=(t('settings_plugin_resolves_to')||'Resolves to:')+' '+r.git_url+(r.subdir?('#'+r.subdir):'')+insecure;
-  preview.style.display='';
+  const data=await api('/api/plugins/lifecycle/status',{timeoutToast:false});
+  _pluginLifecycleData=data;
+  _renderPluginLifecycle(data);
+  _syncPluginLifecyclePolling(data);
+  return data;
  }catch(e){
-  preview.style.display='none';
+  const fallback={available:false,writable:false,running:false,last:null,installed:[]};
+  _pluginLifecycleData=fallback;
+  _renderPluginLifecycle(fallback);
+  return fallback;
  }
+}
+
+function _syncPluginLifecyclePolling(data){
+ const shouldPoll=!!(data&&data.running);
+ const wasPolling=!!_pluginLifecyclePollTimer;
+ if(shouldPoll&&!_pluginLifecyclePollTimer){
+  _pluginLifecyclePollTimer=setInterval(loadPluginLifecyclePanel,2000);
+ }else if(!shouldPoll&&_pluginLifecyclePollTimer){
+  clearInterval(_pluginLifecyclePollTimer);
+  _pluginLifecyclePollTimer=null;
+  // A poll cycle just observed the in-flight action finish -- refresh the
+  // read-only hooks list too (a completed install/remove changes it).
+  if(wasPolling&&typeof loadPluginsPanel==='function') loadPluginsPanel();
+ }
+}
+
+function _renderPluginLifecycleNote(data){
+ const note=$('pluginLifecycleGateNote');
+ if(!note) return;
+ if(!data||!data.available){
+  note.style.display='';
+  note.textContent=t('settings_plugin_lifecycle_unavailable')||'Plugin management requires a Hermes agent checkout.';
+ }else if(!data.writable){
+  note.style.display='';
+  note.textContent=t('settings_plugin_lifecycle_gate_disabled')||'Plugin install/update/remove is disabled. Set HERMES_WEBUI_ALLOW_PLUGIN_WRITE=1 to enable.';
+ }else{
+  note.style.display='none';
+ }
+}
+
+function _renderPluginLifecycleResult(data){
+ const resultEl=$('pluginInstallResult');
+ if(!resultEl) return;
+ const last=data&&data.last;
+ if(!last){resultEl.innerHTML='';return;}
+ const color=last.ok?'#22c55e':'#ef4444';
+ const actionLabel=t('settings_plugin_last_action_'+last.action)||last.action;
+ const outcome=last.ok?(t('settings_plugin_last_ok')||'succeeded'):(t('settings_plugin_last_failed')||'failed');
+ const logTail=last.log_tail?('<pre style="max-height:180px;overflow:auto;font-size:11px;padding:8px;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;white-space:pre-wrap;word-break:break-word;margin-top:6px">'+esc(last.log_tail)+'</pre>'):'';
+ resultEl.innerHTML='<div style="color:'+color+'">'+esc(actionLabel)+' '+esc(last.name||'')+': '+esc(outcome)+'</div>'+logTail;
+}
+
+function _renderPluginLifecycle(data){
+ _renderPluginLifecycleNote(data);
+ _renderPluginLifecycleResult(data);
+
+ const form=$('pluginLifecycleForm');
+ const interactive=!!(data&&data.available&&data.writable);
+ const busy=!!(data&&data.running);
+ if(form) form.style.display='';
+ const input=$('pluginInstallIdentifier');
+ const installBtn=$('btnPluginInstall');
+ if(input) input.disabled=!interactive||busy;
+ if(installBtn) installBtn.disabled=!interactive||busy;
+
+ const list=$('pluginLifecycleList');
+ const empty=$('pluginLifecycleEmpty');
+ if(!list) return;
+ list.innerHTML='';
+ const installed=Array.isArray(data&&data.installed)?data.installed:[];
+ // Only plugins the CLI can actually update/remove (bundled + entrypoint
+ // plugins aren't on-disk user installs) are shown as manageable rows.
+ const userPlugins=installed.filter(p=>p&&p.source&&p.source!=='bundled'&&p.source!=='entrypoint');
+ if(userPlugins.length===0){
+  if(empty) empty.style.display='';
+ }else{
+  if(empty) empty.style.display='none';
+  for(const plugin of userPlugins){
+   list.appendChild(_buildPluginLifecycleRow(plugin,interactive,busy));
+  }
+ }
+}
+
+function _buildPluginLifecycleRow(plugin,interactive,busy){
+ const row=document.createElement('div');
+ row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border2);border-radius:6px;flex-wrap:wrap';
+ const info=document.createElement('div');
+ info.style.cssText='flex:1;min-width:160px;font-size:12px';
+ info.innerHTML='<div style="font-weight:600;color:var(--text)">'+esc(plugin.name||'')+(plugin.version?' <span style="color:var(--muted);font-weight:400">v'+esc(plugin.version)+'</span>':'')+'</div>'+(plugin.source?'<div style="color:var(--muted);font-size:11px">'+esc(plugin.source)+(plugin.enabled?(' · '+(t('plugins_enabled')||'Enabled')):'')+'</div>':'');
+ row.appendChild(info);
+
+ // Only a "git" source (a user plugin dir with a .git checkout) supports
+ // `hermes plugins update` -- a plain copied "user" plugin has nothing to pull.
+ if(plugin.source==='git'){
+  const updateBtn=document.createElement('button');
+  updateBtn.type='button';
+  updateBtn.className='settings-btn';
+  updateBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px';
+  updateBtn.disabled=!interactive||busy;
+  updateBtn.textContent=t('settings_plugin_btn_update')||'Update';
+  updateBtn.addEventListener('click',()=>_updateInstalledPlugin(plugin.name));
+  row.appendChild(updateBtn);
+ }
+
+ const removeBtn=document.createElement('button');
+ removeBtn.type='button';
+ removeBtn.className='settings-btn';
+ removeBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px;color:#ef4444';
+ removeBtn.disabled=!interactive||busy;
+ removeBtn.textContent=t('settings_plugin_btn_remove')||'Remove';
+ removeBtn.addEventListener('click',()=>_removeInstalledPlugin(plugin.name));
+ row.appendChild(removeBtn);
+
+ return row;
 }
 
 async function _installPluginFromForm(){
  const input=$('pluginInstallIdentifier');
- const resultEl=$('pluginInstallResult');
- const identifier=input?(input.value||'').trim():'';
- if(!identifier) return;
- let preview=null;
- try{preview=await api('/api/plugins/resolve?identifier='+encodeURIComponent(identifier));}catch(e){}
- const sourceLine=preview?(preview.git_url+(preview.subdir?('#'+preview.subdir):'')):identifier;
- const confirmed=await showConfirmDialog({
+ const source=input?(input.value||'').trim():'';
+ if(!source) return;
+ const confirmed=await _pluginConfirmModal({
   title:t('settings_plugin_confirm_install_title')||'Install plugin?',
-  message:(t('settings_plugin_confirm_install_msg')||'This clones and runs code from:\n{source}\n\nOnly proceed if you trust this source.').replace('{source}',sourceLine),
+  message:(t('settings_plugin_confirm_install_msg')||'This clones and runs code from:\n{source}\n\nOnly proceed if you trust this source.').replace('{source}',source),
   confirmLabel:t('settings_plugin_btn_install')||'Install',
-  danger:true,
  });
  if(!confirmed) return;
- if(resultEl) resultEl.innerHTML='';
  try{
-  const r=await api('/api/plugins/install',{method:'POST',body:JSON.stringify({identifier})});
-  if(r&&r.ok){
-   if(typeof showToast==='function') showToast((t('settings_plugin_install_success')||'Plugin installed: {name}').replace('{name}',r.plugin_name||identifier));
-   if(resultEl){
-    const warnings=Array.isArray(r.warnings)?r.warnings:[];
-    const missing=Array.isArray(r.missing_env)?r.missing_env:[];
-    let extra='';
-    if(warnings.length) extra+='<div style="color:#f59e0b">'+warnings.map(esc).join('<br>')+'</div>';
-    if(missing.length) extra+='<div style="color:var(--muted)">'+(t('settings_plugin_missing_env')||'Requires environment variables:')+' '+missing.map(esc).join(', ')+'</div>';
-    resultEl.innerHTML=extra;
-   }
-   if(input) input.value='';
-   const preview2=$('pluginResolvePreview');
-   if(preview2) preview2.style.display='none';
-   loadPluginLifecyclePanel();
-   loadPluginsPanel();
-  }else{
-   if(typeof showToast==='function') showToast((t('settings_plugin_install_failed')||'Failed to install plugin')+(r&&r.error?': '+r.error:''));
-  }
+  const r=await api('/api/plugins/lifecycle/install',{method:'POST',body:JSON.stringify({source})});
+  if(input) input.value='';
+  if(typeof showToast==='function') showToast(t('settings_plugin_install_started')||'Install started…');
+  _pluginLifecycleData=r;
+  _renderPluginLifecycle(r);
+  _syncPluginLifecyclePolling(r);
  }catch(e){
   if(typeof showToast==='function') showToast((t('settings_plugin_install_failed')||'Failed to install plugin')+(e&&e.message?': '+e.message:''));
  }
 }
 
-async function _updateInstalledPlugin(name,btn){
- const confirmed=await showConfirmDialog({
+async function _updateInstalledPlugin(name){
+ const confirmed=await _pluginConfirmModal({
   title:t('settings_plugin_confirm_update_title')||'Update plugin?',
   message:(t('settings_plugin_confirm_update_msg')||'This pulls and runs the latest code for "{name}".').replace('{name}',name),
   confirmLabel:t('settings_plugin_btn_update')||'Update',
-  danger:true,
  });
  if(!confirmed) return;
- if(btn) btn.disabled=true;
  try{
-  const r=await api('/api/plugins/'+encodeURIComponent(name)+'/update',{method:'POST',body:JSON.stringify({})});
-  if(r&&r.ok){
-   if(typeof showToast==='function') showToast(r.unchanged?(t('settings_plugin_update_unchanged')||'Already up to date'):(t('settings_plugin_update_success')||'Plugin updated'));
-   loadPluginLifecyclePanel();
-  }else{
-   if(typeof showToast==='function') showToast((t('settings_plugin_update_failed')||'Failed to update plugin')+(r&&r.error?': '+r.error:''));
-  }
+  const r=await api('/api/plugins/lifecycle/update',{method:'POST',body:JSON.stringify({name})});
+  if(typeof showToast==='function') showToast(t('settings_plugin_update_started')||'Update started…');
+  _pluginLifecycleData=r;
+  _renderPluginLifecycle(r);
+  _syncPluginLifecyclePolling(r);
  }catch(e){
   if(typeof showToast==='function') showToast((t('settings_plugin_update_failed')||'Failed to update plugin')+(e&&e.message?': '+e.message:''));
- }finally{
-  if(btn) btn.disabled=false;
  }
 }
 
-async function _removeInstalledPlugin(name,btn){
- const confirmed=await showConfirmDialog({
+async function _removeInstalledPlugin(name){
+ const confirmed=await _pluginConfirmModal({
   title:t('settings_plugin_confirm_remove_title')||'Remove plugin?',
   message:(t('settings_plugin_confirm_remove_msg')||'This permanently deletes "{name}" from disk.').replace('{name}',name),
   confirmLabel:t('settings_plugin_btn_remove')||'Remove',
-  danger:true,
  });
  if(!confirmed) return;
- if(btn) btn.disabled=true;
  try{
-  const r=await api('/api/plugins/'+encodeURIComponent(name)+'/remove',{method:'POST',body:JSON.stringify({})});
-  if(r&&r.ok){
-   if(typeof showToast==='function') showToast(t('settings_plugin_remove_success')||'Plugin removed');
-   loadPluginLifecyclePanel();
-   loadPluginsPanel();
-  }else{
-   if(typeof showToast==='function') showToast((t('settings_plugin_remove_failed')||'Failed to remove plugin')+(r&&r.error?': '+r.error:''));
-  }
+  const r=await api('/api/plugins/lifecycle/remove',{method:'POST',body:JSON.stringify({name})});
+  if(typeof showToast==='function') showToast(t('settings_plugin_remove_started')||'Remove started…');
+  _pluginLifecycleData=r;
+  _renderPluginLifecycle(r);
+  _syncPluginLifecyclePolling(r);
  }catch(e){
   if(typeof showToast==='function') showToast((t('settings_plugin_remove_failed')||'Failed to remove plugin')+(e&&e.message?': '+e.message:''));
- }finally{
-  if(btn) btn.disabled=false;
  }
 }
 
