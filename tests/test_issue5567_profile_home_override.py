@@ -657,6 +657,199 @@ def test_profile_env_for_background_worker_serializes_static_module_scope_with_l
     assert fake_skill_manager_module.SKILLS_DIR == "default-home/skills"
 
 
+@pytest.mark.skipif(
+    not HAS_OVERRIDE,
+    reason="requires v0.18.0 context-local home override support",
+)
+def test_profile_env_for_background_worker_uses_real_modules_and_serializes_overlap(tmp_path, monkeypatch):
+    """Real skill modules should serialize static fallback scopes across profiles."""
+
+    try:
+        import tools.skills_tool as skills_tool
+        import tools.skill_manager_tool as skill_manager_tool
+    except Exception as exc:
+        pytest.skip(f"hermes-agent skill modules unavailable for this environment: {exc}")
+
+    required_attrs = ("_SKILLS_DIR_AT_IMPORT", "SKILLS_DIR", "HERMES_HOME")
+    for _name, _mod in (
+        ("tools.skills_tool", skills_tool),
+        ("tools.skill_manager_tool", skill_manager_tool),
+    ):
+        for _attr in required_attrs:
+            if not hasattr(_mod, _attr):
+                pytest.skip(f"{_name} missing {_attr}")
+
+    if not hasattr(skills_tool, "skills_list"):
+        pytest.skip("tools.skills_tool missing skills_list API")
+
+    alpha_home = tmp_path / "alpha"
+    beta_home = tmp_path / "beta"
+    alpha_home.mkdir()
+    beta_home.mkdir()
+
+    alpha_skill = f"alpha-only-{tmp_path.name}"
+    beta_skill = f"beta-only-{tmp_path.name}"
+
+    def _write_skill(home: Path, name: str) -> None:
+        skill_dir = home / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            textwrap.dedent(
+                f"""\
+                ---
+                name: {name}
+                description: skill for overlap test
+                ---
+                skill body
+                """
+            ),
+            encoding="utf-8",
+        )
+
+    def _parse_skill_names(raw: object) -> set[str]:
+        payload = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+        data = json.loads(payload) if isinstance(payload, str) else payload
+        if isinstance(data, dict):
+            data = data.get("skills", [])
+        return {
+            item.get("name")
+            for item in data or []
+            if isinstance(item, dict) and item.get("name") is not None
+        }
+
+    _write_skill(alpha_home, alpha_skill)
+    _write_skill(beta_home, beta_skill)
+
+    baseline_override = hermes_constants.get_hermes_home_override()
+    baseline_env_home = os.environ.get("HERMES_HOME")
+    baseline_env_has = "HERMES_HOME" in os.environ
+
+    baseline_skill_dir = skills_tool.SKILLS_DIR
+    baseline_skill_home = getattr(skills_tool, "HERMES_HOME", None)
+    baseline_skill_manager_dir = skill_manager_tool.SKILLS_DIR
+    baseline_skill_manager_home = getattr(skill_manager_tool, "HERMES_HOME", None)
+
+    alpha_skills_dir = str(alpha_home / "skills")
+
+    # Start with both modules deliberately patched to alpha.
+    skills_tool.HERMES_HOME = str(alpha_home)
+    skills_tool.SKILLS_DIR = alpha_skills_dir
+    skill_manager_tool.HERMES_HOME = str(alpha_home)
+    skill_manager_tool.SKILLS_DIR = alpha_skills_dir
+
+    monkeypatch.setenv("HERMES_HOME", str(alpha_home))
+    monkeypatch.setattr(
+        profiles_api,
+        "get_hermes_home_for_profile",
+        lambda profile: alpha_home if profile == "alpha" else beta_home,
+    )
+    monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
+    monkeypatch.setattr(profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: env)
+
+    alpha_ready = threading.Event()
+    alpha_listed = threading.Event()
+    beta_started = threading.Event()
+    beta_entered = threading.Event()
+    release_alpha = threading.Event()
+
+    seen: dict[str, set[str]] = {}
+    observed: dict[str, dict[str, object]] = {}
+    worker_errors: list[tuple[str, BaseException]] = []
+
+    def _worker_alpha() -> None:
+        try:
+            with profiles_api.profile_env_for_background_worker("alpha", "real alpha worker"):
+                alpha_ready.set()
+                names = _parse_skill_names(skills_tool.skills_list())
+                seen["alpha"] = names
+                assert alpha_skill in names
+                assert beta_skill not in names
+                alpha_listed.set()
+                assert release_alpha.wait(timeout=5)
+        except BaseException as exc:  # pragma: no cover - defensive
+            worker_errors.append(("alpha", exc))
+        finally:
+            observed["alpha"] = {
+                "override": hermes_constants.get_hermes_home_override(),
+            }
+
+    def _worker_beta() -> None:
+        try:
+            beta_started.set()
+            with profiles_api.profile_env_for_background_worker("beta", "real beta worker"):
+                beta_entered.set()
+                names = _parse_skill_names(skills_tool.skills_list())
+                seen["beta"] = names
+                assert beta_skill in names
+                assert alpha_skill not in names
+        except BaseException as exc:  # pragma: no cover - defensive
+            worker_errors.append(("beta", exc))
+        finally:
+            observed["beta"] = {
+                "override": hermes_constants.get_hermes_home_override(),
+            }
+
+    thread_alpha = threading.Thread(target=_worker_alpha)
+    thread_beta = threading.Thread(target=_worker_beta)
+
+    try:
+        thread_alpha.start()
+        assert alpha_ready.wait(timeout=5), "alpha worker should enter first"
+
+        thread_beta.start()
+        assert beta_started.wait(timeout=5), "beta worker should attempt to start"
+        assert not beta_entered.wait(0.25), "beta must block on fallback scope lock while alpha holds it"
+
+        assert alpha_listed.wait(timeout=5), "alpha must list skills while beta is waiting"
+
+        release_alpha.set()
+        assert beta_entered.wait(timeout=5), "beta should enter after alpha exits"
+
+        thread_alpha.join(timeout=5)
+        thread_beta.join(timeout=5)
+
+        assert not thread_alpha.is_alive()
+        assert not thread_beta.is_alive()
+        assert not worker_errors
+
+        assert seen.get("alpha", set()) == {alpha_skill}
+        assert seen.get("beta", set()) == {beta_skill}
+
+        assert observed["alpha"]["override"] == baseline_override
+        assert observed["beta"]["override"] == baseline_override
+
+        assert hermes_constants.get_hermes_home_override() == baseline_override
+        assert skills_tool.HERMES_HOME == str(alpha_home)
+        assert skills_tool.SKILLS_DIR == alpha_skills_dir
+        assert skill_manager_tool.HERMES_HOME == str(alpha_home)
+        assert skill_manager_tool.SKILLS_DIR == alpha_skills_dir
+        assert os.environ.get("HERMES_HOME") == str(alpha_home)
+    finally:
+        thread_alpha.join(timeout=1)
+        thread_beta.join(timeout=1)
+        release_alpha.set()
+
+        if baseline_env_has:
+            if baseline_env_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = baseline_env_home
+        else:
+            os.environ.pop("HERMES_HOME", None)
+
+        skills_tool.SKILLS_DIR = baseline_skill_dir
+        if baseline_skill_home is not None:
+            skills_tool.HERMES_HOME = baseline_skill_home
+        else:
+            skills_tool.__dict__.pop("HERMES_HOME", None)
+
+        skill_manager_tool.SKILLS_DIR = baseline_skill_manager_dir
+        if baseline_skill_manager_home is not None:
+            skill_manager_tool.HERMES_HOME = baseline_skill_manager_home
+        else:
+            skill_manager_tool.__dict__.pop("HERMES_HOME", None)
+
+
 def test_profile_env_for_background_worker_resets_override_when_dynamic_check_raises(
     tmp_path,
     monkeypatch,
