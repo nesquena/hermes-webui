@@ -5293,7 +5293,9 @@ function _syncSessionAttentionSoundState(sessions){
       ?_attentionSoundKey(sid,kind,count):`${sid}:${sig}`;
     if(prev!==sig&&retry instanceof Map&&retryKey!==retryKeyForSignature) retry.delete(sid);
     const shouldRetry=typeof _attentionSoundKey==='function'
-      &&retryKey===_attentionSoundKey(sid,kind,count)&&retryAttempts===1;
+      &&retryKey===_attentionSoundKey(sid,kind,count)
+      &&(retryAttempts===1
+        ||(typeof _attentionRetryEligible==='function'&&_attentionRetryEligible(sid,kind,count)));
     if(prev!==sig||shouldRetry){
       const s=(Array.isArray(sessions)?sessions:[]).find(item=>item&&item.session_id===sid)||{session_id:sid};
       const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;

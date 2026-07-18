@@ -271,6 +271,83 @@ const sync = payload => new Promise(resolve => {{
     return json.loads(completed.stdout)
 
 
+def _run_backoff_rearm_probe() -> dict:
+    """After the retry bound, an unchanged pending signature must become
+    deliverable again once the failure backoff elapses (never a permanent block)."""
+    if NODE is None:  # pragma: no cover - node is installed in CI
+        pytest.skip("node not on PATH")
+    functions = "\n".join(
+        (
+            _function_source(MESSAGES_JS, "_attentionSoundKey"),
+            _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_clearAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_attentionRetryBackoffMs"),
+            _function_source(MESSAGES_JS, "_attentionRetryEligible"),
+            _function_source(MESSAGES_JS, "_deliverAttentionNotification"),
+            _function_source(MESSAGES_JS, "sendBrowserNotification"),
+            _function_source(SESSIONS_JS, "_sessionAttentionSoundSignature"),
+            _function_source(SESSIONS_JS, "_syncSessionAttentionSoundState"),
+        )
+    )
+    script = f"""
+global.window = global;
+global.document = {{hidden: true}};
+global.location = {{origin: 'https://example.test', href: 'https://example.test/'}};
+global.S = {{session: {{session_id: 'other'}}}};
+global._notificationsEnabled = true;
+global._isBackgroundedForBrowserNotification = () => true;
+global._sessionUrlForSid = sid => `/?session=${{sid}}`;
+global.assistantDisplayName = () => 'Hermes';
+global.requestNotificationPermission = () => Promise.resolve('granted');
+const shown = [];
+function Notification() {{ throw new Error('direct fallback should not run'); }}
+Notification.permission = 'granted';
+global.Notification = Notification;
+global._showPwaNotification = (title, body, options) => new Promise((resolve, reject) => {{
+  shown.push({{sid: options.sid, title}});
+  setTimeout(() => reject(new Error('delivery failed')), 0);
+}});
+global.playAttentionSound = () => {{}};
+let _sessionAttentionSoundPrimed = true;
+const _sessionAttentionSoundState = new Map();
+{functions}
+const attention = count => [{{session_id:'target',title:'Build',attention:{{kind:'approval',count}}}}];
+const sync = payload => new Promise(resolve => {{
+  _syncSessionAttentionSoundState(payload);
+  setTimeout(resolve, 10);
+}});
+const age = ms => {{
+  const state = window._attentionNotificationRetryKeys.get('target');
+  state.lastFailedAt -= ms;
+  window._attentionNotificationRetryKeys.set('target', state);
+}};
+(async () => {{
+  await sync(attention(1));
+  await sync(attention(1));
+  await sync(attention(1));
+  const blockedAttempts = shown.length;
+  const state = window._attentionNotificationRetryKeys.get('target');
+  const hadTimestamp = Number(state && state.lastFailedAt) > 0;
+  age(61000);
+  await sync(attention(1));
+  const agedAttempts = shown.length;
+  await sync(attention(1));
+  const reblockedAttempts = shown.length;
+  age(121000);
+  await sync(attention(1));
+  console.log(JSON.stringify({{
+    blockedAttempts, hadTimestamp, agedAttempts, reblockedAttempts,
+    totalAttempts: shown.length,
+  }}));
+}})();
+"""
+    completed = subprocess.run(
+        [NODE, "-e", script], cwd=REPO, check=True, text=True, capture_output=True
+    )
+    return json.loads(completed.stdout)
+
+
 def _run_active_switch_before_delivery_probe() -> dict:
     if NODE is None:  # pragma: no cover - node is installed in CI
         pytest.skip("node not on PATH")
@@ -449,13 +526,26 @@ def test_failed_attention_delivery_retries_once_then_rearms_for_new_attention():
     assert result["totalAttempts"] == 5
 
 
+def test_failed_attention_delivery_rearms_after_backoff_for_unchanged_signature():
+    result = _run_backoff_rearm_probe()
+
+    assert result["blockedAttempts"] == 2
+    assert result["hadTimestamp"] is True
+    assert result["agedAttempts"] == 3
+    assert result["reblockedAttempts"] == 3
+    assert result["totalAttempts"] == 4
+
+
 def test_switching_back_to_target_before_service_worker_delivery_cancels_alert():
     result = _run_active_switch_before_delivery_probe()
 
     assert result["shown"] == []
     assert result["delivered"] is False
     assert result["pending"] is None
-    assert result["retry"] == {"key": "target:approval:1", "attempts": 1}
+    retry = result["retry"]
+    assert retry["key"] == "target:approval:1"
+    assert retry["attempts"] == 1
+    assert retry["lastFailedAt"] > 0
 
 
 def test_active_session_attention_never_uses_background_delivery_seam():

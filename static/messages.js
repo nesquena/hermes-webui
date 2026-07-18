@@ -8590,6 +8590,25 @@ function _clearAttentionNotificationKey(sid){
   if(safeSid&&retry instanceof Map) retry.delete(safeSid);
 }
 
+function _attentionRetryBackoffMs(attempts){
+  return Math.min(300000,60000*Math.pow(2,Math.max(0,attempts-2)));
+}
+
+function _attentionRetryEligible(sid,kind,count){
+  // A failed delivery may try again: freely while under the attempt bound,
+  // and after an exponential backoff beyond it. Never a permanent block — a
+  // still-pending approval must stay reachable until it resolves or its
+  // signature changes.
+  const retry=window._attentionNotificationRetryKeys;
+  const state=retry instanceof Map?retry.get(String(sid||'')):null;
+  const key=typeof state==='string'?state:(state&&state.key);
+  if(key!==_attentionSoundKey(sid,kind,count)) return false;
+  const attempts=typeof state==='string'?1:Math.max(0,Number(state&&state.attempts)||0);
+  if(attempts<2) return true;
+  const lastFailedAt=Number(state&&state.lastFailedAt)||0;
+  return Date.now()-lastFailedAt>=_attentionRetryBackoffMs(attempts);
+}
+
 function _deliverAttentionNotification(sid,kind,count,title,body){
   const safeSid=String(sid||'');
   if(!safeSid||_hasAttentionNotificationKey(safeSid,kind,count)) return false;
@@ -8604,7 +8623,7 @@ function _deliverAttentionNotification(sid,kind,count,title,body){
   const priorRetry=retry.get(safeSid);
   const priorRetryKey=typeof priorRetry==='string'?priorRetry:(priorRetry&&priorRetry.key);
   const priorRetryAttempts=typeof priorRetry==='string'?1:Math.max(0,Number(priorRetry&&priorRetry.attempts)||0);
-  if(priorRetryKey===key&&priorRetryAttempts>=2) return false;
+  if(priorRetryKey===key&&priorRetryAttempts>=2&&!_attentionRetryEligible(safeSid,kind,count)) return false;
   pending.set(safeSid,key);
   if(priorRetryKey===key) retry.delete(safeSid);
   const release=()=>{
@@ -8618,7 +8637,7 @@ function _deliverAttentionNotification(sid,kind,count,title,body){
   const failed=()=>{
     if(pending.get(safeSid)!==key) return;
     release();
-    retry.set(safeSid,{key,attempts:priorRetryKey===key?priorRetryAttempts+1:1});
+    retry.set(safeSid,{key,attempts:priorRetryKey===key?priorRetryAttempts+1:1,lastFailedAt:Date.now()});
   };
   try{
     return sendBrowserNotification(title,body,{
