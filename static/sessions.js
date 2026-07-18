@@ -986,6 +986,38 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   _rememberObservedStreamingSession(s);
 }
 
+function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId='') {
+  if(!event||typeof event!=='object') return '';
+  const sourceType=String(
+    event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
+  ).trim();
+  if(sourceType!==expectedType) return '';
+  const eventId=String(event.event_id||event.lastEventId||event.last_event_id||'').trim();
+  const eventRunId=String(event.run_id||'').trim();
+  const eventIdRunId=eventId.includes(':')?eventId.slice(0,eventId.lastIndexOf(':')):'';
+  if(eventRunId&&eventIdRunId&&eventRunId!==eventIdRunId) return '';
+  const effectiveRunId=eventRunId||eventIdRunId;
+  const expectedRun=String(expectedRunId||'').trim();
+  if(expectedRun&&!effectiveRunId) return '';
+  if(expectedRun&&effectiveRunId&&effectiveRunId!==expectedRun) return '';
+  if(eventId) return `event:${eventId}`;
+  const hasSeq=event.seq!==undefined&&event.seq!==null&&event.seq!=='';
+  return effectiveRunId&&hasSeq?`run-seq:${effectiveRunId}:${String(event.seq)}`:'';
+}
+
+function _anchorActivitySceneHasRecoveryState(scene) {
+  if (!scene || scene.version !== 'activity_scene_v1') return false;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const expectedRunId=String(identity.run_id||identity.stream_id||'').trim();
+  const hasOutcome=(events,expectedType)=>Array.isArray(events)
+    &&events.some((event)=>!!_anchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRunId));
+  return Boolean(
+    (Array.isArray(scene.activity_rows) && scene.activity_rows.length)
+    || hasOutcome(scene.artifacts,'artifact_reference')
+    || hasOutcome(scene.side_effects,'state_saved')
+  );
+}
+
 function _inflightHasVisibleLiveState(inflight) {
   if (!inflight || typeof inflight !== 'object') return false;
   if (String(inflight.lastAssistantText || '').trim()) return true;
@@ -1049,7 +1081,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=_anchorActivitySceneHasRecoveryState(anchorActivityScene);
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     messages,
@@ -1067,6 +1099,52 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
     activityBurstAnchors,
   };
+}
+
+function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot){
+  if(!inflight||typeof inflight!=='object'||!serverSnapshot||typeof serverSnapshot!=='object') return false;
+  const journalScene=serverSnapshot.anchorActivityScene;
+  if(!journalScene||journalScene.version!=='activity_scene_v1') return false;
+  const cachedScene=(inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1')
+    ? inflight.anchorActivityScene
+    : null;
+  const cachedStream=String(cachedScene&&cachedScene.identity&&cachedScene.identity.stream_id||'').trim();
+  const journalStream=String(journalScene.identity&&journalScene.identity.stream_id||'').trim();
+  if(cachedStream&&journalStream&&cachedStream!==journalStream) return false;
+  const cachedRun=String(cachedScene&&cachedScene.identity&&(cachedScene.identity.run_id||cachedScene.identity.stream_id)||'').trim();
+  const journalRun=String(journalScene.identity&&(journalScene.identity.run_id||journalScene.identity.stream_id)||'').trim();
+  const mergeCollection=(journalEvents,cachedEvents,expectedType)=>{
+    const merged=[];
+    const seen=new Set();
+    for(const [events,expectedRun] of [[journalEvents,journalRun],[cachedEvents,cachedRun]]){
+      for(const event of (Array.isArray(events)?events:[])){
+        const identityKey=_anchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun);
+        if(!identityKey||seen.has(identityKey)) continue;
+        seen.add(identityKey);
+        merged.push(event);
+      }
+    }
+    return merged;
+  };
+  const artifacts=mergeCollection(journalScene.artifacts,cachedScene&&cachedScene.artifacts,'artifact_reference');
+  const sideEffects=mergeCollection(journalScene.side_effects,cachedScene&&cachedScene.side_effects,'state_saved');
+  if(!artifacts.length&&!sideEffects.length) return false;
+  inflight.anchorActivityScene={
+    ...(cachedScene||journalScene),
+    identity:{
+      ...((cachedScene&&cachedScene.identity)||{}),
+      ...((journalScene&&journalScene.identity)||{}),
+    },
+    artifacts,
+    side_effects:sideEffects,
+  };
+  const journalSeq=Number(serverSnapshot.lastRunJournalSeq||0);
+  const cachedSeq=Number(inflight.lastRunJournalSeq||0);
+  inflight.lastRunJournalSeq=Math.max(
+    Number.isFinite(cachedSeq)?cachedSeq:0,
+    Number.isFinite(journalSeq)?journalSeq:0
+  );
+  return true;
 }
 
 function _runtimeJournalAnchorActivitySceneForSession(sid){
@@ -2028,7 +2106,12 @@ async function loadSession(sid){
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 
-  if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
+  if(
+    activeStreamId
+    &&INFLIGHT[sid]
+    &&!_inflightHasVisibleLiveState(INFLIGHT[sid])
+    &&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)
+  ){
     // A stale cursor-only INFLIGHT entry is worse than no cache: replay would
     // resume after lastRunJournalSeq while the pane has no prose/tool DOM to
     // preserve, making a session switch look like the live turn vanished.
@@ -2041,6 +2124,8 @@ async function loadSession(sid){
     : null;
   if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
     INFLIGHT[sid]=serverLiveSnapshot;
+  }else if(serverLiveSnapshot&&INFLIGHT[sid]){
+    _mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot);
   }
 
   if(INFLIGHT[sid]){
@@ -2108,7 +2193,7 @@ async function loadSession(sid){
     const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
       String(INFLIGHT[sid].lastAssistantText||'').trim()||
       String(INFLIGHT[sid].lastReasoningText||'').trim()||
-      !!(INFLIGHT[sid].anchorActivityScene&&Array.isArray(INFLIGHT[sid].anchorActivityScene.activity_rows)&&INFLIGHT[sid].anchorActivityScene.activity_rows.length)||
+      _anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)||
       (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
       (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
     ));

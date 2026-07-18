@@ -3,7 +3,7 @@
 - **Status:** Implemented
 - **Author:** @franksong2702
 - **Created:** 2026-06-10
-- **Updated:** 2026-07-16
+- **Updated:** 2026-07-18
 - **Tracking issue:** [#3926](https://github.com/nesquena/hermes-webui/issues/3926)
 - **Parent contract:** [Live-to-Final Assistant Replies](./live-to-final-assistant-replies.md) ([#3400](https://github.com/nesquena/hermes-webui/issues/3400))
 - **Related RFCs:** [Transparent Stream](./transparent-stream-activity-mode.md), [Hermes Run Adapter Contract](./hermes-run-adapter-contract.md), [WebUI Run State Consistency Contract](./webui-run-state-consistency-contract.md), [Turn Journal](./turn-journal.md), [Pending Intent Controls](./webui-pending-intent-controls.md)
@@ -319,10 +319,11 @@ AssistantTurnAnchor
     tool_completed
     lifecycle_status
     control_boundary
-    artifact_reference
     terminal_status
   artifacts[]
+    artifact_reference
   side_effects[]
+    state_saved
   usage
 ```
 
@@ -494,7 +495,7 @@ long-term model themselves.
 | `cancel` | `terminal_status` with `cancelled` or `interrupted` semantics. |
 | `error` / `apperror` | `terminal_status` with error metadata. |
 | `warning` | `lifecycle_status` if user-visible, otherwise diagnostic metadata. |
-| `state_saved` | `artifact_reference` or side effect depending on whether it is user-meaningful durable output. |
+| `state_saved` | Bounded persistent-state outcome owned by `side_effects[]`; not an activity row by default. |
 | `bg_task_complete` | session/background-task side effect; may become `control_boundary` only when it starts or explains a visible assistant turn. |
 
 ### Current non-activity sources
@@ -595,6 +596,15 @@ Conceptual reconstruction steps:
 5. fill compatible gaps from `INFLIGHT`,
 6. render Compact Worklog or Transparent Stream from the reconstructed anchor,
 7. show `restoring` or `degraded` when evidence is incomplete.
+
+Run-journal snapshot reconstruction keeps `artifact_reference` and
+`state_saved` as source-event envelopes in `activity_scene_v1.artifacts[]` and
+`side_effects[]`. Each envelope retains `event_id`, `run_id`, `stream_id`,
+`seq`, and `created_at`, but its payload is reduced to the event-specific public
+allowlist. These outcomes never enter `activity_rows`. A snapshot containing
+only outcomes is still valid recovery state: it may create or preserve
+`INFLIGHT`, hydrate the active Anchor, and dedupe repeated snapshot/replay
+delivery by event identity without creating a Worklog row.
 
 Reconstruction is not the normal creation path. The normal path creates an
 anchor after `/api/chat/start` succeeds and returns `stream_id`. Reconstruction

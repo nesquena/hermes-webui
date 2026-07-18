@@ -11,6 +11,7 @@ import errno
 import io
 import gzip
 import json
+import math
 from api.sse_chunked import end_sse_headers
 import logging
 import os
@@ -3068,6 +3069,13 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
 
 
 _RUN_JOURNAL_TOOL_ID_KEYS = ("tid", "id", "tool_call_id", "tool_use_id", "call_id")
+_RUN_JOURNAL_OUTCOME_EVENTS = frozenset({"artifact_reference", "state_saved"})
+_RUN_JOURNAL_ARTIFACT_PAYLOAD_KEYS = (
+    "kind",
+    "path",
+    "source_tool",
+    "tool_call_id",
+)
 
 
 def _run_journal_snapshot_tool_id(payload: dict | None) -> str:
@@ -3090,6 +3098,164 @@ def _truncate_journal_snapshot_value(value, *, limit: int = 120):
     return value
 
 
+def _bounded_journal_outcome_string(value, *, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if (
+        not cleaned
+        or len(cleaned) > limit
+        or "\x00" in cleaned
+        or "\n" in cleaned
+        or "\r" in cleaned
+    ):
+        return None
+    return cleaned
+
+
+def _bounded_journal_artifact_path(value) -> str | None:
+    path = _bounded_journal_outcome_string(value, limit=4096)
+    if (
+        not path
+        or path.startswith(("/", "\\"))
+        or "\\" in path
+        or "://" in path
+        or re.match(r"^[A-Za-z]:[\\/]", path)
+    ):
+        return None
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    return path
+
+
+def _run_journal_outcome_seq(event: dict, event_id: str | None) -> int | None:
+    raw_seq = event.get("seq")
+    if raw_seq in (None, "") and event_id and ":" in event_id:
+        raw_seq = event_id.rsplit(":", 1)[-1]
+    if isinstance(raw_seq, bool):
+        return None
+    if isinstance(raw_seq, int):
+        seq = raw_seq
+    elif isinstance(raw_seq, float):
+        if not math.isfinite(raw_seq) or not raw_seq.is_integer():
+            return None
+        seq = int(raw_seq)
+    elif isinstance(raw_seq, str) and re.fullmatch(r"[1-9][0-9]*", raw_seq.strip()):
+        seq = int(raw_seq.strip())
+    else:
+        return None
+    return seq if seq > 0 else None
+
+
+def _run_journal_outcome_created_at(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(float(value)) else None
+    return _bounded_journal_outcome_string(value, limit=128)
+
+
+def _run_journal_outcome_event(
+    event: dict,
+    *,
+    event_name: str,
+    session_id: str,
+    stream_id: str,
+    fallback_run_id: str,
+) -> dict | None:
+    if event_name not in _RUN_JOURNAL_OUTCOME_EVENTS:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    raw_event_id_value = event.get("event_id")
+    raw_event_id = _bounded_journal_outcome_string(raw_event_id_value, limit=512)
+    if raw_event_id_value not in (None, "") and raw_event_id is None:
+        return None
+    seq = _run_journal_outcome_seq(event, raw_event_id)
+    if seq is None:
+        return None
+
+    raw_stream_id_value = event.get("stream_id")
+    raw_stream_id = _bounded_journal_outcome_string(raw_stream_id_value, limit=512)
+    if raw_stream_id_value not in (None, "") and raw_stream_id is None:
+        return None
+    if raw_stream_id and raw_stream_id != stream_id:
+        return None
+
+    raw_run_id_value = event.get("run_id")
+    raw_run_id = _bounded_journal_outcome_string(raw_run_id_value, limit=512)
+    if raw_run_id_value not in (None, "") and raw_run_id is None:
+        return None
+
+    event_id_run_id = None
+    if raw_event_id:
+        if ":" not in raw_event_id:
+            return None
+        event_id_run_id = _bounded_journal_outcome_string(
+            raw_event_id.rsplit(":", 1)[0],
+            limit=512,
+        )
+        if not event_id_run_id:
+            return None
+        try:
+            event_id_seq = int(raw_event_id.rsplit(":", 1)[-1])
+        except (TypeError, ValueError):
+            return None
+        if event_id_seq != seq:
+            return None
+    if raw_run_id and event_id_run_id and raw_run_id != event_id_run_id:
+        return None
+    run_id = raw_run_id or fallback_run_id or stream_id
+    if event_id_run_id and event_id_run_id != run_id:
+        return None
+    event_id = f"{run_id}:{seq}"
+    if raw_event_id and raw_event_id != event_id:
+        return None
+
+    if event_name == "artifact_reference":
+        kind = _bounded_journal_outcome_string(payload.get("kind"), limit=128)
+        path = _bounded_journal_artifact_path(payload.get("path"))
+        if not kind or not path:
+            return None
+        bounded_payload = {"kind": kind, "path": path}
+        for key in _RUN_JOURNAL_ARTIFACT_PAYLOAD_KEYS[2:]:
+            value = _bounded_journal_outcome_string(payload.get(key), limit=512)
+            if value:
+                bounded_payload[key] = value
+    else:
+        payload_session_id = _bounded_journal_outcome_string(
+            payload.get("session_id"),
+            limit=512,
+        )
+        kind = _bounded_journal_outcome_string(payload.get("kind"), limit=128)
+        action = _bounded_journal_outcome_string(payload.get("action"), limit=128)
+        if payload_session_id != session_id or not kind or not action:
+            return None
+        bounded_payload = {
+            "session_id": payload_session_id,
+            "kind": kind,
+            "action": action,
+        }
+        name = _bounded_journal_outcome_string(payload.get("name"), limit=512)
+        if name:
+            bounded_payload["name"] = name
+
+    return {
+        "source_event_type": event_name,
+        "event_id": event_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "seq": seq,
+        "created_at": _run_journal_outcome_created_at(event.get("created_at")),
+        "payload": bounded_payload,
+    }
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3106,6 +3272,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     session_id = str(summary.get("session_id") or "")
     if not session_id:
         return None
+    fallback_run_id = str(summary.get("run_id") or stream_id).strip() or stream_id
     journal = read_run_events(session_id, stream_id)
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
@@ -3115,6 +3282,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    anchor_artifacts: list[dict] = []
+    anchor_side_effects: list[dict] = []
+    seen_outcome_event_ids: set[str] = set()
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3197,6 +3367,19 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         event_name = str(event.get("event") or event.get("type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
+        if event_name in _RUN_JOURNAL_OUTCOME_EVENTS:
+            outcome = _run_journal_outcome_event(
+                event,
+                event_name=event_name,
+                session_id=session_id,
+                stream_id=stream_id,
+                fallback_run_id=fallback_run_id,
+            )
+            if outcome and outcome["event_id"] not in seen_outcome_event_ids:
+                seen_outcome_event_ids.add(outcome["event_id"])
+                target = anchor_artifacts if event_name == "artifact_reference" else anchor_side_effects
+                target.append(outcome)
+            continue
         if event_name == "token":
             text = str(payload.get("text") or "")
             if text:
@@ -3525,7 +3708,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
-    if not anchor_activity_rows and events:
+    has_reconstructed_outcomes = bool(anchor_artifacts or anchor_side_effects)
+    if not anchor_activity_rows and events and not has_reconstructed_outcomes:
         anchor_activity_rows.append(
             {
                 "row_id": f"lifecycle:{stream_id}:running",
@@ -3619,6 +3803,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "artifacts": anchor_artifacts,
+            "side_effects": anchor_side_effects,
         },
     }
 

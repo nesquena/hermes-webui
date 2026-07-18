@@ -2005,6 +2005,29 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry, scene, context){
+  if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function'||!anchorRegistry) return false;
+  if(!scene||scene.version!=='activity_scene_v1') return false;
+  const collections=[
+    [Array.isArray(scene.artifacts)?scene.artifacts:[],'artifact_reference'],
+    [Array.isArray(scene.side_effects)?scene.side_effects:[],'state_saved'],
+  ];
+  let accepted=false;
+  for(const [events,expectedType] of collections){
+    for(const event of events){
+      if(!event||typeof event!=='object') continue;
+      const sourceType=String(
+        event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
+      ).trim();
+      if(sourceType!==expectedType) continue;
+      let result=null;
+      try{ result=anchorApi.applyAssistantTurnAnchorSourceEvent(anchorRegistry,event,context||{}); }catch(_){ continue; }
+      if(result&&(result.applied||result.reason==='duplicate')) accepted=true;
+    }
+  }
+  return accepted;
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -3987,6 +4010,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
   _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
+  const _inflightAnchorActivityScene=INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene;
+  if(_inflightAnchorActivityScene&&_inflightAnchorActivityScene.version==='activity_scene_v1'){
+    const _outcomeSceneIdentity=(_inflightAnchorActivityScene.identity&&typeof _inflightAnchorActivityScene.identity==='object')
+      ?_inflightAnchorActivityScene.identity
+      :{};
+    const _outcomeSceneStreamId=String(_outcomeSceneIdentity.stream_id||streamId||'');
+    const _outcomeSceneRunId=String(_outcomeSceneIdentity.run_id||_outcomeSceneStreamId||'');
+    _applyAnchorRegistryOutcomesFromActivityScene(
+      _anchorApi,
+      _anchorRegistry,
+      _inflightAnchorActivityScene,
+      {session_id:activeSid,stream_id:_outcomeSceneStreamId,run_id:_outcomeSceneRunId}
+    );
+  }
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];

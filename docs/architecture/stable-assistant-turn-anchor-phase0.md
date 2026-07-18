@@ -355,3 +355,21 @@ The registry tests also pin the reconnect/settlement race shape: if one run is
 observed live, replayed, and settled in either order, duplicate event envelopes
 are skipped and the resulting anchor has the same activity list, terminal state,
 final message reference, final-answer snapshot, and usage metadata.
+
+## Run-Journal Outcome Reconstruction (#6212)
+
+`_run_journal_live_snapshot()` reconstructs `artifact_reference` and
+`state_saved` events into `activity_scene_v1.artifacts[]` and `side_effects[]`,
+not `activity_rows`. The snapshot entries remain normalizer-ready source-event
+envelopes with `event_id`, `run_id`, `stream_id`, `seq`, and `created_at`.
+Artifact payloads are limited to `kind`, `path`, `source_tool`, and
+`tool_call_id`; state-save payloads are limited to `session_id`, `kind`,
+`action`, and `name`. Malformed, foreign-session, unsafe-path, or duplicate
+outcome entries are excluded during reconstruction.
+
+`static/sessions.js` treats an outcome-only scene as recoverable `INFLIGHT`
+state even when `activity_rows` is empty. `static/messages.js` separately
+iterates `scene.artifacts` and `scene.side_effects` and feeds those envelopes to
+the existing Anchor normalizer/registry. Repeated hydration is safe because the
+registry dedupes by event identity. Outcome hydration does not render or add a
+Compact Worklog / Transparent Stream row.
