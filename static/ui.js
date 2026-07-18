@@ -7277,6 +7277,19 @@ function renderMd(raw){
     media_stash.push(ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
+  // ── Bare local file paths → probe placeholders (deliverable-mode parity) ──
+  // Messaging platforms auto-attach bare paths like /tmp/chart.png; the WebUI
+  // mirrors that via a PROBE: the path renders as a placeholder span, and
+  // probeBarePathMedia() only swaps it for real media when /api/media confirms
+  // the file exists and is allowed — a 403/404 leaves the path as plain text,
+  // so hallucinated or referenced-only paths never produce broken embeds.
+  // Runs after the fence/inline-code stashes (code samples stay literal) and
+  // before the link passes; the lookbehind excludes URL/link/attr contexts.
+  const bare_probe_stash=[];
+  s=s.replace(/(?<![/:\w.`("'=\[\]])(~\/|\/)((?:[\w.\-]+\/)*[\w.\-]+\.(?:png|jpe?g|gif|webp|avif|svg|mp3|wav|m4a|ogg|flac|mp4|mov|webm|mkv|pdf|html?|csv|xlsx?|docx?|pptx?|zip|txt|md|json|diff|patch))\b(?![\w./-])/gi,(m0,lead,rest)=>{
+    bare_probe_stash.push(lead+rest);
+    return '\x00J'+(bare_probe_stash.length-1)+'\x00';
+  });
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -7711,6 +7724,11 @@ function renderMd(raw){
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
+  // ── Restore bare-path probes → placeholder spans (path stays visible) ─────
+  s=s.replace(/\x00J(\d+)\x00/g,(_,i)=>{
+    const p=bare_probe_stash[+i]||'';
+    return `<span class="bare-media-probe" data-path="${esc(p)}">${esc(p)}</span>`;
+  });
   // ── Restore artifact stash → sandboxed HTML preview with title/publish ────
   s=s.replace(/\x00T(\d+)\x00/g,(_,i)=>{
     const a=artifact_stash[+i]||{};
@@ -18423,9 +18441,42 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  probeBarePathMedia(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
+}
+
+// ── Bare-path probes: swap placeholder spans for media once /api/media
+// confirms the file exists and is allowed (deliverable-mode parity). A
+// cheap 1-byte Range GET is the existence check; 403/404/network errors
+// degrade the span back to plain text, so nothing ever breaks visibly.
+const _barePathProbeCache=new Map(); // path -> true|false (this page load)
+function probeBarePathMedia(container){
+  const root=container||document;
+  const probes=root.querySelectorAll('.bare-media-probe:not([data-probed])');
+  if(!probes.length) return;
+  const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+  probes.forEach(el=>{
+    el.setAttribute('data-probed','1');
+    const path=el.dataset.path||'';
+    const swap=ok=>{
+      if(!el.isConnected) return;
+      if(!ok){el.replaceWith(document.createTextNode(path));return;}
+      const holder=document.createElement('span');
+      holder.className='bare-media-embed';
+      holder.innerHTML=_inlineMediaHtmlForRef(path,sid);
+      el.replaceWith(holder);
+      // Hydrate any lazy-load placeholders the media HTML produced.
+      const parent=holder.parentElement||holder;
+      loadDiffInline(parent);loadCsvInline(parent);loadPdfInline(parent);loadHtmlInline(parent);
+    };
+    if(_barePathProbeCache.has(path)){swap(_barePathProbeCache.get(path));return;}
+    const url='api/media?path='+encodeURIComponent(path)+(sid?'&session_id='+encodeURIComponent(sid):'');
+    fetch(url,{headers:{'Range':'bytes=0-0'}})
+      .then(r=>{const ok=r.status===200||r.status===206;_barePathProbeCache.set(path,ok);swap(ok);})
+      .catch(()=>{swap(false);});
+  });
 }
 
 function highlightCode(container) {

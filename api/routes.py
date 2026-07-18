@@ -18959,7 +18959,9 @@ def _handle_media(handler, parsed):
 
     # Resolve the path and check it is within an allowed root
     try:
-        target = Path(raw_path).resolve()
+        # expanduser: agent replies routinely reference ~/workspace/... paths
+        # (the gateway's deliverable pipeline expands them the same way).
+        target = Path(_os.path.expanduser(raw_path)).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
 

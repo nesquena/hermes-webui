@@ -198,3 +198,51 @@ class TestAuditFixes:
         assert "artifact_make_public" in UI_JS
         occurrences = len(re.findall(r"^\s*artifact_make_public:", I18N_JS, re.M))
         assert occurrences >= 2
+
+
+class TestBarePathProbes:
+    """WP5: bare local paths become probe placeholders (deliverable parity)."""
+
+    def test_bare_path_becomes_probe_span(self, driver_path):
+        html = _render(driver_path, "Chart liegt unter /tmp/chart.png bereit")
+        assert 'class="bare-media-probe"' in html
+        assert 'data-path="/tmp/chart.png"' in html
+        assert ">/tmp/chart.png</span>" in html, "path must stay visible as text"
+
+    def test_tilde_path_becomes_probe_span(self, driver_path):
+        html = _render(driver_path, "Siehe ~/ws/report.pdf dazu")
+        assert 'data-path="~/ws/report.pdf"' in html
+
+    def test_bare_path_in_fence_stays_literal(self, driver_path):
+        html = _render(driver_path, "```\ncp /tmp/chart.png /dest/\n```")
+        assert "bare-media-probe" not in html
+
+    def test_bare_path_in_inline_code_stays_literal(self, driver_path):
+        html = _render(driver_path, "Nutze `/tmp/chart.png` als Quelle")
+        assert "bare-media-probe" not in html
+
+    def test_markdown_link_target_not_probed(self, driver_path):
+        html = _render(driver_path, "[Download](/tmp/chart.png) hier")
+        assert "bare-media-probe" not in html
+
+    def test_url_paths_not_probed(self, driver_path):
+        html = _render(driver_path, "Bild: https://example.com/img/chart.png fertig")
+        assert "bare-media-probe" not in html
+
+    def test_non_media_extension_not_probed(self, driver_path):
+        html = _render(driver_path, "Config unter /etc/nginx/nginx.conf prüfen")
+        assert "bare-media-probe" not in html
+
+    def test_media_token_still_renders_directly(self, driver_path):
+        html = _render(driver_path, "MEDIA:/tmp/chart.png")
+        assert "msg-artifact-image" in html or "msg-media-img" in html
+        assert "bare-media-probe" not in html
+
+    def test_probe_loader_wiring(self):
+        assert "function probeBarePathMedia" in UI_JS
+        assert "probeBarePathMedia(container);" in UI_JS, (
+            "probe loader must run in postProcessRenderedMessages"
+        )
+        loader = UI_JS[UI_JS.find("function probeBarePathMedia"):][:2000]
+        assert "'Range':'bytes=0-0'" in loader, "existence check must be a 1-byte range GET"
+        assert "createTextNode(path)" in loader, "failed probes must degrade to plain text"
