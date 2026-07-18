@@ -12906,7 +12906,12 @@ function _bindTransparentFadeCleanup(body){
   body.addEventListener('animationend', e=>{
     const span = e.target;
     if(!span || !span.classList || !span.classList.contains('stream-fade-word')) return;
-    span.replaceWith(document.createTextNode(span.textContent || ''));
+    // Keep the animated inline node stable for the lifetime of the live turn.
+    // Replacing each word with a fresh text node makes native scroll anchoring
+    // choose a new anchor while the transcript is still growing, producing a
+    // visible vertical bounce. Final settlement rebuilds plain persisted DOM.
+    span.classList.remove('is-new');
+    if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
 }
 

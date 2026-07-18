@@ -1666,6 +1666,67 @@ global._anchorSceneTransparentNodeForRow = (row) => makeToolRow(row.version);
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_transparent_fade_cleanup_preserves_the_animated_node_as_the_scroll_anchor():
+    """Animation cleanup in transparent-activity path must not replace inline nodes.
+
+    The _bindTransparentFadeCleanup handler fires on animationend for every
+    .stream-fade-word.is-new span inside a transparent-activity prose row.
+    Replacing each word with a fresh text node makes native scroll anchoring
+    choose a new anchor while the transcript is still growing.  The cleanup
+    must keep the span identity, remove is-new, and clear --stream-fade-ms.
+    """
+    script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.env.UI_JS_PATH, 'utf8');
+function extractFunc(name){
+  const marker = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(marker);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start) + 1;
+  let depth = 1;
+  while(depth > 0 && i < src.length){
+    if(src[i] === '{') depth += 1;
+    else if(src[i] === '}') depth -= 1;
+    i += 1;
+  }
+  return src.slice(start, i);
+}
+const cleanup = extractFunc('_bindTransparentFadeCleanup');
+class FakeClassList {
+  constructor(names){ this.names=new Set(names); }
+  contains(name){ return this.names.has(name); }
+  remove(name){ this.names.delete(name); }
+}
+const listeners={};
+const document={createTextNode(text){ return {textContent:String(text)}; }};
+const body={
+  _transparentFadeCleanupBound:false,
+  addEventListener(name,fn){ listeners[name]=fn; },
+};
+eval(cleanup);
+_bindTransparentFadeCleanup(body);
+const span={
+  textContent:'stable anchor',
+  classList:new FakeClassList(['stream-fade-word','is-new']),
+  style:{
+    removed:[],
+    removeProperty(name){ this.removed.push(name); },
+  },
+  replacements:0,
+  replaceWith(){ this.replacements += 1; },
+};
+listeners.animationend({target:span});
+if(span.replacements!==0) throw new Error('fade cleanup replaced the active scroll-anchor node');
+if(span.classList.contains('is-new')) throw new Error('fade animation class was not cleared');
+if(!span.classList.contains('stream-fade-word')) throw new Error('stable fade node lost its identity');
+if(span.style.removed.join('|')!=='--stream-fade-ms') throw new Error('fade timing override was not cleared');
+process.stdout.write(JSON.stringify({passed:true}));
+"""
+    data = _run_node_script(script, str(ROOT / "static" / "ui.js"))
+    assert data["passed"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_transparent_live_thinking_refresh_preserves_scroll_container():
     script = """
 const fs = require('fs');
