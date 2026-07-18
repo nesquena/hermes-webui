@@ -341,6 +341,41 @@ def test_session_new_explicit_workspace_overrides_project_default(project_env, m
     )
 
 
+def test_session_new_valid_project_default_beats_stale_fallback_workspace(
+    project_env, monkeypatch, tmp_path
+):
+    """A valid project default must win before a stale lower-priority fallback is validated."""
+    import api.routes as routes
+
+    project_ws = str(tmp_path / "project-default")
+    stale_fallback = str(tmp_path / "stale-fallback")
+    _seed_project(project_env, dw=project_ws)
+
+    def fake_resolve(path):
+        path = str(path)
+        if path == stale_fallback:
+            raise ValueError("stale fallback")
+        return Path(path)
+
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", fake_resolve)
+
+    captured = []
+
+    def fake_new_session(**kwargs):
+        captured.append(kwargs)
+        return _FakeSession(workspace=kwargs.get("workspace"))
+
+    monkeypatch.setattr(routes, "new_session", fake_new_session)
+
+    h = _post("/api/session/new", {
+        "project_id": "proj1",
+        "fallback_workspace": stale_fallback,
+    })
+    assert h.status == 200, h.json_body()
+    assert captured[0]["workspace"] == project_ws
+    assert captured[0]["project_id"] == "proj1"
+
+
 def test_session_new_stale_project_default_falls_back_to_fallback_workspace(
     project_env, monkeypatch, tmp_path
 ):

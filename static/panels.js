@@ -6731,7 +6731,9 @@ async function switchToProfile(name) {
       S._profileDefaultWorkspace = data.default_workspace;
       // Also set the one-shot flag consumed by newSession() so the first new
       // session after a profile switch inherits this workspace (#424).
-      S._profileSwitchWorkspace = data.default_workspace;
+      if (!_callerOwnsNewSession) {
+        S._profileSwitchWorkspace = data.default_workspace;
+      }
 
       if (S.session && !sessionInProgress) {
         // Empty session (no messages yet) — safe to update it in place

@@ -81,6 +81,7 @@ def _run_new_session_case(
     all_projects=None,
     profile_default_workspace=None,
     switch_workspace=None,
+    switch_response_workspace=None,
     session=None,
     messages=None,
     active_profile="default",
@@ -174,8 +175,8 @@ globalThis.S = {
   activeProfile: args.activeProfile || 'default',
   activeProfileIsDefault: !args.activeProfile || args.activeProfile === 'default',
   _pendingSessionToolsets: null,
-  _profileSwitchWorkspace: args.switchWorkspace || null,
-  _profileDefaultWorkspace: args.profileDefaultWorkspace || null,
+  _profileSwitchWorkspace: args.switchWorkspace !== undefined ? args.switchWorkspace : null,
+  _profileDefaultWorkspace: args.profileDefaultWorkspace !== undefined ? args.profileDefaultWorkspace : null,
 };
 globalThis._defaultModel = null;
 globalThis._activeProvider = 'openai';
@@ -216,7 +217,7 @@ globalThis.api = async (url, opts) => {
     return {
       active: body.name || 'default',
       is_default: !body.name || body.name === 'default',
-      default_workspace: args.switchWorkspace !== undefined ? args.switchWorkspace : (args.profileDefaultWorkspace || null),
+      default_workspace: args.switchResponseWorkspace !== undefined ? args.switchResponseWorkspace : (args.profileDefaultWorkspace || null),
       default_model: null,
       default_model_provider: null,
     };
@@ -263,6 +264,7 @@ eval(switchToProfileSrc);
         "profileDefaultWorkspace": profile_default_workspace,
         "activeProfile": active_profile,
         "switchWorkspace": switch_workspace,
+        "switchResponseWorkspace": switch_response_workspace,
         "showAllProfiles": show_all_profiles,
         "messages": messages or [],
         "timeoutMs": timeout_ms,
@@ -402,6 +404,7 @@ def test_new_session_cross_profile_project_switches_before_request():
         ],
         profile_default_workspace="/workspace/profile",
         switch_workspace="/workspace/profile-switch",
+        switch_response_workspace="/workspace/destination-default",
         show_all_profiles=True,
         return_meta=True,
     )
@@ -424,10 +427,11 @@ def test_cross_profile_project_new_owns_single_session_creation_during_switch():
                 "project_id": "foreign-project",
                 "name": "Foreign",
                 "profile": "other",
-                "default_workspace": "/workspace/foreign",
+                "default_workspace": "/workspace/project-default",
             },
         ],
-        switch_workspace="/workspace/profile-switch",
+        switch_workspace="/workspace/one-shot",
+        switch_response_workspace="/workspace/destination-profile-default",
         session={"session_id": "session-1", "workspace": "/workspace/session"},
         messages=[{"role": "user", "content": "keep"}],
         show_all_profiles=True,
@@ -437,7 +441,8 @@ def test_cross_profile_project_new_owns_single_session_creation_during_switch():
     assert out["switchCalls"] == ["other"]
     assert out["callCount"] == 1
     assert out["body"]["project_id"] == "foreign-project"
-    assert out["body"]["workspace"] == "/workspace/profile-switch"
+    assert out["body"]["workspace"] == "/workspace/one-shot"
+    assert "fallback_workspace" not in out["body"]
 
 
 _HELPER = r"""

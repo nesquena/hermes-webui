@@ -13040,14 +13040,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
-        try:
-            fallback_workspace = (
-                str(resolve_trusted_workspace(body.get("fallback_workspace")))
-                if body.get("fallback_workspace")
-                else None
-            )
-        except (TypeError, ValueError) as e:
-            return bad(handler, str(e))
+        fallback_workspace = None
         # Use the project's stored default workspace when no explicit workspace was supplied.
         if not workspace and _body_project_id:
             _proj_ws = _get_project_default_workspace_for_session(
@@ -13055,6 +13048,12 @@ def handle_post(handler, parsed) -> bool:
             )
             if _proj_ws:
                 workspace = _proj_ws
+        # Validate the lower-priority fallback only when it can still be selected.
+        if not workspace and body.get("fallback_workspace"):
+            try:
+                fallback_workspace = str(resolve_trusted_workspace(body["fallback_workspace"]))
+            except (TypeError, ValueError) as e:
+                return bad(handler, str(e))
         if not workspace and fallback_workspace:
             workspace = fallback_workspace
         worktree_info = None
