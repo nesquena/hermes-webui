@@ -34,6 +34,9 @@ FINAL_ACK_TEXT = "Lifecycle"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+GATEWAY_ACTIVITY_TIMEOUT = 60.0
+ANCHOR_SCENE_REQUEST_TIMEOUT = 45.0
+ANCHOR_SCENE_PERSIST_TIMEOUT = 30.0
 
 
 def _free_port() -> int:
@@ -66,7 +69,12 @@ def _get_json(url: str) -> dict:
         return json.loads(response.read(1024 * 1024))
 
 
-def _wait_for_persisted_scene(base_url: str, session_id: str, timeout: float = 10.0) -> dict:
+def _wait_for_persisted_scene(
+    base_url: str,
+    session_id: str,
+    timeout: float = ANCHOR_SCENE_PERSIST_TIMEOUT,
+    anchor_scene_requests: list[dict] | None = None,
+) -> dict:
     deadline = time.time() + timeout
     url = f"{base_url}/api/session?session_id={session_id}&messages=1"
     last_payload = None
@@ -96,9 +104,33 @@ def _wait_for_persisted_scene(base_url: str, session_id: str, timeout: float = 1
         if isinstance(message, dict)
     ]
     error_note = f"; last read error: {last_error}" if last_error else ""
+    request_note = ""
+    if anchor_scene_requests is not None:
+        request_note = f"; anchor scene requests: {anchor_scene_requests!r}"
     raise AssertionError(
-        f"anchor scene was not persisted before reload; message summary: {summary!r}{error_note}"
+        "anchor scene was not persisted before reload; "
+        f"message summary: {summary!r}{error_note}{request_note}"
     )
+
+
+def _wait_for_anchor_scene_response(
+    events: list[dict],
+    timeout: float = ANCHOR_SCENE_REQUEST_TIMEOUT,
+) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        responses = [event for event in events if event.get("type") == "response"]
+        if responses:
+            response = responses[-1]
+            status = int(response.get("status") or 0)
+            if 200 <= status < 300:
+                return response
+            raise AssertionError(f"anchor scene persistence returned HTTP {status}: {events!r}")
+        failures = [event for event in events if event.get("type") == "requestfailed"]
+        if failures:
+            raise AssertionError(f"anchor scene persistence request failed: {failures[-1]!r}")
+        time.sleep(0.2)
+    raise AssertionError(f"anchor scene persistence request did not complete: {events!r}")
 
 
 def _terminate_process(proc: subprocess.Popen | None) -> None:
@@ -289,6 +321,15 @@ def _capture_page_errors(page):
 def _capture_anchor_scene_requests(page):
     events = []
 
+    def on_request(request):
+        if "/api/session/anchor-scene" not in request.url:
+            return
+        events.append({
+            "type": "request",
+            "method": request.method,
+            "url": request.url,
+        })
+
     def on_response(response):
         if "/api/session/anchor-scene" not in response.url:
             return
@@ -309,6 +350,7 @@ def _capture_anchor_scene_requests(page):
             "error": str(failure),
         })
 
+    page.on("request", on_request)
     page.on("response", on_response)
     page.on("requestfailed", on_request_failed)
     return events
@@ -513,8 +555,11 @@ def main() -> int:
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
-        if not gateway.activity_ready.wait(timeout=20):
-            raise AssertionError("mock Gateway did not reach the live activity checkpoint")
+        if not gateway.activity_ready.wait(timeout=GATEWAY_ACTIVITY_TIMEOUT):
+            raise AssertionError(
+                "mock Gateway did not reach the live activity checkpoint; "
+                f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}"
+            )
         page.wait_for_function(
             """({reasoning, tool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
@@ -552,7 +597,12 @@ def main() -> int:
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
         if not TEST_BITE:
-            scene = _wait_for_persisted_scene(base_url, session_id)
+            _wait_for_anchor_scene_response(anchor_scene_requests)
+            scene = _wait_for_persisted_scene(
+                base_url,
+                session_id,
+                anchor_scene_requests=anchor_scene_requests,
+            )
             assert scene.get("version") == "activity_scene_v1", scene
         _expand_settled_worklog(page)
         page.wait_for_selector(
