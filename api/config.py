@@ -3848,6 +3848,12 @@ def resolve_model_reasoning_efforts(
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
         return raw
+    # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
+    # disabled, so the 'none' sentinel must NOT appear in their supported list —
+    # otherwise the UI offers an "off" option that has no effect and contradicts
+    # the forced-tier contract. (#6219 round-3)
+    if _zai_glm_classification(model_id, provider_id) == "forced":
+        return []
     # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
     # the ceiling filter only knows the reasoning LEVELS.
     had_none = "none" in raw
@@ -3980,6 +3986,13 @@ def coerce_reasoning_effort_for_model(
     """Return the closest supported effort for the target model/provider."""
     raw = str(effort or "").strip().lower()
     if not raw:
+        return ""
+    # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
+    # disabled at all — a stored 'none' must coerce to '' (provider default =
+    # thinking on) so streaming does not build disabled reasoning for a model
+    # that forces thinking on regardless. Checked BEFORE the generic 'none'
+    # early-return below so the forced-tier contract wins. (#6219 round-3)
+    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
         return ""
     if raw == "none":
         return "none"
@@ -4242,12 +4255,18 @@ def set_reasoning_effort(
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
-    Raises ``ValueError`` on an unrecognised level so callers can return 400.
+
+    An empty string is accepted as "clear the override" — it removes the
+    ``agent.reasoning_effort`` key so the provider default takes effect. This is
+    the re-enable path for thinking-toggle-only models (GLM-4.5–5.1 on native
+    zai): the dropdown's "Default"/"On" option POSTs ``effort:''`` to switch
+    thinking back on after the user selected "None". Without this, the toggle
+    would be one-way (off-only) for those models. (#6219 round-3)
+
+    Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
     raw = str(effort or "").strip().lower()
-    if not raw:
-        raise ValueError("effort is required")
-    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
+    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
         raise ValueError(
             f"Unknown reasoning effort '{effort}'. "
             f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
@@ -4258,7 +4277,14 @@ def set_reasoning_effort(
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        agent_cfg["reasoning_effort"] = raw
+        if raw:
+            agent_cfg["reasoning_effort"] = raw
+        else:
+            # Clear the override so the provider default takes effect (the
+            # "Default"/"On" re-enable path for thinking-toggle-only models).
+            # Drop the key entirely rather than writing an empty string so the
+            # CLI's "is reasoning_effort configured?" check stays simple.
+            agent_cfg.pop("reasoning_effort", None)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()

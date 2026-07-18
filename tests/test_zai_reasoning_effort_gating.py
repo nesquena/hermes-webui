@@ -329,3 +329,131 @@ def test_coerce_unchanged_for_unknown_non_zai_models():
     )
     # custom: provider is not zai → ZAI gate returns None → #3505 preserve path.
     assert coerced == "high"
+
+
+# ── Round-3: GLM-4.7 forced + stored 'none' (gap #2) ────────────────────────────
+# A forced-thinking model cannot have reasoning disabled, so a stored 'none'
+# must coerce to '' (provider default = thinking on) and the 'none' sentinel
+# must NOT appear in supported_efforts even when the raw source lists it.
+
+
+@pytest.mark.parametrize("model_id", ["glm-4.7", "glm-4.7-air"])
+def test_coerce_stored_none_to_empty_for_forced_glm(model_id):
+    """Gap #2: GLM-4.7 + stored 'none' must coerce to '' (forced thinking)."""
+    coerced = cfg.coerce_reasoning_effort_for_model(
+        "none", model_id, provider_id="zai"
+    )
+    assert coerced == "", (
+        f"{model_id} forces thinking on — stored 'none' must coerce to '' so "
+        f"streaming does not build disabled reasoning; got {coerced!r}"
+    )
+
+
+@pytest.mark.parametrize("model_id", ["glm-5.2", "glm-4.6", "glm-5.1"])
+def test_coerce_preserves_none_for_non_forced_glm(model_id):
+    """Regression guard: non-forced GLM models MUST still accept 'none'."""
+    coerced = cfg.coerce_reasoning_effort_for_model(
+        "none", model_id, provider_id="zai"
+    )
+    assert coerced == "none", (
+        f"{model_id} is not forced-thinking — 'none' must be preserved; "
+        f"got {coerced!r}"
+    )
+
+
+def test_resolve_does_not_reattach_none_for_forced_glm():
+    """Gap #2 part B: when the raw source lists 'none', the resolver must NOT
+    reattach it to a forced-thinking model's supported options."""
+    import unittest.mock as mock
+    raw_with_none = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    with mock.patch(
+        "api.config._resolve_model_reasoning_efforts_impl",
+        return_value=raw_with_none,
+    ):
+        for model_id in ["glm-4.7", "glm-4.7-air"]:
+            sup = cfg.resolve_model_reasoning_efforts(model_id, provider_id="zai")
+            assert sup == [], (
+                f"{model_id} is forced-thinking — supported_efforts must be [] "
+                f"even when the raw source lists 'none'; got {sup}"
+            )
+
+
+def test_resolve_reattaches_none_for_thinking_tier():
+    """Regression guard: GLM-4.6 (thinking tier) MUST still get 'none' in its
+    supported list when the raw source lists it — the thinking tier CAN turn
+    thinking off, only the forced tier cannot."""
+    import unittest.mock as mock
+    raw_with_none = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    with mock.patch(
+        "api.config._resolve_model_reasoning_efforts_impl",
+        return_value=raw_with_none,
+    ):
+        sup = cfg.resolve_model_reasoning_efforts("glm-4.6", provider_id="zai")
+        assert sup == ["none"], (
+            f"glm-4.6 (thinking tier) must keep [none] when raw source lists it; "
+            f"got {sup}"
+        )
+
+
+def test_get_reasoning_status_forced_glm_with_stored_none_reports_default():
+    """End-to-end gap #2: GLM-4.7 with agent.reasoning_effort=none configured
+    must report reasoning_effort='' (default = thinking on), not 'none'."""
+    import unittest.mock as mock
+    with mock.patch(
+        "api.config._load_yaml_config_file",
+        return_value={"agent": {"reasoning_effort": "none"}},
+    ):
+        st = cfg.get_reasoning_status(model_id="glm-4.7", provider_id="zai")
+    assert st["reasoning_effort"] == "", (
+        f"forced-thinking glm-4.7 with stored 'none' must report '' (default = "
+        f"thinking on); got {st['reasoning_effort']!r}"
+    )
+    assert st["supports_thinking_toggle"] is False
+    assert st["supported_efforts"] == []
+
+
+# ── Round-3: set_reasoning_effort accepts empty (gap #1 backend) ────────────────
+# The Default/On re-enable path POSTs effort:'' to clear the override. The
+# backend must accept empty (not 400) and remove the agent.reasoning_effort key.
+
+
+def test_set_reasoning_effort_accepts_empty_as_clear():
+    """Gap #1 backend: empty effort clears the override (Default/On path)."""
+    import unittest.mock as mock
+    saved = {}
+
+    def fake_save(path, data):
+        saved.update(data.get("agent", {}) or {})
+
+    with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
+         mock.patch("api.config.reload_config"):
+        result = cfg.set_reasoning_effort("", model_id="glm-4.6", provider_id="zai")
+    # Empty effort must remove the key entirely (not write empty string).
+    assert "reasoning_effort" not in saved, (
+        f"empty effort must clear agent.reasoning_effort; saved agent cfg={saved}"
+    )
+    assert result["reasoning_effort"] == ""
+
+
+def test_set_reasoning_effort_still_rejects_invalid():
+    """Regression guard: invalid effort values must still raise ValueError."""
+    import unittest.mock as mock
+    with mock.patch("api.config._save_yaml_config_file"), \
+         mock.patch("api.config.reload_config"):
+        with pytest.raises(ValueError):
+            cfg.set_reasoning_effort("banana", model_id="glm-4.6", provider_id="zai")
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_set_reasoning_effort_still_accepts_valid_levels(effort):
+    """Regression guard: all valid levels + none must still save correctly."""
+    import unittest.mock as mock
+    saved = {}
+
+    def fake_save(path, data):
+        saved.update(data.get("agent", {}) or {})
+
+    with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
+         mock.patch("api.config.reload_config"):
+        cfg.set_reasoning_effort(effort, model_id="glm-4.6", provider_id="zai")
+    assert saved.get("reasoning_effort") == effort
