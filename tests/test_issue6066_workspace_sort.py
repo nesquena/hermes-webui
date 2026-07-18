@@ -219,6 +219,23 @@ if(S._workspaceBirthtimeSeen!==false||_workspaceCreatedSortAvailable()!==false||
     assert result.returncode == 0, result.stderr
 
 
+def test_unavailable_created_pref_uses_effective_menu_radio_state():
+    result = _run_sort_harness("""
+const mkRow=value=>{
+  const input={value,checked:false,disabled:false};
+  return {_input:input,attrs:{},classList:{toggle(){}},setAttribute(k,v){this.attrs[k]=String(v);},querySelector(sel){return sel==='input[name="workspaceSortKey"]'?input:null;}};
+};
+const nameRow=mkRow('name-asc');
+const createdRow=mkRow('created-desc');
+_workspacePrefsMenu={querySelectorAll(sel){return sel==='.workspace-prefs-item--radio'?[nameRow,createdRow]:[];}};
+S._workspaceBirthtimeSeen=false;
+S.workspaceSortKey='created-desc';
+_syncWorkspaceSortMenuState();
+if(nameRow._input.checked!==true||nameRow.attrs['aria-checked']!=='true'||createdRow._input.checked!==false||createdRow._input.disabled!==true||createdRow.attrs['aria-checked']!=='false'||createdRow.attrs['aria-disabled']!=='true')process.exit(1);
+""")
+    assert result.returncode == 0, result.stderr
+
+
 def test_birthtime_support_scope_resets_on_workspace_change():
     result = _run_sort_harness("""
 const input={value:'created-desc',checked:true,disabled:false};
@@ -284,6 +301,7 @@ def test_sort_public_surface_text_shape():
                 "workspace_sort_created_desc", "workspace_sort_modified_desc",
                 "workspace_sort_created_unavailable"):
         assert key in UI_JS or key in I18N_JS
+    assert UI_JS.count("const active=_effectiveWorkspaceSortKey();") >= 2
     assert "row.setAttribute('aria-disabled',disabled?'true':'false');" in UI_JS
     assert "Number(a[field])" not in UI_JS
     assert I18N_JS.count("workspace_sort_by:") == I18N_JS.count("workspace_show_hidden_files:")

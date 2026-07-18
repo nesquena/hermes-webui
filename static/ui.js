@@ -18841,7 +18841,7 @@ function _syncWorkspacePrefsIndicators(ind=$('workspaceHiddenIndicator'),dot=$('
 }
 function _syncWorkspaceSortMenuState(menu=_workspacePrefsMenu){
   if(!menu||!menu.querySelectorAll)return;
-  const active=_normalizeWorkspaceSortKey(S.workspaceSortKey);
+  const active=_effectiveWorkspaceSortKey();
   const createdOk=_workspaceCreatedSortAvailable();
   menu.querySelectorAll('.workspace-prefs-item--radio').forEach(row=>{
     const input=row&&row.querySelector?row.querySelector('input[name="workspaceSortKey"]'):null;
@@ -18935,7 +18935,7 @@ function _buildWorkspacePrefsMenu(){
   head.textContent=groupLabel;
   group.appendChild(head);
   const createdOk=_workspaceCreatedSortAvailable();
-  const active=_normalizeWorkspaceSortKey(S.workspaceSortKey);
+  const active=_effectiveWorkspaceSortKey();
   [['name-asc','workspace_sort_name_asc'],['name-desc','workspace_sort_name_desc'],['created-desc','workspace_sort_created_desc'],['modified-desc','workspace_sort_modified_desc']].forEach(([key,i18nKey])=>{
     const disabled=key==='created-desc'&&!createdOk;
     const row=document.createElement('label');
