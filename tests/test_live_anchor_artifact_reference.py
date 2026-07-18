@@ -158,6 +158,21 @@ def test_existing_symlink_escape_is_rejected(tmp_path):
     assert references == []
 
 
+def test_foreign_drive_path_is_rejected_on_posix(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    references = derive_file_artifact_references(
+        "write_file",
+        {"path": r"C:\\foreign\\report.md"},
+        json.dumps({"bytes_written": 1, "resolved_path": r"C:\\foreign\\report.md"}),
+        workspace,
+        tool_call_id="call-foreign-drive",
+    )
+
+    assert references == []
+
+
 def test_backend_emits_artifact_after_tool_completion_and_keeps_cancel_journalable():
     modern = _function_block(STREAMING_PY, "on_tool_complete")
     legacy = _function_block(STREAMING_PY, "on_tool")
