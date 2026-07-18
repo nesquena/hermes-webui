@@ -55,10 +55,13 @@ _LOG_TAIL_MAX_CHARS = 200_000
 # ordinary status/progress output readable. Scan finding bodies are handled
 # separately below because a finding is explicitly a matched source fragment.
 _INLINE_SECRET_RE = re.compile(
-    r"(?i)\b(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd)"
+    r"(?i)\b(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|"
+    r"[a-z][a-z0-9_]*(?:access_key|secret_access_key)|cookie|session(?:[_-]?(?:id|token|key))?)"
     r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)"
 )
+_AUTHORIZATION_BASIC_RE = re.compile(r"(?i)\bauthorization\s*:\s*basic\s+[^\s,;]+")
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_COOKIE_HEADER_RE = re.compile(r"(?i)\b(?:set-)?cookie\s*:\s*[^\r\n]+")
 
 # Held for the lifetime of a running scan/install/update/uninstall. Search is
 # read-only and stateless, so it does not take this lock.
@@ -205,16 +208,32 @@ def _redact_sensitive_text(text: object) -> object:
     """Return text safe for browser-visible action status responses."""
     if not isinstance(text, str):
         return text
+    text = _COOKIE_HEADER_RE.sub("Cookie: <redacted>", text)
+    text = _AUTHORIZATION_BASIC_RE.sub("Authorization: Basic <redacted>", text)
     text = _INLINE_SECRET_RE.sub(
         lambda match: f"{match.group('key')}{match.group('separator')}<redacted>", text
     )
     return _BEARER_TOKEN_RE.sub("Bearer <redacted>", text)
 
 
+def _redact_scan_finding_lines(log: object) -> object:
+    """Remove raw scanned-source fragments from a browser-visible transcript."""
+    if not isinstance(log, str):
+        return log
+    safe_lines = []
+    for raw_line in log.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        if _FINDING_RE.match(line):
+            safe_lines.append("[scan finding redacted]" + raw_line[len(line):])
+        else:
+            safe_lines.append(raw_line)
+    return "".join(safe_lines)
+
+
 def _safe_status_projection(state: dict) -> dict:
     """Project private runner state onto the Skills Hub browser API contract."""
     status = dict(state)
-    status["log"] = _redact_sensitive_text(status.get("log", ""))
+    status["log"] = _redact_sensitive_text(_redact_scan_finding_lines(status.get("log", "")))
     status["error"] = _redact_sensitive_text(status.get("error"))
     scan_result = status.get("scan_result")
     if isinstance(scan_result, dict):

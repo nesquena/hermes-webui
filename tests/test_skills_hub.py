@@ -165,16 +165,28 @@ def test_parse_scan_report_returns_none_without_header():
     assert parse_scan_report("Error: Could not fetch 'bogus' from any source.\n") is None
 
 
-def test_hub_status_redacts_cli_secrets_and_scan_match_bodies(monkeypatch):
-    """The browser-visible status API must not disclose captured source/output."""
+def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch):
+    """Status helper and route never serialize captured scan source or credentials."""
     from api import skills_hub_actions as sha
 
     sensitive_value = "".join(("synthetic", "-", "private-value"))
+    aws_key = "_".join(("AWS", "SECRET", "ACCESS", "KEY"))
+    finding_source = f"{aws_key}={sensitive_value}"
+    finding_line = f'  HIGH credential SKILL.md:7 "{finding_source}"\n'
+    basic_value = "".join(("basic", "-", "credential"))
+    session_key = "_".join(("session", "id"))
+    cookie_key = "".join(("coo", "kie"))
     with sha._STATE_LOCK:
         sha._STATE.update(
             {
                 "status": "failed",
-                "log": f"Installed pdf\ntoken={sensitive_value}\n",
+                "log": (
+                    "Installed pdf\n"
+                    + finding_line
+                    + f"Authorization: Basic {basic_value}\n"
+                    + f"{session_key}={sensitive_value}\n"
+                    + f"{cookie_key}={sensitive_value}\n"
+                ),
                 "error": f"secret: {sensitive_value}",
                 "scan_result": {
                     "verdict": "dangerous",
@@ -182,8 +194,8 @@ def test_hub_status_redacts_cli_secrets_and_scan_match_bodies(monkeypatch):
                         {
                             "severity": "HIGH",
                             "category": "credential",
-                            "location": "SKILL.md:1",
-                            "match": sensitive_value,
+                            "location": "SKILL.md:7",
+                            "match": finding_source,
                         }
                     ],
                 },
@@ -197,10 +209,16 @@ def test_hub_status_redacts_cli_secrets_and_scan_match_bodies(monkeypatch):
     for status in (direct, routed):
         rendered = json.dumps(status)
         assert sensitive_value not in rendered
+        assert basic_value not in rendered
+        assert finding_source not in rendered
+        assert finding_line.strip() not in rendered
         assert "Installed pdf" in status["log"]
-        assert "token=<redacted>" in status["log"]
+        assert "[scan finding redacted]" in status["log"]
+        assert "Authorization: Basic <redacted>" in status["log"]
+        assert f"{session_key}=<redacted>" in status["log"]
+        assert f"{cookie_key}=<redacted>" in status["log"]
         assert status["scan_result"]["findings"] == [
-            {"severity": "HIGH", "category": "credential", "location": "SKILL.md:1"}
+            {"severity": "HIGH", "category": "credential", "location": "SKILL.md:7"}
         ]
 
 
