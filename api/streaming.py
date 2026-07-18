@@ -10,7 +10,9 @@ import logging
 import mimetypes
 import os
 import queue
+import random
 import re
+import sqlite3
 import shlex
 import sys
 import subprocess
@@ -6333,7 +6335,25 @@ def _build_session_db_for_stream(state_db_path):
     """
     try:
         from hermes_state import SessionDB
-        return SessionDB(db_path=state_db_path)
+        _attempts = 3
+        _last_error = None
+        for _attempt in range(_attempts):
+            try:
+                return SessionDB(db_path=state_db_path)
+            except sqlite3.OperationalError as _db_err:
+                _db_err_text = str(_db_err).lower()
+                if not (
+                    "locked" in _db_err_text or "busy" in _db_err_text
+                ):
+                    raise
+                _last_error = _db_err
+                if _attempt < _attempts - 1:
+                    print(
+                        f"[webui] WARNING: SessionDB init attempt {_attempt + 1}/{_attempts} failed, retrying: {_db_err}",
+                        flush=True,
+                    )
+                    time.sleep(0.05 * (2 ** _attempt) + random.uniform(0, 0.05))
+        raise _last_error or RuntimeError("SessionDB construction exhausted all attempts")
     except Exception as _db_err:
         print(f"[webui] WARNING: SessionDB init failed - session_search will be unavailable: {_db_err}", flush=True)
         return None
