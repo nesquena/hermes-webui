@@ -245,3 +245,21 @@ def submit_pending(session_key: str, approval: dict) -> None:
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
+
+
+def force_clean_pending_approvals(session_key: str) -> None:
+    """Remove all pending-approval entries and gateway mirrors for *session_key*.
+
+    Used during stream teardown to clean up orphaned sub-agent or stale
+    approvals that were enqueued under the parent session key (#6100).
+    After the parent agent thread has finished, any remaining entries in
+    ``_pending`` for this session are necessarily orphaned — they belong
+    to sub-agent threads that used the parent's session key because
+    contextvars were not propagated to ``DaemonThreadPoolExecutor`` workers.
+
+    Notifies SSE subscribers so the sidebar red dot is cleared immediately.
+    """
+    with _lock:
+        _pending.pop(session_key, None)
+        _approval_sse_notify_locked(session_key, None, 0)
+    publish_session_list_changed("attention_pending")

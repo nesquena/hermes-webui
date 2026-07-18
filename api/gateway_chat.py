@@ -1177,6 +1177,11 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
+            try:
+                from api.route_approvals import force_clean_pending_approvals
+                force_clean_pending_approvals(session_id)
+            except Exception:
+                pass
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_GOAL_RELATED.pop(stream_id, None)
