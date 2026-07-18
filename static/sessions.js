@@ -5283,9 +5283,12 @@ function _syncSessionAttentionSoundState(sessions){
   }
   next.forEach((sig,sid)=>{
     const prev=_sessionAttentionSoundState.get(sid);
-    if(prev!==sig){
-      const [kind,countRaw]=String(sig).split(':');
-      const count=Number(countRaw)||1;
+    const [kind,countRaw]=String(sig).split(':');
+    const count=Number(countRaw)||1;
+    const retry=window._attentionNotificationRetryKeys;
+    const shouldRetry=retry instanceof Map&&typeof _attentionSoundKey==='function'
+      &&retry.get(sid)===_attentionSoundKey(sid,kind,count);
+    if(prev!==sig||shouldRetry){
       const s=(Array.isArray(sessions)?sessions:[]).find(item=>item&&item.session_id===sid)||{session_id:sid};
       const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;
       if(playKey&&typeof playAttentionSound==='function') playAttentionSound(playKey);
@@ -5299,14 +5302,12 @@ function _syncSessionAttentionSoundState(sessions){
         const _activeSid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
         if(sig&&sid!==_activeSid&&typeof sendBrowserNotification==='function'
           &&typeof _hasAttentionNotificationKey==='function'
-          &&typeof _markAttentionNotificationKey==='function'
+          &&typeof _deliverAttentionNotification==='function'
           &&!_hasAttentionNotificationKey(s.session_id,kind,count)){
           const _title=kind==='approval'?'Waiting for permission decision'
             :(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
           const _body=(s&&s.title)?String(s.title):'A background session needs you';
-          sendBrowserNotification(_title,_body,{
-            sid:s.session_id,onDelivered:()=>_markAttentionNotificationKey(s.session_id,kind,count)
-          });
+          _deliverAttentionNotification(s.session_id,kind,count,_title,_body);
         }
       }catch(_e){}
     }

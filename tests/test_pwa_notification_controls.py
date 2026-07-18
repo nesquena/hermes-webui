@@ -43,8 +43,8 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
 
     # Active SSE attention alerts must retain the originating session while using
-    # the shared delivery-only key. The key stops a later sidebar poll from
-    # duplicating a delivered alert, but an ineligible attempt must not poison it.
+    # the shared delivery seam. It owns the delivered key and the in-flight claim,
+    # so a later sidebar refresh cannot duplicate a notification still in flight.
     approval_handler = _source_between(
         "source.addEventListener('approval'", "source.addEventListener('clarify'"
     )
@@ -55,11 +55,8 @@ def test_notification_payload_uses_completion_session_when_provided():
         (approval_handler, "approval", "Approval required", "d.description||'Tool approval needed'"),
         (clarify_handler, "clarify", "Clarification needed", "d.question||'Tool clarification needed'"),
     ):
-        assert f"_hasAttentionNotificationKey(activeSid,'{kind}',1)" in handler
-        assert f"sendBrowserNotification('{title}',{body},{{" in handler
-        assert "sid:activeSid" in handler
-        assert f"onDelivered:()=>_markAttentionNotificationKey(activeSid,'{kind}',1)" in handler
-        assert handler.count(f"_markAttentionNotificationKey(activeSid,'{kind}',1)") == 1
+        assert "if(!S.session||S.session.session_id!==activeSid){" in handler
+        assert f"_deliverAttentionNotification(activeSid,'{kind}',1,'{title}',{body})" in handler
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
@@ -101,10 +98,10 @@ def test_completion_notification_fires_when_tab_was_hidden_during_stream():
     # Delivery now reports a boolean so attention dedup keys are recorded only
     # after an eligible notification, while both preference and visibility gates
     # remain fail-closed for ordinary notifications.
-    assert "if(!force&&!window._notificationsEnabled) return false;" in MESSAGES_JS
+    assert "if(!force&&!window._notificationsEnabled){failed();return false;}" in MESSAGES_JS
     assert "function _isBackgroundedForBrowserNotification(){" in MESSAGES_JS
     assert "window.__hermesSetBackgrounded=(value)=>{" in MESSAGES_JS
-    assert "if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return false;" in MESSAGES_JS
+    assert "if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()){failed();return false;}" in MESSAGES_JS
 
 
 def test_desktop_background_notification_signal_stays_out_of_stream_visibility():
