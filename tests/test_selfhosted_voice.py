@@ -392,8 +392,18 @@ def test_transcribe_forwards_language(monkeypatch, tmp_path):
         calls["language"] = language
         return {"success": True, "transcript": "hallo"}
 
-    import tools.transcription_tools as tt
-    monkeypatch.setattr(tt, "transcribe_audio", _fake_transcribe)
+    # The agent's ``tools`` package isn't installed in the standalone webui CI —
+    # handle_transcribe imports it lazily and degrades to 503 when absent. Inject
+    # a fake module (plus a ``tools`` parent stub) so the language-forwarding
+    # path is exercised without depending on the agent being importable.
+    import sys
+    import types
+    fake = types.ModuleType("tools.transcription_tools")
+    fake.transcribe_audio = _fake_transcribe
+    tools_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setattr(tools_pkg, "transcription_tools", fake, raising=False)
+    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake)
     monkeypatch.setattr(
         upload, "parse_multipart",
         lambda *a, **k: ({"language": "de-DE"}, {"file": ("a.webm", b"RIFFxxxx")}),
