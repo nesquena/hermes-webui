@@ -19,6 +19,7 @@ import multiprocessing
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -884,6 +885,24 @@ def _rmtree_retry(path):
     )
 
 
+def _seed_test_skills(real_skills: pathlib.Path, test_skills: pathlib.Path) -> None:
+    if not real_skills.exists() or test_skills.exists():
+        return
+    try:
+        test_skills.symlink_to(real_skills)
+    except OSError as exc:
+        if not WINDOWS or getattr(exc, "winerror", None) != 1314:
+            raise
+        shutil.copytree(real_skills, test_skills, copy_function=_copy2_readonly)
+
+
+def _copy2_readonly(source: str, destination: str) -> str:
+    copied = shutil.copy2(source, destination)
+    path = pathlib.Path(copied)
+    path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    return copied
+
+
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -914,8 +933,7 @@ def test_server():
     # but all write-heavy state stays isolated.
     real_skills  = HERMES_HOME / 'skills'
     test_skills  = TEST_STATE_DIR / 'skills'
-    if real_skills.exists() and not test_skills.exists():
-        test_skills.symlink_to(real_skills)
+    _seed_test_skills(real_skills, test_skills)
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)
