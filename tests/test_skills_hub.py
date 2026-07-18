@@ -165,6 +165,45 @@ def test_parse_scan_report_returns_none_without_header():
     assert parse_scan_report("Error: Could not fetch 'bogus' from any source.\n") is None
 
 
+def test_hub_status_redacts_cli_secrets_and_scan_match_bodies(monkeypatch):
+    """The browser-visible status API must not disclose captured source/output."""
+    from api import skills_hub_actions as sha
+
+    sensitive_value = "".join(("synthetic", "-", "private-value"))
+    with sha._STATE_LOCK:
+        sha._STATE.update(
+            {
+                "status": "failed",
+                "log": f"Installed pdf\ntoken={sensitive_value}\n",
+                "error": f"secret: {sensitive_value}",
+                "scan_result": {
+                    "verdict": "dangerous",
+                    "findings": [
+                        {
+                            "severity": "HIGH",
+                            "category": "credential",
+                            "location": "SKILL.md:1",
+                            "match": sensitive_value,
+                        }
+                    ],
+                },
+            }
+        )
+
+    direct = sha.get_status()
+    handler = _call_get(monkeypatch, "/api/skills/hub/status")
+    routed = handler.get_json()
+
+    for status in (direct, routed):
+        rendered = json.dumps(status)
+        assert sensitive_value not in rendered
+        assert "Installed pdf" in status["log"]
+        assert "token=<redacted>" in status["log"]
+        assert status["scan_result"]["findings"] == [
+            {"severity": "HIGH", "category": "credential", "location": "SKILL.md:1"}
+        ]
+
+
 # ── list_installed_hub_skills ────────────────────────────────────────────────
 
 
@@ -401,6 +440,32 @@ def test_hub_install_force_flag_forwarded(monkeypatch, tmp_path):
     _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "id", "force": True})
     _wait_until_not_running()
     assert "--force" in spawned[0]
+
+
+@pytest.mark.parametrize(
+    ("provided_force", "expected_force"),
+    [(False, False), ("false", False), (0, False), (1, False), ("0", False), (None, False), (True, True)],
+)
+def test_hub_install_route_forwards_only_json_boolean_true_as_force(monkeypatch, provided_force, expected_force):
+    """Exercise the real POST route, not its source text, at the force seam."""
+    from api import skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    forwarded = []
+
+    def fake_start_action(action, target, **kwargs):
+        forwarded.append((action, target, kwargs["force"]))
+        return True, {"status": "running"}
+
+    monkeypatch.setattr(sha, "start_action", fake_start_action)
+    handler, _data = _call_post(
+        monkeypatch,
+        "/api/skills/hub/install",
+        {"identifier": "example", "force": provided_force},
+    )
+
+    assert handler.status == 200
+    assert forwarded == [("install", "example", expected_force)]
 
 
 def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):

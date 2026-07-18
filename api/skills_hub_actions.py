@@ -50,6 +50,16 @@ _ACTION_TIMEOUT_SECONDS = 300
 _SEARCH_TIMEOUT_SECONDS = 35
 _LOG_TAIL_MAX_CHARS = 200_000
 
+# Captured CLI output is useful to diagnose hub actions, but it is a browser
+# response surface. Redact common inline secret assignments while leaving
+# ordinary status/progress output readable. Scan finding bodies are handled
+# separately below because a finding is explicitly a matched source fragment.
+_INLINE_SECRET_RE = re.compile(
+    r"(?i)\b(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+
 # Held for the lifetime of a running scan/install/update/uninstall. Search is
 # read-only and stateless, so it does not take this lock.
 _ACTION_LOCK = threading.Lock()
@@ -191,6 +201,38 @@ def parse_scan_report(log_text: str) -> dict | None:
     }
 
 
+def _redact_sensitive_text(text: object) -> object:
+    """Return text safe for browser-visible action status responses."""
+    if not isinstance(text, str):
+        return text
+    text = _INLINE_SECRET_RE.sub(
+        lambda match: f"{match.group('key')}{match.group('separator')}<redacted>", text
+    )
+    return _BEARER_TOKEN_RE.sub("Bearer <redacted>", text)
+
+
+def _safe_status_projection(state: dict) -> dict:
+    """Project private runner state onto the Skills Hub browser API contract."""
+    status = dict(state)
+    status["log"] = _redact_sensitive_text(status.get("log", ""))
+    status["error"] = _redact_sensitive_text(status.get("error"))
+    scan_result = status.get("scan_result")
+    if isinstance(scan_result, dict):
+        safe_scan_result = dict(scan_result)
+        findings = scan_result.get("findings")
+        if isinstance(findings, list):
+            # `match` is a raw fragment of scanned Skill content. Its metadata
+            # remains useful to explain the verdict, but never expose its body.
+            safe_scan_result["findings"] = [
+                {key: value for key, value in finding.items() if key != "match"}
+                if isinstance(finding, dict)
+                else finding
+                for finding in findings
+            ]
+        status["scan_result"] = safe_scan_result
+    return status
+
+
 # ---------------------------------------------------------------------------
 # Search (synchronous, read-only, no single-flight lock)
 # ---------------------------------------------------------------------------
@@ -326,7 +368,7 @@ def _drain_stdout(stream) -> None:
 
 def get_status() -> dict:
     with _STATE_LOCK:
-        return dict(_STATE)
+        return _safe_status_projection(_STATE)
 
 
 def start_action(

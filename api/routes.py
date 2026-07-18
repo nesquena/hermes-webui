@@ -15600,7 +15600,7 @@ def handle_post(handler, parsed) -> bool:
                 target,
                 category=str(body.get("category", "") or "").strip(),
                 name_override=str(body.get("name_override", "") or "").strip(),
-                force=bool(body.get("force", False)),
+                force=body.get("force") is True,
             )
         except ValueError as exc:
             return bad(handler, str(exc), 400)
