@@ -1365,11 +1365,12 @@ def _drain_loop() -> None:
 def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> int:
     """Recover core background processes and restore WebUI routing metadata.
 
-    The core gateway performs this during gateway startup, but the standalone
-    source WebUI is a different host and previously started only the queue
-    drain. That left checkpointed processes invisible after a WebUI restart.
+    The core gateway performs this during gateway startup, but this WebUI host
+    previously started only the queue drain. That left checkpointed processes
+    invisible after a WebUI restart.
     """
     global _PROCESS_RECOVERY_DONE
+
     if _PROCESS_RECOVERY_DONE:
         return 0
     if process_registry is None:
