@@ -8202,12 +8202,13 @@ def _run_agent_streaming(
                 result = agent.run_conversation(**_run_conversation_kwargs)
 
                 # Check if this was a silent provider failure
-                _last_err = ""
+                _last_err = None
                 _has_messages = False
                 if result is not None:
-                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                    _last_err = getattr(agent, '_last_error', None) or result.get('error')
                     _has_messages = bool(result.get('messages'))
-                _is_silent_failure = not bool(_last_err) and not _has_messages
+                # Silent failure: no error key AND no messages
+                _is_silent_failure = _last_err is None and not _has_messages
 
                 if _is_silent_failure and _retry_state["attempt"] < _retry_state["max_retries"]:
                     # Calculate exponential backoff with jitter
