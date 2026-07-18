@@ -3020,12 +3020,17 @@ const _INITIAL_MSG_LIMIT = 30;
 // ceiling. _loadOlderMessages grows its msg_limit tail window by
 // +_INITIAL_MSG_LIMIT each load; once growth would exceed this ceiling the
 // server clamps and the tail stops growing, so we switch to msg_before paging
-// (a fixed-size backward page keyed off _oldestIdx) instead. If you change the
-// backend _MAX_MSG_LIMIT, change this value to match — otherwise load-older
-// silently stalls again for long sessions. The durable fix (so this mirror
-// isn't needed) is to expose the ceiling in the /api/session metadata response
-// and read it here; see tracking issue for that follow-up.
+// (a fixed-size backward page keyed off _oldestIdx) instead. This const is the
+// static FALLBACK default only — the live ceiling is read from the /api/session
+// `_msg_limit_max` metadata into _msgLimitMax below (#6177), so the two can no
+// longer drift. Keep this fallback value roughly in sync with the backend
+// _MAX_MSG_LIMIT for the mixed-version case where the server omits the field.
 const _MSG_LIMIT_MAX = 500;
+// Live server-advertised msg_limit ceiling. Declared at module scope with the
+// static fallback so the reload-width paths (_ensureMessagesLoaded /
+// _loadOlderMessages) always read a defined value even before the first
+// /api/session response lands; refreshed from `_msg_limit_max` on each load.
+let _msgLimitMax = _MSG_LIMIT_MAX;
 let _sameSessionForceReloadHint = null;
 
 function _currentLoadedRenderableMessageCount(){
@@ -3137,7 +3142,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   // window exceeds the ceiling, fall back to the bare full-transcript request
   // (no msg_limit / no expand_renderable) so a same-session refresh never drops
   // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _MSG_LIMIT_MAX) ? reloadLimit : null;
+  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
   const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
@@ -3157,6 +3162,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
+  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -3655,7 +3661,7 @@ async function _loadOlderMessages() {
     //    arbitrarily long transcripts. (This is the same paging request the
     //    race-fallback below uses, proven correct there.)
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const useBeforePaging = requestedLimit >= _MSG_LIMIT_MAX;
+    const useBeforePaging = requestedLimit >= _msgLimitMax;
     const data = useBeforePaging
       ? await api(
           `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
