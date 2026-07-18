@@ -931,7 +931,7 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     projected_push_idx = complete.index("orderedRows.push(row);", ordered_idx)
     backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)", projected_push_idx)
     terminal_idx = complete.index("if(row&&row.role==='terminal') orderedRows.push(row);", backfill_idx)
-    replay_idx = complete.index("orderedRows.forEach((row,idx)=>pushRow(row,idx));", terminal_idx)
+    replay_idx = complete.index("orderedRows.forEach((row)=>pushRow(row));", terminal_idx)
     assert projected_idx < ordered_idx < projected_push_idx < backfill_idx < terminal_idx < replay_idx
 
     assert "const seenTextKeys=[];" in complete
