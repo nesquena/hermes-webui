@@ -274,6 +274,20 @@ class TestMoaBackendRoutes:
 class TestMoaBackendBehavior:
     """Behavioral tests for get_moa_config / set_moa_config."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_config_module_state(self):
+        """Tests here redirect _get_config_path to a tmp file and drive the
+        real reload_config(), which repoints the module-global config cache
+        (_cfg_cache/_cfg_path/_cfg_mtime) at that tmp file. Reload from the
+        real path afterwards so later tests (e.g. test_model_resolver's
+        in-place cfg mutations) don't see a poisoned cache."""
+        from api import config
+
+        real_get_config_path = config._get_config_path
+        yield
+        with config._cfg_lock:
+            config._refresh_config_cache(real_get_config_path())
+
     def test_get_returns_disabled_default_for_empty_config(self, monkeypatch):
         from api import config
 
