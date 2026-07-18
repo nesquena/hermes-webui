@@ -44,14 +44,25 @@ jobs:
           emit() { echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"; }
           trap emit EXIT
           set -uo pipefail
+          # A path is "docs" ONLY by extension/type, never by a name that merely
+          # contains README/CHANGELOG — a code file must never skip the smoke. See
+          # tests.yml for the full rationale.
           is_docs() {
-            case "$1" in
+            f="$1"; low="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"; base="${f##*/}"
+            case "$low" in
               *.md|*.markdown|*.txt|*.rst) return 0 ;;
-              docs/*) return 0 ;;
-              LICENSE|LICENSE.*) return 0 ;;
-              *README*|*README.*|*CHANGELOG*|*CHANGELOG.*) return 0 ;;
-              *) return 1 ;;
             esac
+            case "$base" in
+              LICENSE|README|CHANGELOG|NOTICE|AUTHORS|CONTRIBUTING) return 0 ;;
+            esac
+            case "$low" in
+              docs/*)
+                case "$low" in
+                  *.py|*.js|*.mjs|*.ts|*.sh|*.bash|*.yml|*.yaml|*.json|*.html|*.css) return 1 ;;
+                  *) return 0 ;;
+                esac ;;
+            esac
+            return 1
           }
           if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
