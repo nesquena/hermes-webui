@@ -6,7 +6,10 @@ forward the browser locale as a transcription language hint.
 """
 import io
 import json
+import shutil
 import socket
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -520,13 +523,86 @@ def test_voice_reply_tts_toggle_present():
     assert i18n.count("voice_reply_toggle:") == i18n.count("voice_mode_toggle:")
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required for voice-mode runtime tests")
 def test_completion_beep_suppressed_in_voice_mode():
-    """The completion chime is silenced while voice mode is active — the
-    spoken TTS reply is the done signal ('beep, then the reply')."""
+    """Drive the real voice-mode state export and completion-chime body.
+
+    A text marker cannot prove that the chime reads the same active state as the
+    voice system. This harness executes the actual voice-mode IIFE, activates it
+    through its rendered button handler, and then calls the actual completion
+    sound function. Deactivation must preserve the ordinary non-voice chime.
+    """
+    boot = (_STATIC / "boot.js").read_text(encoding="utf-8")
     messages = (_STATIC / "messages.js").read_text(encoding="utf-8")
-    fn = messages[messages.index("function playNotificationSound"):]
-    fn = fn[:fn.index("\n}")]
-    assert "window._voiceModeActive" in fn and "return" in fn
+    voice_start = boot.index("(function(){", boot.index("// ── Turn-based voice mode"))
+    voice_end = boot.index("\n})();\nfunction _currentSessionIsReusableEmptyChat", voice_start) + len("\n})();")
+    voice_mode = boot[voice_start:voice_end]
+    sound_start = messages.index("function playNotificationSound")
+    sound_end = messages.index("\n}", sound_start) + len("\n}")
+    completion_sound = messages[sound_start:sound_end]
+
+    harness = textwrap.dedent(
+        """
+        let oscillatorStarts = 0;
+        const classes = () => ({ add() {}, remove() {} });
+        const elements = {
+          btnVoiceMode: { style: {}, classList: classes(), onclick: null },
+          voiceModeBar: { style: {} },
+          voiceModeIndicator: { className: '' },
+          voiceModeLabel: { textContent: '' },
+          btnMic: { style: {} },
+          msg: { value: '' },
+        };
+        const window = {
+          _soundEnabled: true,
+          SpeechRecognition: class { start() {} abort() {} },
+          speechSynthesis: {},
+          AudioContext: class {
+            constructor() { this.currentTime = 0; this.destination = {}; }
+            createOscillator() {
+              return {
+                connect() {}, type: '',
+                frequency: { setValueAtTime() {} },
+                start() { oscillatorStarts += 1; }, stop() {}, onended: null,
+              };
+            }
+            createGain() {
+              return {
+                connect() {},
+                gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+              };
+            }
+            close() {}
+          },
+        };
+        const navigator = { mediaDevices: null };
+        const localStorage = { getItem() { return null; }, setItem() {} };
+        const S = { busy: false };
+        const document = { querySelectorAll() { return []; } };
+        const $ = id => elements[id] || null;
+        const t = key => key;
+        const showToast = () => {};
+        const autoResize = () => {};
+        const stopTTS = () => {};
+        const _micOriginNeedsSecureContext = () => false;
+        const _setButtonTooltip = () => {};
+        %s
+        %s
+        elements.btnVoiceMode.onclick();
+        if (typeof window._voiceModeActive !== 'function' || !window._voiceModeActive()) {
+          throw new Error('voice mode did not expose its active state');
+        }
+        playNotificationSound();
+        const whileVoiceActive = oscillatorStarts;
+        elements.btnVoiceMode.onclick();
+        playNotificationSound();
+        console.log(JSON.stringify({ whileVoiceActive, afterDeactivate: oscillatorStarts }));
+        """
+    ) % (voice_mode, completion_sound)
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout.strip())
+    assert observed == {"whileVoiceActive": 0, "afterDeactivate": 1}
 
 
 def test_voice_mode_thinking_watchdog_present():
