@@ -3045,11 +3045,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // A reload window above the server's msg_limit ceiling would be clamped by
+  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
+  // silently SHRINK an already-loaded transcript that had more than the ceiling
+  // of rows visible (rows 400–999 replaced by 500–999). When the requested
+  // window exceeds the ceiling, fall back to the bare full-transcript request
+  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
+  // already-loaded older rows (Codex gate #6154, silent row-loss).
+  const boundedReloadLimit = (reloadLimit && reloadLimit <= _MSG_LIMIT_MAX) ? reloadLimit : null;
+  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
@@ -3598,7 +3606,14 @@ async function _loadOlderMessages() {
     // the server appended new messages (or merge filtered something) while we
     // were awaiting, the suffix won't line up — fall back to the legacy
     // msg_before page so we never drop visible older messages on the floor.
-    let tailMatches = expandedMsgs.length >= currentLen;
+    // When useBeforePaging is true, `data` is a bounded msg_before OLDER page,
+    // not a cumulative tail. A raw-row-heavy older page whose visible text
+    // repeats the current tail could otherwise pass the suffix check below and
+    // be wholesale-replaced AS IF it were the full tail — silently discarding
+    // the current (newer) rows and marking history complete. Gate the suffix
+    // heuristic on !useBeforePaging so every msg_before page is always treated
+    // as an older page and prepended (Codex gate #6154, silent row-loss).
+    let tailMatches = !useBeforePaging && expandedMsgs.length >= currentLen;
     if (tailMatches && currentLen > 0) {
       const start = expandedMsgs.length - currentLen;
       for (let i = 0; i < currentLen; i++) {
