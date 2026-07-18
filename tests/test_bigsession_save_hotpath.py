@@ -125,6 +125,25 @@ def test_backup_guard_grow_makes_no_bak_shrink_makes_bak(session_store):
     assert len(json.loads((session_store / "hotpath2.json").read_text(encoding="utf-8"))["messages"]) == 1
 
 
+def test_backup_guard_does_not_trust_stale_message_count_on_shrink(session_store):
+    """External/legacy writers may leave a derived prefix count stale."""
+    s = _make_session("hotpath-stale-count", 3)
+    s.save(skip_index=True)
+    payload = json.loads(s.path.read_text(encoding="utf-8"))
+    payload["message_count"] = 1  # stale low count, but three real messages
+    s.path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+
+    incoming = Session.load("hotpath-stale-count")
+    assert incoming is not None
+    incoming.messages = incoming.messages[:1]
+    incoming.save(skip_index=True)
+
+    backup = s.path.with_suffix(".json.bak")
+    assert backup.exists()
+    assert len(json.loads(backup.read_text(encoding="utf-8"))["messages"]) == 3
+    assert len(json.loads(s.path.read_text(encoding="utf-8"))["messages"]) == 1
+
+
 def test_backup_guard_refuses_empty_overwrite_with_active_stream(session_store):
     s = _make_session("hotpath3", 2)
     s.save(skip_index=True)
@@ -425,6 +444,19 @@ def test_draft_sidecar_roundtrip_and_precedence(session_store):
     # Delete → falls back to legacy again.
     delete_composer_draft_sidecar(sid)
     assert resolve_composer_draft(sid, s.composer_draft)["text"] == "legacy draft"
+
+
+def test_draft_sidecar_uses_safe_replace(session_store, monkeypatch):
+    calls = []
+    original = _models._safe_replace
+
+    def tracked_replace(src, dst):
+        calls.append((src, dst))
+        return original(src, dst)
+
+    monkeypatch.setattr(_models, "_safe_replace", tracked_replace)
+    write_composer_draft_sidecar("hotpath-safe-replace", {"text": "draft", "files": []})
+    assert calls, "draft sidecars must retain the platform-safe replacement path"
 
 
 def test_draft_sidecar_rejects_unsafe_session_ids(session_store):

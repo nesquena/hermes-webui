@@ -1302,7 +1302,7 @@ def write_composer_draft_sidecar(sid, draft) -> dict:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, p)
+        _safe_replace(tmp, p)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
@@ -1736,38 +1736,18 @@ class Session:
         try:
             if self.path.exists():
                 incoming_msg_count = len(self.messages or [])
-                # Fast path (big-session hotpath, 2026-07-13): modern session
-                # files carry an accurate message_count in the metadata prefix
-                # (written by this method before the messages array). Reading
-                # that prefix costs a few KB instead of parsing the entire
-                # multi-MB file. The full read+parse only happens when the
-                # prefix is unavailable (legacy/corrupt layout) or when it
-                # signals a shrink — the case that needs existing_text for
-                # the .bak snapshot anyway.
-                existing_text = None
-                existing_msg_count = None
+                # ``message_count`` is an accelerator written by this class,
+                # not a generation/integrity proof for legacy or external
+                # writers.  A stale low count must never make a real shrink
+                # overwrite history without a parseable recovery backup.
+                # Therefore read and verify the existing payload before every
+                # overwrite; grow still avoids making a backup.
+                existing_text = self.path.read_text(encoding='utf-8')
                 try:
-                    prefix = _read_metadata_json_prefix(self.path)
+                    existing = _json_loads_session(existing_text)
+                    existing_msg_count = len(existing.get('messages') or [])
                 except Exception:
-                    prefix = None
-                if prefix:
-                    try:
-                        existing_msg_count = _parse_nonnegative_int(
-                            json.loads(prefix).get('message_count')
-                        )
-                    except (json.JSONDecodeError, ValueError):
-                        existing_msg_count = None
-                if (
-                    existing_msg_count is None
-                    or existing_msg_count > incoming_msg_count
-                    or (existing_msg_count > 0 and incoming_msg_count == 0)
-                ):
-                    existing_text = self.path.read_text(encoding='utf-8')
-                    try:
-                        existing = _json_loads_session(existing_text)
-                        existing_msg_count = len(existing.get('messages') or [])
-                    except Exception:
-                        existing_msg_count = -1  # corrupt → always back up
+                    existing_msg_count = -1  # corrupt → never infer a safe shrink
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
