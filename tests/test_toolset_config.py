@@ -165,16 +165,19 @@ def _disable_write_gate(monkeypatch):
 
 
 def test_list_toolsets_unavailable_without_hermes_cli(monkeypatch):
-    # This test venv's conftest puts a real hermes-agent checkout on
-    # sys.path (agent-runtime discovery, unrelated to this bridge), so
-    # `import hermes_cli.tools_config` normally succeeds here even though a
-    # bare interpreter can't see it. To exercise the "hermes-agent not
-    # installed" branch we block submodule resolution by emptying the real
-    # package's __path__ (same technique tests/test_commands_endpoint.py
-    # uses) and evict any already-imported submodule from sys.modules.
-    import hermes_cli
-
-    monkeypatch.setattr(hermes_cli, "__path__", [], raising=False)
+    # Some venvs (a dev checkout with hermes-agent on sys.path via conftest)
+    # can import the real hermes_cli; bare CI venvs cannot. If it imports, we
+    # block submodule resolution by emptying the real package's __path__
+    # (same technique tests/test_commands_endpoint.py uses) and evict any
+    # already-imported submodule from sys.modules; if it doesn't, the
+    # "hermes-agent not installed" branch under test is already the natural
+    # state and nothing needs patching.
+    try:
+        import hermes_cli
+    except ModuleNotFoundError:
+        pass
+    else:
+        monkeypatch.setattr(hermes_cli, "__path__", [], raising=False)
     for mod in ("hermes_cli.tools_config", "hermes_cli.config"):
         monkeypatch.delitem(sys.modules, mod, raising=False)
 
