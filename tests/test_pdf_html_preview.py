@@ -180,14 +180,14 @@ class TestLoadHtmlInlineFunction:
         """Must use srcdoc (not src) for HTML content to keep it same-origin sandboxed."""
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 2200]
+        body = ui[idx:idx + 4400]  # widened for artifact publish-button markup
         assert 'srcdoc=' in body, 'Must use srcdoc attribute for inline HTML rendering'
 
     def test_escapes_html_for_srcdoc(self):
         """HTML content must be escaped before embedding in srcdoc to prevent attribute injection."""
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 2200]
+        body = ui[idx:idx + 4400]  # widened for artifact publish-button markup
         # Must escape &, <, >, " to prevent breaking out of srcdoc attribute
         assert '&amp;' in body or 'replace' in body, 'Must escape HTML entities for srcdoc'
 

@@ -150,6 +150,8 @@ const LOCALES = {
     artifact_revoke: 'Revoke',
     artifact_revoked: 'Artifact revoked',
     artifact_public: 'public',
+    artifact_make_public: 'Make public (redacted copy, anyone with the link)',
+    artifact_now_public: 'Artifact is now public',
     artifacts_title: 'Published artifacts',
     artifacts_empty: 'No published artifacts yet',
     thinking: 'Thinking',
@@ -10266,6 +10268,8 @@ const LOCALES = {
     artifact_revoke: 'Zurückziehen',
     artifact_revoked: 'Artifact zurückgezogen',
     artifact_public: 'öffentlich',
+    artifact_make_public: 'Öffentlich machen (redigierte Kopie, jeder mit Link)',
+    artifact_now_public: 'Artifact ist jetzt öffentlich',
     artifacts_title: 'Publizierte Artifacts',
     artifacts_empty: 'Noch keine publizierten Artifacts',
     // TTS (#499)

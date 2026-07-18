@@ -157,3 +157,44 @@ class TestArtifactUiWiring:
         assert "/api/artifact/list" in UI_JS
         assert "/api/artifact/publish" in UI_JS
         assert "/api/artifact/revoke" in UI_JS
+
+
+class TestAuditFixes:
+    """Regression coverage for the 18.07.2026 audit findings (UI side)."""
+
+    def test_artifact_tag_inside_fence_stays_literal(self, driver_path):
+        md = "Nutze das Tag so:\n```\n[[artifact:/tmp/x.html|Titel]]\n```\nfertig"
+        html = _render(driver_path, md)
+        assert "html-preview-load" not in html, (
+            "artifact tags inside code fences must stay documentation text"
+        )
+        assert "[[artifact:" in html
+
+    def test_artifact_tag_inside_inline_code_stays_literal(self, driver_path):
+        html = _render(driver_path, "Das `[[artifact:/tmp/x.html|T]]` Tag")
+        assert "html-preview-load" not in html
+        assert "[[artifact:" in html
+
+    def test_handlers_use_api_helper_not_response_json(self):
+        start = UI_JS.find("function _bindArtifactHandlers")
+        end = UI_JS.find("function renderMermaidBlocks", start)
+        body = UI_JS[start:end]
+        assert ".json()" not in body, (
+            "api() returns decoded JSON already; calling .json() on it crashes"
+        )
+        panel = UI_JS[UI_JS.find("async function showArtifactsPanel"):end]
+        assert ".json()" not in panel
+
+    def test_sandbox_label_survives_artifact_title(self):
+        idx = UI_JS.find("const headerLabel=artifactTitle")
+        assert idx > 0
+        snippet = UI_JS[idx:idx + 400]
+        assert "html_sandbox_label" in snippet.split("\n")[0] or (
+            "html_sandbox_label" in snippet
+        ), "the sandbox trust cue must appear even when a title is set"
+
+    def test_make_public_button_wired(self):
+        assert "artifact-public-btn" in UI_JS
+        assert "artifact_make_public" in UI_JS
+        occurrences = len(re.findall(r"^\s*artifact_make_public:", I18N_JS, re.M))
+        assert occurrences >= 2

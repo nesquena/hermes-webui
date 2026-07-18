@@ -121,14 +121,41 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
         raise
 
 
-def _allowed_source_roots() -> list[Path]:
-    """Roots a publishable file may live in: active workspace + /tmp.
+# Internal Hermes state subdirectories that must never be publishable even
+# though they sit inside an allowed root (mirrors the /api/media #3234 model).
+_DENY_STATE_SUBDIRS = (
+    "sessions", "memories", "cron", "logs", "checkpoints", "backups",
+)
 
-    Deliberately narrower than /api/media's serving allowlist -- publishing is
-    an explicit, durable act, so it only accepts the places agent deliverables
-    legitimately land. Hermes home state directories are NOT publishable.
+
+def _hermes_roots() -> list[Path]:
+    home = Path(os.path.expanduser("~"))
+    roots = [Path(os.getenv("HERMES_HOME", str(home / ".hermes"))).expanduser()]
+    base = home / ".hermes"
+    if base not in roots:
+        roots.append(base)
+    out = []
+    for r in roots:
+        try:
+            rr = r.resolve()
+            if rr not in out:
+                out.append(rr)
+        except Exception:
+            pass
+    return out
+
+
+def _allowed_source_roots() -> list[Path]:
+    """Roots a publishable file may live in.
+
+    Matches the /api/media serving allowlist (hermes home, /tmp, active
+    workspace, env extras) so the UI's Publish button works wherever the HTML
+    preview itself works. Hermes-internal state subdirs and secret basenames
+    are still denied in validate_source_path (#3234 model): the allowlist
+    grants places deliverables land, the deny rules protect Hermes's own state.
     """
     roots: list[Path] = [Path("/tmp").resolve()]
+    roots.extend(_hermes_roots())
     try:
         from api.workspace import get_last_workspace
         ws = Path(get_last_workspace()).resolve()
@@ -148,6 +175,29 @@ def _allowed_source_roots() -> list[Path]:
                 except Exception:
                     pass
     return roots
+
+
+def _in_denied_state_subdir(target: Path) -> bool:
+    """True when target sits inside an internal state subdir of a Hermes root,
+    UNLESS it is inside the active workspace (the legitimate-media carve-out
+    /api/media uses: a workspace may live under a Hermes root)."""
+    try:
+        from api.workspace import get_last_workspace
+        ws = Path(get_last_workspace()).resolve()
+        if ws.is_dir() and _path_is_within(target, ws):
+            return False
+    except Exception:
+        pass
+    for root in _hermes_roots():
+        if not _path_is_within(target, root):
+            continue
+        try:
+            rel_first = target.relative_to(root).parts[0]
+        except Exception:
+            continue
+        if rel_first in _DENY_STATE_SUBDIRS:
+            return True
+    return False
 
 
 def _path_is_within(target: Path, root: Path) -> bool:
@@ -176,7 +226,9 @@ def validate_source_path(raw_path: str) -> Path:
     if target.name.casefold() in {n.casefold() for n in _DENY_FILENAMES}:
         raise ValueError("this file type is not publishable")
     if not any(_path_is_within(target, r) for r in _allowed_source_roots()):
-        raise ValueError("path is outside the publishable roots (workspace, /tmp)")
+        raise ValueError("path is outside the publishable roots")
+    if _in_denied_state_subdir(target):
+        raise ValueError("Hermes state directories are not publishable")
     size = target.stat().st_size
     if size == 0:
         raise ValueError("file is empty")
@@ -224,7 +276,7 @@ def publish_artifact(
     raw_path: str,
     *,
     title: str | None = None,
-    public: bool = False,
+    public: bool | None = None,
     session_id: str | None = None,
     token: str | None = None,
 ) -> dict:
@@ -233,6 +285,10 @@ def publish_artifact(
     Explicit ``token`` re-publishes that artifact; otherwise an existing
     non-revoked artifact for the same resolved source path is version-bumped;
     otherwise a fresh token is minted.
+
+    ``public`` tri-state: True/False set the flag, None PRESERVES the current
+    value (so a plain re-publish from the UI never silently un-shares a
+    public artifact).
     """
     source = validate_source_path(raw_path)
     mime = mime_for(source.name)
@@ -263,23 +319,26 @@ def publish_artifact(
                 "versions": [],
             }
 
+        effective_public = bool(meta.get("public")) if public is None else bool(public)
+
         version = len(meta.get("versions") or []) + 1
         vdir = _artifact_dir(token) / f"v{version}"
         vdir.mkdir(parents=True, exist_ok=True)
         dest = vdir / source.name
 
-        if public or bool(meta.get("public")):
-            # Public boundary: text-like content is credential-redacted at
-            # publish time (immutable copy), so a later toggle to public can
-            # never resurrect unredacted bytes. Binary formats copy verbatim.
-            if mime in _REDACTABLE_MIME:
-                try:
-                    text = source.read_text(encoding="utf-8", errors="replace")
-                except Exception as exc:
-                    raise ValueError(f"could not read file: {exc}")
-                dest.write_text(_force_redact_credentials(text), encoding="utf-8")
-            else:
-                shutil.copyfile(source, dest)
+        # Redaction is a PER-VERSION property recorded in the version entry:
+        # anonymous serving of a public artifact only ever exposes versions
+        # whose stored copy is public-safe (redacted text, or binary formats
+        # the redactor does not apply to). Older versions published while the
+        # artifact was private stay session-gated even after a public toggle.
+        redacted = False
+        if effective_public and mime in _REDACTABLE_MIME:
+            try:
+                text = source.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:
+                raise ValueError(f"could not read file: {exc}")
+            dest.write_text(_force_redact_credentials(text), encoding="utf-8")
+            redacted = True
         else:
             shutil.copyfile(source, dest)
 
@@ -288,6 +347,15 @@ def publish_artifact(
             "v": version,
             "size": dest.stat().st_size,
             "created_at": now,
+            # Per-version serving identity: resolve_artifact_file must locate
+            # THIS version's file even if a later re-publish uses a different
+            # source filename/MIME (pinned ?v=N links stay valid).
+            "filename": source.name,
+            "mime": mime,
+            # public_safe: this stored copy may be served anonymously when the
+            # artifact is public (redacted text, or non-redactable binary
+            # published while public).
+            "public_safe": bool(effective_public and (redacted or mime not in _REDACTABLE_MIME)),
         }]
         meta["updated_at"] = now
         meta["mime"] = mime
@@ -297,7 +365,7 @@ def publish_artifact(
             meta["title"] = str(title).strip()[:200]
         elif not meta.get("title"):
             meta["title"] = source.name
-        meta["public"] = bool(public)
+        meta["public"] = effective_public
         if session_id:
             meta["session_id"] = str(session_id)
         _write_json_atomic(_meta_path(token), meta)
@@ -315,8 +383,8 @@ def publish_artifact(
     }
 
 
-def resolve_artifact_file(token: str, version: int | None = None) -> tuple[dict, Path] | None:
-    """(meta, file_path) for a live artifact version, or None."""
+def resolve_artifact_file(token: str, version: int | None = None) -> tuple[dict, dict, Path] | None:
+    """(meta, version_entry, file_path) for a live artifact version, or None."""
     meta = _load_meta(token)
     if meta is None or meta.get("revoked_at"):
         return None
@@ -324,23 +392,26 @@ def resolve_artifact_file(token: str, version: int | None = None) -> tuple[dict,
     if not versions:
         return None
     if version is None:
-        version = int(versions[-1].get("v") or len(versions))
+        ventry = versions[-1]
     else:
         version = int(version)
-        if not any(int(v.get("v") or 0) == version for v in versions):
+        ventry = next((v for v in versions if int(v.get("v") or 0) == version), None)
+        if ventry is None:
             return None
+    vnum = int(ventry.get("v") or 0)
     try:
-        vdir = _artifact_dir(str(meta.get("token") or token)) / f"v{version}"
+        vdir = _artifact_dir(str(meta.get("token") or token)) / f"v{vnum}"
     except ValueError:
         return None
-    fname = str(meta.get("filename") or "")
+    # Per-version filename (pre-fix metas fall back to the artifact-level name).
+    fname = str(ventry.get("filename") or meta.get("filename") or "")
     fpath = (vdir / fname) if fname else None
     if not fpath or not fpath.is_file():
         return None
     # Belt-and-braces: the served file must stay inside this artifact's dir.
     if not _path_is_within(fpath.resolve(), _artifact_dir(token).resolve()):
         return None
-    return meta, fpath
+    return meta, ventry, fpath
 
 
 def revoke_artifact(token: str) -> bool:

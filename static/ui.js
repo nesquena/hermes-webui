@@ -7171,22 +7171,7 @@ function renderMd(raw){
     flush(lines.length);
     return out.join('\n');
   })(s);
-  // ── [[artifact:path|title]] publish-hint tags ──────────────────────────────
-  // The gateway leaves these tags intact for browser surfaces (messaging
-  // platforms get them normalized to bare paths server-side). HTML artifacts
-  // render as the sandboxed inline preview carrying the title + publish
-  // affordance; every other file type funnels into the normal MEDIA pipeline.
-  // Same code-fence semantics as MEDIA: tokens (stash runs before fences).
   const artifact_stash=[];
-  s=s.replace(/\[\[artifact:([^|\]\n]+)(?:\|([^\]\n]*))?\]\]/g,(_,p,title)=>{
-    const ref=String(p||'').trim();
-    if(!ref) return '';
-    if(/\.html?$/i.test(ref.split('?')[0])){
-      artifact_stash.push({path:ref,title:String(title||'').trim()});
-      return '\x00T'+(artifact_stash.length-1)+'\x00';
-    }
-    return 'MEDIA:'+ref;
-  });
   // ── MEDIA: token stash (must run first, before any other processing) ───────
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
@@ -7274,6 +7259,24 @@ function renderMd(raw){
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
   s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
+  // ── [[artifact:path|title]] publish-hint tags ──────────────────────────────
+  // The gateway leaves these tags intact for browser surfaces (messaging
+  // platforms get them normalized to bare paths server-side). HTML artifacts
+  // render as the sandboxed inline preview carrying the title + publish
+  // affordance; every other file type funnels into the MEDIA pipeline via the
+  // already-collected media_stash. Runs AFTER the fence/inline-code stashes so
+  // tags inside code examples stay literal text — the same contract as the
+  // gateway's normalize_artifact_tags (audit finding, 18.07.2026).
+  s=s.replace(/\[\[artifact:([^|\]\n]+)(?:\|([^\]\n]*))?\]\]/g,(_,p,title)=>{
+    const ref=String(p||'').trim();
+    if(!ref) return '';
+    if(/\.html?$/i.test(ref.split('?')[0])){
+      artifact_stash.push({path:ref,title:String(title||'').trim()});
+      return '\x00T'+(artifact_stash.length-1)+'\x00';
+    }
+    media_stash.push(ref);
+    return '\x00D'+(media_stash.length-1)+'\x00';
+  });
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -18980,7 +18983,12 @@ function loadHtmlInline(container){
         const openUrl=publicMediaUrl+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const artifactTitle=el.dataset.artifactTitle||'';
-        const headerLabel=artifactTitle?esc(artifactTitle):t('html_sandbox_label');
+        // The sandbox label is a trust cue and must NEVER be replaced by the
+        // model-controlled title (title-spoofing hardening, audit 18.07.2026);
+        // a title is shown alongside it.
+        const headerLabel=artifactTitle
+          ?`${esc(artifactTitle)} <span class="html-sandbox-note">· ${t('html_sandbox_label')}</span>`
+          :t('html_sandbox_label');
         const publishBtn=window._artifactsEnabled
           ?`<button type="button" class="artifact-publish-btn" data-path="${esc(path)}"${artifactTitle?` data-title="${esc(artifactTitle)}"`:''}>${t('artifact_publish')} ⤴</button><button type="button" class="artifact-panel-btn" onclick="showArtifactsPanel()" title="${t('artifacts_title')}">📚</button>`
           :'';
@@ -19008,22 +19016,43 @@ function _bindArtifactHandlers(){
       const title=btn.dataset.title||'';
       try{
         const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-        const r=await api('/api/artifact/publish',{
+        // api() returns the decoded JSON body and throws on non-ok statuses.
+        const d=await api('/api/artifact/publish',{
           method:'POST',
-          headers:{'Content-Type':'application/json'},
           body:JSON.stringify({path,title:title||undefined,session_id:sid||undefined}),
         });
-        const d=await r.json();
-        if(!r.ok||!d.ok) throw new Error((d&&d.error)||r.status);
+        if(!d||!d.ok) throw new Error((d&&d.error)||'publish failed');
         const art=d.artifact;
         const abs=new URL(art.url.replace(/^\//,''),document.baseURI||location.href).href;
         const wrap=document.createElement('span');
         wrap.className='artifact-published';
-        wrap.innerHTML=`<a href="${esc(art.url)}" target="_blank" rel="noopener" class="artifact-link">v${art.version} ↗</a> <button type="button" class="artifact-copy-btn" data-url="${esc(abs)}">${t('artifact_copy')}</button>`;
+        // The copied link is session-gated until the artifact is made public;
+        // the 🌐 button re-publishes with public=true so shared links work
+        // for recipients without a WebUI session.
+        wrap.innerHTML=`<a href="${esc(art.url)}" target="_blank" rel="noopener" class="artifact-link">v${art.version} ↗</a> <button type="button" class="artifact-copy-btn" data-url="${esc(abs)}">${t('artifact_copy')}</button>${art.public?'':` <button type="button" class="artifact-public-btn" data-token="${esc(art.token)}" data-path="${esc(path)}" title="${t('artifact_make_public')}">🌐</button>`}`;
         btn.replaceWith(wrap);
         showToast(t('artifact_published'));
       }catch(e){
         btn.disabled=false;
+        showToast(t('artifact_publish_failed')+': '+(e&&e.message||e));
+      }
+      return;
+    }
+    const pub=ev.target&&ev.target.closest&&ev.target.closest('.artifact-public-btn');
+    if(pub){
+      ev.preventDefault();
+      if(pub.disabled) return;
+      pub.disabled=true;
+      try{
+        const d=await api('/api/artifact/publish',{
+          method:'POST',
+          body:JSON.stringify({path:pub.dataset.path||'',token:pub.dataset.token||'',public:true}),
+        });
+        if(!d||!d.ok) throw new Error((d&&d.error)||'publish failed');
+        pub.remove();
+        showToast(t('artifact_now_public'));
+      }catch(e){
+        pub.disabled=false;
         showToast(t('artifact_publish_failed')+': '+(e&&e.message||e));
       }
       return;
@@ -19041,13 +19070,11 @@ function _bindArtifactHandlers(){
     if(revoke){
       ev.preventDefault();
       try{
-        const r=await api('/api/artifact/revoke',{
+        const d=await api('/api/artifact/revoke',{
           method:'POST',
-          headers:{'Content-Type':'application/json'},
           body:JSON.stringify({token:revoke.dataset.token||''}),
         });
-        const d=await r.json();
-        if(!r.ok||!d.ok) throw new Error((d&&d.error)||r.status);
+        if(!d||!d.ok) throw new Error((d&&d.error)||'revoke failed');
         const row=revoke.closest('.artifact-row');
         if(row) row.remove();
         showToast(t('artifact_revoked'));
@@ -19065,8 +19092,7 @@ async function showArtifactsPanel(){
   _bindArtifactHandlers();
   let items=[];
   try{
-    const r=await api('/api/artifact/list');
-    const d=await r.json();
+    const d=await api('/api/artifact/list');
     items=(d&&d.artifacts)||[];
   }catch(_){}
   const old=$('artifactsPanelOverlay');

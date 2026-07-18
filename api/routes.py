@@ -14160,7 +14160,9 @@ def handle_post(handler, parsed) -> bool:
             result = publish_artifact(
                 str(body.get("path") or ""),
                 title=body.get("title"),
-                public=bool(body.get("public")),
+                # Tri-state: omitted key preserves the artifact's current
+                # public flag (a plain re-publish must not un-share it).
+                public=(bool(body.get("public")) if "public" in body else None),
                 session_id=str(body.get("session_id") or "") or None,
                 token=str(body.get("token") or "") or None,
             )
@@ -18891,14 +18893,20 @@ def _handle_artifact_get(handler, parsed):
     resolved = resolve_artifact_file(token, version)
     if resolved is None:
         return j(handler, {"error": "not found"}, status=404)
-    meta, fpath = resolved
-    if not bool(meta.get("public")):
+    meta, ventry, fpath = resolved
+    # Anonymous access requires BOTH: artifact is public AND this specific
+    # version's stored copy is public-safe (redacted / non-redactable binary
+    # published while public). Versions published while private stay
+    # session-gated even after a later public toggle — otherwise ?v=N would
+    # resurrect unredacted bytes (audit finding, 18.07.2026).
+    anonymous_ok = bool(meta.get("public")) and bool(ventry.get("public_safe"))
+    if not anonymous_ok:
         from api.auth import is_auth_enabled, parse_cookie, verify_session
         if is_auth_enabled():
             cv = parse_cookie(handler)
             if not (cv and verify_session(cv)):
                 return j(handler, {"error": "not found"}, status=404)
-    mime = str(meta.get("mime") or "application/octet-stream")
+    mime = str(ventry.get("mime") or meta.get("mime") or "application/octet-stream")
     csp = None
     if mime == "text/html":
         csp = "sandbox allow-scripts"
