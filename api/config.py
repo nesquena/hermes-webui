@@ -3382,6 +3382,49 @@ def _nested_gateway_route_reasoning(model: str) -> bool:
     return False
 
 
+def _zai_glm_reasoning_efforts_supported(model_id: str, provider_id: str) -> bool | None:
+    """Z.AI native-endpoint gate for the ``reasoning_effort`` intensity field.
+
+    Returns True if the model accepts the effort ladder (GLM-5.2+), False if it
+    is known NOT to (pre-5.2 GLM and the forced-thinking GLM-4.7 family), or None
+    if this is not a native-``zai`` GLM model (caller should defer to other rules).
+
+    Z.AI's API (docs.z.ai) documents ``reasoning_effort`` as GLM-5.2+ exclusive;
+    earlier GLM models accept the ``thinking`` on/off toggle but NOT the effort
+    ladder, and GLM-4.7 uses forced thinking that cannot be disabled. The gate is
+    scoped to the native ``zai`` endpoint (aliases glm/z-ai/z.ai/zhipu all resolve
+    to zai); aggregators route through their own routers and are not bound by
+    Z.AI's per-model docs, so they return None here.
+
+    Shared by the advertising filter (``_filter_reasoning_efforts_for_provider``)
+    and the coercion path (``coerce_reasoning_effort_for_model``) so the UI
+    options and the value actually sent to Z.AI agree — a known-empty gate means
+    "send no effort field", distinct from the ambiguous empty list returned for
+    genuinely unknown models (which preserves the configured effort verbatim per
+    #3505).
+    """
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    if provider != "zai":
+        return None
+    bare = _strip_provider_hint_for_reasoning(str(model_id or "")).lower().rsplit("/", 1)[-1]
+    if "glm" not in bare:
+        return None
+    # GLM-4.7 family: forced thinking — reasoning is not configurable at all.
+    if bare.startswith("glm-4.7"):
+        return False
+    m = re.search(r"glm-(\d+)(?:\D+(\d+))?", bare)
+    if m:
+        major = int(m.group(1))
+        minor = int(m.group(2)) if m.group(2) else 0
+        # GLM-5.2+: Z.AI's max/xhigh/high/medium/low/minimal values match
+        # VALID_REASONING_EFFORTS exactly ('max' is the Z.AI default and
+        # recommended for coding tasks).
+        if (major, minor) >= (5, 2):
+            return True
+    # Everything else (4.5, 4.5-flash, 5, 5.1, 5-turbo): no reasoning_effort.
+    return False
+
+
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
@@ -3419,27 +3462,13 @@ def _filter_reasoning_efforts_for_provider(
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff != "max"]
-    # Z.AI / GLM (native zai endpoint only): the `reasoning_effort` intensity
-    # field is GLM-5.2+ exclusive per docs.z.ai — earlier GLM models accept the
-    # `thinking` on/off toggle but NOT the effort ladder, and GLM-4.7 uses forced
-    # thinking (cannot be disabled). Strip the whole ladder for non-5.2 GLM so the
-    # UI never offers values the endpoint will silently ignore and never offers
-    # 'none' for forced-thinking models. Aggregators (openrouter/kilocode/...) are
-    # untouched because they route through their own routers, not Z.AI's docs.
-    if provider == "zai" and "glm" in bare:
-        # GLM-4.7 family: forced thinking — reasoning is not configurable at all.
-        if bare.startswith("glm-4.7"):
-            return []
-        m = re.search(r"glm-(\d+)(?:\D+(\d+))?", bare)
-        if m:
-            major = int(m.group(1))
-            minor = int(m.group(2)) if m.group(2) else 0
-            # GLM-5.2+ keeps the full ladder: Z.AI's max/xhigh/high/medium/low/
-            # minimal values match VALID_REASONING_EFFORTS exactly ('max' is the
-            # Z.AI default and recommended for coding tasks).
-            if (major, minor) >= (5, 2):
-                return normalized
-        # Everything else (4.5, 4.5-flash, 5, 5.1, 5-turbo): no reasoning_effort.
+    # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
+    # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
+    # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
+    zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
+    if zai_supports is True:
+        return normalized
+    if zai_supports is False:
         return []
     return normalized
 
@@ -3962,7 +3991,15 @@ def coerce_reasoning_effort_for_model(
     # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
     # filter above already stripped it for any KNOWN-capped model. All other
     # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
+    #
+    # EXCEPTION for the ZAI native-endpoint gate: a pre-5.2 GLM model (incl. the
+    # forced-thinking GLM-4.7) is KNOWN not to accept reasoning_effort at all, so
+    # any stored level must coerce to "" (send no field) — NOT be preserved
+    # verbatim, which Z.AI would silently ignore. This keeps the value actually
+    # sent in agreement with the UI (which offers no options for these models).
     if not supported:
+        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
+            return ""
         if raw == "max" and not _provider_known_reasoning_capable(provider_id):
             return "xhigh"
         return raw

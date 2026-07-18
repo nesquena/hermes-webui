@@ -36,11 +36,23 @@ def test_glm_5_2_native_zai_keeps_full_ladder():
 
 
 def test_glm_5_2_preserves_none_sentinel():
-    # The 'none' UI sentinel (turn reasoning off) must survive filtering.
-    efforts = cfg.resolve_model_reasoning_efforts("glm-5.2", provider_id="zai")
-    assert "none" in efforts or set(efforts) == {
-        "minimal", "low", "medium", "high", "xhigh", "max"
-    }
+    # The 'none' UI sentinel (turn reasoning off) must survive filtering when a
+    # provider config or models.dev source emits it alongside the ladder. The
+    # default heuristic path does NOT emit 'none', so we inject it via provider
+    # config to exercise the preservation branch in resolve_model_reasoning_efforts
+    # (which re-attaches 'none' after _filter_reasoning_efforts_for_provider runs).
+    import unittest.mock as mock
+
+    raw_with_none = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    with mock.patch(
+        "api.config._resolve_model_reasoning_efforts_impl",
+        return_value=raw_with_none,
+    ):
+        efforts = cfg.resolve_model_reasoning_efforts("glm-5.2", provider_id="zai")
+    assert "none" in efforts, (
+        "glm-5.2 filter returns the full ladder unchanged, so a raw 'none' "
+        f"sentinel must survive re-attachment; got {efforts!r}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -137,19 +149,57 @@ def test_non_glm_model_on_zai_provider_unaffected():
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
+# The ZAI gate returns a KNOWN-empty list for pre-5.2 GLM (distinct from the
+# ambiguous empty list returned for genuinely-unknown models, which preserves
+# the configured effort verbatim per #3505). So any stored effort level — not
+# just 'max' — must coerce to "" (send no reasoning_effort field) for these
+# models, matching the UI showing no options. Without this, a stored 'high' or
+# 'medium' would be forwarded to Z.AI and silently ignored.
 
-def test_coerce_downgrades_max_for_pre_5_2_glm():
-    """A stored 'max' for glm-5.1 must coerce down (it's not in the offered list)."""
+@pytest.mark.parametrize(
+    "model_id",
+    ["glm-5.1", "glm-5", "glm-5-turbo", "glm-4.5", "glm-4.5-flash", "glm-4.7"],
+)
+def test_coerce_any_stored_level_to_empty_for_pre_5_2_glm(model_id):
+    """Bug 2 (coercion gap): all levels, not just 'max', must coerce to ''."""
+    for level in ["max", "xhigh", "high", "medium", "low", "minimal"]:
+        coerced = cfg.coerce_reasoning_effort_for_model(
+            level, model_id, provider_id="zai"
+        )
+        assert coerced == "", (
+            f"{model_id} via zai is known not to support reasoning_effort; stored "
+            f"'{level}' must coerce to '' (send no field), got {coerced!r}"
+        )
+
+
+def test_coerce_preserves_levels_for_glm_5_2():
+    """GLM-5.2 accepts the full ladder — all stored levels preserve verbatim."""
+    for level in ["max", "xhigh", "high", "medium", "low", "minimal"]:
+        coerced = cfg.coerce_reasoning_effort_for_model(
+            level, "glm-5.2", provider_id="zai"
+        )
+        assert coerced == level, (
+            f"glm-5.2 supports '{level}'; got {coerced!r}"
+        )
+
+
+@pytest.mark.parametrize("alias", ["glm", "z-ai", "z.ai", "zhipu"])
+def test_coerce_zai_aliases_resolve_through_same_gate(alias):
+    """All ZAI aliases must hit the same coercion gate as native 'zai'."""
     coerced = cfg.coerce_reasoning_effort_for_model(
-        "max", "glm-5.1", provider_id="zai"
+        "high", "glm-5.1", provider_id=alias
     )
-    # glm-5.1 offers no levels, so 'max' must walk down the ladder to the
-    # highest supported level — which for an empty list is the downgrade floor.
-    assert coerced != "max"
+    assert coerced == "", (
+        f"alias '{alias}' must resolve to zai and coerce 'high' to '' for glm-5.1"
+    )
 
 
-def test_coerce_preserves_max_for_glm_5_2():
+def test_coerce_unchanged_for_unknown_non_zai_models():
+    """Regression guard for #3505: a genuinely-unknown model on a non-zai provider
+    must STILL preserve the configured effort verbatim (the ZAI gate must not
+    bleed into the ambiguous-empty path)."""
     coerced = cfg.coerce_reasoning_effort_for_model(
-        "max", "glm-5.2", provider_id="zai"
+        "high", "some-brand-new-model-9999", provider_id="custom:myrouter"
     )
-    assert coerced == "max"
+    # custom: provider is not zai → ZAI gate returns None → #3505 preserve path.
+    assert coerced == "high"
