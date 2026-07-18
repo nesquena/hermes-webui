@@ -1412,6 +1412,68 @@ window._hermesTtsSynth=function(id, text, opts){
     });
 };
 
+// ── Session-open hook (for extensions) ────────────────────────────────────
+var _HERMES_SESSION_OPEN_HANDLERS=[];
+window.registerHermesSessionOpenHandler=function(fn){
+  if(typeof fn!=='function') return false;
+  if(_HERMES_SESSION_OPEN_HANDLERS.indexOf(fn)>=0) return false;
+  _HERMES_SESSION_OPEN_HANDLERS.push(fn);
+  return true;
+};
+window._hermesNotifySessionOpen=function(sid, data, opts){
+  opts=opts||{};
+  for(var i=0;i<_HERMES_SESSION_OPEN_HANDLERS.length;i++){
+    try{
+      var result=_HERMES_SESSION_OPEN_HANDLERS[i](sid, data, opts);
+      if(opts.preload===true && result&&result.cancel===true) return {cancel:true};
+    }catch(_){}
+  }
+  return {};
+};
+
+// ── Transcript renderer (for extensions) ───────────────────────────────────
+window.renderTranscript=function(container, messages, opts){
+  if(!container||!Array.isArray(messages)) return container;
+  opts=opts||{};
+  container.innerHTML='';
+  var md=window.renderMd||null;
+  for(var i=0;i<messages.length;i++){
+    var msg=messages[i];
+    if(!msg||!msg.role||msg.role==='tool') continue;
+    var content;
+    if(typeof msg.content==='string'){
+      content=msg.content;
+    }else if(msg.content==null){
+      content='';
+    }else if(Array.isArray(msg.content)){
+      // Multi-part content (OpenAI/Anthropic API style) — concatenate text parts.
+      content=msg.content.map(function(p){return (p&&typeof p.text==='string')?p.text:''}).join('');
+    }else{
+      content=String(msg.content);
+    }
+    if(!content&&opts.skipEmpty) continue;
+    var row=document.createElement('div');
+    row.className='msg-row';
+    row.setAttribute('data-role',msg.role);
+    var body=document.createElement('div');
+    body.className='msg-body';
+    try{
+      if(md){
+        var html=md(content);
+        if(html!=null){body.innerHTML=html}else{body.textContent=content}
+      }else{
+        body.textContent=content;
+      }
+    }catch(_){body.textContent=content}
+    row.appendChild(body);
+    container.appendChild(row);
+  }
+  if(typeof _rehydrateTransparentStreamDom==='function'){
+    try{_rehydrateTransparentStreamDom(container);}catch(_){}
+  }
+  return container;
+};
+
 // ── Turn-based voice mode (#1333) ────────────────────────────────────────
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
@@ -3497,7 +3559,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   }
   if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
   // Fetch available models without blocking session restore. The static HTML
-  // options are enough for first paint; the dynamic provider list can settle
+  // options enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
   const _redirectBootModelDropdownIfUnauth=(res)=>{
     if(!res||res.status!==401) return false;
