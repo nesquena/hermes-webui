@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
+_PROCESS_RECOVERY_DONE = False
 
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
@@ -1361,6 +1362,41 @@ def _drain_loop() -> None:
             logger.warning("bg_task_complete event handling failed", exc_info=True)
 
 
+def recover_processes_for_webui() -> int:
+    """Recover core background processes and restore WebUI routing metadata.
+
+    The core gateway performs this during gateway startup, but the standalone
+    source WebUI is a different host and previously started only the queue
+    drain. That left checkpointed processes invisible after a WebUI restart.
+    """
+    global _PROCESS_RECOVERY_DONE
+    if _PROCESS_RECOVERY_DONE:
+        return 0
+    from tools.process_registry import process_registry
+
+    recovered = process_registry.recover_from_checkpoint()
+    for row in process_registry.list_sessions():
+        session_key = str(row.get("session_key") or "")
+        if not session_key:
+            continue
+        try:
+            from api.models import get_session
+            if get_session(session_key, metadata_only=True) is None:
+                continue
+        except Exception:
+            logger.debug(
+                "Could not validate recovered WebUI session %r",
+                session_key,
+                exc_info=True,
+            )
+            continue
+        register_process_session(session_key, session_key)
+    _PROCESS_RECOVERY_DONE = True
+    if recovered:
+        logger.info("Recovered %d background process(es) for WebUI", recovered)
+    return recovered
+
+
 def register_process_session(session_key: str, session_id: str) -> None:
     """Bind a process-registry session_key to a WebUI session_id.
 
@@ -1407,6 +1443,7 @@ def start_drain_thread() -> bool:
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
+        recover_processes_for_webui()
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,
