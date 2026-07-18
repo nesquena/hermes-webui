@@ -4850,6 +4850,10 @@ if(document.readyState==='loading'){
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
+// Whether the model accepts the thinking on/off toggle when supported_efforts
+// is empty (GLM-4.5–5.1 on native zai). Undefined = unknown, treated as true
+// so the chip stays visible by default (prior behavior).
+let _currentReasoningToggleSupported=undefined;
 let _profileTransitionReasoningContext=null;
 
 function _normalizeReasoningEffort(eff){
@@ -4901,7 +4905,14 @@ function _applyReasoningOptions(supportedEfforts){
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
-    if(effort==='none'){
+    // 'none' (turn thinking off) and '' (Default = clear override, provider
+    // default = thinking on) are meta-options outside the effort ladder. They
+    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
+    // zai, where the ladder is empty) still has an operable two-state control:
+    // Default (on) + None (off). Without the Default option the toggle is
+    // one-way off-only — the user can disable thinking but cannot re-enable it.
+    // (#6219 round-3)
+    if(effort==='none'||effort===''){
       opt.style.display='';
       return;
     }
@@ -4920,6 +4931,15 @@ function _applyReasoningChip(eff){
   if(meta&&Array.isArray(meta.supported_efforts)){
     _currentReasoningEffortsSupported=meta.supported_efforts;
   }
+  // supports_thinking_toggle: the model accepts the thinking on/off toggle even
+  // when the effort ladder is empty (GLM-4.5–5.1 on native zai accept
+  // `thinking: {"type": ...}` but NOT `reasoning_effort`). Without honoring this
+  // flag, returning an empty supported_efforts hides the entire chip and
+  // silently regresses the working thinking on/off control for those models.
+  // Default true preserves prior behavior when the field is absent.
+  if(meta&&typeof meta.supports_thinking_toggle==='boolean'){
+    _currentReasoningToggleSupported=meta.supports_thinking_toggle;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
@@ -4929,9 +4949,15 @@ function _applyReasoningChip(eff){
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
     ?null
     :_currentReasoningEffortsSupported;
-  const supports=Array.isArray(supportedEfforts)
+  const toggleSupported=(typeof _currentReasoningToggleSupported==='undefined')
+    ?true
+    :_currentReasoningToggleSupported;
+  const hasEffortLadder=Array.isArray(supportedEfforts)
     ?supportedEfforts.length>0
     :true;
+  // Show the chip if there is an effort ladder OR a thinking toggle is still
+  // available. Only hide when the model supports neither.
+  const supports=hasEffortLadder||toggleSupported;
   if(!supports){
     wrap.style.display='none';
     if(mobileAction) mobileAction.style.display='none';
@@ -4984,7 +5010,7 @@ function fetchReasoningChip(keyOverride){
     // routine syncs retry after a genuine transient failure.
     if(seq!==_reasoningFetchSeq) return;
     _lastReasoningFetchKey=null;
-    _applyReasoningChip('', {supported_efforts:[]});
+    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   });
 }
 
@@ -4992,9 +5018,10 @@ function refreshProfileTransitionReasoningChip(model, provider){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
+  _currentReasoningToggleSupported=undefined;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
-  _applyReasoningChip('', {supported_efforts:[]});
+  _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
@@ -5089,12 +5116,19 @@ document.addEventListener('click',function(e){
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
-    if(effort){
+    // NOTE: effort may be the empty string for the "Default" option (clears
+    // the override). Check option presence, not truthiness — `if(effort)` would
+    // silently ignore the Default click and leave the toggle one-way off-only.
+    // (#6219 round-3)
+    if(opt){
       const payload=Object.assign({effort:effort},_reasoningEffortContext());
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          // For Default (effort=''), the returned reasoning_effort is '' (clear)
+          // — display 'Default' rather than an empty toast.
+          const display=(st&&st.reasoning_effort)||effort||'Default';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+          showToast('🧠 Reasoning effort set to '+display);
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
