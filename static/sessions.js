@@ -963,7 +963,12 @@ async function _ensureProjectProfileForNewSession(project){
   const activeProfile=S.activeProfile||'default';
   if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return true;
   if(typeof switchToProfile!=='function') return false;
-  await switchToProfile(targetProfile);
+  _profileSwitchCallerOwnsNewSession=true;
+  try{
+    await switchToProfile(targetProfile);
+  }finally{
+    _profileSwitchCallerOwnsNewSession=false;
+  }
   return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
 }
 
@@ -997,10 +1002,11 @@ async function newSession(flash, options={}){
     // Keep explicit workspace ownership on the server for project-targeted chats.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
-    const fallbackWs=inheritWs;
+    const explicitWs=switchWs||null;
+    const fallbackWs=explicitWs?null:((S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null));
     const reqBody={ profile:S.activeProfile||'default' };
-    if(hasProjectTarget) reqBody.fallback_workspace=fallbackWs;
+    if(explicitWs) reqBody.workspace=explicitWs;
+    else if(hasProjectTarget) reqBody.fallback_workspace=fallbackWs;
     else reqBody.workspace=fallbackWs;
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
@@ -3209,6 +3215,7 @@ let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FI
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
+let _profileSwitchCallerOwnsNewSession = false;  // true while project-targeted newSession() owns the post-switch replacement
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested

@@ -6571,6 +6571,7 @@ async function switchToProfile(name) {
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _callerOwnsNewSession = !!(typeof _profileSwitchCallerOwnsNewSession !== 'undefined' && _profileSwitchCallerOwnsNewSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -6760,6 +6761,13 @@ async function switchToProfile(name) {
       if (_switchGen !== _profileSwitchGeneration) return;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
+    } else if (sessionInProgress && _callerOwnsNewSession) {
+      // Project-targeted newSession() already owns the replacement chat, so the
+      // profile switch must not recursively await the same in-flight promise.
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      await renderSessionList();
+      if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
