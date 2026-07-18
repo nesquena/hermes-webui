@@ -103,7 +103,7 @@ errors. It uses isolated temporary state and no provider credentials.
 
 ```bash
 pip install playwright pyyaml
-python -m playwright install chromium
+python -m playwright install --with-deps chromium
 python tests/browser_conversation_lifecycle.py
 ```
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -40,9 +41,11 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_for_health(base_url: str, timeout: float = 30.0) -> bool:
+def _wait_for_health(base_url: str, timeout: float = 30.0, process=None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            return False
         try:
             with urllib.request.urlopen(base_url + "/health", timeout=2) as response:
                 if response.status == 200:
@@ -62,15 +65,23 @@ def _wait_for_persisted_scene(base_url: str, session_id: str, timeout: float = 1
     deadline = time.time() + timeout
     url = f"{base_url}/api/session?session_id={session_id}&messages=1"
     last_payload = None
+    last_error = None
     while time.time() < deadline:
-        last_payload = _get_json(url)
+        try:
+            last_payload = _get_json(url)
+            last_error = None
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as error:
+            last_error = error
+            time.sleep(0.1)
+            continue
         session = last_payload.get("session") if isinstance(last_payload, dict) else None
         messages = session.get("messages", []) if isinstance(session, dict) else []
         assistants = [message for message in messages if message.get("role") == "assistant"]
         if assistants and assistants[-1].get("_anchor_activity_scene"):
             return assistants[-1]["_anchor_activity_scene"]
         time.sleep(0.1)
-    session = last_payload.get("session") if isinstance(last_payload, dict) else None
+    payload = last_payload if isinstance(last_payload, dict) else {}
+    session = payload.get("session")
     messages = session.get("messages", []) if isinstance(session, dict) else []
     summary = [
         {
@@ -80,9 +91,41 @@ def _wait_for_persisted_scene(base_url: str, session_id: str, timeout: float = 1
         for message in messages
         if isinstance(message, dict)
     ]
+    error_detail = f"; last request error: {last_error}" if last_error else ""
     raise AssertionError(
         f"anchor scene was not persisted before reload; message summary: {summary!r}"
+        f"{error_detail}"
     )
+
+
+def _stop_process(process) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _start_webui_server(repo_root: Path, env: dict, log, attempts: int = 3):
+    """Start the real server, retrying the narrow free-port handoff race."""
+    for _attempt in range(attempts):
+        port = _free_port()
+        attempt_env = {**env, "HERMES_WEBUI_PORT": str(port)}
+        process = subprocess.Popen(
+            [sys.executable, str(repo_root / "server.py")],
+            cwd=repo_root,
+            env=attempt_env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        if _wait_for_health(base_url, process=process):
+            return process, base_url
+        _stop_process(process)
+    raise RuntimeError(f"WebUI server did not become healthy after {attempts} attempts")
 
 
 class DeterministicGateway:
@@ -336,8 +379,6 @@ def main() -> int:
     state_dir = Path(tempfile.mkdtemp(prefix="hermes-lifecycle-gate-"))
     artifact_dir = Path(os.environ.get("LIFECYCLE_ARTIFACT_DIR", state_dir / "artifacts"))
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    port = int(os.environ.get("LIFECYCLE_PORT", _free_port()))
-    base_url = f"http://127.0.0.1:{port}"
     gateway = DeterministicGateway()
     gateway.start()
 
@@ -361,7 +402,6 @@ def main() -> int:
     ):
         env.pop(key, None)
     env.update({
-        "HERMES_WEBUI_PORT": str(port),
         "HERMES_WEBUI_HOST": "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR": str(state_dir / "webui-state"),
         "HERMES_HOME": str(state_dir / "hermes-home"),
@@ -378,20 +418,15 @@ def main() -> int:
     })
     log_path = artifact_dir / "server.log"
     log = log_path.open("w")
-    proc = subprocess.Popen(
-        [sys.executable, str(repo_root / "server.py")],
-        cwd=repo_root,
-        env=env,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
+    proc = None
+    base_url = None
+    exit_code = 1
     playwright = None
     browser = None
     page = None
     errors = []
     try:
-        if not _wait_for_health(base_url):
-            raise RuntimeError("WebUI server did not become healthy in 30 seconds")
+        proc, base_url = _start_webui_server(repo_root, env, log)
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(
             headless=True,
@@ -494,6 +529,7 @@ def main() -> int:
         browser.close()
         browser = None
         print("\nCONVERSATION LIFECYCLE GATE PASSED")
+        exit_code = 0
         return 0
     except Exception as error:
         print(f"\nCONVERSATION LIFECYCLE GATE FAILED: {error}", file=sys.stderr)
@@ -520,18 +556,18 @@ def main() -> int:
             browser.close()
         if playwright is not None:
             playwright.stop()
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if proc is not None:
+            _stop_process(proc)
         log.close()
-        if proc.returncode not in (None, 0, -15):
+        if proc is not None and proc.returncode not in (None, 0, -15):
             print(f"WebUI server exit code: {proc.returncode}", file=sys.stderr)
         if log_path.exists():
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-            if tail and proc.returncode not in (None, 0, -15):
+            if tail and proc is not None and proc.returncode not in (None, 0, -15):
                 print(tail, file=sys.stderr)
+        artifact_is_inside_state = artifact_dir.resolve().is_relative_to(state_dir.resolve())
+        if exit_code == 0 or not artifact_is_inside_state:
+            shutil.rmtree(state_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
