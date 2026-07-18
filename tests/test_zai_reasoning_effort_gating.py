@@ -102,6 +102,132 @@ def test_glm_4_7_air_forced_thinking_drops_entire_ladder():
     assert efforts == []
 
 
+# ── Three-tier classification: effort / thinking / forced ────────────────────────
+# Per docs.z.ai, the three Z.AI capability tiers are distinct:
+#   - GLM-5.2+:           effort ladder (max..minimal) AND thinking toggle
+#   - GLM-4.5–5.1:        thinking toggle ONLY (no effort ladder)
+#   - GLM-4.7:            forced thinking (neither toggle nor ladder)
+# Returning [] for the effort ladder must NOT also hide the thinking on/off
+# control for the middle tier — otherwise GLM-4.5/4.6/5.0/5.1 users lose the
+# working thinking toggle they had before (#6219 round-2 review).
+
+
+@pytest.mark.parametrize(
+    "model_id,expected",
+    [
+        # GLM-5.2+ → effort ladder + thinking toggle
+        ("glm-5.2", "effort"),
+        ("glm-5.2-air", "effort"),
+        ("glm-5.3", "effort"),
+        ("glm-6", "effort"),
+        # GLM-4.5 up to (but not including) 5.2 → thinking toggle only
+        ("glm-5.1", "thinking"),
+        ("glm-5", "thinking"),
+        ("glm-5-turbo", "thinking"),
+        ("glm-4.5", "thinking"),
+        ("glm-4.5-flash", "thinking"),
+        ("glm-4.5-air", "thinking"),
+        ("glm-4.6", "thinking"),
+        # GLM-4.7 family → forced thinking (no toggle, no ladder)
+        ("glm-4.7", "forced"),
+        ("glm-4.7-air", "forced"),
+        # Non-zai / non-glm → defer (None)
+        ("gpt-5", None),
+        ("claude-sonnet-4.6", None),
+    ],
+)
+def test_zai_glm_classification_three_tiers(model_id, expected):
+    cls = cfg._zai_glm_classification(model_id, provider_id="zai")
+    assert cls == expected, (
+        f"{model_id} via zai should classify as {expected!r}, got {cls!r}"
+    )
+
+
+def test_classification_none_for_non_zai_provider():
+    """Aggregators must defer (None) — they route through their own routers."""
+    assert cfg._zai_glm_classification("glm-5.2", provider_id="openrouter") is None
+    assert cfg._zai_glm_classification("glm-5.2", provider_id="custom:newapi") is None
+
+
+def test_classification_none_for_non_glm_on_zai():
+    """A non-GLM model routed through zai must defer (None)."""
+    assert cfg._zai_glm_classification("gpt-5", provider_id="zai") is None
+    assert cfg._zai_glm_classification("claude-sonnet-4.6", provider_id="zai") is None
+
+
+# ── supports_thinking_toggle: chip visibility contract ──────────────────────────
+
+
+def _reasoning_status(model_id, provider_id="zai"):
+    """Helper: call get_reasoning_status with a stub config so it does not depend
+    on the active profile's config.yaml."""
+    import unittest.mock as mock
+    with mock.patch("api.config._load_yaml_config_file", return_value={}):
+        return cfg.get_reasoning_status(
+            model_id=model_id, provider_id=provider_id
+        )
+
+
+def test_glm_5_2_status_offers_effort_ladder_and_toggle():
+    """GLM-5.2: full effort ladder AND thinking toggle both available."""
+    st = _reasoning_status("glm-5.2")
+    assert st["supports_reasoning_effort"] is True
+    assert set(st["supported_efforts"]) == {
+        "minimal", "low", "medium", "high", "xhigh", "max"
+    }
+    assert st["supports_thinking_toggle"] is True
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["glm-4.6", "glm-4.5", "glm-4.5-flash", "glm-5", "glm-5.1", "glm-5-turbo"],
+)
+def test_sub_5_2_glm_status_keeps_thinking_toggle_without_effort_ladder(model_id):
+    """#6219 round-2: GLM-4.5–5.1 must keep the thinking on/off toggle even though
+    the effort ladder is empty — otherwise the composer hides the whole chip and
+    silently regresses the working thinking control."""
+    st = _reasoning_status(model_id)
+    assert st["supported_efforts"] == [], (
+        f"{model_id} must not advertise an effort ladder"
+    )
+    assert st["supports_reasoning_effort"] is False
+    assert st["supports_thinking_toggle"] is True, (
+        f"{model_id} accepts thinking:{type:enabled|disabled} per Z.AI docs; the "
+        "composer must still render an On/None control when the ladder is empty"
+    )
+
+
+def test_glm_4_7_status_offers_neither_toggle_nor_ladder():
+    """GLM-4.7 forced thinking: the composer must hide the chip entirely."""
+    st = _reasoning_status("glm-4.7")
+    assert st["supported_efforts"] == []
+    assert st["supports_reasoning_effort"] is False
+    assert st["supports_thinking_toggle"] is False, (
+        "glm-4.7 forces thinking on — no on/off toggle should be offered"
+    )
+
+
+@pytest.mark.parametrize("alias", ["glm", "z-ai", "z.ai", "zhipu"])
+def test_thinking_toggle_aliases_resolve_through_same_gate(alias):
+    """All ZAI aliases must produce the same thinking-toggle verdict as native zai."""
+    st_glm_4_6 = _reasoning_status("glm-4.6", provider_id=alias)
+    st_glm_4_7 = _reasoning_status("glm-4.7", provider_id=alias)
+    assert st_glm_4_6["supports_thinking_toggle"] is True
+    assert st_glm_4_7["supports_thinking_toggle"] is False
+
+
+def test_non_zai_status_toggle_defaults_to_effort_capability():
+    """For non-zai providers, supports_thinking_toggle must mirror effort
+    capability (the prior behavior) — no separate ZAI gate fires."""
+    # An effort-capable model on a non-zai provider.
+    st = _reasoning_status("gpt-5", provider_id="openai")
+    assert st["supports_thinking_toggle"] == st["supports_reasoning_effort"]
+    # A non-effort model on a non-zai provider: toggle also False (no ZAI gate).
+    st2 = _reasoning_status("gpt-4o", provider_id="openai")
+    assert st2["supports_thinking_toggle"] is False
+    assert st2["supports_reasoning_effort"] is False
+
+
 # ── Aliases resolve through the same gate ────────────────────────────────────────
 
 @pytest.mark.parametrize("alias", ["glm", "z-ai", "z.ai", "zhipu"])

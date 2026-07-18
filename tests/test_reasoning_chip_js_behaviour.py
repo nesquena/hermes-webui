@@ -202,3 +202,168 @@ class TestTitleAttributeAccessibility:
     def test_title_has_active_label_for_high(self, driver_path):
         out = _apply(driver_path, "high")
         assert out["title"] == "Reasoning effort: High"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# supports_thinking_toggle (ZAI GLM-4.5–5.1): the chip must STAY visible when
+# supported_efforts is empty but the model still accepts the thinking on/off
+# toggle. Without this, the gate regresses GLM-4.5/4.6/5.0/5.1 users who today
+# can toggle thinking on/off (#6219 round-2 review). GLM-4.7 (forced thinking)
+# passes supports_thinking_toggle:false and the chip hides as intended.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_DRIVER_META_SRC = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+function makeEl() {
+    return {
+    style: {},
+    _attrs: {},
+    setAttribute(k, v){this._attrs[k] = String(v)},
+    getAttribute(k){return this._attrs[k]},
+    classList: {
+      _set: new Set(),
+      add(c){this._set.add(c)},
+      remove(c){this._set.delete(c)},
+      toggle(c, on){
+        const want = on === undefined ? !this._set.has(c) : Boolean(on);
+        if (want) this._set.add(c); else this._set.delete(c);
+      },
+      contains(c){return this._set.has(c)},
+    },
+    dataset: {},
+    title: '',
+    textContent: '',
+    querySelectorAll(){return []},
+  };
+}
+
+const els = {
+  composerReasoningWrap: makeEl(),
+  composerReasoningLabel: makeEl(),
+  composerReasoningChip: makeEl(),
+  composerReasoningDropdown: makeEl(),
+};
+els.composerReasoningWrap.style.display = 'none';
+
+global.window = {};
+global.document = {
+  createElement: () => makeEl(),
+  addEventListener: () => {},
+  querySelectorAll: () => [],
+  querySelector: () => null,
+};
+global.$ = id => els[id] || null;
+global.api = () => ({ then: () => ({ catch: () => {} }), catch: () => {} });
+var _profileTransitionReasoningContext = null;
+
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+eval(extractFunc('_normalizeReasoningEffort'));
+eval(extractFunc('_formatReasoningEffortLabel'));
+eval(extractFunc('_highlightReasoningOption'));
+eval(extractFunc('_applyReasoningOptions'));
+eval(extractFunc('_applyReasoningChip'));
+
+const input = JSON.parse(process.argv[3]);
+_applyReasoningChip(input.effort, input.meta);
+const result = {
+  display: els.composerReasoningWrap.style.display,
+  label:   els.composerReasoningLabel.textContent,
+};
+process.stdout.write(JSON.stringify(result));
+"""
+
+
+@pytest.fixture(scope="module")
+def driver_meta_path(tmp_path_factory):
+    p = tmp_path_factory.mktemp("reasoning_meta_driver") / "driver_meta.js"
+    p.write_text(_DRIVER_META_SRC, encoding="utf-8")
+    return str(p)
+
+
+def _apply_meta(driver_meta_path, effort, meta):
+    """Run _applyReasoningChip(effort, meta) against the actual ui.js."""
+    import json as _json
+    payload = _json.dumps({"effort": effort, "meta": meta})
+    result = subprocess.run(
+        [NODE, driver_meta_path, str(UI_JS_PATH), payload],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node meta driver failed: {result.stderr}")
+    return _json.loads(result.stdout)
+
+
+class TestSupportsThinkingToggleVisibility:
+    """#6219 round-2: empty effort ladder must NOT hide the chip when the model
+    still accepts the thinking on/off toggle (GLM-4.5–5.1 on native zai)."""
+
+    def test_empty_efforts_with_toggle_stays_visible(self, driver_meta_path):
+        """GLM-4.6 (thinking-only tier): empty ladder + toggle=True → chip stays."""
+        out = _apply_meta(
+            driver_meta_path,
+            "",
+            {"supported_efforts": [], "supports_thinking_toggle": True},
+        )
+        assert out["display"] == "", (
+            "GLM-4.5–5.1 accept thinking:{type:enabled|disabled} per Z.AI docs; "
+            f"the chip must stay visible for the On/None control: {out}"
+        )
+
+    def test_empty_efforts_forced_thinking_hides_chip(self, driver_meta_path):
+        """GLM-4.7 (forced thinking): empty ladder + toggle=False → chip hides."""
+        out = _apply_meta(
+            driver_meta_path,
+            "",
+            {"supported_efforts": [], "supports_thinking_toggle": False},
+        )
+        assert out["display"] == "none", (
+            "glm-4.7 forces thinking on — neither toggle nor ladder should be "
+            f"offered; chip must hide: {out}"
+        )
+
+    def test_effort_ladder_stays_visible_regardless_of_toggle(self, driver_meta_path):
+        """GLM-5.2 (full ladder): effort ladder present → chip stays visible
+        whether or not the toggle flag is set (effort implies toggle)."""
+        out = _apply_meta(
+            driver_meta_path,
+            "max",
+            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
+             "supports_thinking_toggle": True},
+        )
+        assert out["display"] == ""
+        out2 = _apply_meta(
+            driver_meta_path,
+            "max",
+            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
+             "supports_thinking_toggle": False},
+        )
+        assert out2["display"] == "", (
+            "effort ladder alone is sufficient to show the chip regardless of toggle"
+        )
+
+    def test_default_toggle_undefined_keeps_prior_behavior(self, driver_meta_path):
+        """When supports_thinking_toggle is absent (legacy responses), the chip
+        visibility must follow the prior contract: empty efforts → hide."""
+        out = _apply_meta(driver_meta_path, "", {"supported_efforts": []})
+        # No supports_thinking_toggle in meta → undefined → treated as true →
+        # chip stays visible. This is the conservative default: a missing flag
+        # must not newly hide the chip for older response shapes.
+        assert out["display"] == "", (
+            "absent supports_thinking_toggle defaults to visible (prior behavior "
+            f"for legacy responses without the field): {out}"
+        )
