@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -38,20 +39,46 @@ from api.gateway_restart import _gateway_restart_profile_context, _resolve_herme
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
-_RUNNING = False
-_LAST: Optional[dict] = None  # {"action","name","ok","log_tail","finished_at"}
+
+# Keyed by profile ("HERMES_HOME") so one profile's in-flight/last-result
+# state -- including any credentials redacted into `name`/`log_tail` -- can
+# never be read back through another profile's GET /status (#audit MEDIUM:
+# these were process-wide globals, so any authenticated session could see a
+# DIFFERENT profile's install source/log regardless of which profile it was
+# scoped to).
+_RUNNING_PROFILES: set[str] = set()
+_LAST_BY_PROFILE: dict[str, dict] = {}  # profile_key -> {"action","name","ok","log_tail","finished_at"}
 
 _ACTION_TIMEOUT_SECONDS = 600
 _LOG_TAIL_MAX_BYTES = 200_000
 _LIST_TIMEOUT_SECONDS = 30
 
 # Registry-name shorthand segments: safe charset only (letters, digits, dot,
-# underscore, hyphen) -- no shell metacharacters, no path traversal.
-_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# underscore, hyphen), and must NOT *start* with a hyphen -- otherwise a
+# segment like "-force" is indistinguishable from a CLI flag once it lands in
+# argv (see hermes_cli's own `skills install` flag set for why this matters:
+# an unvalidated leading-hyphen identifier can get consumed by argparse as an
+# option instead of the positional value it was meant to be).
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
 
 # Plugin directory names on disk (hermes_cli.plugins_cmd._sanitize_plugin_name
-# for a fresh install path never allows a subdir) -- flat, safe charset.
-_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# for a fresh install path never allows a subdir) -- flat, safe charset, no
+# leading hyphen (same argv-ambiguity reasoning as _SAFE_SEGMENT_RE above).
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
+
+# Redacts HTTP Basic-auth-style userinfo embedded in a URL (e.g.
+# "https://user:token@host/repo.git" -> "https://***@host/repo.git") before
+# anything derived from an install source is stored where GET
+# /api/plugins/lifecycle/status can return it. validate_source() only checks
+# the https:// prefix, not what follows, so a credential-bearing URL reaches
+# this module; the credential itself must still reach the `hermes` subprocess
+# (it needs it to actually clone), so this is applied only at the
+# storage/display boundary, never to the argv passed to subprocess.run.
+_URL_USERINFO_RE = re.compile(r"://([^/@\s]+)@")
+
+
+def _redact_credentials(text: str) -> str:
+    return _URL_USERINFO_RE.sub("://***@", text or "")
 
 
 class PluginSourceError(ValueError):
@@ -147,6 +174,17 @@ def _run_env() -> tuple[list[str], dict]:
     return prefix, env
 
 
+def _profile_key() -> str:
+    """Return a stable identifier for the active profile's HERMES_HOME.
+
+    Used to scope in-flight/last-result state per profile (see
+    _RUNNING_PROFILES / _LAST_BY_PROFILE) so one profile's install source or
+    subprocess log can never surface in another profile's status response.
+    """
+    active_home, _cli_profile = _gateway_restart_profile_context()
+    return str(active_home)
+
+
 def list_installed_plugins() -> list[dict]:
     """``hermes plugins list --json``, parsed into ``{name, version, source, enabled}`` rows.
 
@@ -183,10 +221,21 @@ def list_installed_plugins() -> list[dict]:
 
 
 def get_status() -> dict:
-    """Current lifecycle status: availability, in-flight action, last result, installed list."""
+    """Current lifecycle status for the ACTIVE profile: availability, in-flight
+    action, last result, installed list.
+
+    Profile resolution failure degrades to "no running/last state" rather
+    than raising -- this backs the always-readable GET /status route, which
+    must never 500 just because it couldn't determine a profile key.
+    """
+    try:
+        profile_key = _profile_key()
+    except Exception:
+        profile_key = None
+
     with _LOCK:
-        running = _RUNNING
-        last = dict(_LAST) if _LAST else None
+        running = profile_key is not None and profile_key in _RUNNING_PROFILES
+        last = dict(_LAST_BY_PROFILE[profile_key]) if profile_key in _LAST_BY_PROFILE else None
 
     available = is_available()
     installed: list[dict] = []
@@ -203,8 +252,10 @@ def get_status() -> dict:
     }
 
 
-def _build_action_command(action: str, arg: str, *, force: bool, enable: Optional[bool]) -> list[str]:
-    prefix, _env = _run_env()
+def _build_action_command(
+    action: str, arg: str, *, force: bool, enable: Optional[bool],
+) -> tuple[list[str], dict]:
+    prefix, env = _run_env()
     if action == "install":
         cmd = prefix + ["plugins", "install", arg]
         if force:
@@ -213,12 +264,28 @@ def _build_action_command(action: str, arg: str, *, force: bool, enable: Optiona
             cmd.append("--enable")
         elif enable is False:
             cmd.append("--no-enable")
-        return cmd
+        return cmd, env
     if action == "update":
-        return prefix + ["plugins", "update", arg]
+        return prefix + ["plugins", "update", arg], env
     if action == "remove":
-        return prefix + ["plugins", "remove", arg]
+        return prefix + ["plugins", "remove", arg], env
     raise ValueError(f"unknown action: {action!r}")
+
+
+def _kill_process_group(proc: "subprocess.Popen[str]") -> None:
+    """Kill the whole process group a timed-out action spawned, not just the
+    immediate ``hermes`` child -- git/pip/npm often fork helper processes
+    that would otherwise survive as orphans after a plain ``proc.kill()``."""
+    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass  # group (or process) already gone -- fall through to proc.kill()
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 def start_action(
@@ -226,17 +293,25 @@ def start_action(
 ) -> tuple[bool, dict]:
     """Start install/update/remove as a background subprocess.
 
-    Single-flight: only one plugin lifecycle action may run at a time.
-    Returns ``(started, status)`` -- ``started=False`` means another action
-    is already running (the caller maps that to HTTP 409); ``status`` is the
-    current status either way, so a 409 response body still shows what's
-    in-flight.
+    Single-flight PER PROFILE: only one plugin lifecycle action may run at a
+    time for a given HERMES_HOME. Returns ``(started, status)`` --
+    ``started=False`` means another action is already running for the active
+    profile (the caller maps that to HTTP 409); ``status`` is the current
+    status either way, so a 409 response body still shows what's in-flight.
     """
-    global _RUNNING
+    # Resolve the profile key BEFORE reserving a run slot. If this raises,
+    # nothing has been reserved yet, so there is nothing to leak -- the
+    # exception propagates as-is (the route layer's generic error handling
+    # turns it into a 500, same as any other pre-existing resolution
+    # failure). This is what closes the lock-leak: NO code that can raise
+    # runs between "slot reserved" and the try/except immediately below that
+    # releases it.
+    profile_key = _profile_key()
+
     with _LOCK:
-        already_running = _RUNNING
+        already_running = profile_key in _RUNNING_PROFILES
         if not already_running:
-            _RUNNING = True
+            _RUNNING_PROFILES.add(profile_key)
     if already_running:
         # get_status() acquires _LOCK itself -- it MUST be called after the
         # `with` block above has released it. _LOCK is a plain (non-reentrant)
@@ -244,35 +319,57 @@ def start_action(
         # thread forever the first time two lifecycle requests ever raced.
         return False, get_status()
 
-    cmd = _build_action_command(action, arg, force=force, enable=enable)
-    _prefix, env = _run_env()
+    try:
+        cmd, env = _build_action_command(action, arg, force=force, enable=enable)
+    except Exception:
+        # Command construction (_resolve_hermes_command / profile context
+        # resolution again inside _run_env) can fail the same way profile_key
+        # resolution above can -- release the slot we just reserved instead
+        # of leaving it permanently held (the bug this fix closes: previously
+        # this call sat AFTER the reservation with no matching release).
+        with _LOCK:
+            _RUNNING_PROFILES.discard(profile_key)
+        raise
 
     def _run() -> None:
-        global _RUNNING, _LAST
         ok = False
         log = ""
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_ACTION_TIMEOUT_SECONDS, env=env,
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                start_new_session=True,  # own process group -- see _kill_process_group
             )
-            log = ((proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")).strip()
-            ok = proc.returncode == 0
-        except subprocess.TimeoutExpired:
-            log = f"Timed out after {_ACTION_TIMEOUT_SECONDS}s."
+            try:
+                stdout, _stderr = proc.communicate(timeout=_ACTION_TIMEOUT_SECONDS)
+                ok = proc.returncode == 0
+                log = (stdout or "").strip()
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc)
+                # Unbounded wait is safe here: the process (and its group)
+                # was just SIGKILLed, which cannot be ignored. This also
+                # reaps the child so it never lingers as a zombie.
+                stdout, _stderr = proc.communicate()
+                ok = False
+                log = ((stdout or "").strip() + f"\nTimed out after {_ACTION_TIMEOUT_SECONDS}s.").strip()
         except OSError as exc:
             log = f"Failed to run hermes CLI: {exc}"
         finally:
+            log = _redact_credentials(log)
             if len(log) > _LOG_TAIL_MAX_BYTES:
                 log = log[-_LOG_TAIL_MAX_BYTES:]
             with _LOCK:
-                _LAST = {
+                _LAST_BY_PROFILE[profile_key] = {
                     "action": action,
-                    "name": arg,
+                    "name": _redact_credentials(arg),
                     "ok": ok,
                     "log_tail": log,
                     "finished_at": time.time(),
                 }
-                _RUNNING = False
+                _RUNNING_PROFILES.discard(profile_key)
 
     threading.Thread(target=_run, daemon=True).start()
     return True, get_status()

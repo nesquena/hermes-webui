@@ -39,6 +39,59 @@ def _fake_proc(returncode=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+class _FakePopen:
+    """Stand-in for subprocess.Popen used by start_action()'s _run(), which
+    uses Popen+communicate (not subprocess.run) so a timeout can kill the
+    whole process group, not just the immediate child (see
+    _kill_process_group). ``timeout_first=True`` raises TimeoutExpired on the
+    FIRST communicate() call (matching the real timeout path) and returns
+    normally on the second (the post-kill reap call)."""
+
+    _next_pid = 9000
+
+    def __init__(self, cmd, *, stdout="", returncode=0, timeout_first=False):
+        self.args = cmd
+        _FakePopen._next_pid += 1
+        self.pid = _FakePopen._next_pid
+        self.returncode = returncode
+        self._stdout = stdout
+        self._timeout_first = timeout_first
+        self._communicate_calls = 0
+
+    def communicate(self, timeout=None):
+        self._communicate_calls += 1
+        if self._timeout_first and self._communicate_calls == 1:
+            raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout)
+        return self._stdout, None
+
+    def kill(self):
+        pass
+
+
+def _install_fake_popen(monkeypatch, *, stdout="", returncode=0, timeout_first=False):
+    """Patch subprocess.Popen (used by start_action()'s own _run()) with
+    _FakePopen, capturing every {cmd,kwargs} call.
+
+    Also patches subprocess.run with a fixed empty-list fake: subprocess.run
+    is implemented ON TOP OF subprocess.Popen internally, so patching only
+    Popen would ALSO intercept list_installed_plugins()'s `plugins list
+    --json` call (start_action()'s own return path calls get_status(), which
+    calls list_installed_plugins()) -- and subprocess.run's internal usage
+    (context manager, communicate(input=..., timeout=...)) doesn't match
+    _FakePopen's shape. Keeping the two calls on separate fakes avoids that
+    collision entirely.
+    """
+    captured = []
+
+    def factory(cmd, **kwargs):
+        captured.append({"cmd": cmd, "kwargs": kwargs})
+        return _FakePopen(cmd, stdout=stdout, returncode=returncode, timeout_first=timeout_first)
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, "[]"))
+    return captured
+
+
 @pytest.fixture
 def pl(monkeypatch):
     """api.plugin_lifecycle with CLI resolution pinned to a fake, hermetic environment."""
@@ -47,16 +100,16 @@ def pl(monkeypatch):
     monkeypatch.setattr(mod, "_resolve_hermes_command", lambda: "/fake/hermes")
     monkeypatch.setattr(mod, "_gateway_restart_profile_context", lambda: (Path("/fake/home"), None))
     # Reset module-level run state so tests don't leak into each other.
-    monkeypatch.setattr(mod, "_RUNNING", False, raising=False)
-    monkeypatch.setattr(mod, "_LAST", None, raising=False)
+    monkeypatch.setattr(mod, "_RUNNING_PROFILES", set(), raising=False)
+    monkeypatch.setattr(mod, "_LAST_BY_PROFILE", {}, raising=False)
     return mod
 
 
-def _wait_until_idle(pl_mod, timeout=2.0):
+def _wait_until_idle(pl_mod, profile_key="/fake/home", timeout=2.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         with pl_mod._LOCK:
-            if not pl_mod._RUNNING:
+            if profile_key not in pl_mod._RUNNING_PROFILES:
                 return
         time.sleep(0.01)
     raise AssertionError("plugin lifecycle action did not finish in time")
@@ -99,6 +152,11 @@ class TestSourceValidation:
         ("owner/repo && curl evil.sh | sh", "Invalid source segment"),
         ("owner/repo`whoami`", "Invalid source segment"),
         ("just-one-segment", "owner/repo"),
+        # A segment starting with '-' is indistinguishable from a CLI flag
+        # once it reaches argv (e.g. "-force/repo" as the "owner" segment) --
+        # #audit LOW: previously accepted by the old regex.
+        ("-owner/repo", "Invalid source segment"),
+        ("owner/-repo", "Invalid source segment"),
     ])
     def test_rejects_unsafe_sources(self, pl, source, match):
         with pytest.raises(pl.PluginSourceError, match=match):
@@ -121,6 +179,12 @@ class TestPluginNameValidation:
     def test_rejects_unknown_name(self, pl):
         with pytest.raises(LookupError, match="is not installed"):
             pl.validate_plugin_name("nonexistent", [{"name": "my-plugin"}])
+
+    def test_rejects_leading_hyphen(self, pl):
+        """A name starting with '-' could be consumed as a CLI flag instead
+        of the positional value it's meant to be -- #audit LOW."""
+        with pytest.raises(pl.PluginSourceError):
+            pl.validate_plugin_name("-force", [{"name": "-force"}])
 
 
 class TestListInstalledPlugins:
@@ -192,7 +256,7 @@ class TestGetStatus:
 
 class TestStartAction:
     def test_install_success_records_last_result(self, pl, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, "Installed my-plugin", ""))
+        _install_fake_popen(monkeypatch, stdout="Installed my-plugin", returncode=0)
 
         # The background thread runs a near-instant fake, so whether the
         # returned status snapshot still shows running:True is a genuine
@@ -210,7 +274,7 @@ class TestStartAction:
         assert "Installed my-plugin" in final["last"]["log_tail"]
 
     def test_action_failure_recorded(self, pl, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(1, "", "clone failed"))
+        _install_fake_popen(monkeypatch, stdout="clone failed", returncode=1)
 
         pl.start_action("install", "owner/repo")
         _wait_until_idle(pl)
@@ -219,10 +283,14 @@ class TestStartAction:
         assert last["ok"] is False
         assert "clone failed" in last["log_tail"]
 
-    def test_timeout_recorded_as_failure(self, pl, monkeypatch):
-        def _raise(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="hermes", timeout=600)
-        monkeypatch.setattr(subprocess, "run", _raise)
+    def test_timeout_recorded_as_failure_and_kills_process_group(self, pl, monkeypatch):
+        """#audit LOW fix: a timeout must kill the whole process group (git/pip/npm
+        grandchildren), not just the immediate `hermes` child, and must reap it
+        afterward instead of leaving a zombie."""
+        _install_fake_popen(monkeypatch, stdout="partial output", returncode=0, timeout_first=True)
+        killpg_calls = []
+        monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
+        monkeypatch.setattr(pl.os, "getpgid", lambda pid: pid)
 
         pl.start_action("update", "my-plugin")
         _wait_until_idle(pl)
@@ -230,10 +298,26 @@ class TestStartAction:
         last = pl.get_status()["last"]
         assert last["ok"] is False
         assert "Timed out" in last["log_tail"]
+        assert "partial output" in last["log_tail"]  # drained after the kill, not discarded
+        assert len(killpg_calls) == 1
+        assert killpg_calls[0][1] == pl.signal.SIGKILL
+
+    def test_timeout_falls_back_to_proc_kill_when_no_process_groups(self, pl, monkeypatch):
+        """Platforms without os.killpg/getpgid (e.g. Windows) must still terminate
+        the child instead of erroring out of the timeout handler."""
+        monkeypatch.delattr(pl.os, "killpg", raising=False)
+        captured = _install_fake_popen(monkeypatch, stdout="", returncode=0, timeout_first=True)
+
+        pl.start_action("install", "owner/repo")
+        _wait_until_idle(pl)
+
+        last = pl.get_status()["last"]
+        assert last["ok"] is False
+        assert len(captured) == 1
 
     def test_log_tail_bounded(self, pl, monkeypatch):
         huge = "x" * (pl._LOG_TAIL_MAX_BYTES + 5000)
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_proc(0, huge, ""))
+        _install_fake_popen(monkeypatch, stdout=huge, returncode=0)
 
         pl.start_action("install", "owner/repo")
         _wait_until_idle(pl)
@@ -241,47 +325,160 @@ class TestStartAction:
         last = pl.get_status()["last"]
         assert len(last["log_tail"]) <= pl._LOG_TAIL_MAX_BYTES
 
-    def test_single_flight_rejects_concurrent_start(self, pl, monkeypatch):
-        monkeypatch.setattr(pl, "_RUNNING", True)
+    def test_single_flight_rejects_concurrent_start_for_same_profile(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_RUNNING_PROFILES", {"/fake/home"})
         started, status = pl.start_action("install", "owner/repo")
         assert started is False
         assert status["running"] is True
 
     def test_install_command_includes_force_and_enable_flags(self, pl, monkeypatch):
-        # start_action's own return path also calls get_status() -> a second,
-        # concurrent `plugins list --json` subprocess.run call -- capture every
-        # call and pick out the install one rather than assuming call order
-        # between the background action thread and the main thread.
-        captured = []
-        monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (captured.append(cmd), _fake_proc(0, "", ""))[1])
+        # start_action's action subprocess now goes through Popen, while
+        # get_status()'s `plugins list --json` still goes through
+        # subprocess.run -- the two APIs no longer collide, so (unlike
+        # before this fix) there's exactly one Popen call to inspect.
+        captured = _install_fake_popen(monkeypatch, stdout="", returncode=0)
 
         pl.start_action("install", "owner/repo", force=True, enable=False)
         _wait_until_idle(pl)
 
-        install_calls = [c for c in captured if "install" in c]
-        assert len(install_calls) == 1
-        cmd = install_calls[0]
+        assert len(captured) == 1
+        cmd = captured[0]["cmd"]
         assert cmd[:3] == ["/fake/hermes", "plugins", "install"]
         assert "owner/repo" in cmd
         assert "--force" in cmd
         assert "--no-enable" in cmd
         assert "--enable" not in cmd
+        # Required for _kill_process_group to be able to signal the whole group.
+        assert captured[0]["kwargs"].get("start_new_session") is True
 
     def test_update_and_remove_commands(self, pl, monkeypatch):
-        captured = []
-        monkeypatch.setattr(subprocess, "run", lambda cmd, **k: (captured.append(cmd), _fake_proc(0, "", ""))[1])
+        captured = _install_fake_popen(monkeypatch, stdout="", returncode=0)
 
         pl.start_action("update", "my-plugin")
         _wait_until_idle(pl)
-        update_calls = [c for c in captured if "update" in c]
-        captured.clear()
-
         pl.start_action("remove", "my-plugin")
         _wait_until_idle(pl)
-        remove_calls = [c for c in captured if "remove" in c]
 
-        assert update_calls == [["/fake/hermes", "plugins", "update", "my-plugin"]]
-        assert remove_calls == [["/fake/hermes", "plugins", "remove", "my-plugin"]]
+        assert captured[0]["cmd"] == ["/fake/hermes", "plugins", "update", "my-plugin"]
+        assert captured[1]["cmd"] == ["/fake/hermes", "plugins", "remove", "my-plugin"]
+
+
+class TestCredentialRedaction:
+    """#audit MEDIUM fix: a credential-bearing install source must never
+    appear verbatim in stored/status-visible state."""
+
+    def test_redact_credentials_helper(self, pl):
+        assert pl._redact_credentials("https://user:sekret@host/repo.git") == "https://***@host/repo.git"
+        assert pl._redact_credentials("no credentials here") == "no credentials here"
+        assert pl._redact_credentials("") == ""
+        assert pl._redact_credentials(None) == ""
+
+    def test_install_source_with_credentials_is_redacted_in_status(self, pl, monkeypatch):
+        source = "https://user:sekret123@example.com/owner/repo.git"
+        # validate_source only checks the https:// prefix -- the raw
+        # credential-bearing URL passes through unchanged, exactly as
+        # start_action() needs it to actually clone.
+        assert pl.validate_source(source) == source
+
+        _install_fake_popen(
+            monkeypatch,
+            stdout=f"Cloning into 'repo'...\nfatal: could not read from remote: {source}",
+            returncode=1,
+        )
+
+        pl.start_action("install", source)
+        _wait_until_idle(pl)
+
+        last = pl.get_status()["last"]
+        assert "sekret123" not in last["name"]
+        assert "sekret123" not in last["log_tail"]
+        assert last["name"] == "https://***@example.com/owner/repo.git"
+        assert "https://***@example.com/owner/repo.git" in last["log_tail"]
+
+    def test_plain_shorthand_source_is_unaffected(self, pl, monkeypatch):
+        """Redaction must be a no-op for the common case (no '@' present)."""
+        _install_fake_popen(monkeypatch, stdout="Installed owner/repo", returncode=0)
+
+        pl.start_action("install", "owner/repo")
+        _wait_until_idle(pl)
+
+        last = pl.get_status()["last"]
+        assert last["name"] == "owner/repo"
+
+
+class TestProfileScoping:
+    """#audit MEDIUM fix: _RUNNING_PROFILES/_LAST_BY_PROFILE must be keyed per
+    profile HERMES_HOME, not process-wide -- otherwise one profile's install
+    source/log (including any embedded credentials) leaks into another
+    profile's GET /status response."""
+
+    def test_last_result_is_not_visible_from_a_different_profile(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_gateway_restart_profile_context", lambda: (Path("/profile-a"), None))
+        _install_fake_popen(monkeypatch, stdout="done-a", returncode=0)
+        pl.start_action("install", "owner/repo-a")
+        _wait_until_idle(pl, profile_key="/profile-a")
+        assert pl.get_status()["last"]["name"] == "owner/repo-a"
+
+        # Switch the active profile: must see a clean slate, never profile A's result.
+        monkeypatch.setattr(pl, "_gateway_restart_profile_context", lambda: (Path("/profile-b"), None))
+        status_b = pl.get_status()
+        assert status_b["last"] is None
+        assert status_b["running"] is False
+
+        # Profile A's own result must still be intact afterward.
+        monkeypatch.setattr(pl, "_gateway_restart_profile_context", lambda: (Path("/profile-a"), None))
+        assert pl.get_status()["last"]["name"] == "owner/repo-a"
+
+    def test_running_action_in_one_profile_does_not_block_another(self, pl, monkeypatch):
+        monkeypatch.setattr(pl, "_RUNNING_PROFILES", {"/profile-a"})
+        monkeypatch.setattr(pl, "_gateway_restart_profile_context", lambda: (Path("/profile-b"), None))
+        _install_fake_popen(monkeypatch, stdout="", returncode=0)
+
+        started, _status = pl.start_action("install", "owner/repo-b")
+
+        assert started is True
+        _wait_until_idle(pl, profile_key="/profile-b")
+
+
+class TestLockLeakFix:
+    """#audit HIGH fix: start_action() must never leave a profile's run slot
+    permanently reserved if profile/command resolution fails."""
+
+    def test_profile_resolution_failure_reserves_nothing(self, pl, monkeypatch):
+        def _raise():
+            raise RuntimeError("profile resolution failed")
+
+        monkeypatch.setattr(pl, "_gateway_restart_profile_context", _raise)
+
+        with pytest.raises(RuntimeError, match="profile resolution failed"):
+            pl.start_action("install", "owner/repo")
+
+        assert pl._RUNNING_PROFILES == set()
+
+    def test_command_build_failure_releases_the_reserved_slot(self, pl, monkeypatch):
+        real_build = pl._build_action_command
+        calls = {"n": 0}
+
+        def _flaky_once(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_build(*a, **k)
+
+        monkeypatch.setattr(pl, "_build_action_command", _flaky_once)
+        _install_fake_popen(monkeypatch, stdout="", returncode=0)
+
+        with pytest.raises(OSError, match="disk full"):
+            pl.start_action("install", "owner/repo")
+
+        assert pl._RUNNING_PROFILES == set()
+
+        # Regression check: the ORIGINAL bug left the slot permanently
+        # reserved, so every subsequent call -- even a perfectly healthy one
+        # -- would report started=False forever (409, permanent DoS until a
+        # process restart). Confirm that no longer happens.
+        started, _status = pl.start_action("install", "owner/repo")
+        assert started is True
 
 
 class TestPluginLifecycleRoutesGating:
