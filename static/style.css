@@ -7235,3 +7235,8 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+/* Active-run indicator dot - green pulsing animation (#6025) */
+#activeRunDot.active-run-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#2ecc71;margin:0 6px 0 2px;vertical-align:middle;position:relative;box-shadow:0 0 4px rgba(46,204,113,.6);animation:active-run-pulse 2s ease-in-out infinite}
+#activeRunDot.active-run-dot-hidden{display:none!important}
+@keyframes active-run-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}

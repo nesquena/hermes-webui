@@ -843,7 +843,7 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
   let changed=false;
-  if (S.busy) { S.busy=false; changed=true; }
+  if (S.busy) { S.busy=false;_updateActiveRunDot(); changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
   if (INFLIGHT&&INFLIGHT[sid]) {
     delete INFLIGHT[sid];
@@ -1483,7 +1483,7 @@ async function newSession(flash, options={}){
     }
     // Reset per-session visual state: a fresh chat is idle even if another
     // conversation is still streaming in the background.
-    S.busy=false;
+    S.busy=false;_updateActiveRunDot();
     S.activeStreamId=null;
     updateSendBtn();
     setStatus('');
@@ -1961,7 +1961,7 @@ async function loadSession(sid){
   // precede the acknowledge repaint.)
   if(!activeStreamId){
     S.activeStreamId=null;
-    S.busy=false;
+    S.busy=false;_updateActiveRunDot();
     if(INFLIGHT[sid]){
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
@@ -2074,7 +2074,7 @@ async function loadSession(sid){
     }
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-    S.busy=!!activeStreamId;  // #4354: Only assert busy if server confirms active stream.
+    S.busy=!!activeStreamId;_updateActiveRunDot();_persistActiveRunState();  // #4354: Only assert busy if server confirms active stream.
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
@@ -2223,7 +2223,7 @@ async function loadSession(sid){
     activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
 
     if(activeStreamId){
-      S.busy=true;
+      S.busy=true;_updateActiveRunDot();_persistActiveRunState();
       S.activeStreamId=activeStreamId;
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
@@ -2249,7 +2249,7 @@ async function loadSession(sid){
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
     }else{
-      S.busy=false;
+      S.busy=false;_updateActiveRunDot();
       S.activeStreamId=null;
       updateSendBtn();
       setStatus('');
@@ -9245,3 +9245,39 @@ document.addEventListener('keydown',(e)=>{
   e.preventDefault();
   navigateSession(e.key==='j'?1:-1);
 });
+
+/* Active-run indicator persistence - visible across session switches (#6025) */
+function _persistActiveRunState() {
+    try {
+        sessionStorage.setItem('hermes-webui-active-run', JSON.stringify({
+            busy: !!S.busy,
+            activeStreamId: S.activeStreamId || null,
+            sessionId: (S.session && S.session.session_id) || null,
+            timestamp: Date.now()
+        }));
+    } catch(e) {}
+}
+function _restoreActiveRunState() {
+    try {
+        var raw = sessionStorage.getItem('hermes-webui-active-run');
+        if (!raw) return;
+        var state = JSON.parse(raw);
+        if (state.busy && state.timestamp && (Date.now() - state.timestamp) < 30000) {
+            S.busy = true;
+            _updateActiveRunDot();
+            if (state.activeStreamId) S.activeStreamId = state.activeStreamId;
+            if (state.sessionId) S._restoredActiveSessionId = state.sessionId;
+        }
+        sessionStorage.removeItem('hermes-webui-active-run');
+    } catch(e) {}
+}
+function _updateActiveRunDot() {
+    var dot = document.getElementById('activeRunDot');
+    if (!dot) return;
+    if (S.busy) {
+        dot.className = 'active-run-dot';
+        dot.title = 'Agent is running';
+    } else {
+        dot.className = 'active-run-dot-hidden';
+    }
+}
