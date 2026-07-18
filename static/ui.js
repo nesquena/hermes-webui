@@ -19772,9 +19772,9 @@ function _showFileContextMenu(e, item){
     dlItem.onmouseleave=()=>dlItem.style.background='';
     dlItem.onclick=()=>{
       menu.remove();
-      const url='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
+      const rel='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
               + '&path='+encodeURIComponent(item.path||'');
-      window.location.href=url;
+      window.location.href=new URL(rel.slice(1), document.baseURI||location.href).href;
     };
     menu.appendChild(dlItem);
   }
