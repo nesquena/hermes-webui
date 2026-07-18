@@ -83,6 +83,7 @@ api.applyAssistantTurnAnchorSourceEvent(registry, {{
 console.log(JSON.stringify({{
   version:api.version,
   registry,
+  scene:api.projectAssistantTurnAnchorActivityScene(registry,{{mode:'compact_worklog'}}),
   isolated,
   results:results.map((item)=>({{applied:item.applied, reason:item.reason}})),
 }}));
@@ -723,6 +724,93 @@ def test_registry_routes_activity_artifacts_side_effects_metadata_and_transport(
     assert anchor["transport_events"][0]["source_event_type"] == "stream_end"
 
 
+def test_live_state_saved_listener_attaches_side_effect_to_anchor():
+    body = _event_listener_body(_read(MESSAGES_JS), "state_saved")
+
+    assert "_applyToAnchor('state_saved',d,e,null,{render:false});" in body
+
+
+def test_side_effect_owner_survives_scene_settlement_and_reload():
+    from api import routes
+
+    data = _registry_snapshot()
+    scene = routes._sanitize_anchor_activity_scene(data["scene"])
+    messages = [
+        {"role": "user", "content": "save this"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    message_ref = routes._assistant_anchor_scene_message_ref(messages[1])
+    records = {
+        message_ref: {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": 1,
+            "message_ref": message_ref,
+            "stream_id": "stream-1",
+            "scene": scene,
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+    settled_scene = hydrated[1]["_anchor_activity_scene"]
+
+    assert settled_scene["artifacts"] == scene["artifacts"]
+    assert settled_scene["artifacts"][0]["payload"] == {
+        "kind": "workspace_file",
+        "path": "answer.txt",
+    }
+    assert settled_scene["side_effects"] == scene["side_effects"]
+    assert settled_scene["side_effects"][0]["source_event_type"] == "state_saved"
+    assert settled_scene["side_effects"][0]["payload"] == {
+        "kind": "memory",
+        "name": "session-state",
+    }
+
+
+def test_side_effect_only_scene_is_persisted_without_creating_a_worklog():
+    assert NODE, "node is required for assistant-turn ownership tests"
+    messages_js = _read(MESSAGES_JS)
+    has_owned_outcomes = _function_body(messages_js, "_anchorSceneHasOwnedOutcomes")
+    attach_scene = _function_body(
+        messages_js, "_attachProjectedAnchorSceneToLastAssistant"
+    )
+    script = f"""
+const activeSid='sid-owned-outcome';
+const streamId='stream-owned-outcome';
+const _anchorRegistry={{}};
+let persisted=0;
+function _anchorSceneHasOwnedOutcomes(scene){{{has_owned_outcomes}}}
+function _anchorSceneHasWorklogWorthyRows(){{ return false; }}
+function _projectLiveAnchorActivityScene(){{
+  return {{
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[{{source_event_type:'state_saved',payload:{{kind:'memory'}}}}],
+  }};
+}}
+function _completeSettledAnchorSceneForTurn(messages,index,scene){{ return scene; }}
+function _persistSettledAnchorScene(){{ persisted+=1; }}
+function _attachProjectedAnchorSceneToLastAssistant(messages){{{attach_scene}}}
+const messages=[{{role:'assistant',content:'final answer'}}];
+const renderedWorklog=_attachProjectedAnchorSceneToLastAssistant(messages);
+console.log(JSON.stringify({{
+  renderedWorklog,
+  persisted,
+  attached:messages[0]._anchor_activity_scene,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["renderedWorklog"] is False
+    assert data["persisted"] == 1
+    assert data["attached"]["side_effects"][0]["source_event_type"] == "state_saved"
+
+
 def test_registry_updates_lifecycle_and_settled_final_projection():
     data = _registry_snapshot()
     anchor = data["registry"]["anchor"]
@@ -979,6 +1067,8 @@ def test_activity_scene_is_renderer_neutral_and_empty_safe():
         "final_message_ref": None,
         "terminal_state": None,
         "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
     }
 
 

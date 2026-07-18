@@ -2630,7 +2630,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   _scheduleAnchorRegistryCleanup(600000);
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
-  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome){
+  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
     if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
     const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
@@ -2655,7 +2655,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         sourceEvent,
         {session_id:activeSid,stream_id:streamId}
       );
-      const rendered=_renderAnchorLiveScene();
+      const rendered=options&&options.render===false?false:_renderAnchorLiveScene();
       if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
       return result;
     }catch(err){
@@ -3661,6 +3661,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
+  function _anchorSceneHasOwnedOutcomes(scene){
+    return !!(
+      (Array.isArray(scene&&scene.artifacts)&&scene.artifacts.length)
+      || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
+    );
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
@@ -3676,9 +3682,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+    const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
+    if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
-      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';
+      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
       if(!shouldPersistScene) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
@@ -5509,6 +5516,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       if(!S.session||S.session.session_id!==activeSid) return;
+      _applyToAnchor('state_saved',d,e,null,{render:false});
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
