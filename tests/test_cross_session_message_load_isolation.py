@@ -217,6 +217,12 @@ function createEnvironment() {
   // the fetch URL drops msg_limit/expand_renderable and mismatches the
   // enqueued buildMessageUrl(), stalling the ordered api() harness.
   globalThis._MSG_LIMIT_MAX = 500;
+  // #6177: _msgLimitMax is a module-scope `let` (live server-advertised ceiling,
+  // defaulting to _MSG_LIMIT_MAX). It's read by _ensureMessagesLoaded's
+  // boundedReloadLimit and _loadOlderMessages's useBeforePaging; the harness
+  // injects only the extracted functions, not module-level lets, so define it
+  // here or those reads resolve undefined -> wrong fetch URL -> ordered-api stall.
+  globalThis._msgLimitMax = 500;
   globalThis._currentMessageRenderWindowSize = () => 1;
   globalThis._messageRenderableMessageCount = () => 2;
 
