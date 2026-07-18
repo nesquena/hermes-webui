@@ -18917,9 +18917,16 @@ def _handle_artifact_get(handler, parsed):
         or mime.startswith(("image/", "audio/", "video/"))
     )
     disposition = "inline" if inline else "attachment"
-    # A pinned version is immutable; the floating URL must revalidate so a
-    # re-publish is picked up promptly.
-    cache_control = "private, max-age=3600" if version is not None else "private, max-age=0, must-revalidate"
+    # A public-safe pinned version is immutable and anonymously reachable, so it
+    # may be shared by public caches. Floating URLs must revalidate for re-publish;
+    # anything session-gated stays private regardless of its version selector.
+    if anonymous_ok:
+        cache_control = (
+            "public, max-age=31536000, immutable"
+            if version is not None else "public, max-age=0, must-revalidate"
+        )
+    else:
+        cache_control = "private, max-age=3600" if version is not None else "private, max-age=0, must-revalidate"
     return _serve_file_bytes(handler, fpath, mime, disposition, cache_control, csp=csp)
 
 

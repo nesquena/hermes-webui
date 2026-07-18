@@ -18,6 +18,16 @@ PROFILE_CONCEPT_KEYS = [
     "profile_concept_label_example",
 ]
 
+# English-owned copy intentionally relies on t()'s documented per-key fallback
+# instead of duplicating English text through every locale bundle.
+ARTIFACT_FALLBACK_KEYS = [
+    "artifact_publish", "artifact_published", "artifact_publish_failed",
+    "artifact_copy", "artifact_copied", "artifact_revoke", "artifact_revoked",
+    "artifact_public", "artifact_make_public", "artifact_now_public",
+    "artifacts_title", "artifacts_empty",
+]
+LOCALE_FALLBACK_KEYS = set(PROFILE_CONCEPT_KEYS) | set(ARTIFACT_FALLBACK_KEYS)
+
 
 def _locale_blocks():
     """Extract every top-level locale block from static/i18n.js."""
@@ -56,6 +66,19 @@ def test_i18n_keys_are_english_fallback_owned():
             assert not re.search(rf"\b{re.escape(key)}:\s*'", block), (
                 f"key {key!r} must be absent from non-English locale {locale!r}"
             )
+    assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS
+
+
+def test_artifact_keys_fall_back_to_english_when_untranslated():
+    """Artifact copy stays translated in German and falls back elsewhere."""
+    locale_blocks = _locale_blocks()
+    en_block = locale_blocks["en"]
+    for key in ARTIFACT_FALLBACK_KEYS:
+        assert re.search(rf"\b{re.escape(key)}:\s*'", en_block)
+    for key in ARTIFACT_FALLBACK_KEYS:
+        assert not re.search(rf"\b{re.escape(key)}:\s*'", locale_blocks["zh"]), (
+            f"artifact fallback key {key!r} must stay absent from untranslated locales"
+        )
     assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS
 
 

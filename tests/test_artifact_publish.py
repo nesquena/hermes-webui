@@ -135,6 +135,30 @@ def test_public_text_artifact_is_credential_redacted(artifacts_on):
         os.unlink(src)
 
 
+def test_public_pinned_version_is_immutable_cacheable(artifacts_on):
+    src = _tmp_file(".html", b"<p>public pinned version</p>")
+    try:
+        body, status = post("/api/artifact/publish", {"path": src, "public": True})
+        assert status == 200, body
+        _, status, headers = get(body["artifact"]["url"] + "?v=1")
+        assert status == 200
+        assert headers.get("Cache-Control") == "public, max-age=31536000, immutable"
+    finally:
+        os.unlink(src)
+
+
+def test_private_pinned_version_stays_private_cacheable(artifacts_on):
+    src = _tmp_file(".html", b"<p>private pinned version</p>")
+    try:
+        body, status = post("/api/artifact/publish", {"path": src})
+        assert status == 200, body
+        _, status, headers = get(body["artifact"]["url"] + "?v=1")
+        assert status == 200
+        assert headers.get("Cache-Control") == "private, max-age=3600"
+    finally:
+        os.unlink(src)
+
+
 def test_revoke_removes_from_serving_and_list(artifacts_on):
     src = _tmp_file(".html", b"<p>bye</p>")
     try:

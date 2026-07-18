@@ -217,10 +217,10 @@ def validate_source_path(raw_path: str) -> Path:
     raw_path = os.path.expanduser(raw_path)
     try:
         target = Path(raw_path).resolve(strict=True)
-    except FileNotFoundError:
-        raise ValueError("file not found")
-    except Exception:
-        raise ValueError("invalid path")
+    except FileNotFoundError as exc:
+        raise ValueError("file not found") from exc
+    except Exception as exc:
+        raise ValueError("invalid path") from exc
     if not target.is_file():
         raise ValueError("path is not a regular file")
     if target.name.casefold() in {n.casefold() for n in _DENY_FILENAMES}:
@@ -336,7 +336,7 @@ def publish_artifact(
             try:
                 text = source.read_text(encoding="utf-8", errors="replace")
             except Exception as exc:
-                raise ValueError(f"could not read file: {exc}")
+                raise ValueError(f"could not read file: {exc}") from exc
             dest.write_text(_force_redact_credentials(text), encoding="utf-8")
             redacted = True
         else:
