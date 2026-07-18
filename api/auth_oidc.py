@@ -220,7 +220,7 @@ def _normalize_allow_values(raw: Any) -> list[str]:
     if raw is None:
         return []
     if isinstance(raw, (list, tuple, set)):
-        return [str(item).strip() for item in raw]
+        return [value for value in (str(item).strip() for item in raw) if value]
     text = str(raw).replace("\n", ",")
     return [part.strip() for part in text.split(",") if part.strip()]
 
