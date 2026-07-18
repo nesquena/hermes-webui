@@ -165,6 +165,12 @@ _DECISION_RE = re.compile(
 _FINDING_RE = re.compile(
     r'^\s{2}(?P<severity>CRITICAL|HIGH|MEDIUM|LOW)\s+(?P<category>\S+)\s+(?P<location>\S+)\s+"(?P<match>.*)"\s*$'
 )
+# A terminal renderer may wrap the quoted ``match`` field before its closing
+# quote. Keep this deliberately narrower than a generic indented log line: it
+# recognizes only the fixed scan-finding prefix, including an incomplete record.
+_FINDING_RECORD_START_RE = re.compile(
+    r"^\s{2}(?:CRITICAL|HIGH|MEDIUM|LOW)\s+\S+\s+\S+(?:\s|$)"
+)
 
 
 def parse_scan_report(log_text: str) -> dict | None:
@@ -217,14 +223,34 @@ def _redact_sensitive_text(text: object) -> object:
 
 
 def _redact_scan_finding_lines(log: object) -> object:
-    """Remove raw scanned-source fragments from a browser-visible transcript."""
+    """Remove complete raw scan-finding records from a browser transcript.
+
+    Finding matches may be wrapped by the CLI renderer. The original runner
+    transcript remains private in ``_STATE``; this function only creates the
+    browser-facing projection. A blank line, another finding prefix, or a
+    recognized scan header/decision is a safe record boundary. If none appears,
+    keep suppressing rather than guessing that a continuation is harmless.
+    """
     if not isinstance(log, str):
         return log
     safe_lines = []
+    suppressing_finding = False
     for raw_line in log.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
-        if _FINDING_RE.match(line):
-            safe_lines.append("[scan finding redacted]" + raw_line[len(line):])
+        newline = raw_line[len(line):]
+        is_finding_start = bool(_FINDING_RECORD_START_RE.match(line))
+        is_safe_boundary = not line or bool(_SCAN_HEADER_RE.match(line) or _DECISION_RE.match(line))
+        if is_finding_start:
+            if not suppressing_finding:
+                safe_lines.append("[scan finding redacted]" + newline)
+            suppressing_finding = True
+        elif suppressing_finding:
+            if is_safe_boundary:
+                suppressing_finding = False
+                safe_lines.append(raw_line)
+            # Otherwise this may be a wrapped raw source fragment; fail closed.
+        elif _FINDING_RE.match(line):
+            safe_lines.append("[scan finding redacted]" + newline)
         else:
             safe_lines.append(raw_line)
     return "".join(safe_lines)

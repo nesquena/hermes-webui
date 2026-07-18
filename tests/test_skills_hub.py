@@ -173,6 +173,12 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
     aws_key = "_".join(("AWS", "SECRET", "ACCESS", "KEY"))
     finding_source = f"{aws_key}={sensitive_value}"
     finding_line = f'  HIGH credential SKILL.md:7 "{finding_source}"\n'
+    wrapped_source = "".join(("wrapped", "-", "private-fragment"))
+    wrapped_finding = (
+        '  HIGH credential SKILL.md:8 "prefix-\n'
+        + f"    {wrapped_source}\n"
+        + '    suffix"\n\n'
+    )
     basic_value = "".join(("basic", "-", "credential"))
     authorization_prefix = "".join(("Authorization", ": ", "Basic", " "))
     session_key = "_".join(("session", "id"))
@@ -184,6 +190,8 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
                 "log": (
                     "Installed pdf\n"
                     + finding_line
+                    + wrapped_finding
+                    + "Post-scan progress remains visible\n"
                     + f"{authorization_prefix}{basic_value}\n"
                     + f"{session_key}={sensitive_value}\n"
                     + f"{cookie_key}={sensitive_value}\n"
@@ -212,8 +220,10 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
         assert sensitive_value not in rendered
         assert basic_value not in rendered
         assert finding_source not in rendered
+        assert wrapped_source not in rendered
         assert finding_line.strip() not in rendered
         assert "Installed pdf" in status["log"]
+        assert "Post-scan progress remains visible" in status["log"]
         assert "[scan finding redacted]" in status["log"]
         assert "Authorization: Basic <redacted>" in status["log"]
         assert f"{session_key}=<redacted>" in status["log"]

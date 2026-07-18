@@ -4970,9 +4970,15 @@ function renderSkillsHubInstalled() {
       </div>
       ${_skillsHubTrustBadge(entry.trust_level)}
       ${_skillsHubVerdictBadge(entry.scan_verdict)}
-      <button type="button" class="sm-btn" ${gated ? 'disabled' : ''} onclick="updateSkillsHubSkill('${esc(entry.name)}')" style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_update">${esc(t('skills_hub_update'))}</button>
-      <button type="button" class="sm-btn" ${gated ? 'disabled' : ''} onclick="uninstallSkillsHubSkill('${esc(entry.name)}')" style="padding:4px 8px;font-size:11px;color:#ef4444" data-i18n="skills_hub_uninstall">${esc(t('skills_hub_uninstall'))}</button>
+      <button type="button" class="sm-btn skills-hub-update" ${gated ? 'disabled' : ''} style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_update">${esc(t('skills_hub_update'))}</button>
+      <button type="button" class="sm-btn skills-hub-uninstall" ${gated ? 'disabled' : ''} style="padding:4px 8px;font-size:11px;color:#ef4444" data-i18n="skills_hub_uninstall">${esc(t('skills_hub_uninstall'))}</button>
     </div>`).join('');
+  box.querySelectorAll('.skills-hub-update').forEach((button, index) => {
+    button.addEventListener('click', () => updateSkillsHubSkill(_skillsHubInstalled[index].name));
+  });
+  box.querySelectorAll('.skills-hub-uninstall').forEach((button, index) => {
+    button.addEventListener('click', () => uninstallSkillsHubSkill(_skillsHubInstalled[index].name));
+  });
 }
 
 async function searchSkillsHub() {
@@ -5021,12 +5027,18 @@ function renderSkillsHubResults() {
           ${scanBlock}
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
-          <button type="button" class="sm-btn" ${gated ? 'disabled' : ''} onclick="scanSkillsHubResult('${esc(r.identifier)}')" style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_scan">${esc(t('skills_hub_scan'))}</button>
-          <button type="button" class="sm-btn" ${gated || alreadyInstalled ? 'disabled' : ''} onclick="installSkillsHubResult('${esc(r.identifier)}')" style="padding:4px 8px;font-size:11px">${esc(installLabel)}</button>
+          <button type="button" class="sm-btn skills-hub-scan" ${gated ? 'disabled' : ''} style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_scan">${esc(t('skills_hub_scan'))}</button>
+          <button type="button" class="sm-btn skills-hub-install" ${gated || alreadyInstalled ? 'disabled' : ''} style="padding:4px 8px;font-size:11px">${esc(installLabel)}</button>
         </div>
       </div>
     </div>`;
   }).join('');
+  box.querySelectorAll('.skills-hub-scan').forEach((button, index) => {
+    button.addEventListener('click', () => scanSkillsHubResult(_skillsHubResults[index].identifier));
+  });
+  box.querySelectorAll('.skills-hub-install').forEach((button, index) => {
+    button.addEventListener('click', () => installSkillsHubResult(_skillsHubResults[index].identifier));
+  });
 }
 
 function renderSkillsHubActionStatus(data) {
