@@ -212,20 +212,22 @@ def _read_jsonl(
         return events, malformed
 
     # Unbounded whole-file read (original behavior).
+    # Read RAW BYTES and split on b"\n" only — NOT read_text() (which does
+    # universal-newline conversion, silently turning bare \r into \n) and NOT
+    # splitlines() (which splits on bare \r). A crash-truncated final record
+    # ending in bare \r or at EOF-without-\n must be rejected, matching the tail
+    # reader's terminator gate. (#6139 round-6 alignment.)
     try:
-        lines = path.read_text(encoding="utf-8")
+        raw_bytes = path.read_bytes()
     except FileNotFoundError:
         return events, malformed
-    # A crash-truncated final record (write interrupted before its newline
-    # terminator) is silently accepted by splitlines(), which treats EOF as a
-    # line boundary. This must match the tail reader's completeness gate: if the
-    # file doesn't end with \n (or \r\n), the last line is unterminated and
-    # potentially crash-truncated — discard it so a finished run doesn't flip to
-    # a falsely-terminal state from a partial write. (#6139 round-5 alignment.)
-    ended_with_newline = lines.endswith("\n") or lines.endswith("\r")
-    lines_list = lines.splitlines()
-    if not ended_with_newline and lines_list:
-        lines_list = lines_list[:-1]  # drop the unterminated final line
+    # Accept a final record only if it ends in \n (covers both LF and CRLF,
+    # since CRLF ends in \n). Otherwise discard the last line.
+    if raw_bytes and not raw_bytes.endswith(b"\n"):
+        # Drop the unterminated final line (before the split, so it never parses).
+        last_nl = raw_bytes.rfind(b"\n")
+        raw_bytes = raw_bytes[:last_nl + 1] if last_nl >= 0 else b""
+    lines_list = raw_bytes.decode("utf-8", errors="replace").split("\n")
     for line_no, raw in enumerate(lines_list, start=1):
         if not raw.strip():
             continue
@@ -619,7 +621,18 @@ def _read_jsonl_tail(
     # above, making the first whole line `lines_before_window + 2`. When there
     # was no seek (whole file read), the first line is 1.
     base_start_line = lines_before_window + 2 if head_bytes > 0 else 1
-    all_lines = text.splitlines()
+    # Split on \n only (NOT splitlines, which accepts bare \r). A crash-truncated
+    # record ending in bare \r must not be parsed as a complete line.
+    # First check: if the text doesn't end with \n, the last line is unterminated.
+    text_ends_with_newline = text.endswith("\n")
+    all_lines = text.split("\n")
+    # Drop trailing empty string if text ended with \n.
+    if all_lines and all_lines[-1] == "":
+        all_lines.pop()
+    # If text didn't end with \n, the last "line" is unterminated (bare \r or
+    # EOF) — discard it, matching the full reader's terminator gate.
+    if not text_ends_with_newline and all_lines:
+        all_lines.pop()
     # Keep only the last `rows_cap` lines so a huge tail window still bounds the
     # parsed-event list (and the JSON decode cost). If we trim lines from the
     # front, advance the starting line number by the trim count.

@@ -477,6 +477,50 @@ def test_preceding_event_recovery_is_bounded(tmp_path):
     assert result["payload"] == {}, "payload should be empty (not materialized)"
 
 
+def test_ordinary_size_done_bare_cr_rejected_both_readers(tmp_path):
+    """Regression (reviewer round 6): an ORDINARY-SIZE done ending in bare \\r
+    (not \\r\\n) was accepted as terminal by BOTH readers — splitlines() accepts
+    bare \\r, and read_text() converts \\r to \\n via universal-newline. A
+    crash-truncated record must leave the run running in BOTH readers."""
+    import json as _json
+    from api.run_journal import _read_jsonl, _read_jsonl_tail
+
+    rec1 = _json.dumps({"seq": 1, "event": "token", "payload": {}})
+    rec2 = _json.dumps({"seq": 2, "event": "done", "terminal": True,
+                        "terminal_state": "completed", "payload": {}})
+    p = tmp_path / "bare_cr.jsonl"
+    p.write_bytes((rec1 + "\n" + rec2 + "\r").encode("utf-8"))
+    ev_full, _ = _read_jsonl(p)
+    ev_tail, _ = _read_jsonl_tail(p, max_bytes=10000, max_rows=100)
+    # Neither reader should accept the bare-\r-terminated done.
+    assert not any(e.get("event") == "done" for e in ev_full), "FULL reader accepts bare \\r"
+    assert not any(e.get("event") == "done" for e in ev_tail), "TAIL reader accepts bare \\r"
+    # Both readers agree: only the token (seq 1) survives.
+    full_seqs = sorted(e["seq"] for e in ev_full)
+    tail_seqs = sorted(e["seq"] for e in ev_tail)
+    assert full_seqs == [1], f"FULL: {full_seqs}"
+    assert tail_seqs == [1], f"TAIL: {tail_seqs}"
+
+
+def test_ordinary_size_done_eof_no_newline_rejected_both_readers(tmp_path):
+    """Regression (reviewer round 6): an ordinary-size done at EOF with no
+    trailing \\n was silently accepted by splitlines(). Both readers must reject
+    it — the record is unterminated / potentially crash-truncated."""
+    import json as _json
+    from api.run_journal import _read_jsonl, _read_jsonl_tail
+
+    rec1 = _json.dumps({"seq": 1, "event": "token", "payload": {}})
+    rec2 = _json.dumps({"seq": 2, "event": "done", "terminal": True,
+                        "terminal_state": "completed", "payload": {}})
+    p = tmp_path / "eof_no_nl.jsonl"
+    p.write_bytes((rec1 + "\n" + rec2).encode("utf-8"))
+    ev_full, _ = _read_jsonl(p)
+    ev_tail, _ = _read_jsonl_tail(p, max_bytes=10000, max_rows=100)
+    assert not any(e.get("event") == "done" for e in ev_full), "FULL accepts EOF-no-newline"
+    assert not any(e.get("event") == "done" for e in ev_tail), "TAIL accepts EOF-no-newline"
+
+
+
 
 
 
