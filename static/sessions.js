@@ -1799,7 +1799,7 @@ async function loadSession(sid){
           return;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true});
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
       }
@@ -2431,6 +2431,8 @@ async function _openSidebarSession(session, loadOpts={}){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
     if(_preResult&&_preResult.cancel===true) return;
   }
+  // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
+  if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
@@ -8052,8 +8054,6 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          // #5409: close mobile sidebar synchronously before navigation
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
         lineageList.appendChild(row);
@@ -8066,8 +8066,6 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
       const openChildSession=async(childSession)=>{
-        // #5409: close mobile sidebar synchronously before navigation
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -8695,11 +8693,6 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          // #5409: close mobile sidebar synchronously BEFORE awaiting _openSidebarSession
-          // so the user gets instant feedback that navigation is happening, even
-          // for large sessions where loadSession can take 3-15s (metadata fetch +
-          // message load + renderMessages DOM build on slow iOS WKWebView).
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');

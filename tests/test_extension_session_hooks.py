@@ -315,3 +315,58 @@ def test_continuation_retry_carries_preload_notified_flag():
 def test_bridge_flag_passed_by_sidebar_open():
     body = _extract_block(SESSIONS_JS, "async function _openSidebarSession(")
     assert "_preloadNotified:true" in body
+
+
+# ── Regression: {cancel:true} must leave NO side-effect ─────────────────────
+
+
+def test_cancel_does_not_close_mobile_sidebar():
+    """A {cancel:true} handler must not close the sidebar.
+
+    Regression: closeMobileSidebar() was called synchronously BEFORE
+    _openSidebarSession()'s veto guard, so a cancel still closed it.
+    Fix: the three early calls are gone; one now sits AFTER the guard.
+    """
+    # The only remaining closeMobileSidebar() inside _openSidebarSession
+    # must appear AFTER the cancel guard, not before it.
+    body = _extract_block(SESSIONS_JS, "async function _openSidebarSession(")
+    idx_cancel = body.index("_preResult&&_preResult.cancel===true")
+    idx_close = body.index("closeMobileSidebar()")
+    assert idx_close > idx_cancel, (
+        "closeMobileSidebar() must run AFTER the cancel guard"
+    )
+
+
+def test_no_early_closemobilesidebar_before_sidebar_open():
+    """The three premature closeMobileSidebar() calls before _openSidebarSession
+    must be removed — a {cancel:true} veto must not close the sidebar."""
+    # Tap-to-open handler: the setTimeout callback that calls _openSidebarSession
+    # must NOT contain a closeMobileSidebar() before the await.
+    tap_block = _extract_block(SESSIONS_JS, "_tapTimer=setTimeout(async()=>{")
+    # Find the _openSidebarSession call inside the tap handler.
+    idx_open = tap_block.index("await _openSidebarSession(s)")
+    before_open = tap_block[:idx_open]
+    assert "closeMobileSidebar()" not in before_open, (
+        "tap-to-open handler must not closeMobileSidebar() before veto"
+    )
+
+    # Child-session open handler must not contain closeMobileSidebar() at all.
+    child_block = _extract_block(SESSIONS_JS, "const openChildSession=async(childSession)=>{")
+    assert "closeMobileSidebar()" not in child_block, (
+        "openChildSession handler must not contain closeMobileSidebar()"
+    )
+
+    # Lineage-segment handler must not contain closeMobileSidebar() at all.
+    lineage_block = _extract_block(SESSIONS_JS, "row.onclick=async(e)=>{")
+    assert "closeMobileSidebar()" not in lineage_block, (
+        "lineage-segment handler must not contain closeMobileSidebar()"
+    )
+
+
+def test_cross_profile_retry_carries_preload_notified():
+    """Cross-profile retry must pass _preloadNotified:true so the pre-hook
+    doesn't re-fire after destructive side-effects already ran."""
+    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
+    idx_profile = body.index("skipProfileResolve:true")
+    profile_branch = body[idx_profile:idx_profile + 200]
+    assert "_preloadNotified:true" in profile_branch
