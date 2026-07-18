@@ -48,6 +48,14 @@ requires_fork = pytest.mark.skipif(
 # conftest.py lives at <repo>/tests/conftest.py
 TESTS_DIR  = pathlib.Path(__file__).parent.resolve()
 REPO_ROOT  = TESTS_DIR.parent.resolve()
+
+# Force the agent-config bridge (api/agent_config_bridge.py) to its standalone
+# fallback for the whole test run, including spawned server subprocesses, which
+# inherit this environment. On developer machines the agent-dir discovery would
+# otherwise find a real checkout (e.g. ~/.hermes/hermes-agent) and route config
+# writes through it — making unit tests machine-dependent. Bridge-specific tests
+# opt back in by clearing this variable and resetting the probe cache.
+os.environ.setdefault("HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE", "1")
 HOME       = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 
