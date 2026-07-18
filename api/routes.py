@@ -797,14 +797,24 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
-    from agent.skill_utils import iter_skill_index_files
-    from tools.skills_tool import (
-        MAX_DESCRIPTION_LENGTH,
-        _EXCLUDED_SKILL_DIRS,
-        _parse_frontmatter,
-        _sort_skills,
-        skill_matches_platform,
-    )
+    try:
+        from agent.skill_utils import iter_skill_index_files
+        from tools.skills_tool import (
+            MAX_DESCRIPTION_LENGTH,
+            _EXCLUDED_SKILL_DIRS,
+            _parse_frontmatter,
+            _sort_skills,
+            skill_matches_platform,
+        )
+    except ImportError:
+        # Agent-free deployment (e.g. CI, standalone WebUI): the skills page
+        # must still load; it just has no local skill index to show.
+        return {
+            "success": True,
+            "skills": [],
+            "categories": [],
+            "message": "Skills are unavailable (hermes-agent not installed).",
+        }
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
