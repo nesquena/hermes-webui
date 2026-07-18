@@ -241,6 +241,73 @@ def test_republish_uses_source_index_without_scanning_unrelated_metadata(tmp_pat
     assert len(read_paths) == 1, "indexed re-publish must read only its own metadata"
 
 
+def test_token_source_cleanup_is_bounded_under_the_artifact_lock(tmp_path, monkeypatch):
+    """Replacing/revoking a token must not walk every source-index entry."""
+    from api import artifacts
+
+    artifact_dir = tmp_path / "artifacts"
+    old_source = tmp_path / "old-report.html"
+    new_source = tmp_path / "new-report.html"
+    old_source.write_text("<p>old</p>", encoding="utf-8")
+    new_source.write_text("<p>new</p>", encoding="utf-8")
+    token = "targettoken123"
+    target_dir = artifact_dir / token
+    target_dir.mkdir(parents=True)
+    (target_dir / "meta.json").write_text(json.dumps({
+        "token": token,
+        "source_path": str(old_source.resolve()),
+        "filename": old_source.name,
+        "mime": "text/html",
+        "title": old_source.name,
+        "public": False,
+        "created_at": 1,
+        "updated_at": 1,
+        "revoked_at": None,
+        "versions": [],
+    }), encoding="utf-8")
+
+    class TrackingLock:
+        held = False
+
+        def __enter__(self):
+            self.held = True
+
+        def __exit__(self, *_args):
+            self.held = False
+
+    lock = TrackingLock()
+
+    class BoundedIndex(dict):
+        def items(self):
+            if lock.held:
+                raise AssertionError("source index was fully traversed while the artifact lock was held")
+            return super().items()
+
+    index = BoundedIndex({f"/tmp/unrelated-{i}.html": f"othertoken{i:06d}" for i in range(2_000)})
+    index[str(old_source.resolve())] = token
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
+    monkeypatch.setattr(artifacts, "_ARTIFACTS_LOCK", lock)
+    monkeypatch.setattr(artifacts, "_load_source_index", lambda: index)
+    original_write_json_atomic = artifacts._write_json_atomic
+
+    def write_metadata_only(path, payload):
+        if path == artifact_dir / "source_index.json":
+            return
+        original_write_json_atomic(path, payload)
+
+    monkeypatch.setattr(artifacts, "_write_json_atomic", write_metadata_only)
+
+    published = artifacts.publish_artifact(str(new_source), token=token)
+
+    assert published["token"] == token
+    assert str(old_source.resolve()) not in index
+    assert index[str(new_source.resolve())] == token
+
+    assert artifacts.revoke_artifact(token) is True
+    assert str(new_source.resolve()) not in index
+    assert index["/tmp/unrelated-1999.html"] == "othertoken001999"
+
+
 class TestAuditFixes:
     """Regression coverage for the 18.07.2026 audit findings."""
 

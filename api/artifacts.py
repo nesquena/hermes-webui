@@ -275,11 +275,17 @@ def _load_source_index() -> dict[str, str]:
     }
 
 
-def _set_source_index_entry(index: dict[str, str], source: str, token: str) -> None:
-    """Keep one current source path per token, matching ``meta.source_path``."""
-    for indexed_source, indexed_token in list(index.items()):
-        if indexed_token == token and indexed_source != source:
-            del index[indexed_source]
+def _set_source_index_entry(
+    index: dict[str, str], source: str, token: str, previous_source: str = "",
+) -> None:
+    """Keep the canonical ``meta.source_path`` mapping current in bounded time.
+
+    Artifact metadata is the authoritative token-to-source record.  The source
+    index is only an accelerator, so a legacy duplicate mapping is safely
+    discarded when its source is next used and fails metadata validation.
+    """
+    if previous_source and previous_source != source and index.get(previous_source) == token:
+        index.pop(previous_source, None)
     index[source] = token
 
 
@@ -340,6 +346,7 @@ def publish_artifact(
             }
 
         assert token is not None
+        previous_source = str(meta.get("source_path") or "")
         effective_public = bool(meta.get("public")) if public is None else bool(public)
 
         version = len(meta.get("versions") or []) + 1
@@ -390,7 +397,7 @@ def publish_artifact(
         if session_id:
             meta["session_id"] = str(session_id)
         _write_json_atomic(_meta_path(token), meta)
-        _set_source_index_entry(source_index, source_key, token)
+        _set_source_index_entry(source_index, source_key, token, previous_source)
         _write_json_atomic(_source_index_path(), source_index)
 
     return {
@@ -446,9 +453,9 @@ def revoke_artifact(token: str) -> bool:
         canonical_token = str(meta.get("token") or token)
         _write_json_atomic(_meta_path(canonical_token), meta)
         source_index = _load_source_index()
-        for source, indexed_token in list(source_index.items()):
-            if indexed_token == canonical_token:
-                del source_index[source]
+        source = str(meta.get("source_path") or "")
+        if source_index.get(source) == canonical_token:
+            source_index.pop(source, None)
         _write_json_atomic(_source_index_path(), source_index)
     return True
 
