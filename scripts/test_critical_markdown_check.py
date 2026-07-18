@@ -69,6 +69,7 @@ CASES = [
     ("unclosed-at-eof",        "[x](https://a",                   True),
     ("unclosed-newline-term",  "[x](https://a\n",                 True),
     ("angle-dest-split",       "[x](<https://x\n.com>)",          True),
+    ("angle-escaped-newline",  "[x](<foo\\\n>)",                  True),
 ]
 
 # Bad markdown INSIDE code must never be flagged (it's an intentional example).

@@ -86,6 +86,10 @@ def _scan_inline_dest(text: str, i: int) -> str:
         k = j + 1
         while k < n and text[k] not in ">\n":
             if text[k] == "\\" and k + 1 < n:
+                # An escaped char doesn't terminate the angle dest — but an escaped
+                # NEWLINE is still a raw newline inside <...>, which is invalid.
+                if text[k + 1] == "\n":
+                    return "split"
                 k += 2
             else:
                 k += 1
