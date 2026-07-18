@@ -13010,6 +13010,7 @@ async function _gatewayAction(action){
 
 let _configEditorAllowed=false;
 let _configEditorOriginal='';
+let _configEditorEtag=null;
 
 async function loadConfigEditor(){
   const ta=$('configEditorTextarea');
@@ -13021,6 +13022,7 @@ async function loadConfigEditor(){
     const r=await api('/api/config/raw');
     _configEditorOriginal=r.yaml||'';
     _configEditorAllowed=!!r.allowed;
+    _configEditorEtag=r.etag||null;
     ta.value=_configEditorOriginal;
     if(status) status.textContent='';
     if(notice){
@@ -13103,8 +13105,9 @@ async function saveConfigEditor(){
   if(saveBtn) saveBtn.disabled=true;
   if(status){status.textContent=t('loading');status.style.color='var(--muted)';}
   try{
-    await api('/api/config/raw',{method:'PUT',body:JSON.stringify({yaml:newYaml})});
+    const r=await api('/api/config/raw',{method:'PUT',body:JSON.stringify({yaml:newYaml,etag:_configEditorEtag})});
     _configEditorOriginal=newYaml;
+    _configEditorEtag=(r&&r.etag)||null;
     _setConfigEditorEditing(false);
     if(status){status.textContent=t('config_editor_saved');status.style.color='var(--success)';}
     if(typeof showToast==='function') showToast(t('config_editor_saved'),3000,'success');
@@ -13114,6 +13117,8 @@ async function saveConfigEditor(){
       const body=(e&&e.body)?JSON.parse(e.body):null;
       if(body&&Array.isArray(body.blocked_paths)&&body.blocked_paths.length){
         msg=t('config_editor_blocked_paths',body.blocked_paths.join(', '));
+      } else if(e&&e.status===409){
+        msg=t('config_editor_conflict');
       }
     }catch(_){}
     if(status){status.textContent=msg;status.style.color='var(--error)';}

@@ -16419,8 +16419,9 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path == "/api/config/raw":
         from api.config_editor import ConfigEditorError, put_config_raw
 
+        etag = body.get("etag")
         try:
-            return j(handler, put_config_raw(body.get("yaml")))
+            return j(handler, put_config_raw(body.get("yaml"), etag=etag if isinstance(etag, str) else None))
         except ConfigEditorError as exc:
             return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
     return False

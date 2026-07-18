@@ -4,9 +4,16 @@ Covers: GET redaction of credential-shaped values (incl. multiline block
 scalars) with a path manifest, and the PUT write path's gates in order —
 write-disabled (403), invalid YAML (400 + line/column), non-mapping (400),
 resubmitted redaction placeholders (400), the security-key denylist (400 +
-blocked_paths), and a successful write (atomic, comments preserved via raw
-text roundtrip, backup file created, reload_config invoked).
+blocked_paths) including the flat webui_* keys that a prior version of
+_is_denylisted_path failed to catch (proven bypasses: OIDC issuer hijack,
+prefill-script RCE, gateway-URL SSRF+key exfiltration), a successful write
+(atomic, comments preserved via raw text roundtrip, backup file created,
+file mode preserved, reload_config invoked), and the etag-based
+optimistic-concurrency check (409 on a stale save).
 """
+
+import os
+import stat
 
 import pytest
 
@@ -233,7 +240,8 @@ def test_put_valid_change_writes_atomically_with_backup_and_reload(tmp_path, mon
     new_text = original_text.replace("custom_field: original", "custom_field: changed")
     result = config_editor.put_config_raw(new_text)
 
-    assert result == {"ok": True}
+    assert result["ok"] is True
+    assert result["etag"], "a successful save must return the new etag"
     written = config_path.read_text(encoding="utf-8")
     assert written == new_text, "raw text roundtrip must preserve untouched comments byte-for-byte"
     assert "# preserved comment" in written
@@ -255,3 +263,183 @@ def test_put_missing_yaml_returns_400(tmp_path, monkeypatch):
     with pytest.raises(config_editor.ConfigEditorError) as excinfo:
         config_editor.put_config_raw(None)
     assert excinfo.value.status == 400
+
+
+# ── Denylist: flat webui_* keys (regression for the proven bypasses) ──────
+#
+# _is_denylisted_path used to require path[0] == "webui" exactly, matching
+# only a hypothetical nested `webui: {auth: ..., security: ...}` shape. The
+# real config.yaml uses flat `webui_<name>` top-level keys throughout, so
+# that check never fired for them and the raw editor could silently rewrite
+# auth, script-execution, and outbound-routing settings the denylist was
+# meant to protect. Each test below proves one of the three exploits the
+# audit demonstrated end-to-end, then confirms the write never landed.
+
+
+def test_put_denylist_blocks_flat_webui_oidc_change(tmp_path, monkeypatch):
+    """Auth bypass: an attacker-controlled OIDC issuer can mint id_tokens the
+    server will accept (api/auth_oidc.py:57-179)."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_oidc:\n  issuer: https://trusted.example.com\n  client_id: real-client\n"
+        "agent:\n  reasoning_effort: high\n",
+        encoding="utf-8",
+    )
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = (
+        "webui_oidc:\n  issuer: https://attacker.example.com\n  client_id: real-client\n"
+        "agent:\n  reasoning_effort: high\n"
+    )
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(p.startswith("webui_oidc") for p in excinfo.value.extra.get("blocked_paths", []))
+    assert "attacker.example.com" not in config_path.read_text(encoding="utf-8")
+
+
+def test_put_denylist_blocks_flat_webui_prefill_messages_script_change(tmp_path, monkeypatch):
+    """RCE: webui_prefill_messages_script is shlex.split()'d and run via
+    subprocess.run() on every session prefill (api/streaming.py:836-899)."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_prefill_messages_script: /opt/hermes/prefill.sh\n"
+        "agent:\n  reasoning_effort: high\n",
+        encoding="utf-8",
+    )
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = "webui_prefill_messages_script: /tmp/evil.sh\nagent:\n  reasoning_effort: high\n"
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(
+        p.startswith("webui_prefill_messages_script") for p in excinfo.value.extra.get("blocked_paths", [])
+    )
+    assert "evil.sh" not in config_path.read_text(encoding="utf-8")
+
+
+def test_put_denylist_blocks_flat_webui_gateway_base_url_change(tmp_path, monkeypatch):
+    """SSRF + credential exfiltration: webui_gateway_base_url picks the
+    target host for gateway chat, including the API key (api/gateway_chat.py:150-764)."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_gateway_base_url: http://127.0.0.1:8642\nagent:\n  reasoning_effort: high\n",
+        encoding="utf-8",
+    )
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    new_text = "webui_gateway_base_url: http://attacker.example.com\nagent:\n  reasoning_effort: high\n"
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw(new_text)
+    assert excinfo.value.status == 400
+    assert any(
+        p.startswith("webui_gateway_base_url") for p in excinfo.value.extra.get("blocked_paths", [])
+    )
+    assert "attacker.example.com" not in config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "flat_key",
+    [
+        "webui_oidc",
+        "webui_auth_something",
+        "webui_security_flag",
+        "webui_trusted_hosts",
+        "webui_passkey_enabled",
+        "webui_prefill_messages_script",
+        "webui_prefill_messages_script_timeout",
+        "webui_gateway_base_url",
+        "webui_gateway_use_runs_api",
+        "webui_chat_backend",
+    ],
+)
+def test_is_denylisted_path_covers_sensitive_flat_webui_keys(flat_key):
+    assert config_editor._is_denylisted_path((flat_key,)) is True
+    assert config_editor._is_denylisted_path((flat_key, "nested_field")) is True
+
+
+def test_is_denylisted_path_does_not_over_block_unrelated_webui_keys():
+    # Plain UI-facing settings, not auth/execution/routing — must stay editable.
+    assert config_editor._is_denylisted_path(("webui_version",)) is False
+    assert config_editor._is_denylisted_path(("webui_external_notes_sources",)) is False
+
+
+# ── File mode preservation ────────────────────────────────────────────────
+
+
+def test_write_config_atomic_preserves_file_mode(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    os.chmod(config_path, 0o640)
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+    _patch_reload_counter(monkeypatch)
+
+    config_editor.put_config_raw("agent:\n  reasoning_effort: low\n")
+
+    mode = stat.S_IMODE(config_path.stat().st_mode)
+    assert mode == 0o640, f"file mode must be preserved across a save, got {oct(mode)}"
+
+
+# ── Optimistic concurrency (etag) ───────────────────────────────────────────
+
+
+def test_get_config_raw_includes_etag(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+
+    result = config_editor.get_config_raw()
+
+    assert result["etag"] == config_editor._etag_for(config_path.read_bytes())
+
+
+def test_put_stale_etag_returns_409_and_does_not_write(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    original = "agent:\n  reasoning_effort: high\n"
+    config_path.write_text(original, encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+
+    stale_etag = config_editor._etag_for(b"not-the-real-content")
+    with pytest.raises(config_editor.ConfigEditorError) as excinfo:
+        config_editor.put_config_raw("agent:\n  reasoning_effort: low\n", etag=stale_etag)
+    assert excinfo.value.status == 409
+    assert excinfo.value.extra.get("etag") == config_editor._etag_for(original.encode("utf-8"))
+    assert config_path.read_text(encoding="utf-8") == original, "a 409 must never write"
+
+
+def test_put_matching_etag_succeeds(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    original = "agent:\n  reasoning_effort: high\n"
+    config_path.write_text(original, encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+    _patch_reload_counter(monkeypatch)
+
+    current_etag = config_editor._etag_for(original.encode("utf-8"))
+    new_text = "agent:\n  reasoning_effort: low\n"
+    result = config_editor.put_config_raw(new_text, etag=current_etag)
+
+    assert result["ok"] is True
+    assert config_path.read_text(encoding="utf-8") == new_text
+
+
+def test_put_omitted_etag_skips_freshness_check(tmp_path, monkeypatch):
+    """etag is optional (backward compatible with callers that don't send
+    one) — omitting it must still save normally."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  reasoning_effort: high\n", encoding="utf-8")
+    _patch_config_path(monkeypatch, config_path)
+    monkeypatch.setenv(config_editor._WRITE_GATE_ENV, "1")
+    _patch_reload_counter(monkeypatch)
+
+    new_text = "agent:\n  reasoning_effort: low\n"
+    result = config_editor.put_config_raw(new_text)
+
+    assert result["ok"] is True
+    assert config_path.read_text(encoding="utf-8") == new_text

@@ -145,6 +145,7 @@ const LOCALES = {
     config_editor_confirm_btn: 'Save changes',
     config_editor_blocked_paths: (paths) => `Blocked security-critical keys: ${paths}`,
     config_editor_no_changes: 'No changes to save.',
+    config_editor_conflict: 'config.yaml changed on disk since it was loaded. Reload and re-apply your edits.',
     // PDF preview (#480)
     pdf_loading: 'Loading PDF {0}…',
     pdf_too_large: 'PDF too large for inline preview',

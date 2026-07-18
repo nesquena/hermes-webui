@@ -17,10 +17,12 @@ round-tripping through ``yaml.safe_dump`` — that is what preserves comments
 and key ordering across a save.
 """
 
+import hashlib
 import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -223,9 +225,30 @@ def _redact_yaml_text(text: str) -> tuple[str, list[str]]:
 # auth, widen trust, or open an allowlist. A path is "denylisted" if any
 # segment starts with "allow" (allowed_hosts, allowlist, allow_users, ...),
 # if it is/starts with a top-level auth/security section, if it starts with
-# webui.auth*/webui.security*, or if any segment equals "trusted_proxies".
-# Once a path is denylisted the whole subtree from that point is compared as
-# one unit (deep equality) rather than recursed into further.
+# webui.auth*/webui.security* (nested form), if its top-level key starts
+# with one of the sensitive flat webui_* prefixes below, or if any segment
+# equals "trusted_proxies". Once a path is denylisted the whole subtree from
+# that point is compared as one unit (deep equality) rather than recursed
+# into further.
+#
+# config.yaml does NOT nest WebUI settings under a `webui:` mapping — the
+# codebase uses flat `webui_<name>` top-level keys throughout (see
+# api/auth_oidc.py, api/streaming.py, api/gateway_chat.py). An earlier
+# version of this denylist only matched the nested `webui.auth*` shape via
+# `path[0] == "webui"`, which never matches a flat `webui_oidc` key — a
+# proven bypass letting the raw editor rewrite auth/execution/routing
+# settings the denylist was meant to protect. Matched as a prefix on the
+# WHOLE top-level key name (path[0]), same as the auth/security rule above.
+_SENSITIVE_WEBUI_FLAT_KEY_PREFIXES = (
+    "webui_oidc",  # OIDC issuer/client_id — hijacking these is a full auth bypass (api/auth_oidc.py)
+    "webui_auth",
+    "webui_security",
+    "webui_trusted",
+    "webui_passkey",  # passkey auth enable/disable toggle (api/auth.py)
+    "webui_prefill_messages_script",  # shell command run via shlex+subprocess on every session prefill — RCE (api/streaming.py)
+    "webui_gateway",  # gateway proxy base URL / routing — SSRF + credential exfiltration (api/gateway_chat.py)
+    "webui_chat_backend",  # switches chat traffic into gateway-proxied mode (api/gateway_chat.py)
+)
 
 _MISSING = object()
 
@@ -243,6 +266,8 @@ def _is_denylisted_path(path: tuple) -> bool:
     if lowered[0] == "webui" and len(lowered) >= 2 and (
         lowered[1].startswith("auth") or lowered[1].startswith("security")
     ):
+        return True
+    if any(lowered[0].startswith(prefix) for prefix in _SENSITIVE_WEBUI_FLAT_KEY_PREFIXES):
         return True
     return False
 
@@ -286,18 +311,33 @@ def _yaml_error_location(exc) -> tuple:
 
 def _write_config_atomic(config_path: Path, text: str) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    original_mode = None
     if config_path.exists():
         backup_path = config_path.with_name(config_path.name + _BACKUP_SUFFIX)
         try:
             shutil.copy2(config_path, backup_path)
         except OSError:
             logger.warning("Failed to write config editor backup at %s", backup_path, exc_info=True)
+        try:
+            original_mode = stat.S_IMODE(config_path.stat().st_mode)
+        except OSError:
+            original_mode = None
     fd, tmp = tempfile.mkstemp(dir=str(config_path.parent), suffix=".config-editor.tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        # mkstemp() creates the tempfile 0600 regardless of the target's real
+        # mode. Without re-applying the original mode, os.replace() silently
+        # downgrades config.yaml to 0600 on every save — a behavior change
+        # from whatever permissions (e.g. group-readable) the deployment had
+        # intentionally set.
+        if original_mode is not None:
+            try:
+                os.chmod(tmp, original_mode)
+            except OSError:
+                logger.warning("Failed to preserve config.yaml file mode on save", exc_info=True)
         os.replace(tmp, config_path)
     except Exception:
         try:
@@ -310,23 +350,33 @@ def _write_config_atomic(config_path: Path, text: str) -> None:
 # ── Public API ────────────────────────────────────────────────────────────
 
 
-def get_config_raw() -> dict:
-    config_path = _active_profile_config_path()
+def _read_config_bytes(config_path: Path) -> bytes:
     try:
-        text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        return config_path.read_bytes() if config_path.exists() else b""
     except OSError:
         logger.debug("Failed to read config.yaml at %s", config_path, exc_info=True)
-        text = ""
+        return b""
+
+
+def _etag_for(raw_bytes: bytes) -> str:
+    return hashlib.sha256(raw_bytes).hexdigest()
+
+
+def get_config_raw() -> dict:
+    config_path = _active_profile_config_path()
+    raw_bytes = _read_config_bytes(config_path)
+    text = raw_bytes.decode("utf-8", errors="replace")
     redacted_text, redacted_paths = _redact_yaml_text(text)
     return {
         "yaml": redacted_text,
         "redacted": redacted_paths,
         "allowed": _write_enabled(),
         "write_gate_env": _WRITE_GATE_ENV,
+        "etag": _etag_for(raw_bytes),
     }
 
 
-def put_config_raw(yaml_text: Any) -> dict:
+def put_config_raw(yaml_text: Any, *, etag: str | None = None) -> dict:
     if not _write_enabled():
         raise ConfigEditorError(
             f"Raw config editing is disabled. Set {_WRITE_GATE_ENV}=1 to enable it.",
@@ -363,29 +413,47 @@ def put_config_raw(yaml_text: Any) -> dict:
         raise ConfigEditorError("Config must be a YAML mapping at the top level", status=400)
 
     config_path = _active_profile_config_path()
-    try:
-        current_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    except OSError:
-        current_text = ""
-    try:
-        current_parsed = _yaml.safe_load(current_text) or {}
-    except _yaml.YAMLError:
-        current_parsed = {}
-    if not isinstance(current_parsed, dict):
-        current_parsed = {}
-
-    blocked = _find_denylist_violations(current_parsed, parsed)
-    if blocked:
-        raise ConfigEditorError(
-            "Refusing to change security-critical config keys via the raw editor: "
-            + ", ".join(blocked),
-            status=400,
-            extra={"blocked_paths": blocked},
-        )
 
     from api.config import _cfg_lock, reload_config
 
+    # The freshness check, the denylist comparison, and the write must all
+    # observe the SAME on-disk snapshot, so they run together under
+    # _cfg_lock rather than read-then-lock-then-write. Reading "current"
+    # state outside the lock (the original implementation) left a window
+    # between that read and the write where a concurrent save could land:
+    # the denylist check would then be validating against an already-stale
+    # snapshot, and the write would silently clobber the intervening change
+    # without ever having checked it.
     with _cfg_lock:
+        current_bytes = _read_config_bytes(config_path)
+
+        if etag is not None:
+            current_etag = _etag_for(current_bytes)
+            if current_etag != etag:
+                raise ConfigEditorError(
+                    "config.yaml changed on disk since it was loaded. Re-fetch and retry.",
+                    status=409,
+                    extra={"etag": current_etag},
+                )
+
+        current_text = current_bytes.decode("utf-8", errors="replace")
+        try:
+            current_parsed = _yaml.safe_load(current_text) or {}
+        except _yaml.YAMLError:
+            current_parsed = {}
+        if not isinstance(current_parsed, dict):
+            current_parsed = {}
+
+        blocked = _find_denylist_violations(current_parsed, parsed)
+        if blocked:
+            raise ConfigEditorError(
+                "Refusing to change security-critical config keys via the raw editor: "
+                + ", ".join(blocked),
+                status=400,
+                extra={"blocked_paths": blocked},
+            )
+
         _write_config_atomic(config_path, yaml_text)
+        new_etag = _etag_for(yaml_text.encode("utf-8"))
     reload_config()
-    return {"ok": True}
+    return {"ok": True, "etag": new_etag}
