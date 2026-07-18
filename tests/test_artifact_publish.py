@@ -356,8 +356,8 @@ def test_persisted_source_index_is_not_normalized_under_artifact_lock(
         assert current["/tmp/unrelated-1999.html"] == "othertoken001999"
 
 
-def test_concurrent_source_index_updates_preserve_both_new_entries(tmp_path, monkeypatch):
-    """Concurrent same-process publishes cannot overwrite each other's index update."""
+def test_slow_payload_staging_does_not_block_unrelated_publish_or_lose_index_updates(tmp_path, monkeypatch):
+    """Payload staging is outside both global locks; short commits retain both mappings."""
     from api import artifacts
 
     artifact_dir = tmp_path / "artifacts"
@@ -369,34 +369,87 @@ def test_concurrent_source_index_updates_preserve_both_new_entries(tmp_path, mon
     (artifact_dir / "source_index.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
 
-    original_load = artifacts._load_source_index
-    both_loaders = threading.Barrier(2)
+    class TrackingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.held = False
 
-    def synchronized_load():
-        try:
-            both_loaders.wait(timeout=0.2)
-        except threading.BrokenBarrierError:
-            pass
-        return original_load()
+        def __enter__(self):
+            self._lock.acquire()
+            self.held = True
+            return self
 
-    monkeypatch.setattr(artifacts, "_load_source_index", synchronized_load)
+        def __exit__(self, *_args):
+            self.held = False
+            self._lock.release()
+
+    source_index_lock = TrackingLock()
+    artifacts_lock = TrackingLock()
+    monkeypatch.setattr(artifacts, "_SOURCE_INDEX_LOCK", source_index_lock)
+    monkeypatch.setattr(artifacts, "_ARTIFACTS_LOCK", artifacts_lock)
+
+    original_copyfile = artifacts.shutil.copyfile
+    first_staging_started = threading.Event()
+    release_first_staging = threading.Event()
+    second_finished = threading.Event()
     failures = []
+    published = {}
 
-    def publish(source):
+    def slow_first_copy(source, destination, *args, **kwargs):
+        if Path(source) == first:
+            first_staging_started.set()
+            assert not source_index_lock.held
+            assert not artifacts_lock.held
+            assert release_first_staging.wait(timeout=2), "test did not release staged copy"
+        return original_copyfile(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts.shutil, "copyfile", slow_first_copy)
+
+    def publish(name, source):
         try:
-            artifacts.publish_artifact(str(source))
+            published[name] = artifacts.publish_artifact(str(source))
         except Exception as exc:
             failures.append(exc)
+        finally:
+            if name == "second":
+                second_finished.set()
 
-    threads = [threading.Thread(target=publish, args=(source,)) for source in (first, second)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    first_thread = threading.Thread(target=publish, args=("first", first))
+    second_thread = threading.Thread(target=publish, args=("second", second))
+    first_thread.start()
+    assert first_staging_started.wait(timeout=2), "first publish did not begin payload staging"
+    second_thread.start()
+    assert second_finished.wait(timeout=1), "unrelated publish blocked behind payload staging"
+    release_first_staging.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
 
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
     assert not failures
     current = json.loads((artifact_dir / "source_index.json").read_text(encoding="utf-8"))
-    assert set(current) == {str(first.resolve()), str(second.resolve())}
+    assert current == {
+        str(first.resolve()): published["first"]["token"],
+        str(second.resolve()): published["second"]["token"],
+    }
+
+
+def test_failed_payload_staging_cleans_temporary_files(tmp_path, monkeypatch):
+    """A failed source copy cannot leave a retry-blocking staging file behind."""
+    from api import artifacts
+
+    artifact_dir = tmp_path / "artifacts"
+    source = tmp_path / "report.html"
+    source.write_text("<p>report</p>", encoding="utf-8")
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
+
+    def failed_copy(*_args, **_kwargs):
+        raise OSError("simulated copy failure")
+
+    monkeypatch.setattr(artifacts.shutil, "copyfile", failed_copy)
+    with pytest.raises(ValueError, match="could not stage file"):
+        artifacts.publish_artifact(str(source))
+    assert not list(artifact_dir.glob(".stage-*"))
 
 
 class TestAuditFixes:
