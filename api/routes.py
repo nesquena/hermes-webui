@@ -12404,6 +12404,27 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
+
+    # ── Plugin lifecycle (install/update/remove) -- always readable, even
+    # when the write gate is closed, so the UI can render the disabled state
+    # with its flag name instead of silently hiding the card (mirrors
+    # /api/ops/status's allowed:false pattern). ──
+    if parsed.path == "/api/plugins/installed":
+        from api.plugin_lifecycle import list_installed_plugins
+        payload = list_installed_plugins()
+        payload["write_allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE")
+        return j(handler, payload)
+
+    if parsed.path == "/api/plugins/resolve":
+        from api.plugin_lifecycle import PluginLifecycleUnavailable, resolve_plugin_source
+        query = parse_qs(parsed.query)
+        identifier = (query.get("identifier", [""])[0] or "").strip()
+        try:
+            return j(handler, resolve_plugin_source(identifier))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except PluginLifecycleUnavailable as exc:
+            return bad(handler, str(exc), status=503)
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
@@ -14486,6 +14507,57 @@ def handle_post(handler, parsed) -> bool:
             except ValueError as exc:
                 return bad(handler, str(exc), status=400)
         return bad(handler, f"unknown scope: {scope}", status=400)
+
+    # ── Plugin lifecycle (install/update/remove) -- HIGHEST-RISK write
+    # surface in Settings: installing a plugin clones and imports arbitrary
+    # Python from a Git repo into the running agent process. Fail-closed gate
+    # (HERMES_WEBUI_ALLOW_PLUGIN_WRITE), same _truthy_env pattern as the ops
+    # actions (Maintenance) card. ──
+    if parsed.path == "/api/plugins/install" or (
+        parsed.path.startswith("/api/plugins/") and parsed.path.endswith(("/update", "/remove"))
+    ):
+        if not _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE"):
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": (
+                        "Plugin install/update/remove is disabled. "
+                        "Set HERMES_WEBUI_ALLOW_PLUGIN_WRITE=1 to enable."
+                    ),
+                    "allowed": False,
+                },
+                status=403,
+            )
+
+        from api.plugin_lifecycle import (
+            PluginLifecycleUnavailable,
+            install_plugin,
+            remove_plugin,
+            update_plugin,
+        )
+        from urllib.parse import unquote
+
+        try:
+            if parsed.path == "/api/plugins/install":
+                identifier = str(body.get("identifier") or "").strip()
+                force = bool(body.get("force"))
+                enable = body.get("enable")
+                enable = True if enable is None else bool(enable)
+                result = install_plugin(identifier, force=force, enable=enable)
+            elif parsed.path.endswith("/update"):
+                name = unquote(parsed.path[len("/api/plugins/"):-len("/update")])
+                result = update_plugin(name)
+            else:
+                name = unquote(parsed.path[len("/api/plugins/"):-len("/remove")])
+                result = remove_plugin(name)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except PluginLifecycleUnavailable as exc:
+            return bad(handler, str(exc), status=503)
+
+        result["allowed"] = True
+        return j(handler, result, status=200 if result.get("ok") else 400)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":

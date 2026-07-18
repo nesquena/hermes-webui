@@ -1483,7 +1483,7 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title" data-i18n="settings_plugins_title">Plugins</div>
-                <div class="settings-section-meta" data-i18n="settings_plugins_meta">View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.</div>
+                <div class="settings-section-meta" data-i18n="settings_plugins_meta">View installed Hermes plugins and the lifecycle hooks they register.</div>
               </div>
             </div>
             <div id="pluginsList" style="display:flex;flex-direction:column;margin-top:4px">
@@ -1491,6 +1491,22 @@
             </div>
             <div id="pluginsEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="settings_plugins_empty">
               No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.
+            </div>
+            <div class="settings-field" style="margin-top:20px">
+              <label data-i18n="settings_plugin_lifecycle_title">Install plugins</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px" data-i18n="settings_plugin_lifecycle_desc">Installing a plugin clones a Git repository and runs its Python code inside your Hermes agent. Only install plugins from sources you trust.</div>
+              <div id="pluginLifecycleGateNote" style="display:none;font-size:12px;color:var(--muted);margin-bottom:10px"></div>
+              <div id="pluginLifecycleForm" style="display:none">
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <input type="text" id="pluginInstallIdentifier" placeholder="owner/repo or https://github.com/owner/repo.git" style="flex:1;min-width:220px;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px" data-i18n-placeholder="settings_plugin_install_placeholder">
+                  <button type="button" id="btnPluginInstall" class="settings-btn" style="font-size:12px;padding:6px 14px;border-radius:6px" data-i18n="settings_plugin_btn_install">Install</button>
+                </div>
+                <div id="pluginResolvePreview" style="display:none;font-size:11px;color:var(--muted);margin-top:6px;word-break:break-all"></div>
+                <div id="pluginInstallResult" style="font-size:12px;margin-top:8px"></div>
+                <div style="font-size:12px;font-weight:600;color:var(--text);margin:16px 0 6px" data-i18n="settings_plugin_installed_title">Installed plugins</div>
+                <div id="pluginLifecycleList" style="display:flex;flex-direction:column;gap:8px"></div>
+                <div id="pluginLifecycleEmpty" style="display:none;font-size:11px;color:var(--muted)" data-i18n="settings_plugin_installed_empty">No user-installed plugins.</div>
+              </div>
             </div>
           </div>
           <div class="settings-pane" id="settingsPaneExtensions">

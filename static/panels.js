@@ -10550,12 +10550,19 @@ async function loadPluginsPanel(){
   const list=$('pluginsList');
   const empty=$('pluginsEmpty');
   if(!list) return;
+  _bindPluginLifecycleControls();
+  const lifecyclePromise=loadPluginLifecyclePanel();
   try{
     const data=await api('/api/plugins');
     const plugins=Array.isArray((data||{}).plugins)?data.plugins:[];
-    // Hide the Plugins tab when no plugins are installed (#3457)
+    const lifecycleData=await lifecyclePromise;
+    // Hide the Plugins tab when no plugins are installed (#3457) AND plugin
+    // installs are gated off. With HERMES_WEBUI_ALLOW_PLUGIN_WRITE set the
+    // tab stays visible even at zero plugins, so the Install form (the one
+    // thing that would ever change that) stays reachable.
     const tabBtn=document.querySelector('[data-settings-section="plugins"]');
-    if(tabBtn) tabBtn.style.display=(data&&data.empty)?'none':'';
+    const lifecycleWriteAllowed=!!(lifecycleData&&lifecycleData.write_allowed);
+    if(tabBtn) tabBtn.style.display=(data&&data.empty&&!lifecycleWriteAllowed)?'none':'';
     list.innerHTML='';
     if(plugins.length===0){
       list.style.display='none';
@@ -10668,6 +10675,206 @@ const enabled=plugin&&plugin.enabled!==false;
     }
   }
   return card;
+}
+
+// ── Plugin lifecycle (install/update/remove) ────────────────────────────────
+// Backend: api/plugin_lifecycle.py + GET /api/plugins/installed,
+// GET /api/plugins/resolve, POST /api/plugins/install,
+// POST /api/plugins/<name>/{update,remove}. Fail-closed gate:
+// HERMES_WEBUI_ALLOW_PLUGIN_WRITE (see write_allowed on the GET payload).
+async function loadPluginLifecyclePanel(){
+ try{
+  const data=await api('/api/plugins/installed');
+  _renderPluginLifecycle(data);
+  return data;
+ }catch(e){
+  _renderPluginLifecycle({plugins:[],unavailable:true,write_allowed:false,error:(e&&e.message)||String(e)});
+  return {plugins:[],unavailable:true,write_allowed:false};
+ }
+}
+
+function _renderPluginLifecycle(data){
+ const gateNote=$('pluginLifecycleGateNote');
+ const form=$('pluginLifecycleForm');
+ const writeAllowed=!!(data&&data.write_allowed);
+ if(gateNote){
+  if(writeAllowed){
+   gateNote.style.display='none';
+  }else{
+   gateNote.style.display='';
+   gateNote.textContent=(data&&data.unavailable&&data.error)
+    ? data.error
+    : (t('settings_plugin_lifecycle_gate_disabled')||'Plugin install/update/remove is disabled. Set HERMES_WEBUI_ALLOW_PLUGIN_WRITE=1 to enable.');
+  }
+ }
+ if(form) form.style.display=writeAllowed?'':'none';
+ if(!writeAllowed) return;
+
+ const list=$('pluginLifecycleList');
+ const empty=$('pluginLifecycleEmpty');
+ if(!list) return;
+ list.innerHTML='';
+ const plugins=(Array.isArray(data&&data.plugins)?data.plugins:[]).filter(p=>p&&p.removable);
+ if(plugins.length===0){
+  if(empty) empty.style.display='';
+  return;
+ }
+ if(empty) empty.style.display='none';
+ for(const plugin of plugins){
+  list.appendChild(_buildPluginLifecycleRow(plugin));
+ }
+}
+
+function _buildPluginLifecycleRow(plugin){
+ const row=document.createElement('div');
+ row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border2);border-radius:6px;flex-wrap:wrap';
+ const info=document.createElement('div');
+ info.style.cssText='flex:1;min-width:160px;font-size:12px';
+ info.innerHTML='<div style="font-weight:600;color:var(--text)">'+esc(plugin.name||plugin.key)+(plugin.version?' <span style="color:var(--muted);font-weight:400">v'+esc(plugin.version)+'</span>':'')+'</div>'+(plugin.description?'<div style="color:var(--muted);font-size:11px">'+esc(plugin.description)+'</div>':'');
+ row.appendChild(info);
+
+ if(plugin.updatable){
+  const updateBtn=document.createElement('button');
+  updateBtn.type='button';
+  updateBtn.className='settings-btn';
+  updateBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px';
+  updateBtn.textContent=t('settings_plugin_btn_update')||'Update';
+  updateBtn.addEventListener('click',()=>_updateInstalledPlugin(plugin.key||plugin.name,updateBtn));
+  row.appendChild(updateBtn);
+ }
+
+ const removeBtn=document.createElement('button');
+ removeBtn.type='button';
+ removeBtn.className='settings-btn';
+ removeBtn.style.cssText='font-size:11px;padding:4px 10px;border-radius:6px;color:#ef4444';
+ removeBtn.textContent=t('settings_plugin_btn_remove')||'Remove';
+ removeBtn.addEventListener('click',()=>_removeInstalledPlugin(plugin.key||plugin.name,removeBtn));
+ row.appendChild(removeBtn);
+
+ return row;
+}
+
+let _pluginResolveTimer=null;
+function _bindPluginLifecycleControls(){
+ const input=$('pluginInstallIdentifier');
+ if(input&&!input._bound){
+  input._bound=true;
+  input.addEventListener('input',()=>{
+   clearTimeout(_pluginResolveTimer);
+   _pluginResolveTimer=setTimeout(_previewPluginSource,400);
+  });
+ }
+ const installBtn=$('btnPluginInstall');
+ if(installBtn&&!installBtn._bound){
+  installBtn._bound=true;
+  installBtn.addEventListener('click',_installPluginFromForm);
+ }
+}
+
+async function _previewPluginSource(){
+ const input=$('pluginInstallIdentifier');
+ const preview=$('pluginResolvePreview');
+ if(!input||!preview) return;
+ const identifier=(input.value||'').trim();
+ if(!identifier){preview.style.display='none';return;}
+ try{
+  const r=await api('/api/plugins/resolve?identifier='+encodeURIComponent(identifier));
+  const insecure=r.insecure_scheme?(' — '+(t('settings_plugin_insecure_scheme')||'insecure URL scheme')):'';
+  preview.textContent=(t('settings_plugin_resolves_to')||'Resolves to:')+' '+r.git_url+(r.subdir?('#'+r.subdir):'')+insecure;
+  preview.style.display='';
+ }catch(e){
+  preview.style.display='none';
+ }
+}
+
+async function _installPluginFromForm(){
+ const input=$('pluginInstallIdentifier');
+ const resultEl=$('pluginInstallResult');
+ const identifier=input?(input.value||'').trim():'';
+ if(!identifier) return;
+ let preview=null;
+ try{preview=await api('/api/plugins/resolve?identifier='+encodeURIComponent(identifier));}catch(e){}
+ const sourceLine=preview?(preview.git_url+(preview.subdir?('#'+preview.subdir):'')):identifier;
+ const confirmed=await showConfirmDialog({
+  title:t('settings_plugin_confirm_install_title')||'Install plugin?',
+  message:(t('settings_plugin_confirm_install_msg')||'This clones and runs code from:\n{source}\n\nOnly proceed if you trust this source.').replace('{source}',sourceLine),
+  confirmLabel:t('settings_plugin_btn_install')||'Install',
+  danger:true,
+ });
+ if(!confirmed) return;
+ if(resultEl) resultEl.innerHTML='';
+ try{
+  const r=await api('/api/plugins/install',{method:'POST',body:JSON.stringify({identifier})});
+  if(r&&r.ok){
+   if(typeof showToast==='function') showToast((t('settings_plugin_install_success')||'Plugin installed: {name}').replace('{name}',r.plugin_name||identifier));
+   if(resultEl){
+    const warnings=Array.isArray(r.warnings)?r.warnings:[];
+    const missing=Array.isArray(r.missing_env)?r.missing_env:[];
+    let extra='';
+    if(warnings.length) extra+='<div style="color:#f59e0b">'+warnings.map(esc).join('<br>')+'</div>';
+    if(missing.length) extra+='<div style="color:var(--muted)">'+(t('settings_plugin_missing_env')||'Requires environment variables:')+' '+missing.map(esc).join(', ')+'</div>';
+    resultEl.innerHTML=extra;
+   }
+   if(input) input.value='';
+   const preview2=$('pluginResolvePreview');
+   if(preview2) preview2.style.display='none';
+   loadPluginLifecyclePanel();
+   loadPluginsPanel();
+  }else{
+   if(typeof showToast==='function') showToast((t('settings_plugin_install_failed')||'Failed to install plugin')+(r&&r.error?': '+r.error:''));
+  }
+ }catch(e){
+  if(typeof showToast==='function') showToast((t('settings_plugin_install_failed')||'Failed to install plugin')+(e&&e.message?': '+e.message:''));
+ }
+}
+
+async function _updateInstalledPlugin(name,btn){
+ const confirmed=await showConfirmDialog({
+  title:t('settings_plugin_confirm_update_title')||'Update plugin?',
+  message:(t('settings_plugin_confirm_update_msg')||'This pulls and runs the latest code for "{name}".').replace('{name}',name),
+  confirmLabel:t('settings_plugin_btn_update')||'Update',
+  danger:true,
+ });
+ if(!confirmed) return;
+ if(btn) btn.disabled=true;
+ try{
+  const r=await api('/api/plugins/'+encodeURIComponent(name)+'/update',{method:'POST',body:JSON.stringify({})});
+  if(r&&r.ok){
+   if(typeof showToast==='function') showToast(r.unchanged?(t('settings_plugin_update_unchanged')||'Already up to date'):(t('settings_plugin_update_success')||'Plugin updated'));
+   loadPluginLifecyclePanel();
+  }else{
+   if(typeof showToast==='function') showToast((t('settings_plugin_update_failed')||'Failed to update plugin')+(r&&r.error?': '+r.error:''));
+  }
+ }catch(e){
+  if(typeof showToast==='function') showToast((t('settings_plugin_update_failed')||'Failed to update plugin')+(e&&e.message?': '+e.message:''));
+ }finally{
+  if(btn) btn.disabled=false;
+ }
+}
+
+async function _removeInstalledPlugin(name,btn){
+ const confirmed=await showConfirmDialog({
+  title:t('settings_plugin_confirm_remove_title')||'Remove plugin?',
+  message:(t('settings_plugin_confirm_remove_msg')||'This permanently deletes "{name}" from disk.').replace('{name}',name),
+  confirmLabel:t('settings_plugin_btn_remove')||'Remove',
+  danger:true,
+ });
+ if(!confirmed) return;
+ if(btn) btn.disabled=true;
+ try{
+  const r=await api('/api/plugins/'+encodeURIComponent(name)+'/remove',{method:'POST',body:JSON.stringify({})});
+  if(r&&r.ok){
+   if(typeof showToast==='function') showToast(t('settings_plugin_remove_success')||'Plugin removed');
+   loadPluginLifecyclePanel();
+   loadPluginsPanel();
+  }else{
+   if(typeof showToast==='function') showToast((t('settings_plugin_remove_failed')||'Failed to remove plugin')+(r&&r.error?': '+r.error:''));
+  }
+ }catch(e){
+  if(typeof showToast==='function') showToast((t('settings_plugin_remove_failed')||'Failed to remove plugin')+(e&&e.message?': '+e.message:''));
+ }finally{
+  if(btn) btn.disabled=false;
+ }
 }
 
 // ── Plugin pages ─────────────────────────────────────────────────────────────
