@@ -1050,7 +1050,11 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     assert "msg.role !== 'assistant'" in helper_body
 
     compact_load = re.sub(r"\s+", "", load_body)
-    guard = "if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid]))"
+    guard = (
+        "if(activeStreamId&&INFLIGHT[sid]"
+        "&&!_inflightHasVisibleLiveState(INFLIGHT[sid])"
+        "&&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene))"
+    )
     assert guard in compact_load
     guard_pos = compact_load.find(guard)
     # rfind: anchor on the Phase-2 restore branch, not #3899's earlier idle-reset
