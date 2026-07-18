@@ -423,6 +423,75 @@ class TestMcpSaveBridgeModeMasking:
         bridge._import_state = None
 
 
+class TestMcpSaveBearerTokenRoundtrip:
+    """PUT /api/mcp/servers/<name> — bearer_token masked-placeholder roundtrip.
+
+    Submitting the _MASKED_PLACEHOLDER ("......") back for bearer_token (the
+    field the frontend prefills whenever a server already has an
+    Authorization header) must NOT write a new .env value and must NOT lose
+    the existing header template — only a genuinely new value should trigger
+    _bridge.save_mcp_bearer_token.
+
+    Seeds existing state via fake_agent.config_store (the bridge's own
+    home-scoped reader), not a patched api.routes.get_config() — bridge-mode
+    PUT reads existing_cfg via _bridge.load_agent_config(home) exclusively
+    (see _handle_mcp_server_update / 5baee8e4), so a get_config()-seeded
+    fixture would silently stop exercising the real code path the edit form
+    actually uses without failing (get_config() simply goes unused in bridge
+    mode). See TestMcpSaveBridgeModeMasking above for the header-masking
+    regression this same fix addresses from the "changed only the timeout"
+    angle; this class exercises the bearer_token field specifically.
+    """
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes.get_active_hermes_home')
+    def test_masked_bearer_token_preserves_existing_secret(self, mock_home, mock_reload, fake_agent, tmp_path):
+        mock_home.return_value = tmp_path
+        fake_agent.config_store = {
+            'mcp_servers': {
+                'web-srv': {
+                    'url': 'https://x.test/mcp',
+                    'headers': {'Authorization': 'Bearer ${MCP_WEB_SRV_API_KEY}'},
+                }
+            }
+        }
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {
+            'url': 'https://x.test/mcp',
+            'headers': {'Authorization': '••••••'},
+            'bearer_token': '••••••',
+        }
+        _handle_mcp_server_update(h, 'web-srv', body)
+
+        assert fake_agent.env_values == {}, "masked placeholder must not trigger a new .env write"
+        saved = fake_agent.saved_configs[-1]
+        assert saved['mcp_servers']['web-srv']['headers']['Authorization'] == 'Bearer ${MCP_WEB_SRV_API_KEY}'
+        status = h.send_response.call_args[0][0]
+        assert status == 200
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes.get_active_hermes_home')
+    def test_new_bearer_token_overwrites_env_and_header(self, mock_home, mock_reload, fake_agent, tmp_path):
+        mock_home.return_value = tmp_path
+        fake_agent.config_store = {
+            'mcp_servers': {
+                'web-srv': {
+                    'url': 'https://x.test/mcp',
+                    'headers': {'Authorization': 'Bearer ${MCP_WEB_SRV_API_KEY}'},
+                }
+            }
+        }
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {'url': 'https://x.test/mcp', 'bearer_token': 'sk-new-real-token'}
+        _handle_mcp_server_update(h, 'web-srv', body)
+
+        assert fake_agent.env_values.get('MCP_WEB_SRV_API_KEY') == 'sk-new-real-token'
+        saved = fake_agent.saved_configs[-1]
+        assert saved['mcp_servers']['web-srv']['headers']['Authorization'] == 'Bearer ${MCP_WEB_SRV_API_KEY}'
+
+
 class TestMcpDelete:
     """DELETE /api/mcp/servers/<name>."""
 
