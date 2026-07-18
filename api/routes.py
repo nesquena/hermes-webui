@@ -14855,7 +14855,8 @@ def handle_post(handler, parsed) -> bool:
                 owner = get_session(sid)
                 owner.composer_draft = dict(saved_draft)
                 owner.save(touch_updated_at=False)
-                delete_composer_draft_sidecar(sid)
+                if not delete_composer_draft_sidecar(sid):
+                    return bad(handler, "Failed to clear the saved draft", status=500)
                 update_cached_composer_draft(sid, saved_draft)
             else:
                 next_draft = dict(current_draft)
