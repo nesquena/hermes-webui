@@ -1193,6 +1193,16 @@ def _gateway_status_payload() -> dict:
     }
 
 
+_SKILLS_HUB_ACTION_BY_PATH = {
+    "/api/skills/hub/scan": "scan",
+    "/api/skills/hub/install": "install",
+    "/api/skills/hub/update": "update",
+    "/api/skills/hub/uninstall": "uninstall",
+}
+_SKILLS_HUB_GATE_MESSAGE = (
+    "Skills Hub actions are disabled. Set HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE=1 to enable."
+)
+
 _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 
 # Server-side single-flight guard for gateway lifecycle actions. The client
@@ -13638,6 +13648,37 @@ def handle_get(handler, parsed) -> bool:
             data["linked_files"] = {}
         return j(handler, data)
 
+    # ── Skills Hub API (GET): read-only, ungated -- only the mutating POST
+    # routes below are gated behind HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE ──
+    if parsed.path == "/api/skills/hub/search":
+        qs = parse_qs(parsed.query)
+        query = (qs.get("q", [""])[0] or "").strip()
+        if not query:
+            return j(handler, {"results": []})
+        source = qs.get("source", ["all"])[0] or "all"
+        try:
+            limit = int(qs.get("limit", ["20"])[0])
+        except ValueError:
+            limit = 20
+        from api.skills_hub_actions import search_hub_skills
+
+        try:
+            return j(handler, search_hub_skills(query, source=source, limit=limit))
+        except RuntimeError as exc:
+            return bad(handler, _sanitize_error(exc), 502)
+
+    if parsed.path == "/api/skills/hub/installed":
+        from api.skills_hub_actions import list_installed_hub_skills
+
+        return j(handler, {"installed": list_installed_hub_skills(_active_skills_dir())})
+
+    if parsed.path == "/api/skills/hub/status":
+        from api.skills_hub_actions import get_status
+
+        status = get_status()
+        status["allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE")
+        return j(handler, status)
+
     # ── Memory API (GET) ──
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler, parsed)
@@ -15530,6 +15571,41 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/skills/toggle":
         return _handle_skill_toggle(handler, body)
+
+    # ── Skills Hub (POST): search/install/update/uninstall run a fresh
+    # `hermes skills ...` subprocess (see api/skills_hub_actions.py for why:
+    # SKILLS_DIR/HERMES_HOME are bound at import time in the hub modules).
+    # Fail-closed behind HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE. ──
+    if parsed.path in _SKILLS_HUB_ACTION_BY_PATH:
+        if not _truthy_env("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE"):
+            return j(
+                handler,
+                {"error": _SKILLS_HUB_GATE_MESSAGE, "allowed": False},
+                status=403,
+            )
+        action = _SKILLS_HUB_ACTION_BY_PATH[parsed.path]
+        if action in ("scan", "install"):
+            target = str(body.get("identifier", "")).strip()
+        else:
+            target = str(body.get("name", "")).strip()
+        if action in ("scan", "install", "uninstall") and not target:
+            field = "identifier" if action in ("scan", "install") else "name"
+            return bad(handler, f"{field} is required", 400)
+
+        from api.skills_hub_actions import start_action
+
+        try:
+            started, status = start_action(
+                action,
+                target,
+                category=str(body.get("category", "") or "").strip(),
+                name_override=str(body.get("name_override", "") or "").strip(),
+                force=bool(body.get("force", False)),
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        status["allowed"] = True
+        return j(handler, status, status=200 if started else 409)
 
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":

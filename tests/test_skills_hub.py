@@ -1,0 +1,504 @@
+from __future__ import annotations
+
+import io
+import json
+import subprocess
+import time
+from urllib.parse import urlparse
+
+import pytest
+
+
+class _FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.sent_headers: list[tuple[str, str]] = []
+        self.body = bytearray()
+        self.wfile = self
+        self.headers = {}
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.sent_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data if isinstance(data, (bytes, bytearray)) else data.encode("utf-8"))
+
+    def get_json(self):
+        return json.loads(self.body.decode("utf-8"))
+
+
+def _call_get(monkeypatch, path: str):
+    from api import routes
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse(path))
+    return handler
+
+
+def _call_post(monkeypatch, path: str, body: dict | None = None):
+    from api import routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: body or {})
+    handler = _FakeHandler()
+    routes.handle_post(handler, urlparse(path))
+    return handler, handler.get_json()
+
+
+class _FakeStdin:
+    def __init__(self):
+        self.written = []
+        self.closed = False
+
+    def write(self, data):
+        self.written.append(data)
+
+    def close(self):
+        self.closed = True
+
+
+def _make_fake_popen(lines: list[str], returncode: int = 0, on_spawn=None):
+    """Build a fake ``subprocess.Popen`` replacement with a writable stdin
+    (needed for the scan/uninstall stdin pre-answer) and a readline-able
+    stdout (via io.StringIO, which naturally yields '' at EOF)."""
+
+    class _FakeProc:
+        def __init__(self, cmd, **kwargs):
+            self.args = cmd
+            self.kwargs = kwargs
+            self.stdout = io.StringIO("".join(lines))
+            self.stdin = _FakeStdin() if kwargs.get("stdin") == subprocess.PIPE else None
+            self.returncode = returncode
+            if on_spawn:
+                on_spawn(cmd, kwargs)
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    return _FakeProc
+
+
+@pytest.fixture(autouse=True)
+def _reset_skills_hub_state():
+    from api import skills_hub_actions as sha
+
+    def _reset():
+        with sha._STATE_LOCK:
+            sha._STATE.update(
+                {
+                    "action": None,
+                    "target": None,
+                    "status": "idle",
+                    "started_at": None,
+                    "finished_at": None,
+                    "returncode": None,
+                    "log": "",
+                    "error": None,
+                    "scan_result": None,
+                }
+            )
+        if sha._ACTION_LOCK.locked():
+            try:
+                sha._ACTION_LOCK.release()
+            except RuntimeError:
+                pass
+
+    _reset()
+    yield
+    _reset()
+
+
+def _wait_until_not_running(timeout=5.0):
+    from api import skills_hub_actions as sha
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = sha.get_status()
+        if status["status"] != "running":
+            return status
+        time.sleep(0.02)
+    raise AssertionError("skills hub action did not finish in time")
+
+
+_SCAN_TRANSCRIPT = (
+    "Fetching: skills-sh/anthropics/skills/pdf\n"
+    "Quarantined to .hub/quarantine/pdf\n"
+    "Running security scan...\n"
+    "Scan: pdf (skills-sh/anthropics/skills/pdf/trusted)  Verdict: SAFE\n"
+    '  MEDIUM   supply_chain   SKILL.md:235                   "# Requires: pip install pytesseract pdf2image"\n'
+    "\n"
+    "Decision: ALLOWED — Allowed (trusted source, safe verdict)\n"
+    "Installation cancelled.\n"
+)
+
+
+# ── parse_scan_report ────────────────────────────────────────────────────────
+
+
+def test_parse_scan_report_extracts_verdict_and_findings():
+    from api.skills_hub_actions import parse_scan_report
+
+    result = parse_scan_report(_SCAN_TRANSCRIPT)
+    assert result["name"] == "pdf"
+    assert result["source"] == "skills-sh/anthropics/skills/pdf"
+    assert result["trust_level"] == "trusted"
+    assert result["verdict"] == "safe"
+    assert result["decision"] == "ALLOWED"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["severity"] == "MEDIUM"
+    assert result["findings"][0]["category"] == "supply_chain"
+
+
+def test_parse_scan_report_returns_none_without_header():
+    from api.skills_hub_actions import parse_scan_report
+
+    assert parse_scan_report("Error: Could not fetch 'bogus' from any source.\n") is None
+
+
+# ── list_installed_hub_skills ────────────────────────────────────────────────
+
+
+def test_list_installed_hub_skills_reads_lock_file(tmp_path):
+    from api.skills_hub_actions import list_installed_hub_skills
+
+    skills_dir = tmp_path / "skills"
+    hub_dir = skills_dir / ".hub"
+    hub_dir.mkdir(parents=True)
+    (hub_dir / "lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "installed": {
+                    "pdf": {
+                        "source": "skills.sh",
+                        "identifier": "skills-sh/anthropics/skills/pdf",
+                        "trust_level": "trusted",
+                        "scan_verdict": "safe",
+                        "install_path": "pdf",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = list_installed_hub_skills(skills_dir)
+    assert result == [
+        {
+            "name": "pdf",
+            "source": "skills.sh",
+            "identifier": "skills-sh/anthropics/skills/pdf",
+            "trust_level": "trusted",
+            "scan_verdict": "safe",
+            "install_path": "pdf",
+            "installed_at": None,
+            "updated_at": None,
+        }
+    ]
+
+
+def test_list_installed_hub_skills_missing_file_returns_empty(tmp_path):
+    from api.skills_hub_actions import list_installed_hub_skills
+
+    assert list_installed_hub_skills(tmp_path / "skills") == []
+
+
+# ── Gate (fail-closed) ───────────────────────────────────────────────────────
+
+
+def test_hub_status_reports_gate_closed_by_default(monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", raising=False)
+    handler = _call_get(monkeypatch, "/api/skills/hub/status")
+    data = handler.get_json()
+    assert handler.status == 200
+    assert data["allowed"] is False
+    assert data["status"] == "idle"
+
+
+def test_hub_post_rejected_with_403_when_gate_closed(monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", raising=False)
+    for path, body in (
+        ("/api/skills/hub/scan", {"identifier": "x"}),
+        ("/api/skills/hub/install", {"identifier": "x"}),
+        ("/api/skills/hub/update", {}),
+        ("/api/skills/hub/uninstall", {"name": "x"}),
+    ):
+        handler, data = _call_post(monkeypatch, path, body)
+        assert handler.status == 403, path
+        assert data["allowed"] is False
+        assert "HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE" in data["error"]
+
+
+def test_hub_search_and_installed_stay_open_when_gate_closed(monkeypatch, tmp_path):
+    from api import profiles, routes, skills_hub_actions as sha
+
+    monkeypatch.delenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", raising=False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(routes, "_active_skills_dir", lambda: tmp_path / "skills")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    handler = _call_get(monkeypatch, "/api/skills/hub/search?q=pdf")
+    assert handler.status == 200
+    handler2 = _call_get(monkeypatch, "/api/skills/hub/installed")
+    assert handler2.status == 200
+
+
+# ── Search ────────────────────────────────────────────────────────────────
+
+
+def test_hub_search_parses_json_and_builds_expected_command(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        payload = [{"name": "pdf", "identifier": "skills-sh/anthropics/skills/pdf",
+                    "source": "skills.sh", "trust_level": "trusted", "description": "PDF tools"}]
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    handler = _call_get(monkeypatch, "/api/skills/hub/search?q=pdf&source=all&limit=5")
+    data = handler.get_json()
+    assert handler.status == 200
+    assert data["results"][0]["name"] == "pdf"
+    cmd, kwargs = calls[0]
+    assert cmd[1:4] == ["skills", "search", "pdf"]
+    assert "--source" in cmd and cmd[cmd.index("--source") + 1] == "all"
+    assert "--limit" in cmd and cmd[cmd.index("--limit") + 1] == "5"
+    assert "--json" in cmd
+    assert kwargs["env"]["HERMES_HOME"] == str(tmp_path)
+
+
+def test_hub_search_empty_query_returns_empty_without_spawning(monkeypatch, tmp_path):
+    from api import skills_hub_actions as sha
+
+    spawned = []
+    monkeypatch.setattr(sha.subprocess, "run", lambda cmd, **kw: spawned.append(cmd))
+    handler = _call_get(monkeypatch, "/api/skills/hub/search?q=")
+    data = handler.get_json()
+    assert handler.status == 200
+    assert data["results"] == []
+    assert spawned == []
+
+
+def test_hub_search_nonzero_exit_returns_502(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    handler = _call_get(monkeypatch, "/api/skills/hub/search?q=pdf")
+    assert handler.status == 502
+
+
+# ── Gate open: action lifecycle ──────────────────────────────────────────────
+
+
+def test_hub_scan_action_preanswers_stdin_n_and_parses_verdict(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    fake_proc = _make_fake_popen(
+        [_SCAN_TRANSCRIPT], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw))
+    )
+    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "skills-sh/anthropics/skills/pdf"})
+    assert handler.status == 200
+    assert data["allowed"] is True
+    assert data["action"] == "scan"
+
+    final = _wait_until_not_running()
+    assert final["status"] == "completed"
+    assert final["scan_result"]["verdict"] == "safe"
+    assert final["scan_result"]["decision"] == "ALLOWED"
+
+    cmd, kwargs = spawned[0]
+    assert cmd[-3:] == ["skills", "install", "skills-sh/anthropics/skills/pdf"]
+    assert "--yes" not in cmd
+    assert "--force" not in cmd
+    assert kwargs["stdin"] == subprocess.PIPE
+    assert kwargs["env"]["COLUMNS"] == "400"
+
+
+def test_hub_install_action_uses_yes_flag_and_no_stdin_interaction(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    fake_proc = _make_fake_popen(
+        ["Installed: pdf\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw))
+    )
+    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+
+    handler, data = _call_post(
+        monkeypatch, "/api/skills/hub/install",
+        {"identifier": "skills-sh/anthropics/skills/pdf", "category": "docs"},
+    )
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "completed"
+
+    cmd, kwargs = spawned[0]
+    assert "--yes" in cmd
+    assert "--category" in cmd and "docs" in cmd
+    assert kwargs["stdin"] == subprocess.DEVNULL
+
+
+def test_hub_install_force_flag_forwarded(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    fake_proc = _make_fake_popen(["x\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append(cmd))
+    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+
+    _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "id", "force": True})
+    _wait_until_not_running()
+    assert "--force" in spawned[0]
+
+
+def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    fake_proc = _make_fake_popen(["Removed pdf\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw)))
+    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/uninstall", {"name": "pdf"})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "completed"
+
+    cmd, kwargs = spawned[0]
+    assert cmd[-3:] == ["skills", "uninstall", "pdf"]
+    assert "--yes" not in cmd  # the CLI has no such flag for uninstall
+    assert kwargs["stdin"] == subprocess.PIPE
+
+
+def test_hub_update_action_no_stdin_interaction(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    fake_proc = _make_fake_popen(["No updates available.\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw)))
+    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/update", {})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "completed"
+
+    cmd, kwargs = spawned[0]
+    assert cmd[-2:] == ["skills", "update"]
+    assert kwargs["stdin"] == subprocess.DEVNULL
+
+
+def test_hub_action_failure_is_reported(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    fake_proc = _make_fake_popen(["Error: not found\n"], returncode=1)
+    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
+
+    _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "bogus"})
+    final = _wait_until_not_running()
+    assert final["status"] == "failed"
+    assert final["returncode"] == 1
+
+
+def test_hub_scan_missing_identifier_returns_400(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {})
+    assert handler.status == 400
+
+
+# ── Single-flight (409) ──────────────────────────────────────────────────────
+
+
+def test_hub_action_contention_returns_409_without_spawning(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    monkeypatch.setattr(
+        sha.subprocess, "Popen",
+        _make_fake_popen(["x\n"], on_spawn=lambda cmd, kw: spawned.append(cmd)),
+    )
+
+    acquired = sha._ACTION_LOCK.acquire(blocking=False)
+    assert acquired, "lock should be free at test start"
+    try:
+        handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "x"})
+    finally:
+        sha._ACTION_LOCK.release()
+
+    assert handler.status == 409
+    assert data["allowed"] is True
+    assert spawned == []
+
+
+# ── Frontend / i18n presence ─────────────────────────────────────────────────
+
+
+def test_skills_hub_frontend_wiring_present():
+    from pathlib import Path
+
+    panels = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "/api/skills/hub/search" in panels
+    assert "/api/skills/hub/installed" in panels
+    assert "/api/skills/hub/status" in panels
+    assert "function switchSkillsTab" in panels
+    assert "function scanSkillsHubResult" in panels
+    assert "function installSkillsHubResult" in panels
+    assert "function updateSkillsHubSkill" in panels
+    assert "function uninstallSkillsHubSkill" in panels
+
+
+def test_skills_hub_i18n_keys_exist():
+    from pathlib import Path
+
+    i18n = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+    for key in (
+        "skills_tab_hub",
+        "skills_hub_scan",
+        "skills_hub_install",
+        "skills_hub_update",
+        "skills_hub_uninstall",
+        "skills_hub_gate_disabled",
+    ):
+        assert f"{key}:" in i18n
+
+
+def test_skills_hub_html_has_tab_and_views():
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="skillsHubView"' in html
+    assert 'id="skillsMineView"' in html
+    assert "switchSkillsTab('hub')" in html

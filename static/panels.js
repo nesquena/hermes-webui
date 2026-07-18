@@ -394,6 +394,11 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  // Stop the Skills Hub action-status poll when leaving the Skills panel.
+  if (prevPanel === 'skills' && nextPanel !== 'skills' && _skillsHubPollTimer) {
+    clearInterval(_skillsHubPollTimer);
+    _skillsHubPollTimer = null;
+  }
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
@@ -4893,6 +4898,251 @@ function renderSkills(skills) {
 
 function filterSkills() {
   if (_skillsData) renderSkills(_skillsData);
+}
+
+// ── Skills Hub tab (search / install / update / uninstall + pre-install scan) ──
+let _skillsHubTab = 'mine';
+let _skillsHubLoadedOnce = false;
+let _skillsHubResults = [];
+let _skillsHubInstalled = [];
+let _skillsHubScanResults = {}; // identifier -> parsed scan_result
+let _skillsHubPollTimer = null;
+let _skillsHubAllowed = true; // optimistic default; corrected by the first /status poll
+let _skillsHubLastAction = null;
+
+function switchSkillsTab(tab) {
+  _skillsHubTab = tab;
+  document.querySelectorAll('.skills-subtab').forEach(btn => {
+    const active = btn.dataset.skillsTab === tab;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    btn.style.background = active ? 'var(--accent)' : 'transparent';
+    btn.style.color = active ? '#fff' : 'var(--text)';
+  });
+  const mine = $('skillsMineView'), hub = $('skillsHubView');
+  if (mine) mine.style.display = tab === 'mine' ? '' : 'none';
+  if (hub) hub.style.display = tab === 'hub' ? '' : 'none';
+  if (tab !== 'hub' && _skillsHubPollTimer) { clearInterval(_skillsHubPollTimer); _skillsHubPollTimer = null; }
+  if (tab === 'hub' && !_skillsHubLoadedOnce) {
+    _skillsHubLoadedOnce = true;
+    loadSkillsHubStatus().then(() => loadSkillsHubInstalled());
+  }
+}
+
+function _skillsHubTrustBadge(trust) {
+  const colors = {builtin:'#3b82f6', trusted:'#22c55e', community:'#f59e0b'};
+  const color = colors[trust] || '#6b7280';
+  return `<span style="display:inline-flex;align-items:center;font-size:10px;padding:2px 7px;border-radius:9px;background:var(--code-bg);border:1px solid var(--border2);color:${color};font-weight:600;text-transform:uppercase">${esc(trust || 'unknown')}</span>`;
+}
+
+function _skillsHubVerdictBadge(verdict) {
+  if (!verdict) return '';
+  const colors = {safe:'#22c55e', caution:'#f59e0b', dangerous:'#ef4444'};
+  const color = colors[verdict] || '#6b7280';
+  return `<span style="display:inline-flex;align-items:center;font-size:10px;padding:2px 7px;border-radius:9px;background:var(--code-bg);border:1px solid var(--border2);color:${color};font-weight:600;text-transform:uppercase">${esc(verdict)}</span>`;
+}
+
+async function loadSkillsHubInstalled() {
+  const box = $('skillsHubInstalledList');
+  if (!box) return;
+  try {
+    const data = await api('/api/skills/hub/installed', {timeoutToast:false});
+    _skillsHubInstalled = data.installed || [];
+    renderSkillsHubInstalled();
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('skills_hub_load_failed'))}</div>`;
+  }
+}
+
+function renderSkillsHubInstalled() {
+  const box = $('skillsHubInstalledList');
+  if (!box) return;
+  if (!_skillsHubInstalled.length) {
+    box.innerHTML = `<div style="color:var(--muted);font-size:12px">${esc(t('skills_hub_none_installed'))}</div>`;
+    return;
+  }
+  const gated = !_skillsHubAllowed;
+  box.innerHTML = _skillsHubInstalled.map(entry => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:var(--text)">${esc(entry.name)}</div>
+        <div style="font-size:10px;color:var(--muted);word-break:break-all">${esc(entry.identifier || '')}</div>
+      </div>
+      ${_skillsHubTrustBadge(entry.trust_level)}
+      ${_skillsHubVerdictBadge(entry.scan_verdict)}
+      <button type="button" class="sm-btn" ${gated ? 'disabled' : ''} onclick="updateSkillsHubSkill('${esc(entry.name)}')" style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_update">${esc(t('skills_hub_update'))}</button>
+      <button type="button" class="sm-btn" ${gated ? 'disabled' : ''} onclick="uninstallSkillsHubSkill('${esc(entry.name)}')" style="padding:4px 8px;font-size:11px;color:#ef4444" data-i18n="skills_hub_uninstall">${esc(t('skills_hub_uninstall'))}</button>
+    </div>`).join('');
+}
+
+async function searchSkillsHub() {
+  const input = $('skillsHubSearch');
+  const box = $('skillsHubResultsList');
+  const query = ((input && input.value) || '').trim();
+  if (!box) return;
+  if (!query) { box.innerHTML = `<div style="color:var(--muted);font-size:12px">${esc(t('skills_hub_search_hint'))}</div>`; return; }
+  box.innerHTML = `<div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>`;
+  try {
+    const data = await api(`/api/skills/hub/search?q=${encodeURIComponent(query)}&limit=20`, {timeoutMs:40000, timeoutToast:false});
+    _skillsHubResults = data.results || [];
+    renderSkillsHubResults();
+  } catch (e) {
+    const msg = e && e.message ? e.message : '';
+    box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('skills_hub_search_failed'))}${msg ? ': ' + esc(msg) : ''}</div>`;
+  }
+}
+
+function _skillsHubInstalledIdentifiers() {
+  return new Set(_skillsHubInstalled.map(e => e.identifier).filter(Boolean));
+}
+
+function renderSkillsHubResults() {
+  const box = $('skillsHubResultsList');
+  if (!box) return;
+  if (!_skillsHubResults.length) {
+    box.innerHTML = `<div style="color:var(--muted);font-size:12px">${esc(t('skills_hub_no_results'))}</div>`;
+    return;
+  }
+  const installedIds = _skillsHubInstalledIdentifiers();
+  const gated = !_skillsHubAllowed;
+  box.innerHTML = _skillsHubResults.map(r => {
+    const scan = _skillsHubScanResults[r.identifier];
+    const alreadyInstalled = installedIds.has(r.identifier);
+    const scanBlock = scan
+      ? `<div style="margin-top:4px;font-size:10px;color:var(--muted)">${_skillsHubVerdictBadge(scan.verdict)} ${esc(scan.decision || '')}${scan.findings && scan.findings.length ? ` · ${scan.findings.length} finding(s)` : ''}</div>`
+      : '';
+    const installLabel = alreadyInstalled ? t('skills_hub_installed_label') : t('skills_hub_install');
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:flex-start;gap:8px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600;color:var(--text)">${esc(r.name)} ${_skillsHubTrustBadge(r.trust_level)}</div>
+          <div style="font-size:11px;color:var(--muted)">${esc(r.description || '')}</div>
+          <div style="font-size:10px;color:var(--muted);word-break:break-all;margin-top:2px">${esc(r.identifier)} <span style="opacity:.6">(${esc(r.source || '')})</span></div>
+          ${scanBlock}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+          <button type="button" class="sm-btn" ${gated ? 'disabled' : ''} onclick="scanSkillsHubResult('${esc(r.identifier)}')" style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_scan">${esc(t('skills_hub_scan'))}</button>
+          <button type="button" class="sm-btn" ${gated || alreadyInstalled ? 'disabled' : ''} onclick="installSkillsHubResult('${esc(r.identifier)}')" style="padding:4px 8px;font-size:11px">${esc(installLabel)}</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderSkillsHubActionStatus(data) {
+  const notice = $('skillsHubGateNotice');
+  if (notice) {
+    if (!data.allowed) {
+      notice.style.display = '';
+      notice.textContent = t('skills_hub_gate_disabled').replace('{flag}', 'HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE');
+    } else {
+      notice.style.display = 'none';
+    }
+  }
+  const box = $('skillsHubActionStatus');
+  if (!box) return;
+  if (!data.action || data.status === 'idle') { box.innerHTML = ''; return; }
+  const colors = {running:'#3b82f6', completed:'#22c55e', failed:'#ef4444', timeout:'#ef4444'};
+  const color = colors[data.status] || '#6b7280';
+  const actionLabel = t('skills_hub_action_' + data.action) || data.action;
+  const statusLabel = t('skills_hub_status_' + data.status) || data.status;
+  const badge = `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--code-bg);border:1px solid var(--border2);color:${color}"><span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block"></span>${esc(statusLabel)}</span>`;
+  const errBlock = data.error ? `<div style="font-size:11px;color:var(--error,#e05);margin-top:4px">${esc(data.error)}</div>` : '';
+  const logBlock = data.log ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:var(--muted)">${esc(t('skills_hub_view_log'))}</summary><pre style="max-height:200px;overflow:auto;font-size:11px;padding:8px;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;white-space:pre-wrap;word-break:break-word">${esc(data.log)}</pre></details>` : '';
+  box.innerHTML = `<div style="font-size:11px;color:var(--muted)">${esc(actionLabel)}: ${esc(data.target || '')} ${badge}</div>${errBlock}${logBlock}`;
+}
+
+function _syncSkillsHubPolling(data) {
+  const shouldPoll = !!(data && data.status === 'running');
+  if (shouldPoll && !_skillsHubPollTimer) {
+    _skillsHubPollTimer = setInterval(loadSkillsHubStatus, 2000);
+  } else if (!shouldPoll && _skillsHubPollTimer) {
+    clearInterval(_skillsHubPollTimer);
+    _skillsHubPollTimer = null;
+  }
+}
+
+async function loadSkillsHubStatus() {
+  let data;
+  try {
+    data = await api('/api/skills/hub/status', {timeoutToast:false});
+  } catch (e) {
+    return; // best-effort; keep showing the last known state
+  }
+  _skillsHubAllowed = !!data.allowed;
+  const wasRunning = _skillsHubLastAction && _skillsHubLastAction.status === 'running';
+  const justFinished = wasRunning && data.status !== 'running';
+  renderSkillsHubActionStatus(data);
+  _syncSkillsHubPolling(data);
+  if (data.scan_result && data.target) {
+    _skillsHubScanResults[data.target] = data.scan_result;
+  }
+  if (justFinished) {
+    if (data.action === 'install' || data.action === 'update' || data.action === 'uninstall') {
+      loadSkillsHubInstalled();
+    }
+    renderSkillsHubResults();
+  }
+  _skillsHubLastAction = {action: data.action, status: data.status};
+  return data;
+}
+
+async function _startSkillsHubAction(action, body) {
+  return api('/api/skills/hub/' + action, {method:'POST', body:JSON.stringify(body || {}), timeoutMs:15000, timeoutToast:false});
+}
+
+function _skillsHubActionErrorToast(e) {
+  const msg = e && e.message ? e.message : String(e || '');
+  if (typeof showToast === 'function') showToast(`${t('skills_hub_action_failed')}${msg ? ': ' + msg : ''}`, 5000, 'error');
+}
+
+async function scanSkillsHubResult(identifier) {
+  try {
+    const result = await _startSkillsHubAction('scan', {identifier});
+    renderSkillsHubActionStatus(result);
+    _syncSkillsHubPolling(result);
+  } catch (e) { _skillsHubActionErrorToast(e); }
+}
+
+async function installSkillsHubResult(identifier) {
+  const scan = _skillsHubScanResults[identifier];
+  let message = t('skills_hub_confirm_install');
+  let danger = false;
+  let force = false;
+  if (scan && (scan.verdict === 'dangerous' || scan.decision === 'BLOCKED')) {
+    message = t('skills_hub_confirm_install_blocked').replace('{reason}', scan.decision_reason || '');
+    danger = true;
+    force = true; // the only path that can proceed past a blocked verdict
+  } else if (!scan) {
+    message = t('skills_hub_confirm_install_unscanned');
+  } else if (scan.verdict === 'caution' || scan.decision === 'NEEDS CONFIRMATION') {
+    message = t('skills_hub_confirm_install_caution').replace('{reason}', scan.decision_reason || '');
+  }
+  const confirmed = await showConfirmDialog({title:t('skills_hub_install'), message, danger, confirmLabel:t('skills_hub_install')});
+  if (!confirmed) return;
+  try {
+    const result = await _startSkillsHubAction('install', {identifier, force});
+    renderSkillsHubActionStatus(result);
+    _syncSkillsHubPolling(result);
+  } catch (e) { _skillsHubActionErrorToast(e); }
+}
+
+async function updateSkillsHubSkill(name) {
+  try {
+    const result = await _startSkillsHubAction('update', {name});
+    renderSkillsHubActionStatus(result);
+    _syncSkillsHubPolling(result);
+  } catch (e) { _skillsHubActionErrorToast(e); }
+}
+
+async function uninstallSkillsHubSkill(name) {
+  const confirmed = await showConfirmDialog({title:t('skills_hub_uninstall'), message:t('skills_hub_confirm_uninstall').replace('{name}', name), danger:true, confirmLabel:t('skills_hub_uninstall')});
+  if (!confirmed) return;
+  try {
+    const result = await _startSkillsHubAction('uninstall', {name});
+    renderSkillsHubActionStatus(result);
+    _syncSkillsHubPolling(result);
+  } catch (e) { _skillsHubActionErrorToast(e); }
 }
 
 
