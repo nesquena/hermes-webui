@@ -633,6 +633,23 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     return True
 
 
+def _artifact_owner_for_request(handler) -> str | None:
+    """Return the validated auth-session token used to own private artifacts.
+
+    Artifact ``session_id`` is client metadata and never authorization input.
+    Auth-enabled requests fail closed unless the server can resolve a verified
+    session; no-auth deployments retain historical shared artifact behavior.
+    """
+    from api.auth import get_session_info, is_auth_enabled, parse_cookie
+
+    if not is_auth_enabled():
+        return None
+    cookie_value = parse_cookie(handler) or getattr(handler, "_trusted_auth_session_cookie_value", None)
+    info = get_session_info(cookie_value) if cookie_value else None
+    token = str((info or {}).get("token") or "").strip()
+    return token or None
+
+
 def _active_skills_dir() -> Path:
     """Return the skills directory for the request's active Hermes profile.
 
@@ -13442,7 +13459,11 @@ def handle_get(handler, parsed) -> bool:
         from api.artifacts import artifacts_enabled, list_artifacts
         if not artifacts_enabled():
             return j(handler, {"error": "not found"}, status=404)
-        return j(handler, {"ok": True, "artifacts": list_artifacts()})
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
+        return j(handler, {"ok": True, "artifacts": list_artifacts(owner=owner)})
 
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
@@ -14156,6 +14177,10 @@ def handle_post(handler, parsed) -> bool:
         from api.artifacts import artifacts_enabled, publish_artifact
         if not artifacts_enabled():
             return j(handler, {"error": "not found"}, status=404)
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
         try:
             result = publish_artifact(
                 str(body.get("path") or ""),
@@ -14165,7 +14190,10 @@ def handle_post(handler, parsed) -> bool:
                 public=(bool(body.get("public")) if "public" in body else None),
                 session_id=str(body.get("session_id") or "") or None,
                 token=str(body.get("token") or "") or None,
+                owner=owner,
             )
+        except PermissionError:
+            return bad(handler, "unknown artifact token", 404)
         except ValueError as exc:
             return bad(handler, str(exc), 400)
         return j(handler, {"ok": True, "artifact": result})
@@ -14174,10 +14202,14 @@ def handle_post(handler, parsed) -> bool:
         from api.artifacts import artifacts_enabled, revoke_artifact
         if not artifacts_enabled():
             return j(handler, {"error": "not found"}, status=404)
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
         token = str(body.get("token") or "").strip()
         if not token:
             return bad(handler, "token is required", 400)
-        if not revoke_artifact(token):
+        if not revoke_artifact(token, owner=owner):
             return bad(handler, "unknown artifact token", 404)
         return j(handler, {"ok": True})
 
@@ -18901,10 +18933,10 @@ def _handle_artifact_get(handler, parsed):
     # resurrect unredacted bytes (audit finding, 18.07.2026).
     anonymous_ok = bool(meta.get("public")) and bool(ventry.get("public_safe"))
     if not anonymous_ok:
-        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.auth import is_auth_enabled
         if is_auth_enabled():
-            cv = parse_cookie(handler)
-            if not (cv and verify_session(cv)):
+            owner = _artifact_owner_for_request(handler)
+            if not owner or str(meta.get("owner") or "") != owner:
                 return j(handler, {"error": "not found"}, status=404)
     mime = str(ventry.get("mime") or meta.get("mime") or "application/octet-stream")
     csp = None

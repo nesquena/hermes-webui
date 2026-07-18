@@ -256,8 +256,20 @@ def _load_meta(token: str) -> dict | None:
     return meta if isinstance(meta, dict) else None
 
 
-def _find_token_for_source(source: str) -> str | None:
-    """Existing non-revoked artifact for this resolved source path, if any."""
+def _meta_owned_by(meta: dict, owner: str | None) -> bool:
+    """Return whether an artifact belongs to the resolved request owner.
+
+    ``None`` is the no-auth deployment mode, where artifacts retain their
+    historical shared behavior. Authenticated routes always pass a non-empty,
+    server-derived owner; legacy metadata without one is deliberately not owned.
+    """
+    if owner is None:
+        return True
+    return str(meta.get("owner") or "") == owner
+
+
+def _find_token_for_source(source: str, *, owner: str | None = None) -> str | None:
+    """Existing owner-scoped non-revoked artifact for this resolved source path."""
     if not ARTIFACTS_DIR.is_dir():
         return None
     for meta_file in ARTIFACTS_DIR.glob("*/meta.json"):
@@ -267,7 +279,7 @@ def _find_token_for_source(source: str) -> str | None:
             continue
         if not isinstance(meta, dict) or meta.get("revoked_at"):
             continue
-        if meta.get("source_path") == source:
+        if meta.get("source_path") == source and _meta_owned_by(meta, owner):
             return str(meta.get("token") or "") or None
     return None
 
@@ -279,6 +291,7 @@ def publish_artifact(
     public: bool | None = None,
     session_id: str | None = None,
     token: str | None = None,
+    owner: str | None = None,
 ) -> dict:
     """Publish (or re-publish) a file as a new artifact version.
 
@@ -300,8 +313,10 @@ def publish_artifact(
             meta = _load_meta(token)
             if meta is None or meta.get("revoked_at"):
                 raise ValueError("unknown or revoked artifact token")
+            if not _meta_owned_by(meta, owner):
+                raise PermissionError("artifact is not owned by this request")
         else:
-            token = _find_token_for_source(str(source))
+            token = _find_token_for_source(str(source), owner=owner)
             meta = _load_meta(token) if token else None
         if meta is None:
             token = secrets.token_urlsafe(18)
@@ -312,6 +327,7 @@ def publish_artifact(
                 "mime": mime,
                 "title": "",
                 "public": False,
+                "owner": str(owner or ""),
                 "session_id": str(session_id or ""),
                 "created_at": time.time(),
                 "updated_at": None,
@@ -319,6 +335,7 @@ def publish_artifact(
                 "versions": [],
             }
 
+        token = str(token)
         effective_public = bool(meta.get("public")) if public is None else bool(public)
 
         version = len(meta.get("versions") or []) + 1
@@ -414,17 +431,17 @@ def resolve_artifact_file(token: str, version: int | None = None) -> tuple[dict,
     return meta, ventry, fpath
 
 
-def revoke_artifact(token: str) -> bool:
+def revoke_artifact(token: str, *, owner: str | None = None) -> bool:
     with _ARTIFACTS_LOCK:
         meta = _load_meta(token)
-        if meta is None:
+        if meta is None or not _meta_owned_by(meta, owner):
             return False
         meta["revoked_at"] = time.time()
         _write_json_atomic(_meta_path(str(meta.get("token") or token)), meta)
     return True
 
 
-def list_artifacts() -> list[dict]:
+def list_artifacts(*, owner: str | None = None) -> list[dict]:
     items: list[dict] = []
     if not ARTIFACTS_DIR.is_dir():
         return items
@@ -433,7 +450,11 @@ def list_artifacts() -> list[dict]:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if not isinstance(meta, dict) or meta.get("revoked_at"):
+        if (
+            not isinstance(meta, dict)
+            or meta.get("revoked_at")
+            or not _meta_owned_by(meta, owner)
+        ):
             continue
         versions = meta.get("versions") or []
         items.append({
