@@ -210,6 +210,13 @@ function createEnvironment() {
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;
   globalThis._messageReloadLimitForSession = () => 2;
+  // sessions.js module-level const, referenced by _ensureMessagesLoaded's
+  // boundedReloadLimit ceiling check (#6152/#6154). Not one of the extracted
+  // functions, so define it in the harness (matching the real value) or the
+  // reload-width path resolves it as undefined -> boundedReloadLimit=null ->
+  // the fetch URL drops msg_limit/expand_renderable and mismatches the
+  // enqueued buildMessageUrl(), stalling the ordered api() harness.
+  globalThis._MSG_LIMIT_MAX = 500;
   globalThis._currentMessageRenderWindowSize = () => 1;
   globalThis._messageRenderableMessageCount = () => 2;
 

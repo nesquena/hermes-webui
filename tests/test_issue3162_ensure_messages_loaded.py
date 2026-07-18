@@ -15,10 +15,25 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 
 def _ensure_messages_loaded_body() -> str:
     start = SESSIONS_JS.index("async function _ensureMessagesLoaded")
-    # Window widened (#3326 added reload-width-hint handling inside this function,
-    # pushing the carry-forward reassignment further down; #3790 added the
-    # cold-load expand_renderable param + comment, pushing it further still).
-    return SESSIONS_JS[start: start + 4500]
+    # Extract the ACTUAL function body via brace-balance instead of a fixed
+    # character window. The old fixed 4500-char window kept needing bumps as the
+    # function grew (#3326 reload-width-hint, #3790 cold-load expand_renderable,
+    # #6152/#6154 the msg_limit ceiling boundedReloadLimit path — each pushed the
+    # carry-forward reassignment further down and eventually past the window).
+    # Balancing braces from the opening `{` is robust to any in-function growth.
+    brace = SESSIONS_JS.index("{", start)
+    depth = 0
+    end = brace
+    for i in range(brace, len(SESSIONS_JS)):
+        c = SESSIONS_JS[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    return SESSIONS_JS[start:end]
 
 
 def test_ensure_messages_loaded_declares_msgs_with_let():
