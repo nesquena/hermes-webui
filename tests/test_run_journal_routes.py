@@ -363,7 +363,7 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     assert tool["activitySegmentSeq"] == 1
     assert tool["snippet"] == "passed"
     assert tool["duration"] == 1.25
-    assert len(tool["args"]["extra"]) <= 123
+    assert tool["args"]["extra"] == "x" * 200
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():
