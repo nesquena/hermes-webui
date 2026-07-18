@@ -76,7 +76,12 @@ jobs:
       # failure picture across the matrix in a single run.
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
+        # Full suite execution runs on Python 3.12 only for pull requests (5 shards
+        # instead of 15 jobs — the 3.11/3.13 shards were near-duplicate execution).
+        # Push to master still executes the full 3.11/3.12/3.13 matrix, and the
+        # `compat` job below keeps a fast cross-version import/collection signal on
+        # every PR.
+        python-version: ${{ fromJSON(github.event_name == 'push' && '["3.11", "3.12", "3.13"]' || '["3.12"]') }}
         # Split the suite across 5 parallel shards per Python version. pytest-shard
         # partitions tests deterministically by test-id hash; the suite was made
         # shard-safe (no cross-test state leakage) so every shard passes
@@ -134,3 +139,47 @@ jobs:
 
       - name: Run tests (shard ${{ matrix.shard }} of 5)
         run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5
+
+  # Fast cross-version compatibility gate for pull requests. The full suite runs on
+  # 3.12 only for PRs (see the `test` matrix above); this job keeps the 3.11/3.13
+  # signal before merge by installing the same dependencies, byte-compiling the whole
+  # tree, and collecting (importing) every test module — without executing the suite.
+  # That catches version-specific syntax errors, import failures, and dependency
+  # install breakage in ~1-2 minutes per version instead of 10 duplicate execution
+  # shards. Push to master still executes the full 3-version matrix as a backstop.
+  compat:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            **/setup.cfg
+            **/requirements*.txt
+            **/pyproject.toml
+
+      # Same dependency set as the `test` job so install breakage on 3.11/3.13
+      # surfaces here. Playwright browsers are NOT installed — collection imports
+      # test modules but never launches a browser.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard python-docx openpyxl python-pptx playwright
+          pip install ruff || echo "ruff install failed — non-blocking, mirrors the test job"
+          pip install mcp || echo "mcp install failed — non-blocking, mirrors the test job"
+
+      - name: Byte-compile whole tree (version-specific syntax gate)
+        run: python3 -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts
+
+      - name: Collect full test suite (imports every test module, no execution)
+        run: pytest tests/ --collect-only -q
