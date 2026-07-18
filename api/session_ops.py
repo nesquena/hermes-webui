@@ -520,7 +520,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
     }
 
 
-def session_status(session_id: str) -> dict[str, Any]:
+def session_status(session_id: str, *, session=None) -> dict[str, Any]:
     """Return a snapshot of session state for /status.
 
     Webui equivalent of gateway/run.py:_handle_status_command. The agent's
@@ -528,9 +528,12 @@ def session_status(session_id: str) -> dict[str, Any]:
     webui equivalent is whether the session has an active stream
     (active_stream_id is set).
     """
-    s = get_session(session_id)
+    s = session if session is not None else get_session(session_id, metadata_only=True)
     inp = int(s.input_tokens or 0)
     out = int(s.output_tokens or 0)
+    message_count = getattr(s, '_metadata_message_count', None)
+    if message_count is None:
+        message_count = len(s.messages or [])
     profile = getattr(s, 'profile', None) or 'default'
     try:
         from api.profiles import get_hermes_home_for_profile
@@ -545,7 +548,7 @@ def session_status(session_id: str) -> dict[str, Any]:
         'hermes_home': hermes_home,
         'workspace': s.workspace,
         'personality': s.personality,
-        'message_count': len(s.messages or []),
+        'message_count': max(0, int(message_count)),
         'created_at': s.created_at,
         'updated_at': s.updated_at,
         'agent_running': bool(getattr(s, 'active_stream_id', None)),

@@ -215,6 +215,107 @@ def test_get_state_db_message_prefix_summary_missing_db_creates_no_sqlite_files(
     assert not Path(f"{db}-shm").exists()
 
 
+def _raise_readonly_preflight_failed():
+    raise OSError("readonly preflight failed")
+
+
+def test_get_state_db_message_prefix_summary_fails_open_on_path_resolution_error(
+    monkeypatch,
+):
+    """D1R2 review blocker: a path-resolution/stat failure must be 'unprovable'
+    (None → caller full-read fallback), never an exception escaping to the
+    route."""
+    monkeypatch.setattr(
+        models, "_active_state_db_path", _raise_readonly_preflight_failed
+    )
+
+    assert models.get_state_db_session_message_prefix_summary("sess-1", 1000.5) is None
+
+
+def test_get_state_db_message_prefix_summary_fails_open_on_profile_home_error(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        models,
+        "_get_profile_home",
+        lambda _profile: (_ for _ in ()).throw(OSError("profile home unavailable")),
+    )
+
+    assert (
+        models.get_state_db_session_message_prefix_summary(
+            "sess-1", 1000.5, profile="p1"
+        )
+        is None
+    )
+
+
+def test_get_state_db_message_keys_before_timestamp_fails_open_on_path_resolution_error(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        models, "_active_state_db_path", _raise_readonly_preflight_failed
+    )
+
+    assert (
+        models.get_state_db_session_message_keys_before_timestamp("sess-1", 1000.5)
+        is None
+    )
+
+
+def _make_state_db_with_compacted_rows(path):
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, tool_calls TEXT, active INTEGER
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO messages (id, session_id, role, content, timestamp, tool_calls, active) "
+        "VALUES (?,?,?,?,?,?,?)",
+        [
+            (1, "sess-1", "user", "hi", 10.0, None, 1),
+            (2, "sess-1", "assistant", "compacted away", 15.0, None, 0),
+            (3, "sess-1", "assistant", "hello", 20.0, None, None),
+            (4, "other", "user", "other session", 10.0, None, 1),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_get_state_db_message_keys_before_timestamp_excludes_inactive_rows(
+    tmp_path,
+    monkeypatch,
+):
+    """D1R2 review: the definitive key helper must apply the same active
+    predicate as the prefix summary / bounded reader, or a compacted DB
+    materializes more keys than the summary counted and forces a needless
+    conservative fallback."""
+    db = tmp_path / "state.db"
+    _make_state_db_with_compacted_rows(db)
+    _point_models_at(monkeypatch, db)
+
+    summary = models.get_state_db_session_message_prefix_summary("sess-1", 30.0)
+    keys = models.get_state_db_session_message_keys_before_timestamp("sess-1", 30.0)
+
+    assert summary == {"count": 2, "null_timestamp_count": 0}
+    assert summary is not None
+    assert keys is not None
+    assert len(keys) == summary["count"]
+    expected_active_keys = [
+        models._session_message_visible_key(
+            {"role": "user", "content": "hi", "tool_calls": None}
+        ),
+        models._session_message_visible_key(
+            {"role": "assistant", "content": "hello", "tool_calls": None}
+        ),
+    ]
+    assert keys == expected_active_keys
+
+
 def test_get_state_db_session_summary_opens_read_only(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     _make_state_db(db)
