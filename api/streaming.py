@@ -1798,24 +1798,23 @@ def _set_turn_session_identity(session_id: str):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds two context-locals so every session-key consumer is covered without
-    a race:
+    Binds three context-locals so every session-key / UI-owner consumer is
+    covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
         a notify_on_complete background spawn: the bug path).
       * ``gateway.session_context._SESSION_KEY`` — read by direct
-        ``get_session_env("HERMES_SESSION_KEY")`` consumers (e.g. the sudo
-        password cache scope, terminal_tool.py:272).
+        ``get_session_env("HERMES_SESSION_KEY")`` consumers.
+      * ``gateway.session_context._SESSION_UI_SESSION_ID`` — exact browser-tab
+        return address stamped onto ProcessSession.origin_ui_session_id and
+        completion events by modern hermes-agent builds. Authoritative for
+        wakeup routing when present (see ``_resolve_completion_target``).
 
     It deliberately does NOT call ``gateway.session_context.set_session_vars``:
     that blanket setter also zeroes the platform/chat_id/user contextvars,
     flipping ``HERMES_SESSION_PLATFORM`` from its env fallback (``'webui'``,
     still written to os.environ at turn-start) to an explicit ``""`` — which
-    would break the ``notify_on_complete`` watcher registration gate in
-    terminal_tool.py:~1966. Only the session-key identity is bound; every
-    other session var keeps its existing os.environ fallback (CLI/cron compat
-    preserved — when these contextvars are _UNSET, get_session_env still falls
-    back to os.environ).
+    would break the ``notify_on_complete`` watcher registration gate.
     """
     sid = str(session_id or "")
     tokens: dict = {}
@@ -1829,6 +1828,11 @@ def _set_turn_session_identity(session_id: str):
         tokens["session_key"] = _SK.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_KEY bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_UI_SESSION_ID as _UI_SID
+        tokens["ui_session_id"] = _UI_SID.set(sid)
+    except Exception:
+        logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
     return tokens
 
 
@@ -1843,6 +1847,13 @@ def _reset_turn_session_identity(tokens) -> None:
     """
     if not tokens:
         return
+    tok = tokens.get("ui_session_id")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_UI_SESSION_ID as _UI_SID
+            _UI_SID.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_UI_SESSION_ID reset failed", exc_info=True)
     tok = tokens.get("session_key")
     if tok is not None:
         try:
