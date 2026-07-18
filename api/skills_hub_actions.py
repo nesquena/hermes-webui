@@ -223,37 +223,42 @@ def _redact_sensitive_text(text: object) -> object:
 
 
 def _redact_scan_finding_lines(log: object) -> object:
-    """Remove complete raw scan-finding records from a browser transcript.
+    """Fail closed after a raw scan finding enters a browser transcript.
 
-    Finding matches may be wrapped by the CLI renderer. The original runner
-    transcript remains private in ``_STATE``; this function only creates the
-    browser-facing projection. A blank line, another finding prefix, or a
-    recognized scan header/decision is a safe record boundary. If none appears,
-    keep suppressing rather than guessing that a continuation is harmless.
+    ``tools.skills_guard.format_scan_report`` writes ``Finding.match`` directly
+    into a finding line. Its ``match[:60]`` value can contain newlines, blank
+    rows, or text shaped like a later ``Scan:``/``Decision:`` line, so no raw
+    line after a finding prefix is a trustworthy record delimiter. Keep only
+    independent progress emitted before that prefix; the private runner
+    transcript in ``_STATE`` remains intact and ``scan_result`` supplies the
+    browser's structured, match-free finding metadata.
     """
     if not isinstance(log, str):
         return log
     safe_lines = []
-    suppressing_finding = False
     for raw_line in log.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
-        newline = raw_line[len(line):]
-        is_finding_start = bool(_FINDING_RECORD_START_RE.match(line))
-        is_safe_boundary = not line or bool(_SCAN_HEADER_RE.match(line) or _DECISION_RE.match(line))
-        if is_finding_start:
-            if not suppressing_finding:
-                safe_lines.append("[scan finding redacted]" + newline)
-            suppressing_finding = True
-        elif suppressing_finding:
-            if is_safe_boundary:
-                suppressing_finding = False
-                safe_lines.append(raw_line)
-            # Otherwise this may be a wrapped raw source fragment; fail closed.
-        elif _FINDING_RE.match(line):
-            safe_lines.append("[scan finding redacted]" + newline)
-        else:
-            safe_lines.append(raw_line)
+        if _FINDING_RECORD_START_RE.match(line):
+            newline = raw_line[len(line):]
+            safe_lines.append("[scan finding redacted; remaining scan transcript suppressed]" + newline)
+            break
+        safe_lines.append(raw_line)
     return "".join(safe_lines)
+
+
+def _safe_scan_decision(scan_result: dict) -> str | None:
+    """Derive the scanner's non-force decision without accepting raw report text."""
+    trust_level = scan_result.get("trust_level")
+    verdict = scan_result.get("verdict")
+    if trust_level not in {"builtin", "trusted", "community"}:
+        return None
+    if verdict not in {"safe", "caution", "dangerous"}:
+        return None
+    if trust_level == "builtin" or (trust_level == "trusted" and verdict != "dangerous"):
+        return "ALLOWED"
+    if trust_level == "community" and verdict == "safe":
+        return "ALLOWED"
+    return "BLOCKED"
 
 
 def _safe_status_projection(state: dict) -> dict:
@@ -263,13 +268,24 @@ def _safe_status_projection(state: dict) -> dict:
     status["error"] = _redact_sensitive_text(status.get("error"))
     scan_result = status.get("scan_result")
     if isinstance(scan_result, dict):
-        safe_scan_result = dict(scan_result)
+        safe_scan_result = {
+            key: scan_result[key]
+            for key in ("name", "source", "trust_level", "verdict")
+            if key in scan_result
+        }
+        decision = _safe_scan_decision(scan_result)
+        if decision is not None:
+            safe_scan_result["decision"] = decision
         findings = scan_result.get("findings")
         if isinstance(findings, list):
             # `match` is a raw fragment of scanned Skill content. Its metadata
             # remains useful to explain the verdict, but never expose its body.
             safe_scan_result["findings"] = [
-                {key: value for key, value in finding.items() if key != "match"}
+                {
+                    key: finding[key]
+                    for key in ("severity", "category", "location")
+                    if key in finding
+                }
                 if isinstance(finding, dict)
                 else finding
                 for finding in findings

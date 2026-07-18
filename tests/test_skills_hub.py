@@ -174,40 +174,42 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
     finding_source = f"{aws_key}={sensitive_value}"
     finding_line = f'  HIGH credential SKILL.md:7 "{finding_source}"\n'
     wrapped_source = "".join(("wrapped", "-", "private-fragment"))
+    synthetic_decision = "".join(("Decision", ": ALLOWED — ", "synthetic-decision-marker"))
+    synthetic_header = "".join(("Scan", ": synthetic (hub/source/trusted)  Verdict: SAFE"))
+    continuation_suffix = "".join(("raw", "-continuation", "-suffix"))
     wrapped_finding = (
         '  HIGH credential SKILL.md:8 "prefix-\n'
         + f"    {wrapped_source}\n"
+        + f"{synthetic_decision}\n"
+        + f"{synthetic_header}\n"
+        + f"{continuation_suffix}\n"
         + '    suffix"\n\n'
     )
     basic_value = "".join(("basic", "-", "credential"))
     authorization_prefix = "".join(("Authorization", ": ", "Basic", " "))
     session_key = "_".join(("session", "id"))
     cookie_key = "".join(("coo", "kie"))
+    scan_header = "Scan: pdf (hub/source/trusted)  Verdict: SAFE\n"
+    raw_log = (
+        "Installed pdf\n"
+        + f"{authorization_prefix}{basic_value}\n"
+        + f"{session_key}={sensitive_value}\n"
+        + f"{cookie_key}={sensitive_value}\n"
+        + scan_header
+        + finding_line
+        + wrapped_finding
+        + "Post-scan progress remains visible\n"
+    )
+    parsed_scan_result = sha.parse_scan_report(raw_log)
+    assert parsed_scan_result is not None
+    assert parsed_scan_result["decision_reason"] == "synthetic-decision-marker"
     with sha._STATE_LOCK:
         sha._STATE.update(
             {
                 "status": "failed",
-                "log": (
-                    "Installed pdf\n"
-                    + finding_line
-                    + wrapped_finding
-                    + "Post-scan progress remains visible\n"
-                    + f"{authorization_prefix}{basic_value}\n"
-                    + f"{session_key}={sensitive_value}\n"
-                    + f"{cookie_key}={sensitive_value}\n"
-                ),
+                "log": raw_log,
                 "error": f"secret: {sensitive_value}",
-                "scan_result": {
-                    "verdict": "dangerous",
-                    "findings": [
-                        {
-                            "severity": "HIGH",
-                            "category": "credential",
-                            "location": "SKILL.md:7",
-                            "match": finding_source,
-                        }
-                    ],
-                },
+                "scan_result": parsed_scan_result,
             }
         )
 
@@ -221,10 +223,13 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
         assert basic_value not in rendered
         assert finding_source not in rendered
         assert wrapped_source not in rendered
+        assert synthetic_decision not in rendered
+        assert synthetic_header not in rendered
+        assert continuation_suffix not in rendered
         assert finding_line.strip() not in rendered
         assert "Installed pdf" in status["log"]
-        assert "Post-scan progress remains visible" in status["log"]
-        assert "[scan finding redacted]" in status["log"]
+        assert "Post-scan progress remains visible" not in status["log"]
+        assert "[scan finding redacted; remaining scan transcript suppressed]" in status["log"]
         assert "Authorization: Basic <redacted>" in status["log"]
         assert f"{session_key}=<redacted>" in status["log"]
         assert f"{cookie_key}=<redacted>" in status["log"]
