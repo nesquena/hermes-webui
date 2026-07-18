@@ -25213,6 +25213,30 @@ def _handle_skill_toggle(handler, body):
     if not skill_md:
         return bad(handler, f"Skill '{name}' not found", 404)
 
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        home = get_active_hermes_home()
+        with _cfg_lock:
+            cfg = _bridge.load_agent_config(home)
+            skills_cfg = cfg.get("skills") if isinstance(cfg.get("skills"), dict) else {}
+            skills_cfg["disabled"] = _toggle_name_in_list(
+                skills_cfg.get("disabled"), name, enabled
+            )
+            platform_disabled = skills_cfg.get("platform_disabled")
+            if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+                platform_disabled["webui"] = _toggle_name_in_list(
+                    platform_disabled["webui"], name, enabled
+                )
+            _bridge.save_skills_config(skills_cfg, home)
+        reload_config()
+        _SKILLS_STATS_CACHE.clear()
+        return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return j(handler, {"error": f"Agent config layer unavailable: {exc}"}, status=503)
+
     config_path = _active_profile_config_path()
     with _cfg_lock:
         cfg = _load_yaml_config_file(config_path)
@@ -26438,12 +26462,43 @@ def _handle_mcp_servers_list(handler):
     })
 
 
+def _mcp_bridge_or_legacy(handler):
+    """Resolve the MCP write path for this request.
+
+    Returns ``(use_bridge, home)`` or ``None`` after answering the request
+    when the agent checkout is configured but not importable (fail closed —
+    a half-wired deployment must not silently fall back to the legacy
+    comment-destroying writer).
+    """
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        return True, get_active_hermes_home()
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        j(handler, {"error": f"Agent config layer unavailable: {exc}"}, status=503)
+        return None
+    return False, None
+
+
 def _handle_mcp_server_delete(handler, name):
     """Delete an MCP server by name."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        if not _bridge.remove_mcp_server(name, home):
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        reload_config()
+        return j(handler, {"ok": True, "deleted": name})
     cfg = get_config()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
@@ -26466,6 +26521,17 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        if not _bridge.set_mcp_server_enabled(name, enabled, home):
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        reload_config()
+        return j(handler, {"ok": True, "name": name, "enabled": enabled})
     cfg = get_config()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
@@ -26507,6 +26573,10 @@ def _handle_mcp_server_update(handler, name, body):
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
     # Validate: must have url (http) or command (stdio)
     server_cfg = {}
     cfg = get_config()
@@ -26531,6 +26601,27 @@ def _handle_mcp_server_update(handler, name, body):
             server_cfg["timeout"] = int(body["timeout"])
         except (ValueError, TypeError):
             pass
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        bearer_token = str(body.get("bearer_token") or "").strip()
+        if bearer_token and bearer_token != _MASKED_PLACEHOLDER:
+            # Secret goes to the profile's .env; config.yaml only stores the
+            # ${MCP_<NAME>_API_KEY} interpolation template (agent convention).
+            try:
+                token_headers = _bridge.save_mcp_bearer_token(name, bearer_token, home)
+            except ValueError as exc:
+                return bad(handler, str(exc))
+            merged_headers = dict(server_cfg.get("headers") or {})
+            merged_headers.update(token_headers)
+            server_cfg["headers"] = merged_headers
+        issues = _bridge.save_mcp_server(name, server_cfg, home)
+        if issues:
+            return j(handler, {"error": "Server configuration rejected", "issues": issues}, status=400)
+        reload_config()
+        return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+    if body.get("bearer_token"):
+        return bad(handler, "bearer_token requires a Hermes agent checkout (set HERMES_WEBUI_AGENT_DIR); use headers instead")
     servers[name] = server_cfg
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg)
