@@ -14780,10 +14780,30 @@ def handle_post(handler, parsed) -> bool:
                 saved_draft = current_clear_draft
             elif clear_requested:
                 saved_draft = {"text": "", "files": []}
+                # Clearing crosses two durable stores: the sidecar is
+                # authoritative while present, but the legacy session payload
+                # takes over after unlink. Checkpoint the current draft first,
+                # so either later operation can fail without losing it.
                 owner = get_session(sid)
+                owner.composer_draft = dict(current_clear_draft)
+                try:
+                    owner.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to checkpoint composer draft before clear for %s", sid, exc_info=True)
+                    update_cached_composer_draft(sid, current_clear_draft)
+                    return bad(handler, "Failed to clear the saved draft", status=500)
+                if not delete_composer_draft_sidecar(sid):
+                    update_cached_composer_draft(sid, current_clear_draft)
+                    return bad(handler, "Failed to clear the saved draft", status=500)
                 owner.composer_draft = dict(saved_draft)
-                owner.save(touch_updated_at=False)
-                delete_composer_draft_sidecar(sid)
+                try:
+                    owner.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    # The durable checkpoint above remains on disk. Restore the
+                    # in-memory view before reporting the failed clear.
+                    logger.debug("Failed to finalize composer draft clear for %s", sid, exc_info=True)
+                    update_cached_composer_draft(sid, current_clear_draft)
+                    return bad(handler, "Failed to clear the saved draft", status=500)
                 update_cached_composer_draft(sid, saved_draft)
             else:
                 next_draft = dict(current_draft)

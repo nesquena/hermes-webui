@@ -261,6 +261,107 @@ def test_clear_is_canonical_durable_and_does_not_clobber_newer_draft(session_env
     assert models.read_composer_draft_sidecar(sid) == newer
 
 
+def test_clear_returns_error_when_authoritative_draft_sidecar_cannot_be_removed(
+    session_env, monkeypatch
+):
+    from api import models, routes
+
+    _session_dir, _sessions = session_env
+    sid = "draft-clear-unlink-failure"
+    old_draft = {"text": "must not be falsely cleared", "files": []}
+    session = models.Session(session_id=sid, title="Clear unlink failure")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, old_draft)
+
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+    response = _post_draft(
+        monkeypatch,
+        {"session_id": sid, "clear": True, "expected": old_draft},
+    )
+
+    assert response["status"] == 500
+    assert "clear" in response["payload"]["error"].lower()
+    assert models.read_composer_draft_sidecar(sid) == old_draft
+    # A failed clear must retain a durable legacy fallback as well as the
+    # authoritative sidecar; a later sidecar loss must not discard the draft.
+    assert models.Session.load(sid).composer_draft == old_draft
+
+
+def test_clear_preserves_fallback_when_empty_legacy_save_fails(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "draft-clear-empty-save-failure"
+    old_draft = {"text": "must survive empty save failure", "files": []}
+    session = models.Session(session_id=sid, title="Clear empty save failure")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, old_draft)
+    real_save = models.Session.save
+
+    def fail_only_empty_draft_save(self, *args, **kwargs):
+        if self.session_id == sid and self.composer_draft == {"text": "", "files": []}:
+            raise OSError("simulated empty legacy draft save failure")
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", fail_only_empty_draft_save)
+    response = _post_draft(
+        monkeypatch,
+        {"session_id": sid, "clear": True, "expected": old_draft},
+    )
+
+    assert response["status"] == 500
+    assert "clear" in response["payload"]["error"].lower()
+    # The sidecar was removed, so the pre-unlink legacy checkpoint is now the
+    # only durable copy and must restore the submitted draft.
+    assert models.read_composer_draft_sidecar(sid) is None
+    assert models.Session.load(sid).composer_draft == old_draft
+
+
+def test_clear_skips_index_write_to_keep_checkpoint_and_final_save_durable(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "draft-clear-index-failure"
+    old_draft = {"text": "must not depend on index write", "files": []}
+    session = models.Session(session_id=sid, title="Clear index failure")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, old_draft)
+
+    def fail_index_write(*_args, **_kwargs):
+        raise OSError("simulated session index write failure")
+
+    monkeypatch.setattr(models, "_write_session_index", fail_index_write)
+    response = _post_draft(
+        monkeypatch,
+        {"session_id": sid, "clear": True, "expected": old_draft},
+    )
+
+    assert response["status"] == 200
+    assert models.read_composer_draft_sidecar(sid) is None
+    assert models.Session.load(sid).composer_draft == {"text": "", "files": []}
+
+
+def test_delete_draft_sidecar_reports_unlink_failure(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "draft-sidecar-unlink-failure"
+    models.write_composer_draft_sidecar(sid, {"text": "preserve me", "files": []})
+    sidecar_path = models.composer_draft_sidecar_path(sid)
+    assert sidecar_path is not None
+    original_unlink = type(sidecar_path).unlink
+
+    def fail_sidecar_unlink(path, *args, **kwargs):
+        if path == sidecar_path:
+            raise OSError("simulated draft-sidecar unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(sidecar_path), "unlink", fail_sidecar_unlink)
+
+    assert models.delete_composer_draft_sidecar(sid) is False
+    assert sidecar_path.exists()
+
+
 def test_clear_canonicalizes_legacy_draft_without_files(session_env, monkeypatch):
     from api import models
 
