@@ -101,9 +101,11 @@ Two things reviewers look for specifically in Verification, both detailed in
 [`docs/GUIDELINES.md`](docs/GUIDELINES.md):
 
 - When the issue ships a reproduction (a session capture, a script, exact steps,
-  an attachment), your test loads *that*, not a fixture you rebuilt from your reading
-  of it — otherwise the test can pass while the reported bug goes untouched. If you had
-  to build the fixture yourself, say so and why.
+  an attachment — or a fenced JSON block / field-level conditions that pin the shape),
+  your test loads *that*, not a fixture you rebuilt from your reading of it — otherwise
+  the test can pass while the reported bug goes untouched. If the shape is pinned, satisfy
+  every condition it names and don't add a property it never had just to make a guard fire;
+  only if the issue truly leaves the shape under-specified, say so and say what you assumed.
 - For any claim the repo doesn't own (browser behavior, a provider's API, a registry,
   an OS convention), name who owns the truth and confirm your proof is one they'd accept.
   In-page automation proves page behavior, not browser behavior; a mock proves your
