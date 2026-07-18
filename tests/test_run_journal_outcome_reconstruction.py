@@ -17,7 +17,20 @@ NODE = shutil.which("node")
 
 def _js_function_source(source: str, name: str) -> str:
     start = source.index(f"function {name}(")
-    brace = source.index("{", start)
+    params = source.index("(", start)
+    depth = 0
+    close = -1
+    for index in range(params, len(source)):
+        char = source[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                close = index
+                break
+    assert close != -1, f"unterminated JavaScript parameters: {name}"
+    brace = source.index("{", close)
     depth = 0
     for index in range(brace, len(source)):
         char = source[index]
@@ -436,3 +449,23 @@ console.log(JSON.stringify({{
     assert data["stats"]["skipped_duplicate"] == 4
     assert "run_id:_outcomeSceneRunId" in MESSAGES_JS
     assert "&&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)" in SESSIONS_JS.replace("\n", "")
+
+
+def test_session_recovery_paths_wire_reconstructed_outcomes_into_anchor_state():
+    load_session = _js_function_source(SESSIONS_JS, "loadSession")
+    attach_live_stream = _js_function_source(MESSAGES_JS, "attachLiveStream")
+    compact_load = "".join(load_session.split())
+    compact_attach = "".join(attach_live_stream.split())
+
+    snapshot = "_serverLiveSnapshotInflight(S.session.runtime_journal_snapshot,S.session.pending_attachments||[])"
+    merge = "_mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot)"
+    assert snapshot in compact_load
+    assert merge in compact_load
+    assert compact_load.index(snapshot) < compact_load.index(merge)
+
+    hydrate_rows = "_hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene)"
+    hydrate_outcomes = "_applyAnchorRegistryOutcomesFromActivityScene("
+    assert hydrate_rows in compact_attach
+    assert hydrate_outcomes in compact_attach
+    assert compact_attach.index(hydrate_rows) < compact_attach.index(hydrate_outcomes)
+    assert "{session_id:activeSid,stream_id:_outcomeSceneStreamId,run_id:_outcomeSceneRunId}" in compact_attach
