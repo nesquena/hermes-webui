@@ -11846,11 +11846,15 @@ def _serve_app_icon(handler, parsed) -> bool:
     tint = _normalize_icon_tint(tint_values[0] if tint_values else saved_tint)
     icon_path = (api_config.get_static_root() / "favicon.svg").resolve()
     svg = icon_path.read_text(encoding="utf-8")
-    data = (
-        svg.replace(_DEFAULT_ICON_TINT, tint)
-        .replace(_DEFAULT_ICON_GRADIENT_END, _icon_gradient_end(tint))
-        .encode("utf-8")
-    )
+    replacements = {
+        _DEFAULT_ICON_TINT: tint,
+        _DEFAULT_ICON_GRADIENT_END: _icon_gradient_end(tint),
+    }
+    data = re.sub(
+        "|".join(re.escape(color) for color in replacements),
+        lambda match: replacements[match.group(0)],
+        svg,
+    ).encode("utf-8")
     handler.send_response(200)
     handler.send_header("Content-Type", "image/svg+xml; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")

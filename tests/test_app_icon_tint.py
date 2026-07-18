@@ -74,6 +74,15 @@ def test_tinted_favicon_route_uses_requested_color():
     assert "#7C3AED" in bytes(session_handler.body).decode("utf-8")
 
 
+def test_tinted_favicon_handles_source_gradient_color_without_collision():
+    handler = _get("/static/favicon.svg?tint=3889FD")
+    svg = bytes(handler.body).decode("utf-8")
+
+    assert handler.status == 200
+    assert svg.count('stop-color="#3889FD"') == 1
+    assert svg.count('stop-color="#2760B1"') == 1
+
+
 def test_manifest_points_install_icons_at_current_tint(monkeypatch):
     from api import routes
 
@@ -94,6 +103,10 @@ def test_manifest_points_install_icons_at_current_tint(monkeypatch):
 
 def test_icon_tint_control_updates_favicon_and_autosaves():
     assert 'id="settingsIconTint"' in INDEX
+    assert (
+        'rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png"'
+        in INDEX
+    )
     assert "function _pickIconTint(" in BOOT
     assert "_applyIconTint" in BOOT
     assert (
