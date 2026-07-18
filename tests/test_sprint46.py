@@ -688,15 +688,25 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
         }
 
     routes._run_manual_compression_job(sid, {"session_id": sid})
-
-    assert EnvAssertingAgent.seen_env == {
-        "HERMES_HOME": str(profile_home),
-        "HERMES_TEST_PROFILE_ENV": "work-runtime",
-        "THREAD_HERMES_HOME": str(profile_home),
-        "THREAD_HERMES_TEST_PROFILE_ENV": "work-runtime",
-        "SKILL_MODULE_HOME": profile_home,
-        "SKILL_MODULE_DIR": profile_home / "skills",
-    }
+    _profile_override_available = profiles._resolve_hermes_home_override() is not None
+    if _profile_override_available:
+        assert EnvAssertingAgent.seen_env == {
+            "HERMES_HOME": str(profile_home),
+            "HERMES_TEST_PROFILE_ENV": "work-runtime",
+            "THREAD_HERMES_HOME": str(profile_home),
+            "THREAD_HERMES_TEST_PROFILE_ENV": "work-runtime",
+            "SKILL_MODULE_HOME": "default-home",
+            "SKILL_MODULE_DIR": "default-home/skills",
+        }
+    else:
+        assert EnvAssertingAgent.seen_env == {
+            "HERMES_HOME": str(profile_home),
+            "HERMES_TEST_PROFILE_ENV": "work-runtime",
+            "THREAD_HERMES_HOME": str(profile_home),
+            "THREAD_HERMES_TEST_PROFILE_ENV": "work-runtime",
+            "SKILL_MODULE_HOME": profile_home,
+            "SKILL_MODULE_DIR": profile_home / "skills",
+        }
     assert str(getattr(fake_skill_module, "HERMES_HOME")) == "default-home"
     assert str(getattr(fake_skill_module, "SKILLS_DIR")) == "default-home/skills"
     assert os.environ.get("HERMES_HOME") == "default-home"

@@ -1156,6 +1156,7 @@ def profile_env_for_background_worker(
     # older agents → graceful no-op (falls back to the os.environ mirror below).
     _home_override_mod = None
     _home_override_token = None
+    should_restore_skill_modules = False
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1190,18 +1191,23 @@ def profile_env_for_background_worker(
             )
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
-            skill_home_snapshot = snapshot_skill_home_modules()
+            if _home_override_mod is None or _home_override_token is None:
+                # Legacy fallback path: use process cache patching when context-local
+                # home override is unavailable.
+                should_restore_skill_modules = True
+                skill_home_snapshot = snapshot_skill_home_modules()
             os.environ.update(safe_runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
-            try:
-                patch_skill_home_modules(profile_home_path)
-            except Exception:
-                log.debug(
-                    "Failed to patch skill modules for %s profile %s",
-                    purpose,
-                    profile,
-                    exc_info=True,
-                )
+            if should_restore_skill_modules:
+                try:
+                    patch_skill_home_modules(profile_home_path)
+                except Exception:
+                    log.debug(
+                        "Failed to patch skill modules for %s profile %s",
+                        purpose,
+                        profile,
+                        exc_info=True,
+                    )
         yield
     finally:
         # #5567: pop the context-local home override first (reverse of setup order).
@@ -1230,7 +1236,7 @@ def profile_env_for_background_worker(
                 os.environ["HERMES_HOME"] = old_hermes_home or ""
             else:
                 os.environ.pop("HERMES_HOME", None)
-            if skill_home_snapshot is not None:
+            if should_restore_skill_modules and skill_home_snapshot is not None:
                 restore_skill_home_modules(skill_home_snapshot)
 
 
