@@ -2156,6 +2156,63 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
     ]
 
 
+def _prune_orphaned_imported_agent_sidecars(rows, *, cli_by_id, diag_stage=None):
+    """Prune imported CLI/API sidecars whose backing state.db row is gone.
+
+    This direct, uncapped state.db probe is deliberately independent of the
+    optional CLI/gateway projection: the WebUI sidebar skips that expensive
+    projection, but must retain the same orphan-recovery safety contract.
+    """
+    if not rows:
+        return list(rows) if rows is not None else []
+    _diag = diag_stage if callable(diag_stage) else (lambda *_a, **_k: None)
+    cli_by_id = cli_by_id if isinstance(cli_by_id, dict) else {}
+    orphan_probe_rows = []
+    kept_rows = []
+    for row in rows:
+        sid = row.get("session_id")
+        if (
+            sid
+            and (is_cli_session_row(row) or _is_api_server_sidecar_row(row))
+            and not _session_source_is_webui(row)
+            and sid not in cli_by_id
+        ):
+            orphan_probe_rows.append(row)
+        else:
+            kept_rows.append(row)
+    if not orphan_probe_rows:
+        return kept_rows
+    rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+    for row in orphan_probe_rows:
+        rows_by_profile[row.get("profile")].append(row)
+    missing_orphan_ids: set[str] = set()
+    for profile_key, profile_rows in rows_by_profile.items():
+        probe_ids = [
+            str(row.get("session_id")).strip()
+            for row in profile_rows
+            if str(row.get("session_id") or "").strip()
+        ]
+        existing = agent_session_rows_existing(
+            probe_ids,
+            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+        )
+        for row in profile_rows:
+            sid = str(row.get("session_id") or "").strip()
+            if sid and sid not in existing:
+                missing_orphan_ids.add(sid)
+    for row in orphan_probe_rows:
+        sid = str(row.get("session_id") or "").strip()
+        if sid in missing_orphan_ids:
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune orphaned agent sidecar %s", sid, exc_info=True)
+            _diag("prune_orphaned_agent_sidecar")
+            continue
+        kept_rows.append(row)
+    return kept_rows
+
+
 def _build_session_list_cache_payload(
     active_profile: str | None,
     all_profiles: bool,
@@ -2384,6 +2441,11 @@ def _build_session_list_cache_payload(
         # correct; the sidebar_source=="webui" shortcut hijacked the same
         # branch and zeroed counts for the wrong reason).
         diag_stage("filter_webui_sessions")
+        webui_sessions = _prune_orphaned_imported_agent_sidecars(
+            webui_sessions,
+            cli_by_id={},
+            diag_stage=diag_stage,
+        )
         webui_sessions = _prune_orphaned_webui_zero_message_sessions(
             webui_sessions,
             diag_stage=diag_stage,

@@ -356,26 +356,45 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
         swv = _session_list_cache_settings_write_version()
     except Exception:
         swv = 0
-    # WebUI-only sidebar requests are intentionally driven by the JSON sidecar
-    # index + settings stamp, not by state.db/WAL/gateway churn. The builder no
-    # longer loads CLI/gateway sessions for sidebar_source=webui, so letting
-    # unrelated state.db writes invalidate this cache only turns lightweight
-    # sidebar refreshes into repeated full rebuilds (and browser timeouts) under
-    # active chat/cron/gateway load. Sidecar index changes still invalidate
-    # immediately; age-based staleness still refreshes in the background.
+    # WebUI-only sidebar requests skip the expensive CLI/gateway projection, but
+    # ``all_sessions()`` still applies the authoritative state.db summary overlay
+    # for WebUI-owned rows. Track settled state.db changes so a Desktop append
+    # cannot leave the sidebar's count/title stale until the cache TTL expires.
+    # While a turn streams, collapse that volatile state to the stream-set marker
+    # just as the mixed buckets do: the hold-down remains bounded by the streaming
+    # TTL, and start/stop transitions invalidate immediately because the marker is
+    # part of the stamp.
     if sidebar_source == "webui":
-        marker = ("webui-sidebar",)
+        streaming_marker = _session_list_cache_streaming_freeze_marker()
         try:
             session_index_path = _session_list_cache_session_dir() / "_index.json"
         except Exception:
             session_index_path = None
+        if streaming_marker is not None:
+            return (
+                streaming_marker,
+                streaming_marker,
+                streaming_marker,
+                _session_list_cache_path_stamp(session_index_path),
+                _session_list_cache_path_stamp(_session_list_cache_settings_file()),
+                streaming_marker,
+                swv,
+            )
+        try:
+            state_db_path = Path(str(_session_list_cache_state_db_path()))
+        except Exception:
+            state_db_path = None
+        try:
+            state_db_wal_path = state_db_path.with_name(f"{state_db_path.name}-wal") if state_db_path is not None else None
+        except Exception:
+            state_db_wal_path = None
         return (
-            marker,
-            marker,
-            marker,
+            _session_list_cache_path_stamp(state_db_path),
+            _session_list_cache_path_stamp(state_db_wal_path),
+            ("webui-sidebar",),
             _session_list_cache_path_stamp(session_index_path),
             _session_list_cache_path_stamp(_session_list_cache_settings_file()),
-            marker,
+            _session_list_cache_state_db_fingerprint(state_db_path),
             swv,
         )
     # WebUI-origin sessions can also receive settled rows in state.db when the

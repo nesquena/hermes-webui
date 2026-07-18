@@ -702,18 +702,15 @@ def test_source_stamp_still_tracks_wal_when_idle(tmp_path, monkeypatch):
     assert after != before
 
 
-def test_webui_source_stamp_ignores_state_db_churn_when_idle(tmp_path, monkeypatch):
-    """WebUI-only sidebar cache must not be invalidated by unrelated state.db writes.
-
-    Browser sidebar requests use sidebar_source=webui and the builder skips
-    CLI/gateway projections. If state.db/WAL churn still changes this stamp, every
-    chat/cron/gateway write evicts the lightweight WebUI cache and reintroduces
-    multi-second rebuilds on the browser hot path.
-    """
+def test_webui_source_stamp_tracks_settled_state_db_and_holds_active_stream_churn(tmp_path, monkeypatch):
+    """WebUI rows still use the authoritative state.db overlay after a settled
+    external append, while a live stream holds volatile writes behind its
+    stream-set marker until that stream starts or stops."""
     _key, state_db_wal, settings_file, fingerprint = _build_stamp_env(
         tmp_path, monkeypatch
     )
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    streams = {"value": set()}
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set(streams["value"]))
     key = routes._session_list_cache_key(
         active_profile="default",
         all_profiles=False,
@@ -730,11 +727,21 @@ def test_webui_source_stamp_ignores_state_db_churn_when_idle(tmp_path, monkeypat
     before = routes._session_list_cache_source_stamp(key)
     state_db_wal.write_text("wal-2-grew-a-lot", encoding="utf-8")
     fingerprint["value"] = (2, 99)
-    after_state_churn = routes._session_list_cache_source_stamp(key)
+    after_settled_state_churn = routes._session_list_cache_source_stamp(key)
+    streams["value"] = {"turn-1"}
+    streaming = routes._session_list_cache_source_stamp(key)
+    state_db_wal.write_text("wal-3-more-streaming", encoding="utf-8")
+    fingerprint["value"] = (3, 100)
+    after_streaming_state_churn = routes._session_list_cache_source_stamp(key)
+    streams["value"] = set()
+    after_stream_stop = routes._session_list_cache_source_stamp(key)
     settings_file.write_text('{"show_cli_sessions": true}', encoding="utf-8")
     after_settings = routes._session_list_cache_source_stamp(key)
 
-    assert after_state_churn == before
+    assert after_settled_state_churn != before
+    assert streaming != after_settled_state_churn
+    assert after_streaming_state_churn == streaming
+    assert after_stream_stop != streaming
     assert after_settings != before
 
 

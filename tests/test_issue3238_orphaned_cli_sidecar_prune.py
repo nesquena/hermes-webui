@@ -304,3 +304,49 @@ def test_webui_owned_session_with_api_metadata_is_not_pruned(monkeypatch):
 
     assert [session["session_id"] for session in payload["sessions"]] == ["webui-native"]
     assert pruned == []
+
+
+def test_webui_sidebar_skips_cli_projection_but_prunes_imported_orphan(monkeypatch):
+    """The WebUI-only bucket retains direct state.db orphan recovery without
+    building the expensive CLI/gateway projection it does not return."""
+    import api.routes as routes
+
+    row = {
+        "session_id": "cli-orphan-webui-bucket",
+        "title": "Imported CLI session",
+        "profile": "default",
+        "updated_at": 20,
+        "last_message_at": 20,
+        "message_count": 2,
+        "read_only": True,
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+        "is_cli_session": True,
+    }
+    cli_projection_calls = []
+    pruned = []
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [row])
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda *_args, **_kwargs: cli_projection_calls.append(True) or [],
+    )
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
+    monkeypatch.setattr(routes, "agent_session_rows_existing", lambda _ids, profile=None: frozenset())
+    monkeypatch.setattr(routes, "agent_session_zero_message_sids", lambda _ids, profile=None: frozenset())
+    monkeypatch.setattr(routes, "prune_session_from_index", lambda sid: pruned.append(sid))
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        sidebar_source="webui",
+    )
+
+    assert cli_projection_calls == []
+    assert payload["sessions"] == []
+    assert pruned == ["cli-orphan-webui-bucket"]
