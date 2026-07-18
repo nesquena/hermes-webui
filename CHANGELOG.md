@@ -5,9 +5,13 @@
 
 ### Changed
 
+- **Internal: removed a dead `rowIndex` parameter from the settled-scene row projector.** `attachLiveStream`'s `pushRow` helper carried an unused positional index left over from before final-segment eligibility moved to a row-identity `WeakSet`; dropping it is a pure no-op refactor (differential execution confirms byte-identical settled scenes — ordering, dedupe, final-prefix suppression, and sequence assignment all unchanged). Thanks @webtecnica. (#6258)
+
 - **Docs: reconciled the assistant-reply lifecycle RFCs/contracts with shipped behavior.** The Stable Assistant Turn Anchors and Live-to-Final RFCs, `docs/CONTRACTS.md`, and the Phase 0 architecture inventory were updated from "proposed/scaffold" framing to "accepted/implemented" to match what actually ships (single assistant-turn owner projecting one `activity_scene_v1` into Compact Worklog / Transparent Stream / Final answer). Documentation-only — no runtime behavior or CI-gate change; the one code touch is a corrected comment header in `static/assistant_turn_anchors.js`. Remaining hardening stays tracked under #3400. Thanks @franksong2702. (#6144)
 
 ### Fixed
+
+- **Reopening a WebUI tab after a large active session is fast again, even when the session has few messages but large tool outputs.** The reconnect display-path tail optimization only fired based on message *count*, so a session with a handful of messages but multi-MB tool-call JSON forced a slow full-scan merge (bootstrap could take tens of seconds). The optimization now also fires when the session sidecar file exceeds 500 KB, regardless of message count — the same messages are returned (verified: identical message set, count, offset, and truncation metadata), just via the fast path. Thanks @webtecnica. (#6260)
 
 - **OIDC allowlist values containing spaces (e.g. a group named `Hermes Users`) are no longer split into separate entries.** The allowlist parser split comma-separated values on all whitespace, so a multi-word group/user name became two spurious entries. Allowlist parsing now splits only on commas/newlines (multi-word values stay intact and match their exact signed claim — strictly tightening, no security loosening), while OAuth **scope** parsing keeps its space-delimited behavior per RFC 6749 §3.3. A blank allowlist entry no longer bricks an OIDC-only deployment. Thanks @webtecnica. (#6244)
 
