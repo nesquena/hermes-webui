@@ -143,10 +143,14 @@ def start_action(action: str) -> tuple[bool, dict]:
     # matching the pattern api.routes._run_gateway_lifecycle_command uses.
     from api.profiles import get_active_hermes_home
 
-    hermes_home = Path(get_active_hermes_home())
-    backup_dir = _backups_dir()
-
+    # get_active_hermes_home() and _backups_dir() (which mkdir()s) can both
+    # raise (profile resolution failure, disk full, permissions). Both must
+    # stay inside this try/except -- if either raised outside of it, the
+    # lock acquired above would never be released, and every subsequent
+    # action would 409 forever until the WebUI process restarts.
     try:
+        hermes_home = Path(get_active_hermes_home())
+        backup_dir = _backups_dir()
         cmd = _command_for_action(action, backup_dir=backup_dir)
     except Exception:
         _ACTION_LOCK.release()
@@ -210,6 +214,18 @@ def start_action(action: str) -> tuple[bool, dict]:
                     returncode = proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     returncode = -9
+                    # SIGKILL should be near-instant; if the process is
+                    # still not reaped after 5s (e.g. stuck in
+                    # uninterruptible I/O) it would otherwise sit as a
+                    # zombie forever. Keep waiting on a throwaway daemon
+                    # thread -- a blocking, no-timeout proc.wait() -- so
+                    # the OS process table entry is eventually reclaimed
+                    # without delaying the timeout status reported below.
+                    threading.Thread(
+                        target=proc.wait,
+                        name=f"hermes-webui-ops-{action}-reap",
+                        daemon=True,
+                    ).start()
             reader.join(timeout=5)
 
             with _STATE_LOCK:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -285,6 +287,127 @@ def test_ops_action_contention_returns_409_without_spawning(monkeypatch):
     assert handler.status == 409
     assert data["allowed"] is True
     assert spawned == [], "no subprocess should be spawned while another action holds the lock"
+
+
+# ── Regression: audit findings (lock leak, zombie reap, status redaction) ───
+
+
+def test_ops_action_lock_is_released_when_profile_home_resolution_raises(monkeypatch, tmp_path):
+    """Audit finding (HOCH): get_active_hermes_home()/_backups_dir() ran outside
+    the try/except that releases _ACTION_LOCK on failure -- a raise there left
+    the lock held forever, 409-ing every future action until a process
+    restart. Both calls must now be inside that try/except."""
+    from api import ops_actions, profiles
+
+    monkeypatch.setattr(
+        profiles, "get_active_hermes_home", lambda: (_ for _ in ()).throw(RuntimeError("profile resolution failed"))
+    )
+
+    with pytest.raises(RuntimeError):
+        ops_actions.start_action("doctor")
+
+    assert not ops_actions._ACTION_LOCK.locked(), "lock leaked after get_active_hermes_home() raised"
+
+    # Prove the leak doesn't linger: a normal call right after must still work.
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(ops_actions.subprocess, "Popen", _make_fake_popen(["ok\n"], returncode=0))
+    started, _status = ops_actions.start_action("doctor")
+    assert started is True
+    _wait_until_not_running()
+
+
+def test_ops_action_lock_is_released_when_backups_dir_raises(monkeypatch, tmp_path):
+    """Same finding, the other call inside the vulnerable window: _backups_dir()
+    (which mkdir()s) raising (disk full, permissions) must also not leak the
+    lock."""
+    from api import ops_actions, profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(ops_actions, "_backups_dir", lambda: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError):
+        ops_actions.start_action("backup")
+
+    assert not ops_actions._ACTION_LOCK.locked(), "lock leaked after _backups_dir() raised"
+
+
+def test_ops_action_timeout_reaps_zombie_via_background_thread(monkeypatch, tmp_path):
+    """Audit finding (MEDIUM): after proc.kill(), if the 5s proc.wait(timeout=5)
+    also times out, the code assumed returncode=-9 without ever reaping the
+    process, leaving a zombie. A background thread must now call a blocking
+    proc.wait() to actually reclaim it."""
+    from api import ops_actions, profiles
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    wait_calls = []
+    reaped = threading.Event()
+
+    class _StuckProc:
+        def __init__(self, cmd, **kwargs):
+            self.args = cmd
+            self.stdout = io.StringIO("")
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            wait_calls.append(timeout)
+            if timeout is None:
+                # The background reaper's blocking wait -- simulate the
+                # stuck process finally dying now.
+                self.returncode = -9
+                reaped.set()
+                return self.returncode
+            # Every timed wait (the initial action timeout, then the 5s
+            # post-kill wait) times out: the process is stuck.
+            raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(ops_actions.subprocess, "Popen", _StuckProc)
+
+    handler, data = _call_post(monkeypatch, "/api/ops/doctor")
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "timeout"
+    assert final["returncode"] == -9
+
+    assert reaped.wait(timeout=2), "background reap thread never issued a blocking proc.wait()"
+    assert None in wait_calls, "expected at least one no-timeout (blocking) wait() call to reap the process"
+
+
+def test_ops_status_redacts_log_error_backup_path_when_gate_closed(monkeypatch, tmp_path):
+    """Audit finding (MEDIUM): GET /api/ops/status stays readable when the gate
+    is off (so the frontend can show the disabled state), but it must not leak
+    a prior run's log tail, error, or backup_path through that always-open
+    route -- only the allowed:false flag and non-sensitive fields."""
+    from api import ops_actions, profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    fake_proc = _make_fake_popen(["some possibly sensitive log line\n"], returncode=1)
+    monkeypatch.setattr(ops_actions.subprocess, "Popen", fake_proc)
+
+    _call_post(monkeypatch, "/api/ops/doctor")
+    _wait_until_not_running()
+
+    monkeypatch.delenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", raising=False)
+    handler = _call_get(monkeypatch, "/api/ops/status")
+    data = handler.get_json()
+    assert data["allowed"] is False
+    assert data["log"] == ""
+    assert data["error"] is None
+    assert data["backup_path"] is None
+    # Non-sensitive fields stay visible so the UI can still show *something*.
+    assert data["status"] == "failed"
+    assert data["action"] == "doctor"
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    handler2 = _call_get(monkeypatch, "/api/ops/status")
+    data2 = handler2.get_json()
+    assert data2["allowed"] is True
+    assert "sensitive log line" in data2["log"]
 
 
 # ── Frontend / i18n presence ─────────────────────────────────────────────────

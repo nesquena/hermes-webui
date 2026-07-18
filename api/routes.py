@@ -13711,7 +13711,17 @@ def handle_get(handler, parsed) -> bool:
         from api.ops_actions import get_status
 
         status = get_status()
-        status["allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS")
+        allowed = _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS")
+        status["allowed"] = allowed
+        if not allowed:
+            # Defense-in-depth: this route stays open even when the gate is
+            # off (so the frontend can render the disabled state), but a
+            # prior run's log tail/error/backup path could carry details
+            # from before the gate was turned off -- don't let those leak
+            # through the one route that ignores the gate.
+            status["log"] = ""
+            status["error"] = None
+            status["backup_path"] = None
         return j(handler, status)
 
     if parsed.path == "/api/ops/backup/download":
