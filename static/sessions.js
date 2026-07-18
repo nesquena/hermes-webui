@@ -2928,6 +2928,20 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// ============================================================================
+// COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
+// ============================================================================
+// This is a hand-mirrored fallback copy of the backend's GET /api/session
+// ?msg_limit= ceiling. The durable fix (issue #6177) is to read the ceiling
+// from /api/session metadata (_msg_limit_max) so the frontend dynamically
+// follows the server's actual value. The constant below is only the default
+// for older servers that don't expose the field; once _msg_limit_max is
+// available from the API response, _msgLimitMax is updated and this constant
+// is no longer used.
+const _MSG_LIMIT_MAX = 500;
+// Live ceiling: read from /api/session response _msg_limit_max when available,
+// fall back to _MSG_LIMIT_MAX for older servers without the metadata field.
+let _msgLimitMax = _MSG_LIMIT_MAX;
 let _sameSessionForceReloadHint = null;
 
 function _currentLoadedRenderableMessageCount(){
@@ -3051,6 +3065,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
+  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -3531,18 +3546,34 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    // Ask the server for a larger authoritative tail window instead of a
-    // separate msg_before page. The same /api/session contract handles both —
-    // post-#2716 the backend always runs the full append-only merge, so a
-    // larger msg_limit on the same call produces the same merged transcript
-    // we'd get by stitching pages, but without client-side index bookkeeping.
-    // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
-    // newly exposed head is what we expose to the user.
+    // Two strategies, chosen by whether the growing tail window still fits under
+    // the server's msg_limit ceiling (_msgLimitMax, read from /api/session
+    // _msg_limit_max metadata, falling back to _MSG_LIMIT_MAX for older servers):
+    //
+    //  - Below the ceiling: ask for a larger authoritative tail window
+    //    (currentLoaded + _INITIAL_MSG_LIMIT). Post-#2716 the backend runs the
+    //    full append-only merge, so a larger msg_limit produces the same merged
+    //    transcript we'd get by stitching pages, without client-side index
+    //    bookkeeping. The newly exposed head is what we expose to the user.
+    //
+    //  - At/above the ceiling: the server clamps msg_limit, so the tail window
+    //    stops growing and this strategy would stall (the same clamped tail is
+    //    returned, olderMsgs -> 0). Switch to msg_before paging — a fixed
+    //    _INITIAL_MSG_LIMIT backward page keyed off _oldestIdx — which is
+    //    bounded and never hits the ceiling, so the head stays reachable for
+    //    arbitrarily long transcripts. (This is the same paging request the
+    //    race-fallback below uses, proven correct there.)
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
-      {timeoutMs:120000}
-    );
+    const useBeforePaging = requestedLimit >= _msgLimitMax;
+    const data = useBeforePaging
+      ? await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        )
+      : await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
+          {timeoutMs:120000}
+        );
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -3583,18 +3614,22 @@ async function _loadOlderMessages() {
     let olderMsgs = expandedMsgs.slice(0, olderCount);
     let nextMessages = expandedMsgs;
     if (!tailMatches) {
-      // Race fallback: keep the legacy index-page request as the
-      // correctness-preserving alternative. Same guards reapplied because
-      // we just awaited again.
-      const fallback = await api(
-        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
-        {timeoutMs:120000}
-      );
-      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
-      if (!S.session || S.session.session_id !== sid) return;
-      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-      if (_messagesGeneration !== startGeneration) return;
-      responseSession = fallback.session;
+      // Race fallback (or the over-ceiling msg_before primary path): keep the
+      // legacy index-page request as the correctness-preserving alternative.
+      // When useBeforePaging is true we already fetched a msg_before page as
+      // the primary `data`, so reuse it instead of re-fetching. Same guards
+      // reapplied because we just awaited again (skipped for the reuse case).
+      if (!useBeforePaging) {
+        const fallback = await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        );
+        if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+        if (!S.session || S.session.session_id !== sid) return;
+        if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+        if (_messagesGeneration !== startGeneration) return;
+        responseSession = fallback.session;
+      }
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
@@ -3637,6 +3672,7 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
+    _msgLimitMax = responseSession._msg_limit_max || _MSG_LIMIT_MAX;
     renderMessages({ preserveScroll: true });
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
