@@ -229,3 +229,40 @@ def test_compact_session_json_still_drives_parent_recovery_reader(session_env):
     raw = child.path.read_text(encoding="utf-8")
     assert f'"parent_session_id":"{parent_sid}"' in raw
     assert models._has_compression_continuation(models.Session(session_id=parent_sid)) is True
+
+
+@pytest.mark.parametrize("zero_only", [False, True], ids=["untitled", "zero-message"])
+def test_cleanup_preserves_nonempty_draft_owner_and_removes_empty_owner_and_ghost(
+    session_env, monkeypatch, zero_only
+):
+    """Both cleanup endpoints must treat a nonempty draft as durable user state."""
+    from api import models, routes
+
+    session_dir, sessions = session_env
+    keep_sid = f"cleanup-keep-{zero_only}"
+    keep = models.Session(session_id=keep_sid, title="Untitled")
+    keep.save(skip_index=True)
+    models.write_composer_draft_sidecar(keep_sid, {"text": "keep me", "files": []})
+
+    remove_sid = f"cleanup-remove-{zero_only}"
+    remove = models.Session(session_id=remove_sid, title="Untitled")
+    remove.save(skip_index=True)
+    models.write_composer_draft_sidecar(remove_sid, {"text": "", "files": []})
+
+    ghost_sid = f"cleanup-ghost-{zero_only}"
+    models.write_composer_draft_sidecar(ghost_sid, {"text": "orphan", "files": []})
+    sessions.pop(ghost_sid, None)
+
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=zero_only) is True
+
+    assert (session_dir / f"{keep_sid}.json").exists()
+    sessions.clear()
+    restarted = models.Session.load(keep_sid)
+    assert restarted is not None
+    assert models.resolve_composer_draft(keep_sid, restarted.composer_draft)["text"] == "keep me"
+    assert not (session_dir / f"{remove_sid}.json").exists()
+    assert models.read_composer_draft_sidecar(remove_sid) is None
+    assert models.read_composer_draft_sidecar(ghost_sid) is None
+    assert captured["ok"] is True
