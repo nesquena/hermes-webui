@@ -1,0 +1,108 @@
+name: Docs CI
+
+# Lightweight checks for documentation-only changes. Intentionally MINIMAL
+# (Nathan, 2026-07-18): this is NOT a Markdown style linter — it does not enforce
+# line length, heading levels, list markers, or any cosmetic convention. It runs
+# only two things, and only when docs actually change:
+#
+#   1. critical_markdown_check.py — flags ONLY catastrophic rendering breaks
+#      (a link/image destination split across a newline, or an unclosed inline
+#      link). These genuinely stop a link from rendering; nothing else blocks.
+#   2. lychee link check — flags broken/dead links in the changed docs.
+#
+# Runs on docs paths only; does not gate code PRs (the test/browser-smoke required
+# checks cover those, and they short-circuit to green on a docs-only change).
+# This job is NOT a required status check — it's an informational quality gate for
+# docs; make it required later via the ruleset if desired.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '**/*.md'
+      - '**/*.markdown'
+      - '**/*.rst'
+      - 'docs/**'
+      - 'CHANGELOG*'
+      - '**/README*'
+  push:
+    branches: [master]
+    paths:
+      - '**/*.md'
+      - '**/*.markdown'
+      - '**/*.rst'
+      - 'docs/**'
+      - 'CHANGELOG*'
+      - '**/README*'
+
+jobs:
+  docs-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve changed doc files
+        id: docs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
+            RANGE="$BASE_SHA...$HEAD_SHA"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+          # Changed doc files only. If the diff can't be computed, fall back to all
+          # tracked markdown (over-checking docs is harmless; under-checking is the risk).
+          if ! CHANGED="$(git diff --name-only --diff-filter=ACMR "$RANGE" 2>/dev/null)"; then
+            CHANGED=""
+          fi
+          FILES="$(printf '%s\n' "$CHANGED" | grep -Ei '\.(md|markdown|rst)$|(^|/)(README|CHANGELOG)' || true)"
+          if [ -z "$FILES" ]; then
+            FILES="$(git ls-files '*.md' '*.markdown' '*.rst' 'CHANGELOG*' 'README*' 2>/dev/null || true)"
+          fi
+          # Only keep files that still exist (skip deletions).
+          EXISTING=""
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] && EXISTING="$EXISTING$f"$'\n'
+          done <<< "$FILES"
+          {
+            echo "files<<__EOF__"
+            printf '%s' "$EXISTING"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "Doc files to check:"; printf '%s' "$EXISTING"
+
+      - name: Critical Markdown check (rendering-breaks only, not style)
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(printf '%s' "${{ steps.docs.outputs.files }}" | sed '/^$/d')
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "No doc files to check."; exit 0
+          fi
+          python3 scripts/critical_markdown_check.py "${FILES[@]}"
+
+      - name: Broken-link check (lychee)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Only the changed docs; --no-progress keeps logs clean. Do not fail on
+          # 429/rate-limit or timeouts (transient), only on genuinely dead links.
+          args: >-
+            --no-progress
+            --max-concurrency 4
+            --accept 200,206,301,302,303,307,308,401,403,429
+            --timeout 20
+            --max-retries 2
+            ${{ steps.docs.outputs.files }}
+          fail: true
+        continue-on-error: true
