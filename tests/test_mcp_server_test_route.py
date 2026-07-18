@@ -1,21 +1,20 @@
 """Tests for GET /api/mcp/servers/{name}/test — the MCP connection-test route.
 
 Standalone mode (default under tests/conftest.py, which sets
-HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE=1) exercises the plain HTTP
-reachability fallback. Bridge-path tests activate a faked agent checkout
-using the same sys.modules-faking pattern as tests/test_agent_config_bridge.py
-so behavior is identical on CI (no checkout) and dev machines (real checkout).
+HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE=1) fails closed: configured URL and
+stdio servers cannot be tested without the agent MCP client. Bridge-path tests
+activate a faked agent checkout using the same sys.modules-faking pattern as
+tests/test_agent_config_bridge.py so behavior is identical on CI (no checkout)
+and dev machines (real checkout).
 """
 import json
-import socket
 import sys
 import types
 from unittest.mock import MagicMock, patch
-from urllib.error import URLError
 
 import pytest
 
-from api.routes import _handle_mcp_server_test, _standalone_mcp_url_probe
+from api.routes import _handle_mcp_server_test
 from api import agent_config_bridge as bridge
 
 
@@ -56,38 +55,29 @@ class TestNotFound:
 
 
 class TestStandaloneFallback:
-    """Bridge disabled (conftest default) — plain HTTP reachability check."""
+    """Bridge disabled (conftest default) — test endpoint makes no network call."""
 
-    @patch('api.routes._standalone_mcp_url_probe')
     @patch('api.routes.get_config_for_profile_home')
     @patch('api.routes.get_active_hermes_home')
-    def test_url_server_reachable(self, mock_home, mock_cfg, mock_probe):
+    @patch('api.routes.build_opener')
+    @patch('api.routes.Request')
+    def test_url_server_is_unsupported_without_network(self, mock_request, mock_opener, mock_home, mock_cfg):
         mock_home.return_value = object()
         mock_cfg.return_value = {'mcp_servers': SAMPLE_SERVERS}
-        mock_probe.return_value = {"ok": True, "latency_ms": 12, "http_status": 200}
-        h = _make_handler()
-        _handle_mcp_server_test(h, 'web-srv')
-        mock_probe.assert_called_once_with('http://localhost:4000/mcp')
-        payload = _json_payload(h)
-        assert payload['ok'] is True
-        assert payload['latency_ms'] == 12
-
-    @patch('api.routes._standalone_mcp_url_probe')
-    @patch('api.routes.get_config_for_profile_home')
-    @patch('api.routes.get_active_hermes_home')
-    def test_url_server_unreachable(self, mock_home, mock_cfg, mock_probe):
-        mock_home.return_value = object()
-        mock_cfg.return_value = {'mcp_servers': SAMPLE_SERVERS}
-        mock_probe.return_value = {"ok": False, "error": "Connection refused"}
         h = _make_handler()
         _handle_mcp_server_test(h, 'web-srv')
         payload = _json_payload(h)
         assert payload['ok'] is False
-        assert 'Connection refused' in payload['error']
+        assert payload['supported'] is False
+        assert 'agent checkout' in payload['reason']
+        mock_request.assert_not_called()
+        mock_opener.assert_not_called()
 
     @patch('api.routes.get_config_for_profile_home')
     @patch('api.routes.get_active_hermes_home')
-    def test_stdio_server_unsupported(self, mock_home, mock_cfg):
+    @patch('api.routes.build_opener')
+    @patch('api.routes.Request')
+    def test_stdio_server_is_unsupported_without_network(self, mock_request, mock_opener, mock_home, mock_cfg):
         mock_home.return_value = object()
         mock_cfg.return_value = {'mcp_servers': SAMPLE_SERVERS}
         h = _make_handler()
@@ -96,47 +86,8 @@ class TestStandaloneFallback:
         assert payload['ok'] is False
         assert payload['supported'] is False
         assert 'agent checkout' in payload['reason']
-
-
-class TestStandaloneUrlProbeNetworkSeam:
-    """_standalone_mcp_url_probe itself, with the HTTP layer mocked out."""
-
-    def test_reachable_head_ok(self):
-        fake_resp = MagicMock()
-        fake_resp.status = 200
-        fake_resp.__enter__ = lambda self: fake_resp
-        fake_resp.__exit__ = lambda self, *a: False
-        fake_opener = MagicMock()
-        fake_opener.open.return_value = fake_resp
-        with patch('api.routes.build_opener', return_value=fake_opener):
-            result = _standalone_mcp_url_probe('http://localhost:4000/mcp')
-        assert result['ok'] is True
-        assert result['http_status'] == 200
-        assert 'latency_ms' in result
-
-    def test_http_error_status_still_reachable(self):
-        from urllib.error import HTTPError
-        fake_opener = MagicMock()
-        fake_opener.open.side_effect = HTTPError('http://x', 405, 'Method Not Allowed', {}, None)
-        with patch('api.routes.build_opener', return_value=fake_opener):
-            result = _standalone_mcp_url_probe('http://localhost:4000/mcp')
-        assert result['ok'] is True
-        assert result['http_status'] == 405
-
-    def test_connection_failure_is_unreachable(self):
-        fake_opener = MagicMock()
-        fake_opener.open.side_effect = URLError(ConnectionRefusedError('refused'))
-        with patch('api.routes.build_opener', return_value=fake_opener):
-            result = _standalone_mcp_url_probe('http://localhost:4000/mcp')
-        assert result['ok'] is False
-        assert 'error' in result
-
-    def test_timeout_is_unreachable(self):
-        fake_opener = MagicMock()
-        fake_opener.open.side_effect = socket.timeout('timed out')
-        with patch('api.routes.build_opener', return_value=fake_opener):
-            result = _standalone_mcp_url_probe('http://localhost:4000/mcp')
-        assert result['ok'] is False
+        mock_request.assert_not_called()
+        mock_opener.assert_not_called()
 
 
 class _FakeProbeAgent:
@@ -224,9 +175,7 @@ class TestBridgePath:
         assert payload['prompts'] == 2
         assert payload['resources'] == 1
         assert 'latency_ms' in payload
-        # The route must not force a WebUI-side timeout override — see
-        # TestProbeMcpServerBridgeFunction.test_default_timeout_does_not_override_server_connect_timeout.
-        assert fake.probed_with == ('web-srv', None)
+        assert fake.probed_with == ('web-srv', 30)
 
     @patch('api.routes.get_config_for_profile_home')
     @patch('api.routes.get_active_hermes_home')

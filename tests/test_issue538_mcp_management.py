@@ -48,11 +48,12 @@ SAMPLE_MCP = {
 
 
 def test_mcp_test_client_waits_for_the_server_probe_budget():
-    """The fixed browser request budget must outlive the agent's 30s probe default."""
+    """The browser must outlive the route's 30s connect + 10s agent budget."""
     panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     start = panels.index("async function testMcpServer(")
     body = panels[start:panels.index("\n}\n", start) + 3]
-    assert "timeoutMs:35000" in body
+    assert "timeoutMs:45000" in body
+    assert "timeoutMs:35000" not in body
     assert "timeoutMs:20000" not in body
 
 

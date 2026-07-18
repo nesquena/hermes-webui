@@ -13038,11 +13038,10 @@ async function testMcpServer(name,btnEl){
   if(btnEl) btnEl.disabled=true;
   if(resultEl) resultEl.innerHTML=`<span class="mcp-test-badge mcp-test-pending">${esc(t('mcp_test_running'))}</span>`;
   try{
-    // The agent probe honors a configured connect timeout (up to its 30s
-    // default for cold stdio starts). Keep the browser waiting slightly
-    // longer than that server-owned budget; no browser-controlled timeout is
-    // accepted by the route.
-    const r=await api('/api/mcp/servers/'+encodeURIComponent(name)+'/test',{timeoutMs:35000});
+    // The route fixes this interactive probe's connect timeout at 30s; the
+    // agent adds up to 10s for cleanup. Leave a small browser overhead margin.
+    // The route accepts no browser-controlled timeout.
+    const r=await api('/api/mcp/servers/'+encodeURIComponent(name)+'/test',{timeoutMs:45000});
     if(resultEl){
       if(r&&r.ok){
         const parts=[];

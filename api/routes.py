@@ -26672,35 +26672,12 @@ def _handle_mcp_server_update(handler, name, body):
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
 
 
-def _standalone_mcp_url_probe(url: str) -> dict:
-    """Best-effort HTTP reachability check for an MCP HTTP server without an
-    agent checkout — a HEAD request, single hop (no redirect chain), 5s
-    timeout. This is NOT an MCP protocol handshake (that needs the agent's
-    MCP client, only reachable via the bridge); any HTTP response, even a
-    4xx/5xx, counts as reachable — only connection failures are unreachable.
-    """
-    class _NoRedirectMcpProbeHandler(HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            return None  # stop after the first hop; the response itself proves reachability
+MCP_SERVER_TEST_CONNECT_TIMEOUT_SECONDS = 30
+"""Maximum connect timeout for the WebUI's explicit MCP "Test server" action.
 
-    opener = build_opener(_NoRedirectMcpProbeHandler)
-    req = Request(url, method="HEAD")
-    started = time.monotonic()
-    try:
-        with opener.open(req, timeout=5) as resp:
-            status = getattr(resp, "status", None) or resp.getcode()
-    except HTTPError as exc:
-        status = exc.code
-    except (URLError, _socket.timeout, ValueError) as exc:
-        reason = getattr(exc, "reason", None) or exc
-        return {"ok": False, "error": str(reason)}
-    latency_ms = int((time.monotonic() - started) * 1000)
-    return {
-        "ok": True,
-        "latency_ms": latency_ms,
-        "http_status": status,
-        "note": "HTTP reachability only — connect a Hermes agent checkout for a full MCP handshake",
-    }
+This deliberately applies only to the interactive test route. It never changes
+stored MCP configuration or the agent's normal runtime connection policy.
+"""
 
 
 def _handle_mcp_server_test(handler, name):
@@ -26725,7 +26702,11 @@ def _handle_mcp_server_test(handler, name):
         home = get_active_hermes_home()
         started = time.monotonic()
         try:
-            result = _bridge.probe_mcp_server(name, home)
+            result = _bridge.probe_mcp_server(
+                name,
+                home,
+                timeout=MCP_SERVER_TEST_CONNECT_TIMEOUT_SECONDS,
+            )
         except KeyError:
             return bad(handler, f"MCP server '{name}' not found", 404)
         except Exception as exc:
@@ -26744,16 +26725,15 @@ def _handle_mcp_server_test(handler, name):
     except _bridge.AgentBridgeUnavailable as exc:
         return j(handler, {"ok": False, "error": f"Agent config layer unavailable: {exc}"}, status=503)
 
-    # Standalone fallback: no MCP client available here, so this can only
-    # check basic HTTP reachability for url servers and must say so for stdio.
+    # Standalone WebUI deployments have no MCP client. Do not turn configured
+    # URLs into arbitrary server-side HTTP targets; testing is unsupported
+    # until an agent checkout supplies the authenticated MCP probe.
     if not isinstance(server_cfg, dict):
         return j(handler, {"ok": False, "error": "invalid server configuration"})
-    if server_cfg.get("url"):
-        return j(handler, _standalone_mcp_url_probe(server_cfg["url"]))
-    if server_cfg.get("command"):
+    if server_cfg.get("url") or server_cfg.get("command"):
         return j(handler, {
             "ok": False,
             "supported": False,
-            "reason": "stdio server connection tests require a Hermes agent checkout",
+            "reason": "MCP server connection tests require a Hermes agent checkout",
         })
     return j(handler, {"ok": False, "error": "invalid server configuration"})
