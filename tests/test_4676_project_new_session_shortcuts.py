@@ -445,6 +445,33 @@ def test_cross_profile_project_new_owns_single_session_creation_during_switch():
     assert "fallback_workspace" not in out["body"]
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_cross_profile_project_new_without_explicit_workspace_keeps_destination_default_as_fallback():
+    out = _run_new_session_case(
+        {"project_id": "foreign-project"},
+        all_projects=[
+            {
+                "project_id": "foreign-project",
+                "name": "Foreign",
+                "profile": "other",
+                "default_workspace": "/workspace/project-default",
+            },
+        ],
+        profile_default_workspace="/workspace/source-profile-default",
+        switch_response_workspace="/workspace/destination-profile-default",
+        session={"session_id": "session-1", "workspace": "/workspace/session"},
+        messages=[{"role": "user", "content": "keep"}],
+        show_all_profiles=True,
+        return_meta=True,
+    )
+    assert out["timedOut"] is False
+    assert out["switchCalls"] == ["other"]
+    assert out["callCount"] == 1
+    assert out["body"]["project_id"] == "foreign-project"
+    assert "workspace" not in out["body"]
+    assert out["body"]["fallback_workspace"] == "/workspace/destination-profile-default"
+
+
 _HELPER = r"""
 const fs = require('fs');
 const [sessionsPath, paramsJson] = process.argv.slice(-2);
