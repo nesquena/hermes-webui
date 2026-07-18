@@ -172,6 +172,35 @@ def test_bulk_zero_message_prune_preserves_nonempty_draft_owner(session_env, mon
     assert tombstoned == []
 
 
+def test_bulk_zero_message_prune_retains_corrupt_durable_owner(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "draft-bulk-corrupt-owner"
+    sidecar = {"text": "keep this sidecar despite corrupt owner", "files": []}
+    (session_dir / f"{sid}.json").write_text("{not valid json", encoding="utf-8")
+    models.write_composer_draft_sidecar(sid, sidecar)
+
+    pruned = []
+    tombstoned = []
+    monkeypatch.setattr(routes, "agent_session_zero_message_sids", lambda *_a, **_k: {sid})
+    monkeypatch.setattr(routes, "_load_webui_zero_message_orphan_tombstone", lambda: set())
+    monkeypatch.setattr(routes, "prune_session_from_index", pruned.append)
+    monkeypatch.setattr(routes, "_record_webui_zero_message_orphan_tombstone", tombstoned.append)
+
+    rows = [{
+        "session_id": sid,
+        "title": "Corrupt durable owner",
+        "message_count": 1,
+        "session_source": "webui",
+        "source_tag": "webui",
+    }]
+    assert routes._prune_orphaned_webui_zero_message_sessions(rows) == rows
+    assert models.read_composer_draft_sidecar(sid) == sidecar
+    assert pruned == []
+    assert tombstoned == []
+
+
 def test_bulk_zero_message_prune_removes_empty_owner_and_tombstones(session_env, monkeypatch):
     from api import models, routes
 
