@@ -112,7 +112,7 @@ def test_compression_rotation_moves_draft_to_continuation_owner(session_env):
     }
 
 
-def test_delete_race_and_bulk_prune_cannot_leave_orphan_drafts(session_env, monkeypatch):
+def test_delete_race_cannot_leave_orphan_drafts(session_env, monkeypatch):
     from api import models, routes
 
     session_dir, sessions = session_env
@@ -138,24 +138,67 @@ def test_delete_race_and_bulk_prune_cannot_leave_orphan_drafts(session_env, monk
     assert response["status"] == 404
     assert models.read_composer_draft_sidecar(sid) is None
 
-    bulk_sid = "draft-bulk-orphan"
-    bulk = models.Session(session_id=bulk_sid, title="Stale titled row")
-    bulk.save(skip_index=True)
-    models.write_composer_draft_sidecar(bulk_sid, {"text": "orphan", "files": []})
-    monkeypatch.setattr(routes, "agent_session_zero_message_sids", lambda *_a, **_k: {bulk_sid})
+
+def test_bulk_zero_message_prune_preserves_nonempty_draft_owner(session_env, monkeypatch):
+    from api import models, routes
+
+    _session_dir, sessions = session_env
+    sid = "draft-bulk-owner"
+    owner = models.Session(session_id=sid, title="Draft-only conversation")
+    owner.save(skip_index=True)
+    draft = {"text": "keep this durable draft", "files": []}
+    models.write_composer_draft_sidecar(sid, draft)
+    sessions.clear()
+
+    pruned = []
+    tombstoned = []
+    monkeypatch.setattr(routes, "agent_session_zero_message_sids", lambda *_a, **_k: {sid})
     monkeypatch.setattr(routes, "_load_webui_zero_message_orphan_tombstone", lambda: set())
-    monkeypatch.setattr(routes, "prune_session_from_index", lambda _sid: None)
-    monkeypatch.setattr(routes, "_record_webui_zero_message_orphan_tombstone", lambda _sid: None)
+    monkeypatch.setattr(routes, "prune_session_from_index", pruned.append)
+    monkeypatch.setattr(routes, "_record_webui_zero_message_orphan_tombstone", tombstoned.append)
 
     rows = [{
-        "session_id": bulk_sid,
-        "title": "Stale titled row",
+        "session_id": sid,
+        "title": "Draft-only conversation",
+        "message_count": 1,
+        "session_source": "webui",
+        "source_tag": "webui",
+    }]
+    assert routes._prune_orphaned_webui_zero_message_sessions(rows) == rows
+    restarted = models.Session.load(sid)
+    assert restarted is not None
+    assert models.resolve_composer_draft(sid, restarted.composer_draft) == draft
+    assert pruned == []
+    assert tombstoned == []
+
+
+def test_bulk_zero_message_prune_removes_empty_owner_and_tombstones(session_env, monkeypatch):
+    from api import models, routes
+
+    _session_dir, _sessions = session_env
+    sid = "draft-bulk-empty-owner"
+    owner = models.Session(session_id=sid, title="Empty stale conversation")
+    owner.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "", "files": []})
+
+    pruned = []
+    tombstoned = []
+    monkeypatch.setattr(routes, "agent_session_zero_message_sids", lambda *_a, **_k: {sid})
+    monkeypatch.setattr(routes, "_load_webui_zero_message_orphan_tombstone", lambda: set())
+    monkeypatch.setattr(routes, "prune_session_from_index", pruned.append)
+    monkeypatch.setattr(routes, "_record_webui_zero_message_orphan_tombstone", tombstoned.append)
+
+    rows = [{
+        "session_id": sid,
+        "title": "Empty stale conversation",
         "message_count": 1,
         "session_source": "webui",
         "source_tag": "webui",
     }]
     assert routes._prune_orphaned_webui_zero_message_sessions(rows) == []
-    assert models.read_composer_draft_sidecar(bulk_sid) is None
+    assert models.read_composer_draft_sidecar(sid) is None
+    assert pruned == [sid]
+    assert tombstoned == [sid]
 
 
 def test_clear_is_canonical_durable_and_does_not_clobber_newer_draft(session_env, monkeypatch):
