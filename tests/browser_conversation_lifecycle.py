@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 PROMPT = "Exercise the public conversation lifecycle gate."
@@ -173,7 +174,8 @@ class DeterministicGateway:
                 self.wfile.flush()
 
             def do_GET(self):
-                if self.path == "/v1/capabilities":
+                request_path = urlsplit(self.path).path
+                if request_path == "/v1/capabilities":
                     self._json({
                         "features": {
                             "approval_events": True,
@@ -181,7 +183,7 @@ class DeterministicGateway:
                         }
                     })
                     return
-                if self.path != "/v1/runs/lifecycle-run-1/events":
+                if request_path != "/v1/runs/lifecycle-run-1/events":
                     self._json({"error": "not found"}, status=404)
                     return
                 self.send_response(200)
@@ -232,7 +234,7 @@ class DeterministicGateway:
                     return
 
             def do_POST(self):
-                if self.path != "/v1/runs":
+                if urlsplit(self.path).path != "/v1/runs":
                     self._json({"error": "not found"}, status=404)
                     return
                 length = int(self.headers.get("Content-Length", "0"))
