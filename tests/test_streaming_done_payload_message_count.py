@@ -112,3 +112,6 @@ def test_run_agent_streaming_uses_resolved_model_name():
     assert "_dm['model'] = _turn_route_model or resolved_model or model or ''" in source, (
         "_run_agent_streaming periodic checkpoint must use the same fallback chain."
     )
+    assert "usage['model_name'] = _turn_route_model or resolved_model or model or ''" in source, (
+        "_run_agent_streaming done payload must use the same fallback chain."
+    )
