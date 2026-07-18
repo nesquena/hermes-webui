@@ -123,6 +123,43 @@ def test_provider_qualified_missing_fallback_cannot_resolve_to_other_provider():
     }
 
 
+# Colon-bearing model id (e.g. "model-a:free") synthesized as a missing-catalog
+# fallback "@custom:backup:model-a:free". Regression for the #6221 re-gate: the
+# provider must come from the option's authoritative data-provider, NOT a
+# last-colon reparse (which returned the malformed "custom:backup:model-a").
+_COLON_DRIVER = _DRIVER.replace(
+    "'@custom:backup:model-a': {provider: 'custom:backup', role: 'fallback', label: 'Fallback 1'},",
+    "'@custom:backup:model-a:free': {provider: 'custom:backup', role: 'fallback', label: 'Fallback 1'},",
+).replace(
+    "const requested = '@custom:backup:model-a';",
+    "const requested = '@custom:backup:model-a:free';",
+)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_colon_bearing_missing_fallback_keeps_authoritative_provider():
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, "-e", _COLON_DRIVER, str(UI_JS)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    # Provider must be "custom:backup" — NOT the last-colon misparse
+    # "custom:backup:model-a".
+    assert payload["state"] == {
+        "model": "model-a:free",
+        "model_provider": "custom:backup",
+    }
+    assert payload["options"][-1] == {
+        "value": "@custom:backup:model-a:free",
+        "provider": "custom:backup",
+    }
+
+
 _RENDERED_CLICK_DRIVER = r"""
 
 const fs = require('fs');

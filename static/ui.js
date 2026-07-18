@@ -2857,7 +2857,12 @@ function _modelStateForSelect(sel, modelId){
       ?Array.from(sel.options).find(o=>String(o.value||'')===value)
       :null;
     const routedModel=selected&&selected.dataset&&selected.dataset.model;
-    return {model:routedModel||value,model_provider:explicitProvider};
+    // Read the provider from the matched option's authoritative data-provider
+    // rather than re-parsing the value at its LAST colon: a colon-bearing model
+    // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
+    // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
+    const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
+    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
