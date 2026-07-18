@@ -1189,6 +1189,7 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
     stream_id = "stream-long-tool-args"
     long_command = "python -c " + repr("print('x')\n" * 24)
     complete_only_command = "bash -lc " + repr("echo complete-only && " * 16)
+    completion_enriched_command = "python -c " + repr("print('completion')\n" * 16)
     events = [
         {
             "event": "tool",
@@ -1224,6 +1225,29 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
                 "preview": "complete-only complete",
             },
         },
+        {
+            "event": "tool",
+            "seq": 4,
+            "event_id": f"{stream_id}:4",
+            "created_at": 4.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-completion-enriched",
+                "args": {"command": "partial"},
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 5,
+            "event_id": f"{stream_id}:5",
+            "created_at": 5.0,
+            "payload": {
+                "name": "terminal",
+                "tid": "call-completion-enriched",
+                "args": {"command": completion_enriched_command},
+                "preview": "completion-enriched complete",
+            },
+        },
     ]
 
     monkeypatch.setattr(
@@ -1232,8 +1256,8 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
         lambda sid: {
             "session_id": "session-1",
             "run_id": sid,
-            "last_seq": 3,
-            "last_event_id": f"{sid}:3",
+            "last_seq": 5,
+            "last_event_id": f"{sid}:5",
         }
         if sid == stream_id
         else None,
@@ -1250,6 +1274,7 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
     assert snapshot is not None
     assert snapshot["tool_calls"][0]["args"]["command"] == long_command
     assert snapshot["tool_calls"][1]["args"]["command"] == complete_only_command
+    assert snapshot["tool_calls"][2]["args"]["command"] == completion_enriched_command
     tool_rows = [
         row
         for row in snapshot["anchor_activity_scene"]["activity_rows"]
@@ -1257,8 +1282,10 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
     ]
     assert tool_rows[0]["tool"]["args"]["command"] == long_command
     assert tool_rows[1]["tool"]["args"]["command"] == complete_only_command
+    assert tool_rows[2]["tool"]["args"]["command"] == completion_enriched_command
     assert tool_rows[0]["payload"]["args"]["command"] == long_command
     assert tool_rows[1]["payload"]["args"]["command"] == complete_only_command
+    assert tool_rows[2]["payload"]["args"]["command"] == completion_enriched_command
 
     script = "\n".join(
         [
@@ -1269,12 +1296,14 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
             _function_decl(SESSIONS_JS, "_selectLiveRecoveryInflight"),
             f"const snapshot={json.dumps(snapshot)};",
             f"const longCommand={json.dumps(long_command)};",
+            f"const completionEnrichedCommand={json.dumps(completion_enriched_command)};",
             f"const streamId={json.dumps(stream_id)};",
             """
 const serverInflight = _serverLiveSnapshotInflight(snapshot, []);
 assert.strictEqual(serverInflight.streamId, streamId);
-assert.strictEqual(serverInflight.lastRunJournalSeq, 3);
+assert.strictEqual(serverInflight.lastRunJournalSeq, 5);
 assert.strictEqual(serverInflight.toolCalls[0].args.command, longCommand);
+assert.strictEqual(serverInflight.toolCalls[2].args.command, completionEnrichedCommand);
 const localInflight = {
   streamId,
   lastRunJournalSeq: serverInflight.lastRunJournalSeq,
@@ -1289,6 +1318,7 @@ const selected = _selectLiveRecoveryInflight(localInflight, serverInflight, stre
 assert.strictEqual(selected, serverInflight);
 assert.strictEqual(selected.lastRunJournalSeq, localInflight.lastRunJournalSeq);
 assert.strictEqual(selected.toolCalls[0].args.command, longCommand);
+assert.strictEqual(selected.toolCalls[2].args.command, completionEnrichedCommand);
 assert.ok(selected.toolCalls[0].args.command.length > 120);
 assert.ok(!selected.toolCalls[0].args.command.endsWith('...'));
 """,
