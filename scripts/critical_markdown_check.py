@@ -105,6 +105,11 @@ def _scan_inline_dest(text: str, i: int) -> str:
         while j < n:
             c = text[j]
             if c == "\\" and j + 1 < n:
+                # An escaped char doesn't end the destination — but an escaped NEWLINE
+                # is still a raw line ending, which GFM/CommonMark forbid in a bare
+                # destination (GitHub's cmark-gfm won't render it). Treat as split.
+                if text[j + 1] == "\n":
+                    return "split"
                 j += 2
                 continue
             if c in " \t\n":

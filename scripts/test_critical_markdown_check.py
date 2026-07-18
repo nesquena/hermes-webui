@@ -79,9 +79,27 @@ CODE_SAFE = [
     ("inline-code",      "Use `[x](` in prose\n"),
 ]
 
+# Cases where the FORMAL CommonMark/GFM grammar (what GitHub's cmark-gfm renders)
+# disagrees with markdown-it-py, which is permissive. We follow the formal spec /
+# GitHub behavior (these docs are GitHub-rendered), so these are verdict-asserted but
+# excluded from the markdown-it-py cross-check.
+SPEC_DIVERGENT = [
+    # An escaped newline inside a bare destination is a raw line ending — GFM forbids
+    # it (GitHub won't render the link) though markdown-it-py permissively renders it.
+    ("bare-escaped-newline", "[x](foo\\\nbar)", True),
+]
+
 
 @pytest.mark.parametrize("name,src,should_flag", CASES, ids=[c[0] for c in CASES])
 def test_checker_verdict(name, src, should_flag):
+    assert _flags(src) is should_flag
+
+
+@pytest.mark.parametrize("name,src,should_flag", SPEC_DIVERGENT,
+                         ids=[c[0] for c in SPEC_DIVERGENT])
+def test_spec_divergent_verdict(name, src, should_flag):
+    # Follow the formal GFM grammar / GitHub rendering, not markdown-it-py's permissive
+    # behavior — so these are asserted by hand, not cross-checked against the parser.
     assert _flags(src) is should_flag
 
 
