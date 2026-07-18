@@ -3772,7 +3772,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     # Keep returning a live snapshot even when the journal has events but no
     # projected message/tool rows yet. The frontend treats the empty activity
     # scene as "nothing renderable yet" while preserving the live cursor.
-    return {
+    snapshot = {
         "session_id": session_id,
         "stream_id": stream_id,
         "last_seq": last_seq,
@@ -3807,6 +3807,16 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "side_effects": anchor_side_effects,
         },
     }
+    outcome_run_ids = {
+        str(outcome.get("run_id") or "").strip()
+        for outcome in (*anchor_artifacts, *anchor_side_effects)
+        if str(outcome.get("run_id") or "").strip()
+    }
+    if len(outcome_run_ids) == 1:
+        snapshot["anchor_activity_scene"]["identity"]["run_id"] = next(
+            iter(outcome_run_ids)
+        )
+    return snapshot
 
 
 def _ensure_full_session_before_mutation(sid: str, session):

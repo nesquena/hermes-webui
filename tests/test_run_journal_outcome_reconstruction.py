@@ -169,7 +169,7 @@ def test_snapshot_reconstructs_bounded_outcome_envelopes_without_activity_rows(m
     assert "body" not in json.dumps(scene)
 
 
-def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
+def _stable_outcome_scene(monkeypatch):
     from api import routes
 
     stream_id = "stream_transport"
@@ -203,7 +203,7 @@ def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
         "find_run_summary",
         lambda _stream_id: {
             "session_id": session_id,
-            "run_id": stream_id,
+            "run_id": run_id,
             "last_seq": 5,
             "last_event_id": f"{run_id}:5",
         },
@@ -214,20 +214,61 @@ def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
         lambda _session_id, _run_id: {"events": events},
     )
 
-    scene = routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]
+    return routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]
 
+
+def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
+    scene = _stable_outcome_scene(monkeypatch)
+
+    assert scene["identity"]["run_id"] == "run_stable"
+    assert scene["identity"]["stream_id"] == "stream_transport"
     assert scene["artifacts"] == [
         {
             "source_event_type": "artifact_reference",
-            "event_id": f"{run_id}:4",
-            "run_id": run_id,
-            "stream_id": stream_id,
+            "event_id": "run_stable:4",
+            "run_id": "run_stable",
+            "stream_id": "stream_transport",
             "seq": 4,
             "created_at": 104.0,
             "payload": {"kind": "workspace_file", "path": "reports/final.md"},
         }
     ]
     assert scene["side_effects"] == []
+
+
+@pytest.mark.skipif(not NODE, reason="node is required for recovery identity coverage")
+def test_backend_stable_scene_identity_passes_frontend_recovery_validation(monkeypatch):
+    scene = _stable_outcome_scene(monkeypatch)
+    functions = "\n".join(
+        [
+            _js_function_source(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
+        ]
+    )
+    script = f"""
+const vm=require('vm');
+const sandbox={{}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'recovery_identity_helpers.js'}});
+console.log(JSON.stringify({{
+  runId:{json.dumps(scene["identity"]["run_id"])},
+  streamId:{json.dumps(scene["identity"]["stream_id"])},
+  recoverable:sandbox._anchorActivitySceneHasRecoveryState({json.dumps(scene)}),
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "runId": "run_stable",
+        "streamId": "stream_transport",
+        "recoverable": True,
+    }
 
 
 @pytest.mark.skipif(not NODE, reason="node is required for Anchor hydration coverage")
