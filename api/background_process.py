@@ -1386,16 +1386,18 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
 
     recovered = process_registry.recover_from_checkpoint()
     for row in process_registry.list_sessions():
-        session_key = str(row.get("session_key") or "")
-        if not session_key:
+        process_id = str(row.get("session_id") or "")
+        if not process_id:
             continue
         try:
-            if get_session_fn(session_key, metadata_only=True) is None:
+            proc_session = process_registry.get(process_id)
+            session_key = str(getattr(proc_session, "session_key", "") or "")
+            if not session_key or get_session_fn(session_key, metadata_only=True) is None:
                 continue
         except Exception:
             logger.debug(
-                "Could not validate recovered WebUI session %r",
-                session_key,
+                "Could not resolve recovered WebUI process %r",
+                process_id,
                 exc_info=True,
             )
             continue
@@ -1452,7 +1454,12 @@ def start_drain_thread() -> bool:
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
-        recover_processes_for_webui()
+        try:
+            recover_processes_for_webui()
+        except Exception:
+            # Recovery is best-effort. A corrupt checkpoint or transient I/O
+            # error must not disable notifications for newly spawned tasks.
+            logger.warning("background process recovery failed", exc_info=True)
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,

@@ -16,6 +16,11 @@ class _FakeThread:
         self.started = True
 
 
+class _FakeProcessSession:
+    def __init__(self, session_key):
+        self.session_key = session_key
+
+
 def test_start_drain_thread_invokes_recovery(monkeypatch):
     calls = []
     monkeypatch.setattr(bp, "_DRAIN_THREAD", None)
@@ -24,6 +29,19 @@ def test_start_drain_thread_invokes_recovery(monkeypatch):
 
     assert bp.start_drain_thread() is True
     assert calls == ["recover"]
+
+
+def test_start_drain_thread_survives_recovery_failure(monkeypatch):
+    def fail_recovery():
+        raise OSError("corrupt checkpoint")
+
+    monkeypatch.setattr(bp, "_DRAIN_THREAD", None)
+    monkeypatch.setattr(bp, "recover_processes_for_webui", fail_recovery)
+    monkeypatch.setattr(bp.threading, "Thread", _FakeThread)
+
+    assert bp.start_drain_thread() is True
+    assert bp._DRAIN_THREAD is not None
+    assert bp._DRAIN_THREAD.is_alive()
 
 
 def test_recovery_runs_once_and_rebuilds_session_mapping(monkeypatch):
@@ -37,9 +55,12 @@ def test_recovery_runs_once_and_rebuilds_session_mapping(monkeypatch):
         def list_sessions(self):
             return [{
                 "session_id": "proc_recovered",
-                "session_key": "webui-session",
                 "detached": True,
             }]
+
+        def get(self, process_id):
+            assert process_id == "proc_recovered"
+            return _FakeProcessSession("webui-session")
 
     fake_registry = FakeRegistry()
     monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
