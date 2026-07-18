@@ -88,26 +88,37 @@ def _command_for_action(
     force: bool = False,
 ) -> list[str]:
     hermes_cmd = _resolve_hermes_command()
+    # "--" marks the end of option parsing for argparse, so identifier/name
+    # values that start with "-" (e.g. a hub identifier or a plugin/skill
+    # name an attacker crafted to look like a flag) are always taken as the
+    # positional argument instead of being swallowed as an unrecognized
+    # option -- verified live: without "--", `hermes skills install "-x/-y"`
+    # never reaches the identifier positional at all (argparse rejects it
+    # before the CLI's own logic runs); with "--" it does. It must be the
+    # LAST token before the positional, with every real flag placed before
+    # it -- argparse treats everything after "--" as positional, so a flag
+    # placed after "--" would itself be swallowed as a second positional.
     if action == "scan":
         # No --yes / --force: runs the scan, then stops at (or before) the
         # confirm prompt. Never installs anything on its own.
-        return [hermes_cmd, "skills", "install", target]
+        return [hermes_cmd, "skills", "install", "--", target]
     if action == "install":
-        cmd = [hermes_cmd, "skills", "install", target, "--yes"]
+        cmd = [hermes_cmd, "skills", "install", "--yes"]
         if force:
             cmd.append("--force")
         if category:
             cmd.extend(["--category", category])
         if name_override:
             cmd.extend(["--name", name_override])
+        cmd.extend(["--", target])
         return cmd
     if action == "update":
         cmd = [hermes_cmd, "skills", "update"]
         if target:
-            cmd.append(target)
+            cmd.extend(["--", target])
         return cmd
     if action == "uninstall":
-        return [hermes_cmd, "skills", "uninstall", target]
+        return [hermes_cmd, "skills", "uninstall", "--", target]
     raise ValueError(f"unsupported hub action: {action!r}")
 
 
@@ -343,9 +354,13 @@ def start_action(
     # api.routes._run_gateway_lifecycle_command for the established pattern.
     from api.profiles import get_active_hermes_home
 
-    hermes_home = Path(get_active_hermes_home())
-
+    # get_active_hermes_home() can raise (profile resolution failure) just
+    # like the command-building call below -- both must stay inside this
+    # try/except. If it raised outside of it, the lock acquired above would
+    # never be released, and every subsequent hub action would 409 forever
+    # until the WebUI process restarts.
     try:
+        hermes_home = Path(get_active_hermes_home())
         cmd = _command_for_action(
             action, target, category=category, name_override=name_override, force=force
         )
@@ -424,6 +439,18 @@ def start_action(
                     returncode = proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     returncode = -9
+                    # SIGKILL should be near-instant; if the process is
+                    # still not reaped after 5s (e.g. stuck in
+                    # uninterruptible I/O) it would otherwise sit as a
+                    # zombie forever. Keep waiting on a throwaway daemon
+                    # thread -- a blocking, no-timeout proc.wait() -- so
+                    # the OS process table entry is eventually reclaimed
+                    # without delaying the timeout status reported below.
+                    threading.Thread(
+                        target=proc.wait,
+                        name=f"hermes-webui-skills-hub-{action}-reap",
+                        daemon=True,
+                    ).start()
             reader.join(timeout=5)
 
             with _STATE_LOCK:

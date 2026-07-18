@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -332,7 +333,7 @@ def test_hub_scan_action_preanswers_stdin_n_and_parses_verdict(monkeypatch, tmp_
     assert final["scan_result"]["decision"] == "ALLOWED"
 
     cmd, kwargs = spawned[0]
-    assert cmd[-3:] == ["skills", "install", "skills-sh/anthropics/skills/pdf"]
+    assert cmd[-4:] == ["skills", "install", "--", "skills-sh/anthropics/skills/pdf"]
     assert "--yes" not in cmd
     assert "--force" not in cmd
     assert kwargs["stdin"] == subprocess.PIPE
@@ -393,7 +394,7 @@ def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):
     assert final["status"] == "completed"
 
     cmd, kwargs = spawned[0]
-    assert cmd[-3:] == ["skills", "uninstall", "pdf"]
+    assert cmd[-4:] == ["skills", "uninstall", "--", "pdf"]
     assert "--yes" not in cmd  # the CLI has no such flag for uninstall
     assert kwargs["stdin"] == subprocess.PIPE
 
@@ -435,6 +436,115 @@ def test_hub_scan_missing_identifier_returns_400(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
     handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {})
     assert handler.status == 400
+
+
+# ── Regression: audit findings (lock leak, zombie reap, argv robustness) ────
+
+
+def test_hub_action_lock_is_released_when_profile_home_resolution_raises(monkeypatch, tmp_path):
+    """Audit finding (HOCH): get_active_hermes_home() ran outside the
+    try/except that releases _ACTION_LOCK on failure -- a raise there left
+    the lock held forever, 409-ing every future hub action until a process
+    restart."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setattr(
+        profiles, "get_active_hermes_home", lambda: (_ for _ in ()).throw(RuntimeError("profile resolution failed"))
+    )
+
+    with pytest.raises(RuntimeError):
+        sha.start_action("scan", "some-identifier")
+
+    assert not sha._ACTION_LOCK.locked(), "lock leaked after get_active_hermes_home() raised"
+
+    # Prove the leak doesn't linger: a normal call right after must still work.
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen(["ok\n"], returncode=0))
+    started, _status = sha.start_action("scan", "some-identifier")
+    assert started is True
+    _wait_until_not_running()
+
+
+def test_hub_action_timeout_reaps_zombie_via_background_thread(monkeypatch, tmp_path):
+    """Audit finding (MEDIUM): after proc.kill(), if the 5s proc.wait(timeout=5)
+    also times out, the code assumed returncode=-9 without ever reaping the
+    process, leaving a zombie. A background thread must now call a blocking
+    proc.wait() to actually reclaim it."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    wait_calls = []
+    reaped = threading.Event()
+
+    class _StuckProc:
+        def __init__(self, cmd, **kwargs):
+            self.args = cmd
+            self.stdout = io.StringIO("")
+            self.stdin = _FakeStdin() if kwargs.get("stdin") == subprocess.PIPE else None
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            wait_calls.append(timeout)
+            if timeout is None:
+                # The background reaper's blocking wait -- simulate the
+                # stuck process finally dying now.
+                self.returncode = -9
+                reaped.set()
+                return self.returncode
+            # Every timed wait (the initial action timeout, then the 5s
+            # post-kill wait) times out: the process is stuck.
+            raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(sha.subprocess, "Popen", _StuckProc)
+
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "x"})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "timeout"
+    assert final["returncode"] == -9
+
+    assert reaped.wait(timeout=2), "background reap thread never issued a blocking proc.wait()"
+    assert None in wait_calls, "expected at least one no-timeout (blocking) wait() call to reap the process"
+
+
+def test_hub_command_uses_double_dash_for_leading_dash_targets():
+    """Audit finding (NIEDRIG-MEDIUM): identifier/name/category reach argparse
+    as a bare positional. A value starting with "-" (crafted or accidental)
+    was silently swallowed as an unrecognized option instead of reaching the
+    CLI as the intended identifier/name -- verified live against the real
+    CLI: without "--", `hermes skills install "-x/-y"` never reaches the
+    identifier positional at all. "--" must be the last token before the
+    positional, with every real flag placed before it."""
+    from api.skills_hub_actions import _command_for_action
+
+    dashy = "-x/-y"
+
+    scan_cmd = _command_for_action("scan", dashy)
+    assert scan_cmd[-2:] == ["--", dashy]
+
+    install_cmd = _command_for_action("install", dashy, category="-docs", name_override="-n", force=True)
+    assert install_cmd[-2:] == ["--", dashy]
+    # The real flags must all precede "--" so they're still parsed as
+    # options, not swallowed as extra positionals after it.
+    dd_index = install_cmd.index("--")
+    assert "--yes" in install_cmd[:dd_index]
+    assert "--force" in install_cmd[:dd_index]
+    assert "--category" in install_cmd[:dd_index] and "-docs" in install_cmd[:dd_index]
+    assert "--name" in install_cmd[:dd_index] and "-n" in install_cmd[:dd_index]
+
+    uninstall_cmd = _command_for_action("uninstall", dashy)
+    assert uninstall_cmd[-2:] == ["--", dashy]
+
+    update_cmd = _command_for_action("update", dashy)
+    assert update_cmd[-2:] == ["--", dashy]
+    # No target at all: no "--" needed (nothing positional to protect).
+    update_cmd_no_target = _command_for_action("update", "")
+    assert "--" not in update_cmd_no_target
 
 
 # ── Single-flight (409) ──────────────────────────────────────────────────────
