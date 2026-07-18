@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- **`/sessions` and `/resume` typed in the composer now open the session browser instead of being sent as chat text.** Both commands appeared in the slash-command autocomplete (they're exposed by `/api/commands`) but the WebUI send-time dispatch didn't handle them, so they were posted to the agent as plain text. They now open the native WebUI session browser and clear the composer — on desktop and (via the mobile-aware opener) on phone-width layouts. Thanks @webtecnica. (#6245, #6224)
+
 - **Z.AI GLM models now advertise the correct reasoning controls per version.** The WebUI offered the full `reasoning_effort` ladder (max/xhigh/high/medium/low/minimal) for every GLM model, but per Z.AI's API only GLM-5.2+ supports the effort ladder — GLM-4.5 through 5.1 support the binary `thinking` on/off toggle, and GLM-4.7 forces thinking on (not configurable). Reasoning controls are now gated correctly: GLM-5.2+ keeps the full ladder + None, GLM-4.5/4.6/5.0/5.1 get a two-way On/None thinking toggle (no effort levels), and GLM-4.7 shows forced thinking with no toggle. All three surfaces (config status, effort resolution, composer chip) agree across model tiers, provider aliases, and namespaces. Thanks @rh-id. (#6219)
 
 - **Folder downloads now work when the WebUI is served under a subpath.** The file-tree "Download" context-menu action built an absolute `/api/folder/download?...` URL, which broke behind a reverse proxy that mounts the app under a base path (e.g. `/hermes/`). It now resolves the download URL against `document.baseURI` (matching the pattern the other subpath-aware download paths already use), so it works under any base path and is unchanged on root deployments. Thanks @steezypunk. (#6227)
