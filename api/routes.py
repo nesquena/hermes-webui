@@ -18021,7 +18021,9 @@ def _tts_lan_allowlist():
 
       * HERMES_WEBUI_TTS_ALLOW_LAN  — boolean gate (must be truthy), AND
       * HERMES_WEBUI_TTS_ALLOW_HOSTS — comma/semicolon list of the specific
-        IPs, CIDRs, or hostnames that become reachable.
+        IPs, CIDRs, or hostnames that become reachable. A hostname permits the
+        configured name, but any blocked address it resolves to still requires
+        an explicit IP/CIDR entry.
 
     Returns ``(enabled, networks, names)``. ``enabled`` is False (fail-closed)
     when the gate is off or the list is empty, so neither opt-in alone widens
@@ -18171,16 +18173,13 @@ def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except Exception as exc:
         raise ValueError("could not resolve OpenAI TTS base_url host") from exc
-    host_allowlisted = _tts_host_in_lan_allowlist(host)
     pinned_hosts = []
     for info in infos:
         sockaddr = info[4]
         if not sockaddr:
             continue
         pinned_host = str(sockaddr[0])
-        if _tts_addr_is_blocked(pinned_host) and not (
-            host_allowlisted or _tts_addr_in_lan_allowlist(pinned_host)
-        ):
+        if _tts_addr_is_blocked(pinned_host) and not _tts_addr_in_lan_allowlist(pinned_host):
             raise ValueError("resolved OpenAI TTS target is not allowed")
         pinned_hosts.append(pinned_host)
     if not pinned_hosts:

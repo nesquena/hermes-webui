@@ -121,6 +121,33 @@ def test_pinned_https_lan_allowed_when_allowlisted(monkeypatch):
     assert routes._tts_resolve_pinned_address("192.168.1.50") == "192.168.1.50"
 
 
+@pytest.mark.parametrize("blocked_address", ["10.0.0.9", "169.254.169.254"])
+def test_allowlisted_hostname_cannot_authorize_blocked_resolved_address(monkeypatch, blocked_address):
+    """Hostname permission never bypasses the pinned-address SSRF boundary."""
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "voice.example")
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(0, 0, 0, "", (blocked_address, 0))])
+    with pytest.raises(ValueError, match="not allowed"):
+        routes._tts_resolve_pinned_address("voice.example")
+
+
+def test_allowlisted_hostname_keeps_public_resolved_address_behavior(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "voice.example")
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(0, 0, 0, "", ("1.1.1.1", 0))])
+    assert routes._tts_resolve_pinned_address("voice.example") == "1.1.1.1"
+
+
+def test_allowlisted_cidr_permits_hostname_resolved_lan_address(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_LAN", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TTS_ALLOW_HOSTS", "192.168.1.0/24")
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(0, 0, 0, "", ("192.168.1.50", 0))])
+    assert routes._tts_resolve_pinned_address("voice.example") == "192.168.1.50"
+
+
 # ── keyless self-hosted OpenAI TTS + content-type forwarding ────────────────
 
 def test_openai_tts_keyless_self_hosted_uses_placeholder(monkeypatch):
