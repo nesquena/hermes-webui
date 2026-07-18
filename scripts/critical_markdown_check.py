@@ -36,7 +36,6 @@ def _blank_code(text: str) -> str:
     in_fence = False
     fence_marker = ""
     for line in text.split("\n"):
-        stripped = line.lstrip()
         # Fence open/close. A closing fence must be at least as long and same char.
         m = re.match(r"^(\s*)(`{3,}|~{3,})", line)
         if not in_fence and m:
