@@ -193,3 +193,84 @@ def test_png_serves_inline_without_csp(artifacts_on):
         assert data.startswith(b"\x89PNG")
     finally:
         os.unlink(src)
+
+
+class TestAuditFixes:
+    """Regression coverage for the 18.07.2026 audit findings."""
+
+    def test_republish_without_public_flag_preserves_public(self, artifacts_on):
+        src = _tmp_file(".html", b"<p>share me</p>")
+        try:
+            body, status = post(
+                "/api/artifact/publish", {"path": src, "public": True},
+            )
+            assert status == 200 and body["artifact"]["public"] is True
+            token = body["artifact"]["token"]
+            # Plain re-publish (UI button shape: no 'public' key in the body)
+            body, status = post("/api/artifact/publish", {"path": src})
+            assert status == 200
+            assert body["artifact"]["token"] == token
+            assert body["artifact"]["public"] is True, (
+                "re-publish without a public key must not un-share the artifact"
+            )
+            # Explicit false still un-shares
+            body, status = post("/api/artifact/publish", {"path": src, "public": False})
+            assert status == 200 and body["artifact"]["public"] is False
+        finally:
+            os.unlink(src)
+
+    def test_private_versions_not_public_safe_after_toggle(self, artifacts_on):
+        """v1 published private must stay session-gated after a public toggle.
+
+        The test server runs with auth disabled, so the anonymous 404 cannot be
+        exercised over HTTP here; assert the per-version public_safe flags that
+        _handle_artifact_get's anonymous_ok check is built on instead.
+        """
+        secret = "sk-ant-api03-abcdefghij1234567890abcdefghij1234567890"
+        src = _tmp_file(".html", f"<p>{secret}</p>".encode())
+        try:
+            body, status = post("/api/artifact/publish", {"path": src})
+            assert status == 200
+            token = body["artifact"]["token"]
+            body, status = post(
+                "/api/artifact/publish", {"path": src, "public": True, "token": token},
+            )
+            assert status == 200 and body["artifact"]["version"] == 2
+
+            from tests._pytest_port import TEST_STATE_DIR
+            meta = json.loads(
+                (TEST_STATE_DIR / "artifacts" / token / "meta.json").read_text()
+            )
+            flags = {v["v"]: v["public_safe"] for v in meta["versions"]}
+            assert flags[1] is False, "pre-toggle version must NOT be public_safe"
+            assert flags[2] is True
+            # And the stored v1 copy still contains the secret (proving why
+            # public_safe=False matters), while v2 is redacted.
+            v1 = (TEST_STATE_DIR / "artifacts" / token / "v1" / Path(src).name).read_bytes()
+            v2 = (TEST_STATE_DIR / "artifacts" / token / "v2" / Path(src).name).read_bytes()
+            assert secret.encode() in v1
+            assert secret.encode() not in v2
+        finally:
+            os.unlink(src)
+
+    def test_pinned_version_keeps_filename_and_mime_across_republish(self, artifacts_on):
+        html_src = _tmp_file(".html", b"<h1>v1 html</h1>")
+        txt_src = _tmp_file(".txt", b"plain v2")
+        try:
+            body, status = post("/api/artifact/publish", {"path": html_src})
+            assert status == 200
+            token = body["artifact"]["token"]
+            body, status = post(
+                "/api/artifact/publish", {"path": txt_src, "token": token},
+            )
+            assert status == 200 and body["artifact"]["version"] == 2
+            data, status, headers = get(f"/artifact/{token}?v=1")
+            assert status == 200, "pinned v1 link must survive a renamed re-publish"
+            assert headers.get("Content-Type", "").startswith("text/html")
+            assert b"v1 html" in data
+            data, status, headers = get(f"/artifact/{token}")
+            assert status == 200
+            assert headers.get("Content-Type", "").startswith("text/plain")
+        finally:
+            os.unlink(html_src)
+            os.unlink(txt_src)
