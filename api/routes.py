@@ -26579,11 +26579,30 @@ def _handle_mcp_server_update(handler, name, body):
     use_bridge, home = route
     # Validate: must have url (http) or command (stdio)
     server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        # Read the existing server through the SAME home-scoped bridge
+        # reader the write path below uses — not the WebUI's own get_config()
+        # cache. The two can diverge (different profile resolution, stale
+        # in-memory cache), which would make _strip_masked_values() below
+        # miss the real header/env value and silently persist the literal
+        # •••••• placeholder as the "secret" instead of preserving the
+        # original (a quiet secret loss, not a leak).
+        try:
+            agent_cfg = _bridge.load_agent_config(home)
+        except Exception:
+            agent_cfg = {}
+        agent_servers = agent_cfg.get("mcp_servers", {})
+        if not isinstance(agent_servers, dict):
+            agent_servers = {}
+        existing_cfg = agent_servers.get(name, {})
+    else:
+        cfg = get_config()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        existing_cfg = servers.get(name, {})
     if body.get("url"):
         server_cfg["url"] = body["url"].strip()
         if body.get("headers"):
