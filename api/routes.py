@@ -20704,17 +20704,33 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            sid = p.stem
+            with get_composer_draft_lock(sid):
+                # The draft sidecar is durable user state.  Check it under the
+                # same lock as POST/delete so cleanup cannot delete its owner
+                # between validation and a draft write.
+                s = Session.load(sid)
+                draft = resolve_composer_draft(
+                    sid, getattr(s, "composer_draft", None) if s else None
+                )
+                has_draft = bool(
+                    str(draft.get("text") or "") or draft.get("files")
+                ) if isinstance(draft, dict) else False
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0 and not has_draft
+                else:
+                    should_delete = (
+                        s and s.title == "Untitled" and len(s.messages) == 0
+                        and not has_draft
+                    )
+                if should_delete:
+                    with LOCK:
+                        SESSIONS.pop(sid, None)
+                    p.unlink(missing_ok=True)
+                    p.with_suffix('.json.bak').unlink(missing_ok=True)
+                    delete_composer_draft_sidecar(sid)
+                    cleaned += 1
+                    phase1_removed_ids.add(sid)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -20794,6 +20810,24 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     # correct, so keep it (avoids a wasteful rebuild).
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
+
+    # A sidecar with neither a persisted nor in-memory owner is an orphan.
+    # Do this after the owner/index passes and recheck ownership while holding
+    # the draft lock; a draft-only new session writes owner then sidecar under
+    # that lock, so cleanup must never delete an in-flight legitimate draft.
+    drafts_dir = SESSION_DIR / '_drafts'
+    try:
+        for draft_path in drafts_dir.glob('*.json'):
+            sid = draft_path.stem
+            with get_composer_draft_lock(sid):
+                owner_exists = (SESSION_DIR / f'{sid}.json').exists()
+                with LOCK:
+                    in_memory_owner = sid in SESSIONS
+                if not owner_exists and not in_memory_owner:
+                    delete_composer_draft_sidecar(sid)
+                    cleaned += 1
+    except Exception:
+        logger.debug("Failed to clean up draft-sidecar orphans", exc_info=True)
 
     return j(handler, {"ok": True, "cleaned": cleaned})
 
