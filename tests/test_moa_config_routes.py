@@ -10,17 +10,22 @@ api/commands.py resolve_moa_config). hermes_cli is an optional dependency
 here, so these routes read/write the same config.yaml structure without
 importing it.
 """
+import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).parent.parent
-PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+PANELS_JS_PATH = ROOT / "static" / "panels.js"
+PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 class TestMoaSettingsHTML:
@@ -106,6 +111,79 @@ class TestMoaSettingsJS:
         idx = PANELS_JS.find("function _markMoaDirty")
         body = PANELS_JS[idx:idx + 200]
         assert "_markSettingsDirty" in body
+
+    def test_load_preserves_reasoning_effort_for_agents_and_aggregator(self):
+        """#audit MEDIUM: reasoning_effort has no UI control, but the backend
+        persists it per slot (agents and aggregator alike) -- a load must not
+        drop it, or the very next save silently erases it."""
+        idx = PANELS_JS.find("async function _loadMoaConfig")
+        assert idx >= 0
+        body = PANELS_JS[idx:idx + 1800]
+        assert "reasoning_effort:(a&&a.reasoning_effort)||''" in body, (
+            "_loadMoaConfig must carry reasoning_effort into _moaAgentsState"
+        )
+        assert "reasoning_effort:(_moaMeta.aggregator&&_moaMeta.aggregator.reasoning_effort)||''" in body, (
+            "_loadMoaConfig must carry reasoning_effort into _moaAggregatorState"
+        )
+
+    def test_save_uses_moa_slot_payload_for_agents_and_aggregator(self):
+        """Both the agents map and the aggregator must build their save payload
+        through the same helper, so reasoning_effort round-trips for both."""
+        assert "function _moaSlotPayload" in PANELS_JS
+        idx = PANELS_JS.find("async function _saveMoaConfig")
+        assert idx >= 0
+        save_body = PANELS_JS[idx:idx + 500]
+        assert ".map(_moaSlotPayload)" in save_body
+        assert "_moaSlotPayload(_moaAggregatorState)" in save_body
+
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+    def test_moa_slot_payload_preserves_reasoning_effort_and_omits_when_blank(self):
+        """Live-executes _moaSlotPayload (pure, DOM-free) to prove the fix, not
+        just that the right substrings are present."""
+        script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+
+function extract(name){
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 0;
+  while(i < src.length){
+    const ch = src[i];
+    if(ch === '{') depth += 1;
+    else if(ch === '}') {
+      depth -= 1;
+      if(depth === 0) break;
+    }
+    i += 1;
+  }
+  if(depth !== 0) throw new Error(name + ' parse failed');
+  return src.slice(start, i + 1);
+}
+
+eval(extract('_moaSlotPayload'));
+
+const withEffort = _moaSlotPayload({provider:'openai-codex', model:'gpt-5.5', reasoning_effort:'low'});
+const blankEffort = _moaSlotPayload({provider:'openrouter', model:'x', reasoning_effort:''});
+const missingField = _moaSlotPayload({provider:'openrouter', model:'x'});
+
+console.log(JSON.stringify({withEffort, blankEffort, missingField}));
+"""
+        proc = subprocess.run(
+            [NODE, "-e", script, str(PANELS_JS_PATH)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result["withEffort"] == {
+            "provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "low",
+        }
+        assert result["blankEffort"] == {"provider": "openrouter", "model": "x"}
+        assert result["missingField"] == {"provider": "openrouter", "model": "x"}
 
 
 class TestMoaSettingsI18n:

@@ -12654,8 +12654,12 @@ async function _loadMoaConfig(){
   }));
   _moaMeta=moaData||{enabled:false,reference_models:[],aggregator:{provider:'',model:''},preset:'default',other_presets:[]};
   enabledCb.checked=!!_moaMeta.enabled;
-  _moaAgentsState=(Array.isArray(_moaMeta.reference_models)?_moaMeta.reference_models:[]).map(a=>({provider:(a&&a.provider)||'',model:(a&&a.model)||''}));
-  _moaAggregatorState={provider:(_moaMeta.aggregator&&_moaMeta.aggregator.provider)||'',model:(_moaMeta.aggregator&&_moaMeta.aggregator.model)||''};
+  // reasoning_effort has no UI control of its own (yet), but the backend
+  // persists it per slot (see api/config.py _MOA_SLOT_KEYS) -- carry
+  // whatever value was loaded through untouched so a save from this UI
+  // doesn't silently erase it (#audit MEDIUM: this used to be dropped here).
+  _moaAgentsState=(Array.isArray(_moaMeta.reference_models)?_moaMeta.reference_models:[]).map(a=>({provider:(a&&a.provider)||'',model:(a&&a.model)||'',reasoning_effort:(a&&a.reasoning_effort)||''}));
+  _moaAggregatorState={provider:(_moaMeta.aggregator&&_moaMeta.aggregator.provider)||'',model:(_moaMeta.aggregator&&_moaMeta.aggregator.model)||'',reasoning_effort:(_moaMeta.aggregator&&_moaMeta.aggregator.reasoning_effort)||''};
   _renderMoaAgents();
   _renderMoaAggregator();
   _updateMoaFieldsVisibility();
@@ -12674,13 +12678,24 @@ async function _loadMoaConfig(){
  }
 }
 
+function _moaSlotPayload(slot){
+ // reasoning_effort has no UI control yet, but the backend accepts and
+ // persists it per slot (agents and aggregator alike) -- pass through
+ // whatever value _loadMoaConfig() attached so a save from this UI can
+ // never silently erase it (#audit MEDIUM). Omit the key entirely when
+ // blank, matching the backend's own _moa_clean_slot behavior.
+ const out={provider:slot.provider||'',model:slot.model||''};
+ if(slot.reasoning_effort) out.reasoning_effort=slot.reasoning_effort;
+ return out;
+}
+
 async function _saveMoaConfig(){
  const enabledCb=$('moaEnabled');
  const enabled=!!(enabledCb&&enabledCb.checked);
  const referenceModels=_moaAgentsState
   .filter(a=>a.provider||a.model)
-  .map(a=>({provider:a.provider||'',model:a.model||''}));
- const aggregator={provider:_moaAggregatorState.provider||'',model:_moaAggregatorState.model||''};
+  .map(_moaSlotPayload);
+ const aggregator=_moaSlotPayload(_moaAggregatorState);
  const body={enabled,reference_models:referenceModels,aggregator};
  // Round-trip advanced fields this UI doesn't expose (reference_temperature,
  // max_tokens, fanout, …) so saving here never clobbers values a user set
