@@ -5606,6 +5606,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('provider_fallback',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if(!d.to_provider) return;
+      console.info('[provider_fallback]', d.from_provider+'/'+d.from_model+' → '+d.to_provider+'/'+d.to_model, d.reason);
+    });
+
     source.addEventListener('context_status',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}

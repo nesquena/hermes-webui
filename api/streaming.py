@@ -1669,6 +1669,95 @@ _GATEWAY_ROUTING_ATTEMPT_KEYS = {
     'latency_ms', 'error', 'timestamp', 'selected', 'attempt', 'attempt_index',
 }
 
+# ── Provider fallback SSE event (issue #6267) ──────────────────────────
+# When the agent falls back from a primary provider/model to an alternate,
+# emit a typed SSE event so the frontend can surface a visual indicator.
+# Opt-out via env var; no behaviour change to the fallback mechanism itself.
+
+_PROVIDER_FALLBACK_SSE_ENABLED_DEFAULT = True
+
+
+def _provider_fallback_sse_enabled() -> bool:
+    """Check whether provider_fallback SSE events are enabled.
+
+    Controlled by ``HERMES_WEBUI_PROVIDER_FALLBACK_SSE`` (default: enabled).
+    Set to ``0``, ``false``, ``no``, or ``off`` to disable.
+    """
+    raw = os.getenv("HERMES_WEBUI_PROVIDER_FALLBACK_SSE", "")
+    if raw.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return _PROVIDER_FALLBACK_SSE_ENABLED_DEFAULT
+
+
+def _build_provider_fallback_sse_event(
+    gateway_routing: dict,
+    requested_model: str | None = None,
+    requested_provider: str | None = None,
+) -> dict | None:
+    """Build a ``provider_fallback`` SSE event payload from gateway routing metadata.
+
+    Returns None when no fallback occurred (same provider/model used as requested).
+    """
+    if not isinstance(gateway_routing, dict):
+        return None
+
+    used_provider = str(gateway_routing.get('used_provider') or '').strip()
+    used_model = str(gateway_routing.get('used_model') or '').strip()
+    req_provider = str(gateway_routing.get('requested_provider') or requested_provider or '').strip()
+    req_model = str(gateway_routing.get('requested_model') or requested_model or '').strip()
+
+    # Only emit when the used provider/model differ from what was requested.
+    provider_changed = bool(used_provider and req_provider and used_provider.lower() != req_provider.lower())
+    model_changed = bool(used_model and req_model and used_model.lower() != req_model.lower())
+
+    if not (provider_changed or model_changed):
+        return None
+
+    routing = gateway_routing.get('routing')
+    if not isinstance(routing, list):
+        routing = []
+
+    # Build the fallback chain from routing attempts that failed or were skipped.
+    attempted_chain = []
+    for attempt in routing:
+        if not isinstance(attempt, dict):
+            continue
+        status = str(attempt.get('status') or '').strip().lower()
+        attempted_chain.append({
+            'provider': str(attempt.get('provider') or '').strip(),
+            'model': str(attempt.get('model') or '').strip(),
+            'status': status,
+            'reason': str(attempt.get('reason') or '').strip(),
+            'error': str(attempt.get('error') or '').strip()[:240],
+        })
+
+    # Extract a human-readable reason: last attempt's reason, or generic.
+    last_error = ''
+    for attempt in reversed(routing):
+        if not isinstance(attempt, dict):
+            continue
+        reason = str(attempt.get('reason') or '').strip()
+        error = str(attempt.get('error') or '').strip()
+        if reason:
+            last_error = reason
+            break
+        if error:
+            last_error = error
+            break
+
+    reason = last_error or (
+        f"Fell back from {req_provider}/{req_model} to {used_provider}/{used_model}"
+    )
+
+    return {
+        'from_provider': req_provider,
+        'from_model': req_model,
+        'to_provider': used_provider,
+        'to_model': used_model,
+        'reason': reason,
+        'routing_attempts': attempted_chain,
+    }
+
 
 def _clean_gateway_routing_scalar(value):
     if value is None:
@@ -9516,6 +9605,17 @@ def _run_agent_streaming(
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
+                    # ── Provider fallback SSE event (#6267) ─────────────────────
+                    # Emit a typed SSE event when a provider/model fallback occurred,
+                    # so the frontend can surface a visible indicator in the composer.
+                    if _provider_fallback_sse_enabled():
+                        _fallback_event = _build_provider_fallback_sse_event(
+                            _gateway_routing,
+                            requested_model=resolved_model or model,
+                            requested_provider=resolved_provider,
+                        )
+                        if _fallback_event is not None:
+                            put('provider_fallback', _fallback_event)
                 if s.messages:
                     for _dm in reversed(s.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
