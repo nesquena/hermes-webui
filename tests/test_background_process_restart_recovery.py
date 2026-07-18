@@ -43,16 +43,33 @@ def test_recovery_runs_once_and_rebuilds_session_mapping(monkeypatch):
 
     fake_registry = FakeRegistry()
     monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
-    monkeypatch.setattr(bp, "register_process_session", lambda key, sid: calls["registered"].append((key, sid)))
+    monkeypatch.setattr(
+        bp,
+        "register_process_session",
+        lambda key, sid: calls["registered"].append((key, sid)),
+    )
 
-    import tools.process_registry as pr_mod
-    monkeypatch.setattr(pr_mod, "process_registry", fake_registry)
-    import api.models as models
-    monkeypatch.setattr(models, "get_session", lambda sid, metadata_only=False: SimpleNamespace(id=sid))
+    def get_session(sid, metadata_only=False):
+        return SimpleNamespace(id=sid)
 
-    assert bp.recover_processes_for_webui() == 1
-    assert bp.recover_processes_for_webui() == 0
+    assert bp.recover_processes_for_webui(fake_registry, get_session) == 1
+    assert bp.recover_processes_for_webui(fake_registry, get_session) == 0
     assert calls == {
         "recover": 1,
         "registered": [("webui-session", "webui-session")],
     }
+
+
+def test_recovery_is_fail_soft_without_agent(monkeypatch):
+    real_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "tools.process_registry":
+            raise ImportError("Hermes Agent not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    assert bp.recover_processes_for_webui() == 0
+    assert bp._PROCESS_RECOVERY_DONE is False

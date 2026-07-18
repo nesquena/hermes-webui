@@ -1362,7 +1362,7 @@ def _drain_loop() -> None:
             logger.warning("bg_task_complete event handling failed", exc_info=True)
 
 
-def recover_processes_for_webui() -> int:
+def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> int:
     """Recover core background processes and restore WebUI routing metadata.
 
     The core gateway performs this during gateway startup, but the standalone
@@ -1372,7 +1372,17 @@ def recover_processes_for_webui() -> int:
     global _PROCESS_RECOVERY_DONE
     if _PROCESS_RECOVERY_DONE:
         return 0
-    from tools.process_registry import process_registry
+    if process_registry is None:
+        try:
+            from tools.process_registry import process_registry
+        except ImportError:
+            # Hermes Agent is optional in isolated WebUI/test environments.
+            # The drain loop already treats a missing registry as unavailable;
+            # startup recovery must preserve that fail-soft contract.
+            logger.debug("process recovery unavailable: Hermes Agent is not installed")
+            return 0
+    if get_session_fn is None:
+        from api.models import get_session as get_session_fn
 
     recovered = process_registry.recover_from_checkpoint()
     for row in process_registry.list_sessions():
@@ -1380,8 +1390,7 @@ def recover_processes_for_webui() -> int:
         if not session_key:
             continue
         try:
-            from api.models import get_session
-            if get_session(session_key, metadata_only=True) is None:
+            if get_session_fn(session_key, metadata_only=True) is None:
                 continue
         except Exception:
             logger.debug(
