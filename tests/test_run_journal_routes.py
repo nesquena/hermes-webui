@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
 import io
+import json
 import queue
 
 
@@ -363,7 +364,51 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     assert tool["activitySegmentSeq"] == 1
     assert tool["snippet"] == "passed"
     assert tool["duration"] == 1.25
-    assert len(tool["args"]["extra"]) <= 123
+    assert tool["args"]["extra"] == "x" * 200
+
+
+def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
+    import api.routes as routes
+
+    long_command = "python -c " + repr("print('x')\n" * 24)
+    huge_args = {
+        "command": long_command,
+        "items": [{"index": i, "payload": "x" * 100} for i in range(50_000)],
+    }
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": 1,
+            "last_event_id": f"{stream_id}:1",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "tool",
+                    "payload": {
+                        "name": "terminal",
+                        "tool_use_id": "toolu_huge",
+                        "args": huge_args,
+                    },
+                    "event_id": f"{run_id}:1",
+                },
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+    tool = snapshot["tool_calls"][0]
+    assert tool["args"]["command"] == long_command
+    assert len(tool["args"]["items"]) <= 64
+    assert len(json.dumps(snapshot, sort_keys=True)) < 200_000
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():

@@ -1052,6 +1052,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
+    streamId:String(snapshot.stream_id||snapshot.streamId||''),
     messages,
     uploaded:Array.isArray(uploaded)?[...uploaded]:[],
     toolCalls,
@@ -1062,6 +1063,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     lastAssistantText,
     lastReasoningText,
     lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
+    lastRunJournalEventId:String(snapshot.last_event_id||snapshot.lastEventId||''),
     anchorActivityScene,
     currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
@@ -1069,19 +1071,58 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   };
 }
 
-function _runtimeJournalAnchorActivitySceneForSession(sid){
+function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
+  if(!serverLiveSnapshot) return localInflight||null;
+  if(!localInflight||!_inflightHasVisibleLiveState(localInflight)) return serverLiveSnapshot;
+
+  // The run journal owns the Worklog projection. A same-stream browser tail
+  // wins only when it advanced after the metadata snapshot was read.
+  const requestedActiveId=String(activeStreamId||'').trim();
+  const localId=String(localInflight.streamId||'').trim();
+  const serverId=String(serverLiveSnapshot.streamId||'').trim();
+  const activeId=requestedActiveId||serverId;
+  const selectDurableSnapshot=()=>{
+    if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
+      return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
+    }
+    return serverLiveSnapshot;
+  };
+  if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
+    return localId===requestedActiveId?localInflight:null;
+  }
+  if(activeId&&localId!==activeId) return selectDurableSnapshot();
+
+  const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
+  const serverSeq=Math.max(0,Number(serverLiveSnapshot.lastRunJournalSeq)||0);
+  return serverSeq>=localSeq?selectDurableSnapshot():localInflight;
+}
+
+function _anchorActivitySceneStreamId(scene){
+  if(!scene||typeof scene!=='object') return '';
+  const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+  return String(scene.stream_id||scene.streamId||(identity&&(identity.stream_id||identity.streamId))||'').trim();
+}
+
+function _anchorActivitySceneMatchesStream(scene, activeStreamId){
+  const activeId=String(activeStreamId||'').trim();
+  if(!activeId) return true;
+  const sceneId=_anchorActivitySceneStreamId(scene);
+  return !sceneId||sceneId===activeId;
+}
+
+function _runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId){
   const inflight=INFLIGHT&&sid?INFLIGHT[sid]:null;
-  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'){
+  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(inflight.anchorActivityScene, activeStreamId)){
     return inflight.anchorActivityScene;
   }
   const snapshot=S.session&&S.session.runtime_journal_snapshot;
   const scene=snapshot&&(snapshot.anchor_activity_scene||snapshot.anchorActivityScene);
-  return scene&&scene.version==='activity_scene_v1'?scene:null;
+  return scene&&scene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(scene, activeStreamId)?scene:null;
 }
 
 function _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid){
   if(!activeStreamId||typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneSnapshotForStream!=='function') return false;
-  const scene=_runtimeJournalAnchorActivitySceneForSession(sid);
+  const scene=_runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId);
   if(!scene) return false;
   return !!window._renderLiveAnchorActivitySceneSnapshotForStream(activeStreamId, scene, sid);
 }
@@ -2012,6 +2053,7 @@ async function loadSession(sid){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
       INFLIGHT[sid]={
+        streamId:String(stored.streamId||''),
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
@@ -2026,6 +2068,7 @@ async function loadSession(sid){
         lastAssistantText:String(stored.lastAssistantText||''),
         lastReasoningText:String(stored.lastReasoningText||''),
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
         anchorActivityScene:(stored.anchorActivityScene&&stored.anchorActivityScene.version==='activity_scene_v1')?stored.anchorActivityScene:null,
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
@@ -2051,8 +2094,12 @@ async function loadSession(sid){
   const serverLiveSnapshot=activeStreamId
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
-  if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
-    INFLIGHT[sid]=serverLiveSnapshot;
+  const hadLiveRecoveryInflight=!!INFLIGHT[sid];
+  const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
+  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
+  else if(hadLiveRecoveryInflight&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 
   if(INFLIGHT[sid]){

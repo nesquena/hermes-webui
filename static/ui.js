@@ -8824,6 +8824,7 @@ function _compactInflightState(state){
     lastAssistantText:state.lastAssistantText||'',
     lastReasoningText:state.lastReasoningText||'',
     lastRunJournalSeq:state.lastRunJournalSeq||0,
+    lastRunJournalEventId:state.lastRunJournalEventId||'',
     journalReplayFromStart:!!state.journalReplayFromStart,
     currentActivityBurstId:state.currentActivityBurstId||0,
     currentLiveSegmentSeq:state.currentLiveSegmentSeq||0,
