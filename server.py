@@ -16,6 +16,23 @@ _SIGPIPE = getattr(signal, "SIGPIPE", None)
 if _SIGPIPE is not None:
     signal.signal(_SIGPIPE, signal.SIG_IGN)
 
+# Reap exited children via SIGCHLD so subprocess zombies never accumulate.
+# Without this, any async spawn whose reaper thread is lost (server reload,
+# exception, etc.) leaves a [hermes] <defunct> zombie lingering forever.
+# The loop calls waitpid(-1, WNOHANG) until no more exited children remain;
+# it is non-blocking and never disturbs running subprocesses.
+def _reap_children(_signo, _frame):
+    """Reap any exited child so they never linger as zombies."""
+    try:
+        while True:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+    except ChildProcessError:
+        pass
+
+signal.signal(signal.SIGCHLD, _reap_children)
+
 # Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
     _REAL_CREATE_CONN = socket.create_connection
