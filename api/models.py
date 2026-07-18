@@ -1318,16 +1318,24 @@ def write_composer_draft_sidecar(sid, draft) -> dict:
     return draft
 
 
-def delete_composer_draft_sidecar(sid) -> None:
+def delete_composer_draft_sidecar(sid) -> bool:
+    """Remove a draft sidecar and report whether no authoritative copy remains.
+
+    Callers that tell the browser a draft was cleared must fail closed when an
+    unlink error leaves the sidecar in place: sidecars override the legacy
+    in-session draft on the next load.
+    """
     p = composer_draft_sidecar_path(sid)
     with _DRAFT_SIDECAR_LOCK:
         _DRAFT_SIDECAR_CACHE.pop(str(sid), None)
     if p is None:
-        return
+        return True
     try:
         p.unlink(missing_ok=True)
     except OSError:
         logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+        return False
+    return not p.exists()
 
 
 def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:

@@ -261,6 +261,50 @@ def test_clear_is_canonical_durable_and_does_not_clobber_newer_draft(session_env
     assert models.read_composer_draft_sidecar(sid) == newer
 
 
+def test_clear_returns_error_when_authoritative_draft_sidecar_cannot_be_removed(
+    session_env, monkeypatch
+):
+    from api import models, routes
+
+    _session_dir, _sessions = session_env
+    sid = "draft-clear-unlink-failure"
+    old_draft = {"text": "must not be falsely cleared", "files": []}
+    session = models.Session(session_id=sid, title="Clear unlink failure")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, old_draft)
+
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+    response = _post_draft(
+        monkeypatch,
+        {"session_id": sid, "clear": True, "expected": old_draft},
+    )
+
+    assert response["status"] == 500
+    assert "clear" in response["payload"]["error"].lower()
+    assert models.read_composer_draft_sidecar(sid) == old_draft
+
+
+def test_delete_draft_sidecar_reports_unlink_failure(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "draft-sidecar-unlink-failure"
+    models.write_composer_draft_sidecar(sid, {"text": "preserve me", "files": []})
+    sidecar_path = models.composer_draft_sidecar_path(sid)
+    assert sidecar_path is not None
+    original_unlink = type(sidecar_path).unlink
+
+    def fail_sidecar_unlink(path, *args, **kwargs):
+        if path == sidecar_path:
+            raise OSError("simulated draft-sidecar unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(sidecar_path), "unlink", fail_sidecar_unlink)
+
+    assert models.delete_composer_draft_sidecar(sid) is False
+    assert sidecar_path.exists()
+
+
 def test_clear_canonicalizes_legacy_draft_without_files(session_env, monkeypatch):
     from api import models
 
