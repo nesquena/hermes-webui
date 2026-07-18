@@ -830,19 +830,32 @@ class TestPluginLifecycleI18n:
         "settings_plugin_last_failed",
     ]
 
+    # en + the 10 locales with mandatory parity coverage tests (see
+    # tests/test_*_locale.py: zh, zh-Hant, cs, ja, ko, pl, ru, es, tr, vi).
+    # it/de/fr/pt have no such test and may keep falling back to English.
+    #
+    # Originally scoped to "LOCALES.en only"; the repo-wide parity tests fail
+    # hard on any EN-only key, so the policy — and these two checks — require
+    # translations in the 10 mandatory locales instead (mirrors the same fix
+    # applied to tests/test_moa_config_routes.py::TestMoaSettingsI18n).
+    MANDATORY_PARITY_LOCALE_COUNT = 11
+
     def test_all_keys_present(self):
         for key in self.REQUIRED_KEYS:
             assert key in I18N_JS, f"Missing i18n key '{key}' in i18n.js"
 
-    def test_keys_only_added_to_english_locale(self):
+    def test_keys_translated_in_all_mandatory_parity_locales(self):
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
-            assert count == 1, f"i18n key '{key}' found {count} times — expected exactly 1 (en only)"
+            assert count == self.MANDATORY_PARITY_LOCALE_COUNT, (
+                f"i18n key '{key}' found {count} times — expected exactly "
+                f"{self.MANDATORY_PARITY_LOCALE_COUNT} (en + the 10 mandatory-parity locales)"
+            )
 
-    def test_keys_precede_de_locale_block(self):
+    def test_keys_present_in_english_locale_block(self):
         en_start = I18N_JS.find("\n  en: {")
-        de_start = I18N_JS.find("\n  de: {")
-        assert en_start >= 0 and de_start > en_start
+        it_start = I18N_JS.find("\n  it: {")
+        assert en_start >= 0 and it_start > en_start
         for key in self.REQUIRED_KEYS:
             key_idx = I18N_JS.find(f"{key}:")
-            assert en_start < key_idx < de_start, f"'{key}' must be inside LOCALES.en"
+            assert en_start < key_idx < it_start, f"'{key}' must be inside LOCALES.en"
