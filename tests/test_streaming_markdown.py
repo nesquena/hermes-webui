@@ -727,8 +727,8 @@ class TestSmdUrlSchemeSanitization:
         assert "_SMD_SAFE_URL_RE" in safefn, (
             "_safeSmdRenderer set_attr must use _SMD_SAFE_URL_RE for href safety"
         )
-        assert "_SMD_SAFE_IMG_URL_RE" in safefn, (
-            "_safeSmdRenderer set_attr must use _SMD_SAFE_IMG_URL_RE for src safety"
+        assert "_smdImgSrcAllowed" in safefn, (
+            "_safeSmdRenderer set_attr must delegate src safety to the shared data-image policy"
         )
         assert "data-blocked-scheme" in safefn, (
             "_safeSmdRenderer set_attr must set data-blocked-scheme on unsafe URLs"
