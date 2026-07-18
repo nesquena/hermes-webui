@@ -56,9 +56,10 @@ const _mediaPlayerHtml=(k,s,n)=>`<${k} src="${esc(s)}"></${k}>`;
 const t = k => k;
 const S = {};
 
-// The data-image consts are plain consts in ui.js; grab their literals so the
-// extracted functions run against the REAL allowlist, not a test stand-in.
-for (const name of ['_DATA_IMAGE_RE', '_DATA_IMAGE_MAX_LEN']) {
+// The data-image consts and predicate are production code. Extract/eval them
+// in source order so the renderer functions run against the REAL policy, not
+// a test stand-in.
+for (const name of ['_DATA_IMAGE_RE', '_DATA_IMAGE_SVG_RE', '_DATA_IMAGE_MAX_LEN']) {
   const m = src.match(new RegExp('const ' + name + '=([^\\n]*);'));
   if (!m) throw new Error(name + ' const not found in ui.js');
   globalThis[name] = eval('(' + m[1] + ')');
@@ -77,6 +78,7 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+eval(extractFunc('_isSafeDataImageUri'));
 eval(extractFunc('_dataImageHtml'));
 eval(extractFunc('_mdImageHtml'));
 eval(extractFunc('_inlineMediaHtmlForRef'));
