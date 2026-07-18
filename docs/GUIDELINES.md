@@ -48,11 +48,21 @@ Before writing the fix, search for every sibling — other call sites, producers
 alternate backends, companion endpoints, other layouts, every lifecycle exit — and fix at the
 **shared chokepoint**. If you deliberately leave one out of scope, name it in the PR and say why.
 One guard in the shared function is a smaller and more correct change than one guard per caller.
+The chokepoint is the *smallest* boundary that contains the fault, not the widest one you can
+reach: fixing the class means guarding every sibling of the bug, not disabling a whole stage or
+pipeline to suppress one bad output. If your fix blocks more than the fault occupies, it has grown
+past the task (rule 9).
 
 ### 2. Trace one authoritative value end-to-end.
 Follow the value from `input → normalize → decision → action → persist → cleanup`, and use the
 **same** resolved value at every stage. Don't let the code that *decides* see one value while the
 code that *acts* uses the stale or un-normalized one — that split is a silent correctness bug.
+Before you key a decision on a value, confirm it's *authoritative*: written at the point of intent
+(a canonical kind field, a provenance marker stamped by the action itself, a recorded origin) — not
+inferred from an id prefix, content shape, emptiness, or DOM state. Search for an existing canonical
+field first; inference that happens to work on the case in front of you is the most common way a
+guard misfires on a sibling. If no authoritative field exists, add a test with an adjacent case that
+matches your heuristic and must *not* trigger.
 
 ### 3. When you can't confirm something, fail closed and say so.
 For anything touching authority, capability, identity, or containment: if you cannot *confirm* it's
@@ -64,7 +74,12 @@ not verify X" in the PR is good engineering; hiding it is how a security or reli
 Write down which dimensions the change touches — entry point, backend, item count (0 / 1 / many /
 duplicate), lifecycle exit (success / error / cancel / replace / shrink / teardown), auth on vs off,
 concurrency (two profiles or workers at once), input shape (empty / hostile / aliased) — and cover
-each, or mark it out of scope on purpose. Most redo rounds are one un-considered dimension.
+each, or mark it out of scope on purpose. Most redo rounds are one un-considered dimension. Those
+axes are generic; the ones that actually bite are subsystem-specific and are not obvious to a
+first-time contributor. Before editing an unfamiliar subsystem, find its real variants: read the
+closed PRs and review threads that touched the same code, where the discriminating dimensions
+(every session-lineage kind, every replay/recovery source, each stream response shape) were already
+enumerated. Reuse that list rather than inventing your own from the one case you were handed.
 
 ### 5. Assume inputs and check-then-use gaps are adversarial.
 Input crossing a trust boundary can be crafted to break a naive check (odd delimiters, casing, YAML
@@ -79,7 +94,16 @@ Run your new test against the current code *first* and confirm it fails for the 
 then apply the fix. Assert the **observable behavior** (the row updates, the secret is absent from
 the log, the request carries the right value) — not a source string, and not through a mock that
 stands in for the very thing under test. If the bug is about picking the right one of several items,
-the test must include several items, or it can't catch picking the wrong one.
+the test must include several items, or it can't catch picking the wrong one. When the issue ships a
+reproduction — a session capture, a script, exact steps, an attachment — your test loads **that**,
+not a fixture you rebuilt from your reading of it. A fix and a test written from the same wrong model
+of the bug will base-fail and head-pass on the fixture forever while the real symptom sits untouched;
+loading the reporter's actual scene is what breaks that agreement. A reproduction is whatever *pins
+the bug's shape* — a downloadable capture, but a fenced JSON structure, the field-level trigger
+conditions, or exact steps bind it just as tightly. Bind your fixture to that shape: satisfy every
+condition it names and let the assertion fail when any one is violated, instead of granting the
+fixture a property the report never had so a guard will fire. Reconstruct the shape yourself only
+when the issue genuinely leaves it unpinned — and then say so, and say what you assumed.
 
 ### 7. Name the owner of every piece of state and prove it's released.
 For each resource or mutation you introduce (a cache entry, a lock, a temporary env change, a
@@ -119,6 +143,11 @@ to discover the gaps. Make your PR description carry the evidence:
 - **Before/after images** for any visible change (desktop + narrow).
 - **What you could not verify** — an explicit list. An admitted gap is fine; a hidden one is a bug
   waiting to be found in review.
+- **Who owns the truth** for any claim the repo doesn't — browser behavior, a provider's API, a
+  registry, an OS convention. Name the owner and check your proof is one they'd accept: in-page
+  automation proves page behavior, not that the browser didn't swallow the event first; a mock
+  proves your intent, not the provider's contract; a synthetic fixture proves nothing about the live
+  system. The failure mode here isn't knowing you couldn't verify — it's thinking you did.
 
 Following this imperfectly still helps enormously, because the reviewer can see exactly where your
 coverage stops instead of finding it the hard way.
