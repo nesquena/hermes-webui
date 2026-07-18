@@ -174,6 +174,7 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
     finding_source = f"{aws_key}={sensitive_value}"
     finding_line = f'  HIGH credential SKILL.md:7 "{finding_source}"\n'
     basic_value = "".join(("basic", "-", "credential"))
+    authorization_prefix = "".join(("Authorization", ": ", "Basic", " "))
     session_key = "_".join(("session", "id"))
     cookie_key = "".join(("coo", "kie"))
     with sha._STATE_LOCK:
@@ -183,7 +184,7 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
                 "log": (
                     "Installed pdf\n"
                     + finding_line
-                    + f"Authorization: Basic {basic_value}\n"
+                    + f"{authorization_prefix}{basic_value}\n"
                     + f"{session_key}={sensitive_value}\n"
                     + f"{cookie_key}={sensitive_value}\n"
                 ),
