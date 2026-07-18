@@ -2044,8 +2044,13 @@ window.renderTranscript=function(container, messages, opts){
   // own speak-and-resume flow instead of the default auto-read.
   const _origAutoRead=(typeof autoReadLastAssistant==='function')?autoReadLastAssistant:null;
   window.autoReadLastAssistant=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      _speakResponse();
+    // While voice mode is active it OWNS reading the reply — never also invoke
+    // the browser auto-read, or a race between the thinking-watchdog and this
+    // done-hook double-reads the answer (watchdog fires first, state leaves
+    // 'thinking', this call would otherwise fall through to _origAutoRead when
+    // the separate "auto-read" preference is on).
+    if(_voiceModeActive){
+      if(_voiceModeState==='thinking') _speakResponse();
       return;
     }
     if(_origAutoRead) _origAutoRead.apply(this,arguments);

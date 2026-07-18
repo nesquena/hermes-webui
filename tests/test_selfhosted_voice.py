@@ -454,25 +454,44 @@ def test_stt_request_format_field_wired():
     assert "request_format" in vc._STT_STR_FIELDS
 
 
+_WEBM = b'\x1aE\xdf\xa3' + b'\x00' * 12   # EBML/WebM magic
+_WAV = b'RIFF\x00\x00\x00\x00WAVE'        # RIFF..WAVE
+_OGG = b'OggS' + b'\x00' * 12
+
+
 def test_stt_mime_types_allowlist_enforced(monkeypatch):
-    """stt.mime_types is enforced (415) instead of being advisory-only."""
+    """stt.mime_types is enforced (415) by SNIFFING the real container — a
+    renamed extension cannot bypass it (the parse_multipart part type is not
+    available, so filename-only enforcement was a bypassable sham)."""
     import api.config as config
     import api.upload as upload
 
     monkeypatch.setattr(config, "get_config",
                         lambda: {"stt": {"mime_types": "audio/webm,audio/ogg"}})
-    # exact match accepted
-    assert upload._stt_mime_rejection({"file": ("v.webm", b"x", "audio/webm")}, "v.webm") is None
-    # disallowed type rejected
-    rej = upload._stt_mime_rejection({"file": ("v.wav", b"x", "audio/wav")}, "v.wav")
+    # real webm bytes accepted
+    assert upload._stt_mime_rejection({"file": ("v.webm", _WEBM)}, "v.webm") is None
+    # WAV bytes rejected even though allowlist lacks wav
+    rej = upload._stt_mime_rejection({"file": ("v.wav", _WAV)}, "v.wav")
     assert rej and "not in the allowed types" in rej
+    # BYPASS ATTEMPT: WAV content renamed to .webm is still rejected (content wins)
+    rej2 = upload._stt_mime_rejection({"file": ("evil.webm", _WAV)}, "evil.webm")
+    assert rej2 and "not in the allowed types" in rej2
     # wildcard token
     monkeypatch.setattr(config, "get_config", lambda: {"stt": {"mime_types": "audio/*"}})
-    assert upload._stt_mime_rejection({"file": ("v.mp3", b"x", "audio/mpeg")}, "v.mp3") is None
-    assert upload._stt_mime_rejection({"file": ("v.mp4", b"x", "video/mp4")}, "v.mp4")
+    assert upload._stt_mime_rejection({"file": ("v.ogg", _OGG)}, "v.ogg") is None
     # empty allowlist accepts anything
     monkeypatch.setattr(config, "get_config", lambda: {"stt": {}})
-    assert upload._stt_mime_rejection({"file": ("v.wav", b"x", "audio/wav")}, "v.wav") is None
+    assert upload._stt_mime_rejection({"file": ("v.wav", _WAV)}, "v.wav") is None
+
+
+def test_sniff_audio_mime_covers_common_containers():
+    import api.upload as upload
+    assert upload._sniff_audio_mime(_WEBM) == "audio/webm"
+    assert upload._sniff_audio_mime(_WAV) == "audio/wav"
+    assert upload._sniff_audio_mime(_OGG) == "audio/ogg"
+    assert upload._sniff_audio_mime(b'ID3\x04junk') == "audio/mpeg"
+    assert upload._sniff_audio_mime(b'\x00\x00\x00\x20ftypM4A ') == "audio/mp4"
+    assert upload._sniff_audio_mime(b'random') == ""
 
 
 def test_voice_reply_tts_toggle_present():

@@ -8546,12 +8546,20 @@ function _playServerTtsChunks(chunks, bodyFor, btn, label, onDone){
     if(onDone) onDone(err||null);
     else if(err&&typeof showToast==='function') showToast(label+' failed: '+((err&&err.message)||err));
   };
-  const _fetchChunk=function(idx){
+  const _fetchChunk=function(idx, attempt){
+    attempt=attempt||0;
     return fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(bodyFor(chunks[idx]))
     }).then(function(r){
+      // A long (>cap) multi-sentence reply can hit the per-client TTS rate
+      // limiter mid-playback. Don't abort the whole reply on 429 — wait for
+      // the sliding window to free a slot and retry this chunk (bounded).
+      if(r.status===429 && attempt<6 && _ttsQueueToken===token){
+        return new Promise(function(res){ setTimeout(res, 1500); })
+          .then(function(){ return _ttsQueueToken===token ? _fetchChunk(idx, attempt+1) : null; });
+      }
       if(!r.ok){
         return r.json().catch(function(){return {};}).then(function(j){
           throw new Error((j&&j.error)||('TTS request failed: '+r.status));

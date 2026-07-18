@@ -452,20 +452,45 @@ def _configured_stt_mime_types():
     return [t.strip().lower() for t in _re.split(r'[,;]', raw) if t.strip()]
 
 
+def _sniff_audio_mime(data):
+    """Best-effort container detection from the leading bytes — content-based,
+    so it can't be fooled by a renamed extension. Returns a canonical MIME or
+    '' when unrecognised. Covers the formats a browser MediaRecorder / Dictate
+    upload realistically produces plus common uploads."""
+    if not data:
+        return ''
+    b = bytes(data[:16])
+    if b[:4] == b'OggS':
+        return 'audio/ogg'
+    if b[:4] == b'RIFF' and b[8:12] == b'WAVE':
+        return 'audio/wav'
+    if b[:4] == b'\x1aE\xdf\xa3':  # EBML → WebM/Matroska
+        return 'audio/webm'
+    if b[:4] == b'fLaC':
+        return 'audio/flac'
+    if b[:3] == b'ID3' or (len(b) >= 2 and b[0] == 0xFF and (b[1] & 0xE0) == 0xE0):
+        return 'audio/mpeg'
+    if b[4:8] == b'ftyp':
+        return 'audio/mp4'
+    return ''
+
+
 def _stt_mime_rejection(files, safe_name):
     """Enforce the stt.mime_types allowlist. Returns an error string to reject
-    with (HTTP 415) or None to accept. Matches the upload's content-type — the
-    multipart part type when available, else guessed from the filename — against
-    exact tokens and ``type/*`` wildcards. Empty allowlist accepts anything."""
+    with (HTTP 415) or None to accept. Determination is CONTENT-based: the
+    upload's leading bytes are sniffed for the real container, so a renamed
+    extension can't bypass the allowlist. Only when the bytes are unrecognised
+    does it fall back to the filename guess. Empty allowlist accepts anything;
+    an unrecognisable upload is accepted (don't hard-fail a legit odd format)."""
     allow = _configured_stt_mime_types()
     if not allow:
         return None
     import mimetypes
-    ctype = ''
+    file_bytes = b''
     entry = files.get('file') if isinstance(files, dict) else None
-    # parse_multipart may expose a 3-tuple (name, bytes, content_type); tolerate both.
-    if isinstance(entry, (list, tuple)) and len(entry) >= 3 and entry[2]:
-        ctype = str(entry[2]).split(';', 1)[0].strip().lower()
+    if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+        file_bytes = entry[1] or b''
+    ctype = _sniff_audio_mime(file_bytes)
     if not ctype:
         guessed, _ = mimetypes.guess_type(safe_name)
         ctype = (guessed or '').lower()
