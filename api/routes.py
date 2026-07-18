@@ -12769,6 +12769,7 @@ def handle_get(handler, parsed) -> bool:
             _truncated = load_messages and msg_limit is not None and _messages_offset > 0
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset
+            raw["_msg_limit_max"] = _MAX_MSG_LIMIT
             _t4 = _time.monotonic()
             if _diag: _diag.stage("t4_after_compact_and_merge")
             if effective_model:
