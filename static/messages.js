@@ -4210,16 +4210,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
   const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\/|#|\?|\.|api|session\/)/i;
-  // data:image/ is limited to raster+SVG subtypes; scripts never execute inside
-  // <img>, and every other data: scheme stays blocked. The payload charset and
-  // 2MB cap MIRROR ui.js (_DATA_IMAGE_RE/_DATA_IMAGE_MAX_LEN) so a URI never
-  // renders during streaming and then vanishes at settle (audit 18.07.2026).
-  const _SMD_DATA_IMAGE_RE=/^data:image\/(?:png|jpe?g|gif|webp|avif|svg\+xml)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i;
-  const _SMD_DATA_IMAGE_MAX_LEN=2*1024*1024;
+  // ui.js owns the image-only data URI policy. It loads before this script;
+  // fail closed if that contract is unavailable rather than inventing a second
+  // allowlist that can drift from settled rendering.
   const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
   function _smdImgSrcAllowed(v){
     const s=String(v||'');
-    if(/^data:/i.test(s)) return _SMD_DATA_IMAGE_RE.test(s)&&s.length<=_SMD_DATA_IMAGE_MAX_LEN;
+    if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
     return _SMD_SAFE_IMG_URL_RE.test(s);
   }
   function _smdLinkHref(raw){
