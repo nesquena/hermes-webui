@@ -92,6 +92,10 @@ jobs:
 
   lint:
     needs: changes
+    # `lint` is not currently a required check, but add always() anyway so it can
+    # never wedge if it's promoted to required later — same rationale as the test/
+    # browser-smoke jobs; a failed `changes` degrades to running the full lint.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Docs-only short-circuit

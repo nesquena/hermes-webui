@@ -82,23 +82,48 @@ def check_file(path: Path) -> list[str]:
                 f"{path}:{line_no}: link/image destination never closed with ')' — renders broken")
             continue
 
-        # A newline appears before any ')'. This is a BREAK only if it splits the
-        # destination TOKEN itself. The destination token is the unbroken run of
-        # non-space characters starting at dest_start; it ends at the first space,
-        # tab, or newline. So the newline splits the token iff EVERY character from
-        # dest_start up to the newline is non-space (no whitespace ended the token
-        # first). A newline that follows a complete token + whitespace (a trailing
-        # space, or the space before a "title") is legal CommonMark and renders fine.
+        # A newline appears before any ')'. Once a space/newline ends the destination
+        # token, CommonMark expects either the closing ')' or a "title" (in quotes)
+        # then ')'. So after the newline, the next non-space content must be a title
+        # (`"`, `'`, or `(`) or the close `)`. If instead it's bare text, the inline
+        # link is malformed and does NOT render — that's the break we flag.
+        #
+        # Cases:
+        #   [x](url\n)             -> after nl: ')'      -> valid   (skip)
+        #   [x](url\n"title")      -> after nl: '"title' -> valid   (skip)
+        #   [x](\nurl)            -> dest starts next line-> valid   (skip)
+        #   [x](url\nmore)        -> after nl: 'more'    -> BROKEN  (flag)
+        #   [x](url<EOF, no ')')  -> unclosed            -> BROKEN  (flag)
+        rest = text[nl + 1:]
+        rest_stripped = rest.lstrip()
         seg = text[dest_start:nl]
-        if seg == "" or seg.strip() == "":
-            continue                      # dest starts on the next line — legal
-        after = text[nl + 1] if nl + 1 < len(text) else " "
-        # token unbroken up to the newline AND continues after it → split token.
-        if not any(c.isspace() for c in seg) and not after.isspace() and after != ")":
-            before = seg[-1]
+
+        # If a title quote has already opened before the newline (e.g.
+        # `[x](url "multi\nline title")`), the newline is INSIDE the title string,
+        # which is legal CommonMark. Don't treat it as a destination break.
+        if ('"' in seg) or ("'" in seg):
+            continue
+
+        # Sub-case: the destination itself hasn't started yet (all whitespace before nl)
+        # AND resumes on the next line as a normal dest — legal.
+        if seg.strip() == "" and rest_stripped[:1] not in ("", ")"):
+            continue
+
+        # Is there any ')' at all after the newline? If not, it's unclosed -> broken.
+        if close == -1:
             problems.append(
-                f"{path}:{line_no}: newline inside a link destination "
-                f"(`{before}\\n{after}`) — the link will not render")
+                f"{path}:{line_no}: link/image destination never closed with ')' — renders broken")
+            continue
+
+        # There is a ')' later. Valid continuations after the newline: close ')',
+        # or a title opener (" ' or ( ). Anything else (bare text) => broken.
+        nxt = rest_stripped[:1]
+        if nxt in (")", '"', "'", "("):
+            continue                      # legal separator before title/close
+        # bare non-space text after the newline before the close => destination
+        # token is split across the line => the link will not render.
+        problems.append(
+            f"{path}:{line_no}: newline inside a link destination — the link will not render")
         # else: whitespace ended the token before the newline, or the newline is
         # immediately followed by ')'/space (trailing) → legal CommonMark, skip.
     return problems
