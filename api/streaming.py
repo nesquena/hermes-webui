@@ -48,6 +48,7 @@ from api.config import (
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
+from api.artifact_references import derive_file_artifact_references
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
@@ -5762,7 +5763,6 @@ _TOOL_ARG_CONTENT_KEYS = frozenset({
 })
 _TOOL_ARG_CONTENT_CAP = _TOOL_RESULT_SNIPPET_MAX
 
-
 _LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
 _LIVE_TOOL_PROMPT_TURN_MAX = 24_000
 
@@ -7086,8 +7086,11 @@ def _run_agent_streaming(
     _success_writeback_committed = False
 
     def put(event, data):
-        # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'error'):
+        # After cancellation, preserve only terminal events and proven file
+        # artifacts. A tool may finish its on-disk write just after the cancel
+        # flag is set; journaling that reference keeps the real side effect
+        # recoverable without reopening the rest of the live event stream.
+        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'error', 'artifact_reference'):
             return
         event_id = None
         if run_journal is not None:
@@ -7848,6 +7851,17 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    mutation_result = (
+                        cb_kwargs.get('result')
+                        if cb_kwargs.get('result') is not None
+                        else preview
+                    )
+                    artifact_references = derive_file_artifact_references(
+                        name,
+                        args,
+                        mutation_result,
+                        s.workspace,
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -7877,6 +7891,8 @@ def _run_agent_streaming(
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
                     })
+                    for artifact_reference in artifact_references:
+                        put('artifact_reference', artifact_reference)
                     # Mirror the todo tool's in-memory state into a
                     # dedicated SSE event so the Todos panel can update
                     # in real-time without waiting for the turn to
@@ -7951,6 +7967,13 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
+                        artifact_references = derive_file_artifact_references(
+                            name,
+                            args,
+                            function_result,
+                            s.workspace,
+                            tool_call_id=tool_call_id,
+                        )
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
@@ -7975,6 +7998,8 @@ def _run_agent_streaming(
                             'tid': tool_call_id,
                             'is_error': False,
                         })
+                        for artifact_reference in artifact_references:
+                            put('artifact_reference', artifact_reference)
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
                         # update in real-time without waiting for the

@@ -2630,7 +2630,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   _scheduleAnchorRegistryCleanup(600000);
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
-  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome){
+  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
     if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
     const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
@@ -2655,7 +2655,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         sourceEvent,
         {session_id:activeSid,stream_id:streamId}
       );
-      const rendered=_renderAnchorLiveScene();
+      const rendered=options&&options.render===false?false:_renderAnchorLiveScene();
       if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
       return result;
     }catch(err){
@@ -5447,6 +5447,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
     });
 
+    source.addEventListener('artifact_reference',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ return; }
+      _applyToAnchor('artifact_reference',d,e,null,{render:false});
+    });
+
     // Phase 2: dedicated `todo_state` event carries a full snapshot of
     // the upstream TodoStore.  We treat it as the single source of truth
     // for the Todos panel — never merge, always replace.  The handler
@@ -6381,7 +6389,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','artifact_reference','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

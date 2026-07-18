@@ -460,6 +460,9 @@ Confirmed follow-up scope:
 - Treat interrupted/cancelled tool-history loss, such as
   [#3528](https://github.com/nesquena/hermes-webui/issues/3528), as a
   live-to-final recoverability bug when it prevents artifact reconstruction.
+- Canonical `write_file` and `patch` completions that prove a mutation landed
+  emit path-only `artifact_reference` events. Raw arguments and result bodies
+  remain outside Anchor persistence; unknown or failed results fail closed.
 
 ### Sidebar and session ownership
 
