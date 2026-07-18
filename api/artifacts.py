@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 ARTIFACTS_DIR = STATE_DIR / "artifacts"
 _ARTIFACTS_LOCK = threading.Lock()
+# The source index has its own read-modify-write transaction.  Always acquire
+# this lock before _ARTIFACTS_LOCK; no path acquires them in reverse order.
+_SOURCE_INDEX_LOCK = threading.Lock()
 
 # Hard cap per published file. Artifacts are chat deliverables (reports,
 # charts, small bundles), not a file-hosting service.
@@ -310,95 +313,100 @@ def publish_artifact(
     source = validate_source_path(raw_path)
     mime = mime_for(source.name)
 
-    with _ARTIFACTS_LOCK:
-        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-        source_key = str(source)
+    source_key = str(source)
+    # Keep the persisted index snapshot and write serialized independently of
+    # artifact metadata.  In particular, its O(N) JSON normalization happens
+    # before _ARTIFACTS_LOCK is acquired, while this lock prevents same-process
+    # publishers/revokers from writing stale snapshots over one another.
+    with _SOURCE_INDEX_LOCK:
         source_index = _load_source_index()
-        if token:
-            token = str(token).strip()
-            meta = _load_meta(token)
-            if meta is None or meta.get("revoked_at"):
-                raise ValueError("unknown or revoked artifact token")
-        else:
-            token = source_index.get(source_key)
-            meta = _load_meta(token) if token else None
-            # The index is a performance accelerator, never authority: reject a
-            # stale or tampered mapping before it can select another artifact.
-            if meta is None or meta.get("revoked_at") or meta.get("source_path") != source_key:
-                if token:
-                    source_index.pop(source_key, None)
-                token = None
-                meta = None
-        if meta is None:
-            token = secrets.token_urlsafe(18)
-            meta = {
-                "token": token,
-                "source_path": str(source),
+        with _ARTIFACTS_LOCK:
+            ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+            if token:
+                token = str(token).strip()
+                meta = _load_meta(token)
+                if meta is None or meta.get("revoked_at"):
+                    raise ValueError("unknown or revoked artifact token")
+            else:
+                token = source_index.get(source_key)
+                meta = _load_meta(token) if token else None
+                # The index is a performance accelerator, never authority: reject a
+                # stale or tampered mapping before it can select another artifact.
+                if meta is None or meta.get("revoked_at") or meta.get("source_path") != source_key:
+                    if token:
+                        source_index.pop(source_key, None)
+                    token = None
+                    meta = None
+            if meta is None:
+                token = secrets.token_urlsafe(18)
+                meta = {
+                    "token": token,
+                    "source_path": str(source),
+                    "filename": source.name,
+                    "mime": mime,
+                    "title": "",
+                    "public": False,
+                    "session_id": str(session_id or ""),
+                    "created_at": time.time(),
+                    "updated_at": None,
+                    "revoked_at": None,
+                    "versions": [],
+                }
+
+            assert token is not None
+            previous_source = str(meta.get("source_path") or "")
+            effective_public = bool(meta.get("public")) if public is None else bool(public)
+
+            version = len(meta.get("versions") or []) + 1
+            vdir = _artifact_dir(token) / f"v{version}"
+            vdir.mkdir(parents=True, exist_ok=True)
+            dest = vdir / source.name
+
+            # Redaction is a PER-VERSION property recorded in the version entry:
+            # anonymous serving of a public artifact only ever exposes versions
+            # whose stored copy is public-safe (redacted text, or binary formats
+            # the redactor does not apply to). Older versions published while the
+            # artifact was private stay session-gated even after a public toggle.
+            redacted = False
+            if effective_public and mime in _REDACTABLE_MIME:
+                try:
+                    text = source.read_text(encoding="utf-8", errors="replace")
+                except Exception as exc:
+                    raise ValueError(f"could not read file: {exc}") from exc
+                dest.write_text(_force_redact_credentials(text), encoding="utf-8")
+                redacted = True
+            else:
+                shutil.copyfile(source, dest)
+
+            now = time.time()
+            meta["versions"] = list(meta.get("versions") or []) + [{
+                "v": version,
+                "size": dest.stat().st_size,
+                "created_at": now,
+                # Per-version serving identity: resolve_artifact_file must locate
+                # THIS version's file even if a later re-publish uses a different
+                # source filename/MIME (pinned ?v=N links stay valid).
                 "filename": source.name,
                 "mime": mime,
-                "title": "",
-                "public": False,
-                "session_id": str(session_id or ""),
-                "created_at": time.time(),
-                "updated_at": None,
-                "revoked_at": None,
-                "versions": [],
-            }
-
-        assert token is not None
-        previous_source = str(meta.get("source_path") or "")
-        effective_public = bool(meta.get("public")) if public is None else bool(public)
-
-        version = len(meta.get("versions") or []) + 1
-        vdir = _artifact_dir(token) / f"v{version}"
-        vdir.mkdir(parents=True, exist_ok=True)
-        dest = vdir / source.name
-
-        # Redaction is a PER-VERSION property recorded in the version entry:
-        # anonymous serving of a public artifact only ever exposes versions
-        # whose stored copy is public-safe (redacted text, or binary formats
-        # the redactor does not apply to). Older versions published while the
-        # artifact was private stay session-gated even after a public toggle.
-        redacted = False
-        if effective_public and mime in _REDACTABLE_MIME:
-            try:
-                text = source.read_text(encoding="utf-8", errors="replace")
-            except Exception as exc:
-                raise ValueError(f"could not read file: {exc}") from exc
-            dest.write_text(_force_redact_credentials(text), encoding="utf-8")
-            redacted = True
-        else:
-            shutil.copyfile(source, dest)
-
-        now = time.time()
-        meta["versions"] = list(meta.get("versions") or []) + [{
-            "v": version,
-            "size": dest.stat().st_size,
-            "created_at": now,
-            # Per-version serving identity: resolve_artifact_file must locate
-            # THIS version's file even if a later re-publish uses a different
-            # source filename/MIME (pinned ?v=N links stay valid).
-            "filename": source.name,
-            "mime": mime,
-            # public_safe: this stored copy may be served anonymously when the
-            # artifact is public (redacted text, or non-redactable binary
-            # published while public).
-            "public_safe": bool(effective_public and (redacted or mime not in _REDACTABLE_MIME)),
-        }]
-        meta["updated_at"] = now
-        meta["mime"] = mime
-        meta["filename"] = source.name
-        meta["source_path"] = str(source)
-        if title is not None and str(title).strip():
-            meta["title"] = str(title).strip()[:200]
-        elif not meta.get("title"):
-            meta["title"] = source.name
-        meta["public"] = effective_public
-        if session_id:
-            meta["session_id"] = str(session_id)
-        _write_json_atomic(_meta_path(token), meta)
-        _set_source_index_entry(source_index, source_key, token, previous_source)
-        _write_json_atomic(_source_index_path(), source_index)
+                # public_safe: this stored copy may be served anonymously when the
+                # artifact is public (redacted text, or non-redactable binary
+                # published while public).
+                "public_safe": bool(effective_public and (redacted or mime not in _REDACTABLE_MIME)),
+            }]
+            meta["updated_at"] = now
+            meta["mime"] = mime
+            meta["filename"] = source.name
+            meta["source_path"] = str(source)
+            if title is not None and str(title).strip():
+                meta["title"] = str(title).strip()[:200]
+            elif not meta.get("title"):
+                meta["title"] = source.name
+            meta["public"] = effective_public
+            if session_id:
+                meta["session_id"] = str(session_id)
+            _write_json_atomic(_meta_path(token), meta)
+            _set_source_index_entry(source_index, source_key, token, previous_source)
+            _write_json_atomic(_source_index_path(), source_index)
 
     return {
         "token": token,
@@ -445,18 +453,19 @@ def resolve_artifact_file(token: str, version: int | None = None) -> tuple[dict,
 
 
 def revoke_artifact(token: str) -> bool:
-    with _ARTIFACTS_LOCK:
-        meta = _load_meta(token)
-        if meta is None:
-            return False
-        meta["revoked_at"] = time.time()
-        canonical_token = str(meta.get("token") or token)
-        _write_json_atomic(_meta_path(canonical_token), meta)
+    with _SOURCE_INDEX_LOCK:
         source_index = _load_source_index()
-        source = str(meta.get("source_path") or "")
-        if source_index.get(source) == canonical_token:
-            source_index.pop(source, None)
-        _write_json_atomic(_source_index_path(), source_index)
+        with _ARTIFACTS_LOCK:
+            meta = _load_meta(token)
+            if meta is None:
+                return False
+            meta["revoked_at"] = time.time()
+            canonical_token = str(meta.get("token") or token)
+            _write_json_atomic(_meta_path(canonical_token), meta)
+            source = str(meta.get("source_path") or "")
+            if source_index.get(source) == canonical_token:
+                source_index.pop(source, None)
+            _write_json_atomic(_source_index_path(), source_index)
     return True
 
 

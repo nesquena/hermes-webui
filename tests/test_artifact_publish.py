@@ -8,6 +8,7 @@ public text artifacts, and 404-on-revoke.
 import json
 import os
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -241,8 +242,49 @@ def test_republish_uses_source_index_without_scanning_unrelated_metadata(tmp_pat
     assert len(read_paths) == 1, "indexed re-publish must read only its own metadata"
 
 
-def test_token_source_cleanup_is_bounded_under_the_artifact_lock(tmp_path, monkeypatch):
-    """Replacing/revoking a token must not walk every source-index entry."""
+def test_stale_source_index_mapping_is_repaired_from_metadata(tmp_path, monkeypatch):
+    """A source-index accelerator cannot select a token for another source."""
+    from api import artifacts
+
+    artifact_dir = tmp_path / "artifacts"
+    source = tmp_path / "report.html"
+    source.write_text("<p>report</p>", encoding="utf-8")
+    stale_token = "staletoken123"
+    stale_dir = artifact_dir / stale_token
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "meta.json").write_text(json.dumps({
+        "token": stale_token,
+        "source_path": str((tmp_path / "different.html").resolve()),
+        "filename": "different.html",
+        "mime": "text/html",
+        "title": "different",
+        "public": False,
+        "created_at": 1,
+        "updated_at": 1,
+        "revoked_at": None,
+        "versions": [],
+    }), encoding="utf-8")
+    (artifact_dir / "source_index.json").write_text(json.dumps({
+        str(source.resolve()): stale_token,
+    }), encoding="utf-8")
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
+
+    published = artifacts.publish_artifact(str(source))
+
+    assert published["token"] != stale_token
+    current = json.loads((artifact_dir / "source_index.json").read_text(encoding="utf-8"))
+    assert current[str(source.resolve())] == published["token"]
+
+
+@pytest.mark.parametrize("operation", ("publish", "revoke"))
+def test_persisted_source_index_is_not_normalized_under_artifact_lock(
+    tmp_path, monkeypatch, operation,
+):
+    """The real persisted index parser must run before the artifact lock.
+
+    Returning a pre-built mapping from ``_load_source_index`` would miss the
+    production normalization comprehension, which is the regression boundary.
+    """
     from api import artifacts
 
     artifact_dir = tmp_path / "artifacts"
@@ -277,35 +319,84 @@ def test_token_source_cleanup_is_bounded_under_the_artifact_lock(tmp_path, monke
 
     lock = TrackingLock()
 
-    class BoundedIndex(dict):
+    class TrackingIndex(dict):
         def items(self):
             if lock.held:
-                raise AssertionError("source index was fully traversed while the artifact lock was held")
+                raise AssertionError("persisted source index normalized under artifact lock")
             return super().items()
 
-    index = BoundedIndex({f"/tmp/unrelated-{i}.html": f"othertoken{i:06d}" for i in range(2_000)})
-    index[str(old_source.resolve())] = token
+    persisted_index = {
+        f"/tmp/unrelated-{i}.html": f"othertoken{i:06d}"
+        for i in range(2_000)
+    }
+    persisted_index[str(old_source.resolve())] = token
+    raw_index = json.dumps(persisted_index)
+    (artifact_dir / "source_index.json").write_text(raw_index, encoding="utf-8")
+
     monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
     monkeypatch.setattr(artifacts, "_ARTIFACTS_LOCK", lock)
-    monkeypatch.setattr(artifacts, "_load_source_index", lambda: index)
-    original_write_json_atomic = artifacts._write_json_atomic
+    original_loads = artifacts.json.loads
 
-    def write_metadata_only(path, payload):
-        if path == artifact_dir / "source_index.json":
-            return
-        original_write_json_atomic(path, payload)
+    def tracking_loads(doc, *args, **kwargs):
+        loaded = original_loads(doc, *args, **kwargs)
+        return TrackingIndex(loaded) if doc == raw_index else loaded
 
-    monkeypatch.setattr(artifacts, "_write_json_atomic", write_metadata_only)
+    monkeypatch.setattr(artifacts.json, "loads", tracking_loads)
 
-    published = artifacts.publish_artifact(str(new_source), token=token)
+    if operation == "publish":
+        published = artifacts.publish_artifact(str(new_source), token=token)
+        assert published["token"] == token
+        current = json.loads((artifact_dir / "source_index.json").read_text(encoding="utf-8"))
+        assert str(old_source.resolve()) not in current
+        assert current[str(new_source.resolve())] == token
+    else:
+        assert artifacts.revoke_artifact(token) is True
+        current = json.loads((artifact_dir / "source_index.json").read_text(encoding="utf-8"))
+        assert str(old_source.resolve()) not in current
+        assert current["/tmp/unrelated-1999.html"] == "othertoken001999"
 
-    assert published["token"] == token
-    assert str(old_source.resolve()) not in index
-    assert index[str(new_source.resolve())] == token
 
-    assert artifacts.revoke_artifact(token) is True
-    assert str(new_source.resolve()) not in index
-    assert index["/tmp/unrelated-1999.html"] == "othertoken001999"
+def test_concurrent_source_index_updates_preserve_both_new_entries(tmp_path, monkeypatch):
+    """Concurrent same-process publishes cannot overwrite each other's index update."""
+    from api import artifacts
+
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("<p>first</p>", encoding="utf-8")
+    second.write_text("<p>second</p>", encoding="utf-8")
+    (artifact_dir / "source_index.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", artifact_dir)
+
+    original_load = artifacts._load_source_index
+    both_loaders = threading.Barrier(2)
+
+    def synchronized_load():
+        try:
+            both_loaders.wait(timeout=0.2)
+        except threading.BrokenBarrierError:
+            pass
+        return original_load()
+
+    monkeypatch.setattr(artifacts, "_load_source_index", synchronized_load)
+    failures = []
+
+    def publish(source):
+        try:
+            artifacts.publish_artifact(str(source))
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=publish, args=(source,)) for source in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not failures
+    current = json.loads((artifact_dir / "source_index.json").read_text(encoding="utf-8"))
+    assert set(current) == {str(first.resolve()), str(second.resolve())}
 
 
 class TestAuditFixes:
