@@ -10719,7 +10719,7 @@ function _pluginConfirmModal(opts){
   ack.checked=false;
   okBtn.disabled=true;
   okBtn.style.opacity='.5';
-  okBtn.textContent=opts.confirmLabel||t('confirm')||'Confirm';
+  okBtn.textContent=opts.confirmLabel||t('dialog_confirm_btn')||'Confirm';
   cancelBtn.textContent=t('cancel')||'Cancel';
   ack.onchange=()=>{okBtn.disabled=!ack.checked;okBtn.style.opacity=ack.checked?'1':'.5';};
   const close=(result)=>{overlay.style.display='none';resolve(result);};
