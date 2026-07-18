@@ -67,7 +67,9 @@ def test_html_chat_attachment_opens_sandboxed_inline_raw_file():
 
 def test_html_media_open_full_uses_inline_new_tab_not_download():
     """MEDIA: HTML preview's Open full page link should open a browser view."""
-    body = _slice_after(UI_JS, "function loadHtmlInline", 1800)
+    # 3600: the artifact publish-button markup now sits between the fetch and
+    # the html-open-link line, so the original 1800-char window undershoots.
+    body = _slice_after(UI_JS, "function loadHtmlInline", 3600)
     assert "'&inline=1'" in body
     assert "target=\"_blank\"" in body
     assert "rel=\"noopener\"" in body

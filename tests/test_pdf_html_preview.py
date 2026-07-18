@@ -173,7 +173,9 @@ class TestLoadHtmlInlineFunction:
     def test_fallback_on_error(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 2000]
+        # 4000: the artifact publish-button markup sits inside loadHtmlInline
+        # since the artifacts feature, pushing the error fallback further down.
+        body = ui[idx:idx + 4000]
         assert 'html_error' in body, 'Must show error fallback on failure'
 
     def test_uses_srcdoc_attribute(self):
