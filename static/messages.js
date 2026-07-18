@@ -6149,7 +6149,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      const status=await _restoreSettledSession(source,{status:true});
+      const status=await _restoreSettledSession(source,{status:true,preserveVisibleOnShorterTerminalSnapshot:true});
       if(status==='restored'){
         return;
       }
@@ -6726,7 +6726,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _stagedMatchesCurrentPrefix=(
           _stagedMessages.length>0 &&
           _stagedMessages.length<_currentVisibleMessages.length &&
-          _currentVisibleEndsWithTerminalMarker &&
+          (_currentVisibleEndsWithTerminalMarker || preserveVisibleOnShorterTerminalSnapshot) &&
           _stagedMessages.every((message, idx)=>{
             const stagedKey=_messageIdentityKey(message);
             const currentKey=_messageIdentityKey(_currentVisibleMessages[idx]);
