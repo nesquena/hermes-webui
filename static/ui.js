@@ -2553,8 +2553,53 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
 // streamed prose loses its image when the answer settles (#MEDIA-in-stream).
 // `sessionId` is forwarded into /api/media so the same allow-list check applies
 // to streamed references too; falls back to whatever the current session is.
-function _inlineMediaHtmlForRef(ref, sessionId){
+// data:image/* URIs the renderer may embed directly as <img src>. Only raster
+// formats plus base64 SVG (scripts do not execute inside <img>), only safe payload
+// chars, and bounded size — everything else (data:text/html etc.) must
+// keep rendering as inert text so a model-emitted data: URI can never become an
+// executable document.
+const _DATA_IMAGE_RE=/^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i;
+const _DATA_IMAGE_SVG_RE=/^data:image\/svg\+xml;base64,[a-z0-9+/=]+$/i;
+const _DATA_IMAGE_MAX_LEN=2*1024*1024;
+
+// The streaming renderer calls this ui-owned predicate too. Keep the dangerous
+// SVG form base64-only: URL-encoded XML is a document-shaped payload, not a
+// normal inline image transport.
+function _isSafeDataImageUri(ref){
+  const value=String(ref||'');
+  return value.length<=_DATA_IMAGE_MAX_LEN
+    && (_DATA_IMAGE_RE.test(value)||_DATA_IMAGE_SVG_RE.test(value));
+}
+
+function _dataImageHtml(ref, altText){
+  if(!_isSafeDataImageUri(ref)) return null;
+  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
+}
+
+// Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
+// <img>; file:// and bare data:image/ URIs route through the same helpers the
+// MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
+// of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
+// dumping raw base64 text into the chat.
+function _mdImageHtml(alt, url){
+  if(/^data:/i.test(url)){
+    const img=_dataImageHtml(url, alt);
+    if(img) return img;
+    return esc(`![${alt}](${String(url).slice(0,64)}…)`);
+  }
+  if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
+  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+}
+
+function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(ref==null) return '';
+  // data:image/* → inline <img>; any other data: scheme renders as inert
+  // truncated text (never routed to api/media, never embedded).
+  if(/^data:/i.test(ref)){
+    const img=_dataImageHtml(ref,altText===undefined?'image':altText);
+    if(img) return img;
+    return `<code>${esc(String(ref).slice(0,64))}…</code>`;
+  }
   // Keep this logic self-contained: some tests extract renderMd() alone and
   // execute it in node, without the top-level helper functions from ui.js.
   // Tests look for `new URL(ref)` / `u.pathname` / `api/media?path=` patterns,
@@ -2599,13 +2644,13 @@ function _inlineMediaHtmlForRef(ref, sessionId){
   const localKind=_mediaKindForName(ref);
   // localArtifactCard(...)
   if(localKind==='image'){
-    const safeName=esc(ref.split('/').pop()||'image');
+    const safeName=esc(altText===undefined?(ref.split('/').pop()||'image'):altText);
     const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
     const dlLabel=esc(tt('media_download'));
     const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
     return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
   }
-  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(altText===undefined?(typeof t==='function'?t('media_svg_label'):'svg'):altText)}" loading="lazy">`;
   if(localKind==='audio'||localKind==='video'){
     return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
   }
@@ -7268,7 +7313,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -7410,7 +7455,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -7500,7 +7545,11 @@ function renderMd(raw){
     const raw=_safeAttrValue(v);
     const compact=raw.replace(/[\u0000-\u001f\u007f\s]+/g,'').toLowerCase();
     if(!compact) return false;
-    if(/^(javascript|data|vbscript):/i.test(compact)) return false;
+    // data:image/* is permitted for <img> only, validated by the shared strict
+    // predicate. Every other
+    // data: scheme stays blocked for both anchors and images.
+    if(/^data:/i.test(compact)) return !!(img && typeof _isSafeDataImageUri==='function' && _isSafeDataImageUri(raw));
+    if(/^(javascript|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
