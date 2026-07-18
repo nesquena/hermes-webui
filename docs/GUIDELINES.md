@@ -98,13 +98,12 @@ the test must include several items, or it can't catch picking the wrong one. Wh
 reproduction — a session capture, a script, exact steps, an attachment — your test loads **that**,
 not a fixture you rebuilt from your reading of it. A fix and a test written from the same wrong model
 of the bug will base-fail and head-pass on the fixture forever while the real symptom sits untouched;
-loading the reporter's actual scene is what breaks that agreement. A reproduction is not only a
-downloadable file: a fenced JSON structure, the field-level conditions that trigger the bug, or a
-step list all pin the shape just as bindingly. If the issue only describes the symptom without
-pinning the shape (no capture, no field-level conditions, no steps), say so and say what you assumed.
-If it *does* pin the shape, your fixture has to satisfy every condition it names, and your assertion
-has to fail when any one of them is violated — don't add a property the reported shape never had just
-to make a guard fire.
+loading the reporter's actual scene is what breaks that agreement. A reproduction is whatever *pins
+the bug's shape* — a downloadable capture, but a fenced JSON structure, the field-level trigger
+conditions, or exact steps bind it just as tightly. Bind your fixture to that shape: satisfy every
+condition it names and let the assertion fail when any one is violated, instead of granting the
+fixture a property the report never had so a guard will fire. Reconstruct the shape yourself only
+when the issue genuinely leaves it unpinned — and then say so, and say what you assumed.
 
 ### 7. Name the owner of every piece of state and prove it's released.
 For each resource or mutation you introduce (a cache entry, a lock, a temporary env change, a
