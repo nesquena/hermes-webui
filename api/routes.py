@@ -11781,18 +11781,36 @@ def _handle_health_restart(handler) -> bool:
     )
 
 
-def _serve_manifest(handler) -> bool:
-    """Serve static/manifest.json with the correct PWA Content-Type.
+def _app_manifest(manifest_path: Path) -> tuple[dict, bool]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tint = _normalize_icon_tint(load_settings().get("icon_tint"))
+    icon_src = f"static/favicon.svg?tint={tint[1:]}"
+    changed = False
+    for icon in manifest.get("icons", []):
+        if isinstance(icon, dict):
+            icon.update(src=icon_src, type="image/svg+xml")
+            changed = True
+    for shortcut in manifest.get("shortcuts", []):
+        if not isinstance(shortcut, dict):
+            continue
+        for icon in shortcut.get("icons", []):
+            if isinstance(icon, dict):
+                icon.update(src=icon_src, type="image/svg+xml")
+                changed = True
+    return manifest, changed
 
-    Shared by the root (/manifest.json, /manifest.webmanifest) and
-    session-prefixed (/session/manifest.json, /session/manifest.webmanifest)
-    routes so Firefox Android can fetch the manifest when installing from
-    a /session/<id> page.  See #2226.
-    """
+
+def _serve_manifest(handler) -> bool:
+    """Serve the tinted PWA manifest for root and session-prefixed routes."""
     static_root = api_config.get_static_root()
     manifest_path = (static_root / "manifest.json").resolve()
     if manifest_path.exists():
-        data = manifest_path.read_bytes()
+        manifest, changed = _app_manifest(manifest_path)
+        data = (
+            json.dumps(manifest, separators=(",", ":")).encode()
+            if changed
+            else manifest_path.read_bytes()
+        )
         handler.send_response(200)
         handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
         handler.send_header("Cache-Control", "no-store")
@@ -11801,6 +11819,45 @@ def _serve_manifest(handler) -> bool:
         handler.wfile.write(data)
         return True
     return j(handler, {"error": "not found"}, status=404)
+
+
+_DEFAULT_ICON_TINT = "#08EBF1"
+_DEFAULT_ICON_GRADIENT_END = "#3889FD"
+_ICON_TINT_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
+
+
+def _normalize_icon_tint(value) -> str:
+    raw = str(value or "").strip()
+    if not _ICON_TINT_RE.fullmatch(raw):
+        return _DEFAULT_ICON_TINT
+    return f"#{raw.lstrip('#').upper()}"
+
+
+def _icon_gradient_end(tint: str) -> str:
+    if tint == _DEFAULT_ICON_TINT:
+        return _DEFAULT_ICON_GRADIENT_END
+    channels = (int(tint[i : i + 2], 16) for i in (1, 3, 5))
+    return "#" + "".join(f"{round(channel * 0.7):02X}" for channel in channels)
+
+
+def _serve_app_icon(handler, parsed) -> bool:
+    tint_values = parse_qs(parsed.query or "").get("tint", [])
+    saved_tint = load_settings().get("icon_tint")
+    tint = _normalize_icon_tint(tint_values[0] if tint_values else saved_tint)
+    icon_path = (api_config.get_static_root() / "favicon.svg").resolve()
+    svg = icon_path.read_text(encoding="utf-8")
+    data = (
+        svg.replace(_DEFAULT_ICON_TINT, tint)
+        .replace(_DEFAULT_ICON_GRADIENT_END, _icon_gradient_end(tint))
+        .encode("utf-8")
+    )
+    handler.send_response(200)
+    handler.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+    return True
 
 
 def _saved_prompts_path() -> "Path":
@@ -16532,6 +16589,8 @@ def _serve_static(handler, parsed):
     static_root = api_config.get_static_root().resolve()
     # Strip the leading '/static/' prefix, then resolve and sandbox
     rel = parsed.path[len("/static/") :]
+    if rel == "favicon.svg":
+        return _serve_app_icon(handler, parsed)
     static_file = (static_root / rel).resolve()
     try:
         static_file.relative_to(static_root)

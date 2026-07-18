@@ -9145,6 +9145,7 @@ _SETTINGS_DEFAULTS = {
     "raw_audio_mode": False,
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
+    "icon_tint": "#08EBF1",  # favicon and installed-app logo color
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
@@ -9393,6 +9394,12 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    icon_tint = settings.get("icon_tint")
+    settings["icon_tint"] = (
+        icon_tint.upper()
+        if isinstance(icon_tint, str) and _SETTINGS_HEX_COLOR_RE.fullmatch(icon_tint)
+        else _SETTINGS_DEFAULTS["icon_tint"]
+    )
     settings["default_model"] = get_effective_default_model()
     try:
         model_cfg = get_config().get("model", {})
@@ -9493,6 +9500,8 @@ _SETTINGS_BOOL_KEYS = {
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
 _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_SETTINGS_HEX_COLOR_RE = __import__("re").compile(r"^#[0-9A-Fa-f]{6}$")
+_SETTINGS_HEX_COLOR_KEYS = {"icon_tint"}
 
 _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
@@ -9633,6 +9642,10 @@ def save_settings(settings: dict) -> dict:
             # Validate enum-constrained keys
             if k in _SETTINGS_ENUM_VALUES and v not in _SETTINGS_ENUM_VALUES[k]:
                 continue
+            if k in _SETTINGS_HEX_COLOR_KEYS:
+                if not isinstance(v, str) or not _SETTINGS_HEX_COLOR_RE.fullmatch(v):
+                    continue
+                v = v.upper()
             # Validate bounded integer settings.
             if k in _SETTINGS_INT_RANGES:
                 try:
