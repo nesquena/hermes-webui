@@ -1101,6 +1101,15 @@ const selectedWithTodos = _selectLiveRecoveryInflight(localWithTodos, server, 's
 assert.strictEqual(selectedWithTodos.lastAssistantText, server.lastAssistantText);
 assert.deepStrictEqual(selectedWithTodos.todos, localWithTodos.todos);
 assert.deepStrictEqual(selectedWithTodos.todoStateMeta, localWithTodos.todoStateMeta);
+const localWithTodosWithoutMeta = {
+  ...local,
+  todos:[{id:'todo-2', content:'unscoped task', status:'pending'}],
+  todoStateMeta:null,
+};
+const selectedWithoutTodoMeta = _selectLiveRecoveryInflight(localWithTodosWithoutMeta, server, 'stream-1');
+assert.strictEqual(selectedWithoutTodoMeta, server);
+assert.strictEqual(selectedWithoutTodoMeta.todos, undefined);
+assert.strictEqual(selectedWithoutTodoMeta.todoStateMeta, undefined);
 const oldStreamLocal = {...local, streamId:'stream-old', lastRunJournalSeq:99};
 assert.strictEqual(
   _selectLiveRecoveryInflight(oldStreamLocal, server, 'stream-1'),
