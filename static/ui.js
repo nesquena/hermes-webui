@@ -2852,7 +2852,13 @@ function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
   const explicitProvider=_providerFromModelValue(value);
-  if(explicitProvider) return {model:value,model_provider:explicitProvider};
+  if(explicitProvider){
+    const selected=sel&&sel.options
+      ?Array.from(sel.options).find(o=>String(o.value||'')===value)
+      :null;
+    const routedModel=selected&&selected.dataset&&selected.dataset.model;
+    return {model:routedModel||value,model_provider:explicitProvider};
+  }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
   // /tab switch or a model-list rebuild the dropdown transiently still has the
@@ -3242,19 +3248,33 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
-  if(applied) return applied;
-  const value=modelId;
+  const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
+  if(applied){
+    const appliedState=typeof _modelStateForSelect==='function'
+      ?_modelStateForSelect(sel,applied)
+      :{model:applied,model_provider:null};
+    if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
+  const rawModel=String(modelId||'');
+  const bareModel=explicitPrefix&&rawModel.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    ?rawModel.slice(explicitPrefix.length)
+    :rawModel;
+  const value=requestedProvider?`${explicitPrefix}${bareModel}`:rawModel;
   const opt=document.createElement('option');
-  opt.value=modelId;
+  opt.value=value;
   opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
   opt.dataset.custom='1';
   const badge=(window._configuredModelBadges||{})[value];
+  const rawBadge=(window._configuredModelBadges||{})[rawModel];
   if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
+  if(rawBadge&&rawBadge.provider) opt.dataset.provider=rawBadge.provider;
+  if(requestedProvider) opt.dataset.model=bareModel;
+  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)||_providerFromModelValue(value)||'';
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
-  sel.value=modelId;
+  sel.value=value;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
     _refreshOpenModelDropdown();
@@ -3263,7 +3283,7 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
     if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
-  return modelId;
+  return value;
 }
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
