@@ -8616,6 +8616,7 @@ function _deliverAttentionNotification(sid,kind,count,title,body){
     _markAttentionNotificationKey(safeSid,kind,count);
   };
   const failed=()=>{
+    if(pending.get(safeSid)!==key) return;
     release();
     retry.set(safeSid,{key,attempts:priorRetryKey===key?priorRetryAttempts+1:1});
   };

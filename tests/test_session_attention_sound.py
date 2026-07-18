@@ -232,7 +232,7 @@ Notification.permission = 'granted';
 global.Notification = Notification;
 global._showPwaNotification = (title, body, options) => new Promise((resolve, reject) => {{
   shown.push({{sid: options.sid, title}});
-  setTimeout(() => reject(new Error('delivery failed')), 0);
+  setTimeout(() => shown.length === 3 ? resolve() : reject(new Error('delivery failed')), 0);
 }});
 global.playAttentionSound = () => {{}};
 let _sessionAttentionSoundPrimed = true;
@@ -253,11 +253,15 @@ const sync = payload => new Promise(resolve => {{
   const unchangedDelivered = _hasAttentionNotificationKey('target', 'approval', 1);
   await sync(attention(2));
   const changedCountAttempts = shown.length;
+  await sync(attention(1));
+  const directReturnAttempts = shown.length;
+  const directReturnPending = window._attentionNotificationPendingKeys.get('target') || null;
   await sync([]);
   await sync(attention(1));
   console.log(JSON.stringify({{
     unchangedAttempts, unchangedPending, unchangedDelivered,
-    changedCountAttempts, totalAttempts: shown.length,
+    changedCountAttempts, directReturnAttempts, directReturnPending,
+    totalAttempts: shown.length,
   }}));
 }})();
 """
@@ -440,7 +444,9 @@ def test_failed_attention_delivery_retries_once_then_rearms_for_new_attention():
     assert result["unchangedPending"] is None
     assert result["unchangedDelivered"] is False
     assert result["changedCountAttempts"] == 3
-    assert result["totalAttempts"] == 4
+    assert result["directReturnAttempts"] == 4
+    assert result["directReturnPending"] is None
+    assert result["totalAttempts"] == 5
 
 
 def test_switching_back_to_target_before_service_worker_delivery_cancels_alert():

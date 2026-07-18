@@ -5289,6 +5289,9 @@ function _syncSessionAttentionSoundState(sessions){
     const retryState=retry instanceof Map?retry.get(sid):null;
     const retryKey=typeof retryState==='string'?retryState:(retryState&&retryState.key);
     const retryAttempts=typeof retryState==='string'?1:Number(retryState&&retryState.attempts)||0;
+    const retryKeyForSignature=typeof _attentionSoundKey==='function'
+      ?_attentionSoundKey(sid,kind,count):`${sid}:${sig}`;
+    if(prev!==sig&&retry instanceof Map&&retryKey!==retryKeyForSignature) retry.delete(sid);
     const shouldRetry=typeof _attentionSoundKey==='function'
       &&retryKey===_attentionSoundKey(sid,kind,count)&&retryAttempts===1;
     if(prev!==sig||shouldRetry){
