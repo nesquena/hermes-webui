@@ -208,16 +208,19 @@ def search_hub_skills(query: str, *, source: str = "all", limit: int = 20) -> di
 
     hermes_home = Path(get_active_hermes_home())
     hermes_cmd = _resolve_hermes_command()
+    # Keep all actual options before the end-of-options marker. The query is
+    # user-controlled and must remain positional even when it starts with "-".
     cmd = [
         hermes_cmd,
         "skills",
         "search",
-        query,
         "--source",
         source or "all",
         "--limit",
         str(max(1, min(int(limit or 20), 50))),
         "--json",
+        "--",
+        query,
     ]
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)

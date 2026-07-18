@@ -276,11 +276,35 @@ def test_hub_search_parses_json_and_builds_expected_command(monkeypatch, tmp_pat
     assert handler.status == 200
     assert data["results"][0]["name"] == "pdf"
     cmd, kwargs = calls[0]
-    assert cmd[1:4] == ["skills", "search", "pdf"]
+    assert cmd[1:3] == ["skills", "search"]
     assert "--source" in cmd and cmd[cmd.index("--source") + 1] == "all"
     assert "--limit" in cmd and cmd[cmd.index("--limit") + 1] == "5"
     assert "--json" in cmd
+    assert cmd[-2:] == ["--", "pdf"]
     assert kwargs["env"]["HERMES_HOME"] == str(tmp_path)
+
+
+def test_hub_search_treats_leading_dash_query_as_positional(monkeypatch, tmp_path):
+    """The public search route must pass a flag-shaped query as a positional."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(sha.subprocess, "run", fake_run)
+    handler = _call_get(monkeypatch, "/api/skills/hub/search?q=-h")
+
+    assert handler.status == 200
+    cmd = calls[0]
+    separator = cmd.index("--")
+    assert cmd[-2:] == ["--", "-h"]
+    assert "--source" in cmd[:separator]
+    assert "--limit" in cmd[:separator]
+    assert "--json" in cmd[:separator]
 
 
 def test_hub_search_empty_query_returns_empty_without_spawning(monkeypatch, tmp_path):
