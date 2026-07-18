@@ -64,3 +64,34 @@ def test_parse_msg_limit_zero_and_negative_clamp_to_one():
     for msg_limit=0 gets a 1-row window, not the full transcript."""
     assert _parse_msg_limit("0") == 1
     assert _parse_msg_limit("-5") == 1
+
+
+# ── #6177: metadata-decoupling — the frontend reads the ceiling from the
+#    /api/session `_msg_limit_max` field instead of a hand-mirrored constant. ──
+
+from pathlib import Path
+
+_ROUTES_SRC = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
+_SESSIONS_JS = (Path(__file__).resolve().parents[1] / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def test_backend_exposes_msg_limit_max_in_session_response():
+    """The /api/session handler advertises the ceiling as `_msg_limit_max` so the
+    frontend never has to hand-mirror _MAX_MSG_LIMIT (#6177 decoupling)."""
+    assert 'raw["_msg_limit_max"] = _MAX_MSG_LIMIT' in _ROUTES_SRC
+
+
+def test_frontend_declares_live_ceiling_at_module_scope_with_fallback():
+    """`_msgLimitMax` MUST be declared at module scope (not an implicit global)
+    with the static fallback, so the reload-width paths read a DEFINED value
+    before the first /api/session response lands — otherwise a cold load reads
+    `undefined`, drops msg_limit, and full-loads every session."""
+    assert "let _msgLimitMax = _MSG_LIMIT_MAX;" in _SESSIONS_JS
+    # refreshed from the response metadata, falling back when the server omits it
+    assert "_msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;" in _SESSIONS_JS
+
+
+def test_frontend_reload_width_paths_read_the_live_ceiling():
+    """Both reload-width decisions read the live `_msgLimitMax`, not the mirror."""
+    assert "reloadLimit <= _msgLimitMax" in _SESSIONS_JS       # _ensureMessagesLoaded
+    assert "requestedLimit >= _msgLimitMax" in _SESSIONS_JS    # _loadOlderMessages
