@@ -1692,6 +1692,17 @@ class Session:
             max_bytes = 1024 * 1024
         if max_bytes <= 0:
             max_bytes = 1
+
+        # Helper: full-load-and-slice fallback. Used by every correctness escape
+        # hatch below so all paths return the SAME normalized head that
+        # get_session / Session.load would — never a short or denormalized one.
+        def _full_load_head():
+            full = cls.load(sid)
+            msgs = full.messages or []
+            return (list(msgs[:limit]) if limit else list(msgs)), (
+                total_count if total_count is not None else len(msgs)
+            )
+
         try:
             # 1) Cheap metadata prefix → true message_count (does not parse the
             #    messages array).
@@ -1706,10 +1717,34 @@ class Session:
                             total_count = mc
                 except Exception:
                     pass
-            # 2) Stream the file body to locate the "messages": [ opener and
-            #    peel off the first `limit` array elements one at a time.
+
+            # 2) Cache-aware path (blocker #1 from #6138 gate certification):
+            #    active/unsaved sessions live in SESSIONS and may carry messages
+            #    that have NOT been persisted to the sidecar yet. The streaming
+            #    scanner reads the sidecar directly, so it would silently miss
+            #    those messages. Under the same lock get_session uses, detect a
+            #    cached session and delegate to get_session() (which owns disk-
+            #    freshness, state.db sync, and journal-retry semantics) and slice
+            #    its NORMALIZED messages. The streaming scanner is only safe for
+            #    clean, uncached, fully persisted sessions.
+            with LOCK:
+                cached = SESSIONS.get(sid)
+            if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
+                # get_session handles the cache + disk-freshness + state.db
+                # contract end-to-end; reuse it so the head we return matches
+                # what GET /api/session would show for this session.
+                cached_session = get_session(sid, metadata_only=False)
+                cached_msgs = (cached_session.messages or []) if cached_session else []
+                return (list(cached_msgs[:limit]) if limit else list(cached_msgs)), (
+                    total_count if total_count is not None else len(cached_msgs)
+                )
+
+            # 3) Stream the file body to locate the "messages": [ opener and
+            #    peel off raw array elements one at a time. Track whether we hit
+            #    a safety cap so we can fall back rather than return a short head.
             decoder = json.JSONDecoder()
-            messages: list = []
+            raw_messages: list = []  # raw array elements (NOT yet collapsed)
+            cap_hit = False  # set if max_bytes/_METADATA_SCAN_MAX_BYTES truncated
             READ_CHUNK = 16384
             buf = ''
             array_opened = False
@@ -1722,9 +1757,16 @@ class Session:
             # messages could push it higher, but the on-disk layout puts scenes
             # AFTER messages, so this is a generous safety ceiling only.
             _METADATA_SCAN_MAX_BYTES = 4 * 1024 * 1024
+            # Over-collect raw elements so the adjacent-duplicate-_partial
+            # collapse (blocker #3) still yields `limit` NORMALIZED messages.
+            # The collapse ratio is bounded (duplicate partials are rare and
+            # adjacent), so a small multiplier is sufficient; if it ever isn't,
+            # the fallback below catches it.
+            _RAW_OVERCOLLECT = 2
+            raw_target = limit * _RAW_OVERCOLLECT if limit else 0
             with open(p, 'r', encoding='utf-8') as f:
                 while True:
-                    if limit and len(messages) >= limit:
+                    if raw_target and len(raw_messages) >= raw_target:
                         break
                     # Skip inter-element whitespace/commas (and, before the
                     # array opens, the metadata we don't care about).
@@ -1755,6 +1797,7 @@ class Session:
                             if len(buf) >= _METADATA_SCAN_MAX_BYTES:
                                 # Pathological metadata prefix; give up the
                                 # streaming scan and fall back to a full load.
+                                cap_hit = True
                                 break
                             chunk = f.read(READ_CHUNK)
                             if not chunk:
@@ -1780,22 +1823,41 @@ class Session:
                         buf = buf[s:] + chunk
                         continue
                     if isinstance(value, dict):
-                        messages.append(value)
+                        raw_messages.append(value)
                     scanned_bytes += end
                     buf = buf[end:]
                     if scanned_bytes > max_bytes:
-                        # Pathological first-N payload; bound memory/time.
+                        # Pathological first-N payload; bound memory/time. Do
+                        # NOT return the short head — fall back so callers never
+                        # see a truncated result (blocker #2 from #6138 gate).
+                        cap_hit = True
                         break
-            if not array_opened:
-                # Never located the array — fall back to a full load. This is
-                # layout-anomaly-driven (NOT gated on total_count, which modern
-                # sessions always supply from message_count): returning ([],
-                # total_count) here would silently drop content-search matches.
-                full = cls.load(sid)
-                msgs = full.messages or []
-                return (list(msgs[:limit]) if limit else list(msgs)), (
-                    total_count if total_count is not None else len(msgs)
-                )
+            if not array_opened or cap_hit:
+                # Never located the array, OR a safety cap truncated the scan
+                # before we had enough raw elements. Both must fall back to a
+                # full load — returning a short head would silently drop
+                # content-search matches.
+                return _full_load_head()
+
+            # 4) Apply the same adjacent-duplicate-_partial collapse that
+            #    Session.load() applies (blocker #3 from #6138 gate). The
+            #    streaming scanner reads RAW array elements, so without this
+            #    step a duplicate-partial before the requested depth would shift
+            #    the depth window and silently hide a needle.
+            collapsed, _changed = _collapse_adjacent_duplicate_partials(raw_messages)
+            messages = collapsed[:limit] if limit else collapsed
+            # If collapse shortened the result below `limit` AND the raw scan
+            # stopped at the overcollect ceiling (not at end-of-array), there may
+            # be more duplicates just past the window — fall back to a full load
+            # rather than risk a short normalized head.
+            if (
+                limit
+                and len(messages) < limit
+                and len(raw_messages) >= raw_target
+                and total_count is not None
+                and total_count > len(raw_messages)
+            ):
+                return _full_load_head()
             return messages, total_count
         except Exception:
             logger.debug(

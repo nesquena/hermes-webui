@@ -254,3 +254,183 @@ def test_content_search_depth_zero_scans_whole_transcript(tmp_path, monkeypatch)
     results = captured["payload"]["sessions"]
     assert len(results) == 1
     assert results[0]["match_type"] == "content"
+
+
+# ── Gate certification #6138 round-2 regressions ─────────────────────────────
+# The three CORE blockers nesquena-hermes certified RED on 2026-07-19. Each
+# reproducer is built from the maintainer's spec and pinned at the route level
+# (the actual content-search entry point) so a regression in either the route
+# handler or load_messages_head surfaces here.
+
+
+def test_load_messages_head_cache_aware_for_unsaved_messages(tmp_path, monkeypatch):
+    """Blocker #1: active/unsaved cached messages must appear in the head.
+
+    Production keeps sessions with unsaved assistant turns in SESSIONS; the
+    streaming scanner reads the sidecar directly and would silently miss those
+    messages. Under the session lock, load_messages_head must detect a cached
+    session and slice its (normalized) messages instead of reading the disk.
+    """
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    sid = "gate-cache-unsaved"
+    # Persist only ONE message to the sidecar.
+    _write_session_file(
+        session_dir,
+        total_messages=1,
+        first_payloads=["persisted only"],
+    )
+    # Rename the on-disk file to the sid we look up, then put a cached session
+    # with an additional unsaved message into SESSIONS.
+    import shutil
+    src = session_dir / f"{_SESSION_ID}.json"
+    dst = session_dir / f"{sid}.json"
+    shutil.move(str(src), str(dst))
+
+    from api.models import Session, SESSIONS, LOCK
+    cached = Session(
+        session_id=sid,
+        title="cached",
+        messages=[
+            {"id": "m0", "role": "user", "content": "persisted only"},
+            {"id": "m1", "role": "assistant", "content": "UNSAVEDNEEDLE"},
+        ],
+    )
+    with LOCK:
+        SESSIONS[sid] = cached
+    try:
+        head, total = Session.load_messages_head(sid, 5)
+        assert any(
+            "UNSAVEDNEEDLE" in str(m.get("content") or "") for m in head
+        ), (
+            f"unsaved cached message must appear in head; got "
+            f"{[m.get('content') for m in head]}"
+        )
+    finally:
+        with LOCK:
+            SESSIONS.pop(sid, None)
+
+
+def test_load_messages_head_cap_exhaustion_falls_back_to_full(tmp_path, monkeypatch):
+    """Blocker #2: max_bytes cap exhaustion must NOT return a short head.
+
+    Five valid ~300KB messages with depth=5 and a needle in message 5 exceed
+    the default 1 MiB cap after 4 messages. The cap must trigger a fallback to
+    the full loader rather than silently truncating and dropping the match.
+    """
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    sid = "gate-cap-exhaustion"
+    big = "x" * 300000  # ~300 KB each
+    payloads = [big + (" NEEDLE5" if i == 4 else "") for i in range(5)]
+    _write_session_file(
+        session_dir,
+        total_messages=5,
+        first_payloads=payloads,
+    )
+    import shutil
+    shutil.move(
+        str(session_dir / f"{_SESSION_ID}.json"),
+        str(session_dir / f"{sid}.json"),
+    )
+    from api.models import Session
+    head, total = Session.load_messages_head(sid, 5)
+    assert total == 5, f"expected total=5, got {total}"
+    assert len(head) == 5, (
+        f"cap exhaustion must fall back to full load and return 5 messages, "
+        f"not truncate to {len(head)}"
+    )
+    assert any(
+        "NEEDLE5" in str(m.get("content") or "") for m in head
+    ), "needle in message 5 must be found after cap fallback"
+
+
+def test_load_messages_head_collapses_duplicate_partials(tmp_path, monkeypatch):
+    """Blocker #3: adjacent duplicate _partial rows must collapse the same way
+    Session.load() collapses them, so the depth window is measured in
+    NORMALIZED messages (not raw array elements).
+
+    Reproduces the maintainer's spec: 'one adjacent duplicate partial before a
+    needle in normalized message 5'. Clean master returned count=1; the pre-fix
+    scanner stopped at raw element 5 and returned count=0.
+
+    Note: Session.save() itself collapses duplicate partials before writing, so
+    to exercise the scanner's collapse behavior we must write the sidecar JSON
+    DIRECTLY with the duplicate partials intact (mirroring the streaming/journal
+    recovery paths that can write raw duplicates to disk).
+    """
+    import api.models as models
+    import json as _json
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    sid = "gate-dup-partial"
+    # 3 normal + 2 identical _partial (one collapses on read) + needle =
+    # 6 raw on disk, 5 normalized; needle is normalized message 5 (index 4).
+    raw_messages = [
+        {"id": "m1", "role": "user", "content": "msg 1"},
+        {"id": "m2", "role": "user", "content": "msg 2"},
+        {"id": "m3", "role": "user", "content": "msg 3"},
+        {"id": "p1", "role": "assistant", "_partial": True, "content": "partial"},
+        {"id": "p2", "role": "assistant", "_partial": True, "content": "partial"},
+        {"id": "m5", "role": "user", "content": "NEEDLEPARTIAL"},
+    ]
+    # Write directly with duplicates intact — do NOT use Session.save() (which
+    # collapses before writing) so the on-disk layout mirrors what journal
+    # recovery / streaming paths can produce. ALSO do NOT call Session.load(sid)
+    # for a sanity check first — Session.load() self-heals collapsed partials
+    # back to disk (api/models.py #2592 self-heal), which would destroy the
+    # duplicates before load_messages_head runs and defeat the test.
+    sidecar_payload = {
+        "session_id": sid,
+        "title": "dup-partial",
+        "message_count": len(raw_messages),
+        "messages": raw_messages,
+        "anchor_activity_scenes": [],
+    }
+    (session_dir / f"{sid}.json").write_text(
+        _json.dumps(sidecar_payload), encoding="utf-8"
+    )
+    from api.models import Session
+    head, total = Session.load_messages_head(sid, 5)
+    assert any(
+        "NEEDLEPARTIAL" in str(m.get("content") or "") for m in head
+    ), (
+        f"needle at normalized message 5 must be found after collapse-aware "
+        f"scan; got {[m.get('content') for m in head]}"
+    )
+
+
+def test_load_messages_head_streaming_still_used_for_clean_uncached(tmp_path, monkeypatch):
+    """Regression guard: the optimization must still apply for the common case
+    (clean, uncached, fully persisted sessions) — i.e. we don't accidentally
+    route everything through the full loader and defeat the PR's purpose."""
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    sid = "gate-clean-stream"
+    _write_session_file(session_dir, total_messages=50, first_payloads=None)
+    import shutil
+    shutil.move(
+        str(session_dir / f"{_SESSION_ID}.json"),
+        str(session_dir / f"{sid}.json"),
+    )
+    # No SESSIONS entry → cache-aware path must defer to the streaming scanner.
+    from api.models import Session, SESSIONS, LOCK
+    with LOCK:
+        SESSIONS.pop(sid, None)
+    head, total = Session.load_messages_head(sid, 5)
+    assert total == 50, f"expected total=50 from metadata prefix, got {total}"
+    assert len(head) == 5, (
+        f"clean uncached session should return 5 messages via streaming, got {len(head)}"
+    )
