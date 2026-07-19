@@ -6906,7 +6906,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     and _provider_cfg["models"]
                     and _canonical == _canonicalise_provider_id(active_provider)
                 )
-                if not (_is_known_provider or _has_provider_route or _has_models_only_active_route):
+                # A known provider listed in config.yaml without route
+                # configuration should only appear in the picker when it was
+                # already detected from credential sources (env vars, hermes
+                # auth, credential pool).  Otherwise a provider with
+                # metadata-only entries in config.yaml (e.g.
+                # ``openai-api: {name: "OpenAI API"}``) would still render
+                # in the model selector after the API key is removed (#6335).
+                _already_credentialed = _canonical in detected_providers
+                _admit_as_known = _is_known_provider and _already_credentialed
+                if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
