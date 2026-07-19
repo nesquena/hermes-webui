@@ -51,6 +51,11 @@ CLI_VISIBLE_SESSION_LIMIT = 20
 # sidebar window (#3172).
 CRON_PROJECT_CHIP_LIMIT = 200
 WEBHOOK_PROJECT_CHIP_LIMIT = 200
+# Threshold for the bounded-display fast-path optimisation (#6241).
+# Sessions with sidecar JSON > this size skip full deserialisation
+# when the caller only needs a bounded display window (msg_limit)
+# and the session is safe for metadata-only projection.
+_SIDECAR_FAST_PATH_BYTE_THRESHOLD = 1_000_000  # 1 MB
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -1659,6 +1664,60 @@ class Session:
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
             return cls.load(sid)
+
+    @classmethod
+    def _can_serve_bounded_session_metadata_fast(cls, sid):
+        """Return True if a large sidecar is eligible for metadata-only fast-path (#6241).
+
+        The fast-path avoids a full ``json.loads()`` of a multi-megabyte sidecar
+        when the caller only needs metadata + a bounded display window. It is
+        fail-closed: any ambiguity (active stream, pending user message, corrupt
+        prefix) forces the authoritative full-load path.
+
+        Preconditions (all must hold):
+        - Sidecar file exists and exceeds the 1 MB threshold.
+        - The metadata prefix is readable and well-formed.
+        - No live active stream ID is present in the prefix.
+          (A persisted stream id whose worker has already exited is fine.)
+        - No pending user message is stored.
+        - No truncation watermark or boundary is set.
+        """
+        if not is_safe_session_id(sid):
+            return False
+        p = SESSION_DIR / f'{sid}.json'
+        try:
+            if not p.exists():
+                return False
+            st_size = p.stat().st_size
+        except OSError:
+            return False
+        if st_size <= _SIDECAR_FAST_PATH_BYTE_THRESHOLD:
+            return False
+        # Read the metadata prefix to check for disqualifying state.
+        try:
+            prefix = _read_metadata_json_prefix(p)
+            if not prefix:
+                return False
+            parsed = json.loads(prefix)
+        except Exception:
+            return False
+        # ── fail-closed checks ──────────────────────────────────────────
+        # Any live stream means the on-disk sidecar may be stale; full load
+        # is the authoritative path.
+        stream_id = str(parsed.get('active_stream_id') or '').strip()
+        if stream_id and stream_id in _active_stream_ids():
+            return False
+        # A pending user message means the sidecar has unsent state that the
+        # authoritative path must recover.
+        if parsed.get('pending_user_message'):
+            return False
+        # Truncation watermarks / boundaries require the full merge path for
+        # correct transcript reconciliation.
+        if parsed.get('truncation_watermark') not in (None, ''):
+            return False
+        if parsed.get('truncation_boundary') not in (None, ''):
+            return False
+        return True
 
     @staticmethod
     def _compute_user_message_count(messages) -> int:
@@ -4494,6 +4553,17 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         if s:
             return s
     else:
+        # #6241: for large sidecars eligible for fast-path, avoid full
+        # deserialisation. The caller receives a metadata-only session
+        # flagged with ``_bounded_fast_path``; the route layer is then
+        # responsible for populating a bounded message window when the
+        # request carries ``msg_limit``, or falling back to the full
+        # authoritative load when the full transcript is needed.
+        if Session._can_serve_bounded_session_metadata_fast(sid):
+            s = Session.load_metadata_only(sid)
+            if s:
+                s._bounded_fast_path = True
+                return s
         s = Session.load(sid)
     if s:
         if cache_on_miss:

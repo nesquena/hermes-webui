@@ -8737,6 +8737,132 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
+def _read_bounded_fast_path_messages(session_id, msg_limit, _metadata_total=0):
+    """Read the tail of the sidecar messages array without full deserialisation (#6241).
+
+    When a large sidecar qualifies for the bounded fast-path, this reads the
+    file as text (fast I/O), locates the ``messages`` array, scans it once to
+    count all messages, and extracts only the trailing message objects needed
+    to satisfy ``msg_limit``. This avoids ``json.loads()`` on the full
+    multi-megabyte file, which can take tens of seconds for sidecars with
+    1000+ messages and large tool outputs.
+
+    Returns (messages, total_message_count) on success, or (None, 0) when
+    extraction is infeasible (the caller must fall back to the authoritative
+    full-load path).
+
+    The returned message list is raw (no duplicate-partial collapse, no
+    lineage stitching). The caller is responsible for post-processing.
+
+    ``_metadata_total`` is the ``_metadata_message_count`` from the
+    already-loaded metadata-only session stub; it is used when available
+    so we don't re-parse the sidecar prefix a second time.
+    """
+    from api.config import SESSION_DIR
+    import collections
+
+    if not is_safe_session_id(session_id):
+        return None, 0
+    p = SESSION_DIR / f'{session_id}.json'
+    try:
+        text = p.read_text(encoding='utf-8')
+    except Exception:
+        return None, 0
+
+    # Locate the "messages" key. We look for the JSON key token inside
+    # the string, which is safe because sidecar JSON uses double-quoted
+    # keys and the metadata prefix contains no user-controlled content
+    # that could inject a false-positive match before the real key.
+    marker = '"messages":'
+    pos = text.find(marker)
+    if pos < 0:
+        return None, 0
+    pos += len(marker)
+
+    # Skip whitespace to the opening bracket of the array.
+    while pos < len(text) and text[pos] in ' \t\n\r':
+        pos += 1
+    if pos >= len(text) or text[pos] != '[':
+        return None, 0
+    pos += 1  # skip '['
+
+    # ── scan the full messages array; track count + keep a sliding
+    #    window of the tail so we only json.loads() recent messages ──
+    target = max(1, int(msg_limit)) * 2 if msg_limit else 200
+    messages = collections.deque(maxlen=target)
+    total_message_count = 0
+    depth = 0
+    obj_start = None
+    i = pos
+
+    while i < len(text):
+        ch = text[i]
+        if obj_start is None:
+            if ch in ' \t\n\r,':
+                i += 1
+                continue
+            if ch == ']':
+                break
+            if ch == '{':
+                obj_start = i
+                depth = 1
+                i += 1
+                continue
+            # Unexpected character — bail out.
+            return None, 0
+        elif ch == '{':
+            depth += 1
+            i += 1
+        elif ch == '}':
+            depth -= 1
+            i += 1
+            if depth == 0:
+                # End of a top-level message object.
+                total_message_count += 1
+                # Only json.loads() messages that fall into our tail window.
+                if len(messages) >= target:
+                    # Window is full — drop the oldest without parsing.
+                    messages.popleft()
+                try:
+                    msg = json.loads(text[obj_start:i])
+                except json.JSONDecodeError:
+                    # Corrupt message — bail out; the caller falls back
+                    # to the authoritative full load.
+                    return None, 0
+                messages.append(msg)
+                obj_start = None
+        elif ch == '"':
+            # String — skip it (handle backslash escapes).
+            i += 1
+            while i < len(text):
+                if text[i] == '\\':
+                    i += 2  # skip escaped char
+                elif text[i] == '"':
+                    i += 1
+                    break
+                else:
+                    i += 1
+        else:
+            i += 1
+
+    if not messages:
+        return None, 0
+
+    # Prefer the caller-supplied metadata total; fall back to
+    # the count we computed during the scan.
+    total = _metadata_total if _metadata_total and _metadata_total > 0 else total_message_count
+
+    # Trim to the exact tail the caller needs.
+    if msg_limit:
+        limit = max(1, int(msg_limit))
+        messages_list = list(messages)
+        messages_list = messages_list[-min(len(messages_list), limit * 2):]
+    else:
+        messages_list = list(messages)
+
+    return messages_list, int(total)
+
+
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
@@ -12621,40 +12747,100 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
-            cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
-            is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
             limited_sidecar_messages = None
             state_db_since_timestamp = None
+            # ── #6241 bounded fast-path ──────────────────────────────────
+            # When get_session() returned a metadata-only stub for a large
+            # sidecar, populate a bounded message window directly from the
+            # file without full json.loads(), then skip the expensive
+            # lineage-stitch / merge / window path.  Any failure falls
+            # through to the authoritative full-load path.
+            _bounded_fast_path = getattr(s, '_bounded_fast_path', False)
+            if _bounded_fast_path and load_messages and msg_limit is not None and msg_before is None:
+                _fast_msgs, _fast_total = _read_bounded_fast_path_messages(sid, msg_limit, _metadata_total=getattr(s, '_metadata_message_count', 0))
+                if _fast_msgs is not None:
+                    s.messages = _fast_msgs
+                    s._metadata_message_count = _fast_total
+                    limited_sidecar_messages = list(_fast_msgs)
+                    # Disable the normal windowing — the tail is already
+                    # bounded; the caller only needs a lightweight state.db
+                    # merge for any rows newer than the sidecar.
+                    _bounded_fast_path_active = True
+                else:
+                    # Extraction failed — reload s authoritatively so the
+                    # normal path doesn't operate on the metadata-only stub
+                    # with an empty messages list (#6317 gate RED).
+                    try:
+                        s = get_session(sid, metadata_only=False)
+                    except KeyError:
+                        if _diag: _diag.finish()
+                        return bad(handler, "Session not found", 404)
+                    _bounded_fast_path = False
+                    _bounded_fast_path_active = False
+            elif _bounded_fast_path and load_messages and not msg_limit:
+                # Full transcript requested on a fast-path stub — reload
+                # authoritatively so the merge path has every message.
+                try:
+                    s = get_session(sid, metadata_only=False)
+                except KeyError:
+                    if _diag: _diag.finish()
+                    return bad(handler, "Session not found", 404)
+                _bounded_fast_path = False
+                _bounded_fast_path_active = False
+            else:
+                _bounded_fast_path_active = False
+            # ── end #6241 fast-path ──────────────────────────────────────
+            if _bounded_fast_path_active:
+                # Fast-path: we already have a bounded message tail from
+                # the sidecar. Skip the expensive CLI metadata lookup
+                # (WebUI-native sessions never need it) and the full
+                # sidecar lineage scan. Only merge any state.db rows
+                # newer than the sidecar tail to keep the transcript
+                # current.
+                is_messaging_session = False
+                cli_meta = {}
+                # Load only very recent state.db rows for the merge.
+                _db_kwargs = {"profile": _session_profile}
+                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                if _backstop is not None:
+                    _db_kwargs["limit"] = _backstop
+                state_db_messages = get_state_db_session_messages(
+                    sid, **_db_kwargs,
+                )
+            else:
+                cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
+                is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                if msg_limit is not None:
-                    (
-                        state_db_since_timestamp,
-                        limited_sidecar_messages,
-                    ) = _state_db_since_timestamp_for_limited_display(
-                        s,
-                        msg_limit,
-                        msg_before=msg_before,
+                if not _bounded_fast_path_active:
+                    if msg_limit is not None:
+                        (
+                            state_db_since_timestamp,
+                            limited_sidecar_messages,
+                        ) = _state_db_since_timestamp_for_limited_display(
+                            s,
+                            msg_limit,
+                            msg_before=msg_before,
+                        )
+                    _state_db_reader_kwargs = {"profile": _session_profile}
+                    if state_db_since_timestamp is not None:
+                        _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
+                    # Apply the display-path row backstop ONLY on provably-safe
+                    # reads where no truncation_boundary prefix is required for the
+                    # merge — see _state_db_backstop_limit_for_display. Compressed
+                    # sessions and msg_before paging need their full prefix rows for
+                    # correct reconciliation, so those stay uncapped.
+                    _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                    if _backstop is not None:
+                        _state_db_reader_kwargs["limit"] = _backstop
+                    state_db_messages = get_state_db_session_messages(
+                        sid,
+                        **_state_db_reader_kwargs,
                     )
-                _state_db_reader_kwargs = {"profile": _session_profile}
-                if state_db_since_timestamp is not None:
-                    _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
-                # Apply the display-path row backstop ONLY on provably-safe
-                # reads where no truncation_boundary prefix is required for the
-                # merge — see _state_db_backstop_limit_for_display. Compressed
-                # sessions and msg_before paging need their full prefix rows for
-                # correct reconciliation, so those stay uncapped.
-                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
-                if _backstop is not None:
-                    _state_db_reader_kwargs["limit"] = _backstop
-                state_db_messages = get_state_db_session_messages(
-                    sid,
-                    **_state_db_reader_kwargs,
-                )
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
