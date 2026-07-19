@@ -16013,6 +16013,13 @@ function renderMessages(options){
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
+      // Gate-certifier finding #3: when a turn has no text parts
+      // (lastTextPartIdx === -1, e.g. tool-only turns), the notice
+      // was never inserted inside the loop. Stamp it on the first
+      // rendered segment so the notice survives even on textless turns.
+      if(lastTextPartIdx === -1 && fallbackNoticeHtml && firstSeg){
+        firstSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+      }
       assistantSegments.set(rawIdx, firstSeg||null);
       continue;
     }

@@ -150,10 +150,14 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
         "as _turnDuration/_turnTps, before s.save()."
     )
 
-    # 5. The orphan DOM insertion function must not exist
-    assert "function appendFallbackNotice(" not in src, (
+    # 5. The orphan DOM insertion function must not exist in ui.js
+    # (greptile flagged the original assertion checked streaming.py — a Python
+    # file — for a JavaScript function name, so it was always true and provided
+    # no actual regression coverage.)
+    ui_src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "function appendFallbackNotice(" not in ui_src, (
         "appendFallbackNotice() was the orphan-DOM approach that failed "
-        "persistence — it should be removed from the codebase."
+        "persistence — it should be removed from ui.js."
     )
 
     # 6. The heal-success save path must ALSO flush _pending_fallback_notices.
@@ -210,6 +214,124 @@ def test_error_save_paths_flush_fallback_notices():
     assert "_error_message['_fallbackNotice']" in main_block, (
         "The main error save path must flush _pending_fallback_notices onto "
         "_error_message before s.save() so fallback notices survive reload."
+    )
+
+
+def test_fallback_classifier_matches_confirmed_switch_only():
+    """The lifecycle classifier must match the CONFIRMED post-switch notice
+    ("switched to fallback"), NOT transient pre-switch messages ("switching
+    to fallback", "rate limited", etc.).
+
+    The Agent has two distinct fallback emission paths:
+    - Transient (pre-switch): _buffer_status("... switching to fallback: ...")
+      — buffered, only flushed on terminal FAILURE, carries OLD model.
+    - Confirmed (post-switch): _emit_status("Switched to fallback model: ...")
+      — emitted ONLY on SUCCESS, AFTER agent.model/provider have changed.
+
+    Matching transient strings inverts the contract: successful fallbacks
+    produce no persistent notice, while failed attempts get false positives.
+    (Gate-certifier blocking finding #1.)
+    """
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+
+    func_idx = src.find("def _is_fallback_lifecycle_message(")
+    assert func_idx != -1, "_is_fallback_lifecycle_message not found"
+    # Read the function body (up to the next def at column 0)
+    next_def = src.find("\ndef ", func_idx + 1)
+    func_body = src[func_idx:next_def] if next_def != -1 else src[func_idx:func_idx + 800]
+
+    # Must match the confirmed post-switch string in the RETURN statement
+    # (not just the docstring — the actual code must use it)
+    return_idx = func_body.find("return (")
+    assert return_idx != -1, "return statement not found in classifier"
+    return_body = func_body[return_idx:]
+    assert "switched to fallback" in return_body, (
+        "Classifier return must match 'switched to fallback' (the confirmed post-switch "
+        "notice emitted by _emit_pending_fallback_notice on success)."
+    )
+    # Must NOT match transient pre-switch strings in the RETURN statement
+    assert "switching to fallback" not in return_body, (
+        "Classifier must NOT match 'switching to fallback' — that's the transient "
+        "pre-switch buffer line that fires before the model has changed and may "
+        "never succeed. Matching it inverts the fallback contract."
+    )
+    assert "rate limited" not in return_body, (
+        "Classifier must NOT match 'rate limited' — rate-limit retries are "
+        "transient and may not result in a model switch."
+    )
+    assert "falling back" not in return_body, (
+        "Classifier must NOT match 'falling back' — transient pre-switch."
+    )
+    assert "trying fallback" not in return_body, (
+        "Classifier must NOT match 'trying fallback' — transient pre-switch."
+    )
+
+
+def test_stream_scoped_fallback_notices_dict_exists():
+    """A module-level _STREAM_FALLBACK_NOTICES dict must exist so cancel_stream()
+    — which runs outside _run_agent_streaming's closure — can read the latest
+    confirmed fallback notice and stamp it before its own s.save().
+
+    Without this, a user who clicks Stop after a real fallback sees the live
+    SSE warning but loses the persistent _fallbackNotice after reload.
+    (Gate-certifier blocking finding #2.)
+    """
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+
+    # 1. Module-level dict declaration
+    assert "_STREAM_FALLBACK_NOTICES" in src, (
+        "_STREAM_FALLBACK_NOTICES module-level dict must be declared so "
+        "cancel_stream() can access fallback notices outside the streaming closure."
+    )
+    decl_idx = src.find("_STREAM_FALLBACK_NOTICES: dict = {}")
+    assert decl_idx != -1, (
+        "_STREAM_FALLBACK_NOTICES must be declared as a module-level dict."
+    )
+
+    # 2. The callback writes to it
+    callback_write_idx = src.find("_STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]")
+    assert callback_write_idx != -1, (
+        "_agent_status_callback must mirror the latest notice to "
+        "_STREAM_FALLBACK_NOTICES[stream_id] so cancel_stream() can read it."
+    )
+
+    # 3. cancel_stream() reads and stamps it before _cs.save()
+    cancel_stamping = src.find("_cancel_fb_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)")
+    assert cancel_stamping != -1, (
+        "cancel_stream() must read _STREAM_FALLBACK_NOTICES before its s.save() "
+        "so a mid-stream cancel after a real fallback still persists the notice."
+    )
+    # Verify the stamping skips the _error cancel marker
+    stamping_block = src[cancel_stamping:cancel_stamping + 500]
+    assert "not _dm.get('_error')" in stamping_block, (
+        "cancel_stream() must skip the _error cancel marker when stamping "
+        "_fallbackNotice — stamp the partial/prior assistant message instead."
+    )
+
+    # 4. The finally cleanup pops it
+    cleanup_idx = src.find("_STREAM_FALLBACK_NOTICES.pop(stream_id, None)")
+    assert cleanup_idx != -1, (
+        "_run_agent_streaming's finally block must pop _STREAM_FALLBACK_NOTICES "
+        "to prevent unbounded growth across streams."
+    )
+
+
+def test_textless_turn_render_includes_fallback_notice():
+    """The ordered-parts render path must insert the fallback notice even when
+    lastTextPartIdx === -1 (tool-only / textless assistant turns).
+
+    Previously, the notice was only inserted inside the forEach loop when
+    isLastTextPart was true — which never fires for a turn with no text parts.
+    (Gate-certifier blocking finding #3.)
+    """
+    src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+
+    # Find the post-loop stamping for the textless case
+    textless_stamp = src.find("lastTextPartIdx === -1 && fallbackNoticeHtml")
+    assert textless_stamp != -1, (
+        "The ordered-parts render path must handle lastTextPartIdx === -1 by "
+        "stamping fallbackNoticeHtml on firstSeg after the loop, so tool-only "
+        "turns still show the fallback notice."
     )
 
 
