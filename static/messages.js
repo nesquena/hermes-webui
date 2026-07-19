@@ -1128,6 +1128,7 @@ if(typeof document!=='undefined'){
 // setBusy(true) is only called after the first await inside send().
 let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
+let _branchHandoffInProgress = false;
 const _sessionTitleProvisionalBySid = new Map();
 // Agent commands that are safe to execute directly in the WebUI even though
 // their canonical command is registered on the backend (for example
@@ -1304,6 +1305,7 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
+    if(typeof _branchHandoffInProgress!=='undefined'&&_branchHandoffInProgress) return;
     const _text=_composerTextWithPendingSelections().trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
@@ -1356,13 +1358,11 @@ async function send(){
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
-      // Busy-control slash commands must be intercepted HERE, before the
-      // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
-      // /queue, /terminal, /goal, or /yolo while the agent is running and have
-      // them execute immediately.
-      // Without this intercept they fall through to the queue and execute after
-      // the current turn ends — by which point there is no active stream and
-      // cmdSteer / cmdInterrupt say "No active task to stop."
+      if(typeof _isReadOnlySession==='function'&&_isReadOnlySession(S.session)){
+        if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+        return;
+      }
+      // Intercept explicit busy commands before the default mode dispatch.
       if(text.startsWith('/')&&!literalSlash){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
         if(_pc&&['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)){
@@ -1413,22 +1413,18 @@ async function send(){
     }
     return;
   }
-  if(S.session&&(S.session.read_only||S.session.is_read_only)){
-    if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
-    return;
-  }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
-  // Slash command intercept -- local commands handled without agent round-trip.
-  // We push the user message BEFORE running the handler for echo-worthy
-  // commands so chat order is correct: some handlers (e.g. cmdHelp) push
-  // their assistant response synchronously.  If we pushed AFTER, S.messages
-  // would be [assistant, user] and the chat would show the response above
-  // the user's own input — reverse chronological order (#840 ordering bug).
+  // Slash command intercept -- echoing commands optimistically push the user
+  // turn before sync handlers, and false opt-out rolls that push back.
   if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
+      if(_parsedCmd.name!=='branch'&&S.session&&(S.session.read_only||S.session.is_read_only)){
+        if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+        return;
+      }
       let _pushedUser=false;
       if(!_cmd.noEcho){
         if(!S.session){await newSession();await renderSessionList();}
@@ -1448,6 +1444,10 @@ async function send(){
       }
     }
     if(_parsedCmd&&!_cmd){
+      if(_parsedCmd.name!=='branch'&&S.session&&(S.session.read_only||S.session.is_read_only)){
+        if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+        return;
+      }
       if(_parsedCmd.name==='pet'){
         if(!S.session){await newSession();await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
@@ -1556,6 +1556,66 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+    }
+  }
+  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+    if(typeof _isBranchableReadOnlySession!=='function'||!_isBranchableReadOnlySession(S.session)){
+      if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+      return;
+    }
+    const _branchSourceSid=S.session.session_id;
+    const _branchText=text;
+    const _branchFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+    const _branchModelState=_chatPayloadModelState();
+    const _branchProfile=S.activeProfile||S.session.profile||'default';
+    const _branchComposer=$('msg');
+    const _branchComposerReadOnly=!!(_branchComposer&&_branchComposer.readOnly);
+    const _branchComposerDisabled=!!(_branchComposer&&_branchComposer.disabled);
+    const _restoreBranchComposerState=()=>{
+      if(!_branchComposer) return;
+      _branchComposer.readOnly=_branchComposerReadOnly;
+      _branchComposer.disabled=_branchComposerDisabled;
+      if(typeof updateSendBtn==='function') updateSendBtn();
+    };
+    if(_branchComposer){
+      _branchComposer.readOnly=true;
+      _branchComposer.disabled=true;
+    }
+    _branchHandoffInProgress=true;
+    if(typeof updateSendBtn==='function') updateSendBtn();
+    let _branchChildSid=null;
+    try{
+      const _branchData=await api('/api/session/branch',{method:'POST',body:JSON.stringify({session_id:_branchSourceSid})});
+      if(!_branchData||!_branchData.session_id) throw new Error('Fork response did not include a session id.');
+      _branchChildSid=_branchData.session_id;
+      $('msg').value='';
+      S.pendingFiles=[];
+      if(typeof autoResize==='function') autoResize();
+      if(typeof renderTray==='function') renderTray();
+      await loadSession(_branchChildSid,{throwOnMessageLoadFailure:true});
+      if(!S.session||S.session.session_id!==_branchChildSid) throw new Error('Fork load did not activate the writable child.');
+      if(S.session){
+        S.session.model=_branchModelState.model;
+        S.session.model_provider=_branchModelState.model_provider;
+        S.session.profile=_branchProfile;
+      }
+      S.activeProfile=_branchProfile;
+      S.pendingFiles=[..._branchFiles];
+      $('msg').value=_branchText;
+      if(typeof autoResize==='function') autoResize();
+      if(typeof renderTray==='function') renderTray();
+      _restoreBranchComposerState();
+      _branchHandoffInProgress=false;
+      if(typeof showToast==='function') showToast(t('branch_forked'));
+    }catch(_branchError){
+      _branchHandoffInProgress=false;
+      const _restoreSid=(S.session&&S.session.session_id===_branchChildSid)
+        ? _branchChildSid
+        : _branchSourceSid;
+      _restoreComposerDraftAfterFailedSend(_branchText,_branchFiles,_restoreSid);
+      _restoreBranchComposerState();
+      if(typeof showToast==='function') showToast(t('branch_failed')+(_branchError&&_branchError.message||_branchError));
+      return;
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
