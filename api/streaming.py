@@ -6445,6 +6445,15 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
             if _live_tools is not live_tool_calls:
                 _snap_tool_calls = list(_live_tools.get(stream_id, []) or [])
 
+    # Seal projected live tool rows so the durable scene cannot disagree with
+    # the settled terminal state (#6309). Any tool call that was still running
+    # at error time is marked as completed with the terminal-error metadata.
+    if _snap_tool_calls:
+        for _tc in _snap_tool_calls:
+            if isinstance(_tc, dict) and not _tc.get('done'):
+                _tc['done'] = True
+                _tc['_sealed_by_terminal_error'] = True
+
     _partial_msg = _build_partial_message(_snap_partial_text, _snap_reasoning, _snap_tool_calls)
     if _partial_msg is None:
         return None
@@ -9449,6 +9458,14 @@ def _run_agent_streaming(
                                     + 'send a message, switch the model/provider, or fix the credentials.'
                                 )
                                 _error_payload['hint'] = _err_hint
+                        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
+                        _turn_duration_seconds = 0.0
+                        try:
+                            _pending_ts = getattr(s, 'pending_started_at', None)
+                            if _pending_ts:
+                                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
+                        except Exception:
+                            pass
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
@@ -9468,6 +9485,7 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
+                            '_turnDuration': round(_turn_duration_seconds, 3),
                         }
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
@@ -10672,6 +10690,14 @@ def _run_agent_streaming(
                             + 'send a message, switch the model/provider, or fix the credentials.'
                         )
                         _error_payload['hint'] = _exc_hint
+                # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
+                _turn_duration_seconds = 0.0
+                try:
+                    _pending_ts = getattr(s, 'pending_started_at', None)
+                    if _pending_ts:
+                        _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
+                except Exception:
+                    pass
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -10687,6 +10713,7 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
+                    '_turnDuration': round(_turn_duration_seconds, 3),
                 }
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(
