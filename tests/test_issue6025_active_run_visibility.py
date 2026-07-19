@@ -104,11 +104,19 @@ const activeState = {{
   rank: _sessionRunningSortRank(row),
   remembered: remembered.get(row.session_id) === true,
 }};
+const childOnlyParent = _renderOneSession({{
+  session_id:'child-only-parent',
+  message_count:0,
+  _child_session_streaming:true,
+}});
 _markPollingCompletionUnreadTransitions([row]);
 _activeRunSessionIds.clear();
 const idle = _renderOneSession(row);
 _markPollingCompletionUnreadTransitions([row]);
-console.log(JSON.stringify({{active:activeState, idle:{{
+console.log(JSON.stringify({{active:activeState, childOnlyParent:{{
+  ring: childOnlyParent.className.includes(' streaming'),
+  shared: _isSessionEffectivelyStreaming({{session_id:'child-only-parent', message_count:0}}),
+}}, idle:{{
   ring: idle.className.includes(' streaming'),
   shared: _isSessionEffectivelyStreaming(row),
   rank: _sessionRunningSortRank(row),
@@ -118,6 +126,7 @@ console.log(JSON.stringify({{active:activeState, idle:{{
 """
     result = _run_node(source)
     assert result["active"] == {"ring": True, "shared": False, "rank": 0, "remembered": False}
+    assert result["childOnlyParent"] == {"ring": False, "shared": False}
     assert result["idle"] == {
         "ring": False, "shared": False, "rank": 0, "remembered": False,
         "completionUnreadCalls": 0,
