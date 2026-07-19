@@ -826,6 +826,7 @@ def test_kanban_modal_mobile_responsive_css():
     assert block, "kanban-modal-overlay has no mobile (<=640px) rules"
 
     overlay = re.search(r"\.kanban-modal-overlay\s*\{([^}]*)\}", block)
+    assert overlay, "kanban-modal-overlay rule not parseable in mobile block"
     props = overlay.group(1)
     assert "overflow-y:auto" in props, f"overlay must be scrollable. Got: {props}"
     assert "align-items:flex-start" in props, f"overlay must top-align content. Got: {props}"
