@@ -116,6 +116,26 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
                 "tool": {"id": "call-1", "name": "terminal", "args": {"command": "git status"}},
             }
         ],
+        "artifacts": [
+            {
+                "source_event_type": "artifact_reference",
+                "event_id": "run-persist:7",
+                "run_id": "run-persist",
+                "stream_id": "stream-1",
+                "seq": 7,
+                "payload": {"kind": "workspace_file", "path": "reports/final.md"},
+            }
+        ],
+        "side_effects": [
+            {
+                "source_event_type": "state_saved",
+                "event_id": "run-persist:8",
+                "run_id": "run-persist",
+                "stream_id": "stream-1",
+                "seq": 8,
+                "payload": {"action": "saved", "kind": "memory", "name": "memory"},
+            }
+        ],
         "final_answer": "final answer",
     }
     request_body = {
@@ -151,6 +171,8 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert record["message_index"] == 1
     assert record["stream_id"] == "stream-1"
     assert record["scene"]["version"] == "activity_scene_v1"
+    assert record["scene"]["artifacts"] == scene["artifacts"]
+    assert record["scene"]["side_effects"] == scene["side_effects"]
 
     loaded = Session.load("anchorpersist1")
     hydrated = routes._hydrate_anchor_activity_scenes(
@@ -162,6 +184,8 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_stream_id"] == "stream-1"
     assert hydrated[1]["_anchor_activity_scene"]["final_answer"] == "final answer"
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
+    assert hydrated[1]["_anchor_activity_scene"]["artifacts"] == scene["artifacts"]
+    assert hydrated[1]["_anchor_activity_scene"]["side_effects"] == scene["side_effects"]
 
 
 def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypatch):

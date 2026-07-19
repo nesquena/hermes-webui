@@ -5700,9 +5700,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('state_saved',e=>{
       let d={};
-      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      try{
+        const parsed=JSON.parse(e.data||'{}');
+        d=(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))?parsed:{};
+      }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       if(!S.session||S.session.session_id!==activeSid) return;
+      _applyToAnchor('state_saved',d,e);
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 

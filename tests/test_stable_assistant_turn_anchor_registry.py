@@ -1321,6 +1321,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
         "tool_complete",
         "approval",
         "clarify",
+        "state_saved",
         "goal_continue",
         "pending_steer_leftover",
         "compressing",

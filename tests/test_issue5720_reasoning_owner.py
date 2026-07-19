@@ -21,6 +21,7 @@ def _run_reasoning_scene(
     fail_first_anchor_render: bool = False,
     fail_anchor_render_on: int | None = None,
     multi_segment_fallback: bool = False,
+    state_saved_settlement: bool = False,
     stale_active_stream: bool = False,
     stale_live_turn: bool = False,
     show_thinking: bool = True,
@@ -40,6 +41,8 @@ def _run_reasoning_scene(
         env["ISSUE5720_FAIL_ANCHOR_RENDER_ON"] = str(fail_anchor_render_on)
     if multi_segment_fallback:
         env["ISSUE5720_MULTI_SEGMENT_FALLBACK"] = "1"
+    if state_saved_settlement:
+        env["ISSUE5720_STATE_SAVED_SETTLEMENT"] = "1"
     if stale_active_stream:
         env["ISSUE5720_STALE_ACTIVE_STREAM"] = "1"
     if stale_live_turn:
@@ -197,6 +200,42 @@ def test_later_deferred_anchor_paint_remains_hidden_in_final_answer_only_mode():
     assert result["anchor_render_attempts"] == 2
     assert result["anchor_reasoning_events"] == 1
     assert result["anchor_reasoning_text"] == "Plan step"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_state_saved_sse_enters_anchor_before_done_settlement():
+    result = _run_reasoning_scene(state_saved_settlement=True)
+    persisted_scene = result["persisted_scene"]
+
+    assert result["toast_calls"] == [
+        {"kind": "memory", "name": "memory", "created": False}
+    ]
+    assert result["anchor_scene_post_count"] == 1
+    assert result["foreign_side_effect_count"] == 0
+    assert result["foreign_toast_calls"] == 0
+    assert result["registry_side_effect_count"] == 1
+    assert result["registry_mismatched"] == 0
+    assert persisted_scene["version"] == "activity_scene_v1"
+    assert persisted_scene["artifacts"] == []
+    assert [
+        row["role"] for row in persisted_scene["activity_rows"]
+    ] == ["terminal"]
+    assert len(persisted_scene["side_effects"]) == 1
+    assert persisted_scene["side_effects"][0]["source_event_type"] == "state_saved"
+    assert persisted_scene["side_effects"][0]["event_id"] == "run-settled:8"
+    assert persisted_scene["side_effects"][0]["run_id"] == "run-settled"
+    assert persisted_scene["side_effects"][0]["stream_id"] == "stream-1"
+    payload = persisted_scene["side_effects"][0]["payload"]
+    assert {
+        key: payload[key]
+        for key in ["action", "kind", "name"]
+    } == {
+        "action": "saved",
+        "kind": "memory",
+        "name": "memory",
+    }
+    assert payload["activityBurstId"] == 0
+    assert payload["activitySegmentSeq"] == 0
 
 
 _NODE_SCENE = r"""
@@ -500,6 +539,7 @@ window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 const S=global.S={
   session:{session_id:'sid-1',pending_started_at:1},
   messages:[{role:'user',content:'question'}],
+  toolCalls:[],
   activeStreamId:'stream-1',
 };
 const INFLIGHT=global.INFLIGHT={};
@@ -522,7 +562,7 @@ class FakeEventSource {
   static CONNECTING=0;
   constructor(){ this.listeners=Object.create(null);this.readyState=1;FakeEventSource.instances.push(this); }
   addEventListener(name,fn){ (this.listeners[name]||(this.listeners[name]=[])).push(fn); }
-  emit(name,data){ for(const fn of this.listeners[name]||[]) fn({data:JSON.stringify(data),lastEventId:''}); }
+  emit(name,data,lastEventId=''){ for(const fn of this.listeners[name]||[]) fn({data:JSON.stringify(data),lastEventId}); }
   close(){ this.readyState=2; }
 }
 global.EventSource=FakeEventSource;
@@ -540,6 +580,97 @@ attachLiveStream('sid-1','stream-1');
 const source=FakeEventSource.instances[0];
 if(!source) throw new Error('attachLiveStream did not create EventSource');
 if(process.env.ISSUE5720_STALE_ACTIVE_STREAM==='1') S.activeStreamId='stream-new';
+
+if(process.env.ISSUE5720_STATE_SAVED_SETTLEMENT==='1'){
+  const anchorScenePosts=[];
+  const toastCalls=[];
+  global.api=(url,options={})=>{
+    if(String(url)==='/api/session/anchor-scene'){
+      anchorScenePosts.push(JSON.parse(String(options.body||'{}')));
+    }
+    return Promise.resolve({});
+  };
+  global.localStorage={setItem(){}};
+  global._approvalSessionId='';
+  global._clarifySessionId='';
+  global._clearApprovalPendingForSession=()=>{};
+  global.stopApprovalPolling=()=>{};
+  global.hideApprovalCard=()=>{};
+  global._clearClarifyPendingForSession=()=>{};
+  global.stopClarifyPolling=()=>{};
+  global.hideClarifyCard=()=>{};
+  global.clearInflight=()=>{};
+  global.clearInflightState=()=>{};
+  global._resumeSessionStreamAfterLiveChat=()=>{};
+  global.setBusy=()=>{};
+  global.setComposerStatus=()=>{};
+  global.setStatus=()=>{};
+  global._shouldFollowMessagesOnDomReplace=()=>false;
+  global._isMessagePaneNearBottom=()=>false;
+  global._setActiveSessionUrl=()=>{};
+  global._syncCtxIndicator=()=>{};
+  global.renderSessionArtifacts=()=>{};
+  global.clearLiveToolCards=()=>{};
+  global.removeThinking=()=>{};
+  global.renderMessages=()=>{};
+  global.syncTopbar=()=>{};
+  global.loadDir=()=>{};
+  global.renderSessionList=()=>{};
+  global.noteWorkspaceMutationsFromToolCalls=()=>{};
+  global.playNotificationSound=()=>{};
+  global.sendBrowserNotification=()=>{};
+  global._shouldForceCompletionNotification=()=>false;
+  global._completionNotificationPreviewText=()=> '';
+  global._showPersistentStateToast=(kind,name,options={})=>{
+    toastCalls.push({kind:String(kind||''),name:String(name||''),created:!!options.created});
+  };
+  global._isSessionCurrentPane=sid=>sid==='sid-1';
+  global._isSessionActivelyViewed=sid=>sid==='sid-1';
+  global._markSessionViewed=()=>{};
+  global._markSessionCompletionUnread=()=>{};
+  source.emit('state_saved',{
+    session_id:'sid-foreign',
+    kind:'memory',
+    action:'saved',
+    name:'foreign',
+  },'run-settled:7');
+  const registryAfterForeign=window._liveAnchorRegistries&&window._liveAnchorRegistries.get('stream-1');
+  const foreignSideEffects=registryAfterForeign&&registryAfterForeign.anchor&&Array.isArray(registryAfterForeign.anchor.side_effects)
+    ? registryAfterForeign.anchor.side_effects.length
+    : 0;
+  const foreignToastCalls=toastCalls.length;
+  source.emit('state_saved',{
+    session_id:'sid-1',
+    kind:'memory',
+    action:'saved',
+    name:'memory',
+  },'run-settled:8');
+  source.emit('done',{
+    session:{
+      session_id:'sid-1',
+      message_count:2,
+      messages:[
+        {role:'user',content:'question'},
+        {role:'assistant',content:'done'},
+      ],
+    },
+    usage:{},
+    status:'completed',
+  },'run-settled:9');
+  const registry=window._liveAnchorRegistries&&window._liveAnchorRegistries.get('stream-1');
+  process.stdout.write(JSON.stringify({
+    toast_calls:toastCalls,
+    anchor_scene_post_count:anchorScenePosts.length,
+    persisted_scene:anchorScenePosts[0]&&anchorScenePosts[0].scene,
+    foreign_side_effect_count:foreignSideEffects,
+    foreign_toast_calls:foreignToastCalls,
+    registry_side_effect_count:registry&&registry.anchor&&Array.isArray(registry.anchor.side_effects)
+      ? registry.anchor.side_effects.length
+      : 0,
+    registry_mismatched:registry&&registry.stats?registry.stats.skipped_mismatched:0,
+  }));
+  process.exit(0);
+}
 
 function anchorReasoningRows(){
   return turn.querySelectorAll(
