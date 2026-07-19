@@ -89,9 +89,37 @@ python tests/browser_smoke.py
 It is intentionally **credential-free**: it strips every `*_API_KEY` from the
 environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
-that breaks the page for everyone). A full chat golden-path E2E (send → stream →
-render → switch → reload) lives in the maintainer's private QA harness, which has
-the agent + a mock LLM provider available.
+that breaks the page for everyone).
+
+## Public conversation lifecycle gate
+
+`tests/browser_conversation_lifecycle.py` adds the first public, deterministic
+chat golden path. It drives the real composer and real WebUI server in Chromium,
+while a localhost-only fixture supplies reasoning, tool, and final-answer events
+through the existing Hermes Gateway Runs API. The gate asserts semantic activity
+during live streaming, after settlement, and after a hard reload, including
+transcript-backed `activity_scene_v1` persistence and zero unexpected browser
+errors. It uses isolated temporary state and no provider credentials.
+
+```bash
+pip install -r requirements.txt playwright
+python -m playwright install --with-deps chromium
+python tests/browser_conversation_lifecycle.py
+```
+
+To certify that the gate catches its target failure, the test owns an opt-in
+mutation that drops the browser's Anchor-scene persistence request. This command
+must fail at the hard-reload boundary:
+
+```bash
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+  python tests/browser_conversation_lifecycle.py
+```
+
+The dedicated `Conversation lifecycle (informational)` workflow runs this test
+without blocking merges while the public matrix is being established. The
+maintainer's private QA harness remains broader; later public slices will add
+session switching, reconnect/replay, cancellation, compression, and recovery.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
