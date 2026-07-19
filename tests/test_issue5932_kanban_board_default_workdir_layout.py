@@ -7,9 +7,9 @@ from tests._pytest_port import BASE
 
 
 EXPECTED_LABELS = {
-    "en": "Default workdir",
-    "ru": "Рабочая папка по умолчанию",
-    "de": "Standard-Arbeitsverzeichnis",
+    "en": "Default workspace path",
+    "ru": "Путь рабочего пространства по умолчанию",
+    "de": "Standard-Workspace-Pfad",
 }
 _BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 

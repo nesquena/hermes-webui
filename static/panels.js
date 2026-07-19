@@ -3952,7 +3952,7 @@ function _renderKanbanBoardMenu(boards, current){
     </button>
     <button type="button" class="kanban-board-switcher-action" onclick="openKanbanRenameBoard()" data-i18n="kanban_rename_board">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-      <span>${esc(t('kanban_rename_board') || 'Rename current board…')}</span>
+      <span>${esc(t('kanban_rename_board') || 'Board settings…')}</span>
     </button>
     <button type="button" class="kanban-board-switcher-action danger" onclick="archiveKanbanBoard()" ${archiveDisabled ? 'disabled' : ''} data-i18n="kanban_archive_board">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
@@ -4051,6 +4051,7 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalIcon').value = '';
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
   document.getElementById('kanbanBoardModalDefaultWorkdir').value = '';
+  document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value = '';
   _loadKanbanBoardWorkdirOptions();
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
@@ -4086,7 +4087,7 @@ function openKanbanRenameBoard(){
   if (!meta) return;
   document.getElementById('kanbanBoardModalMode').value = 'rename';
   document.getElementById('kanbanBoardModalSlug').value = current;
-  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_rename_board') || 'Rename board';
+  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_board_settings') || 'Board settings';
   document.getElementById('kanbanBoardModalName').value = meta.name || '';
   document.getElementById('kanbanBoardModalSlugInput').value = current;
   document.getElementById('kanbanBoardModalSlugInput').disabled = true;  // slug is immutable
@@ -4095,7 +4096,9 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
   document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
-  document.getElementById('kanbanBoardModalDefaultWorkdir').value = meta.default_workdir || '';
+  const originalDefaultWorkdir = (meta.default_workdir || '').trim();
+  document.getElementById('kanbanBoardModalDefaultWorkdir').value = originalDefaultWorkdir;
+  document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value = originalDefaultWorkdir;
   _loadKanbanBoardWorkdirOptions();
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
@@ -4132,6 +4135,7 @@ async function submitKanbanBoardModal(){
   const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
   const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
   const defaultWorkdir = (document.getElementById('kanbanBoardModalDefaultWorkdir').value || '').trim();
+  const originalDefaultWorkdir = (document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value || '').trim();
   const submitBtn = document.getElementById('kanbanBoardModalSubmit');
   if (!name) {
     errEl.textContent = t('kanban_board_name_required') || 'Name is required';
@@ -4170,9 +4174,11 @@ async function submitKanbanBoardModal(){
     if (!slug) { errEl.textContent = 'Missing slug'; return; }
     if (submitBtn) submitBtn.disabled = true;
     try {
+      const payload = {name, description, icon, color};
+      if (defaultWorkdir !== originalDefaultWorkdir) payload.default_workdir = defaultWorkdir;
       await api('/api/kanban/boards/' + encodeURIComponent(slug), {
         method: 'PATCH',
-        body: JSON.stringify({name, description, icon, color, default_workdir: defaultWorkdir}),
+        body: JSON.stringify(payload),
       });
       closeKanbanBoardModal();
       await loadKanbanBoards();  // refresh switcher label/icon
