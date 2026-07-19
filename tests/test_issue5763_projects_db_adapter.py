@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import shutil
 import sqlite3
 import sys
 import types
@@ -278,6 +279,68 @@ def test_projects_db_adapter_reads_wal_only_from_temporary_snapshot(monkeypatch,
         assert not db_file.with_name("projects.db-shm").exists()
     finally:
         writer.close()
+
+
+def test_projects_db_adapter_retries_checkpoint_between_snapshot_copies(monkeypatch, tmp_path):
+    import api.projects_db_adapter as adapter
+
+    db_file = _profile_home(tmp_path, "work") / "projects.db"
+    db_file.parent.mkdir(parents=True)
+    wal_path = db_file.with_name("projects.db-wal")
+    db_file.write_text("old-main", encoding="utf-8")
+    wal_path.write_text("new-wal", encoding="utf-8")
+
+    class _FakeConn:
+        def __init__(self, database: str):
+            parsed = urlparse(database)
+            path = parsed.path
+            if path.startswith("/") and path[2:3] == ":":
+                path = path.removeprefix("/")
+            self.path = Path(path)
+            self.row_factory = None
+
+        def close(self):
+            return None
+
+    module = types.ModuleType("hermes_cli.projects_db")
+    module.list_projects = lambda conn: [
+        types.SimpleNamespace(slug="old", name="Old", color="#111111", archived=False),
+        *(
+            [types.SimpleNamespace(slug="new", name="New", color="#222222", archived=False)]
+            if "new-main" in conn.path.read_text(encoding="utf-8")
+            or conn.path.with_name(f"{conn.path.name}-wal").read_text(encoding="utf-8")
+            else []
+        ),
+    ]
+    package = types.ModuleType("hermes_cli")
+    package.__path__ = []
+    package.projects_db = module
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.projects_db", module)
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
+    monkeypatch.setattr(adapter.sqlite3, "connect", lambda database, *args, **kwargs: _FakeConn(database))
+
+    real_copy2 = shutil.copy2
+    copied = []
+    raced = {"done": False}
+
+    def _copy2(src, dst, *args, **kwargs):
+        copied.append(Path(src).name)
+        result = real_copy2(src, dst, *args, **kwargs)
+        if Path(src) == db_file and not raced["done"]:
+            raced["done"] = True
+            db_file.write_text("new-main", encoding="utf-8")
+            wal_path.write_text("", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(adapter.shutil, "copy2", _copy2)
+
+    assert adapter.load_projects_from_db(profile_name="work") == [
+        {"project_id": "old", "name": "Old", "color": "#111111", "profile": "work"},
+        {"project_id": "new", "name": "New", "color": "#222222", "profile": "work"},
+    ]
+    assert copied.count("projects.db") >= 2
+    assert copied.count("projects.db-wal") >= 2
 
 
 def test_projects_db_adapter_fails_closed_for_shm_only_without_mutation(monkeypatch, tmp_path):

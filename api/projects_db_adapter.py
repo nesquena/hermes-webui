@@ -89,18 +89,44 @@ def load_projects_from_db(*, profile_name: str | None = None) -> list[dict] | No
     def _sidecar_state() -> tuple[bool, bool]:
         return wal_path.exists(), shm_path.exists()
 
+    def _file_fingerprint(path: Path) -> tuple[bool, int | None, int | None]:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return False, None, None
+        return True, stat.st_size, stat.st_mtime_ns
+
     def _read_partial_snapshot() -> list[dict] | None:
-        wal_exists, shm_exists = _sidecar_state()
-        if not wal_exists and shm_exists:
-            return None
-        with tempfile.TemporaryDirectory(prefix="hermes-projects-db-") as temp_dir:
-            snapshot_db = Path(temp_dir) / resolved_db_path.name
-            shutil.copy2(resolved_db_path, snapshot_db)
-            if wal_exists:
-                shutil.copy2(wal_path, snapshot_db.with_name(f"{snapshot_db.name}-wal"))
+        for _ in range(3):
+            wal_exists, shm_exists = _sidecar_state()
             if shm_exists:
-                shutil.copy2(shm_path, snapshot_db.with_name(f"{snapshot_db.name}-shm"))
-            return _read_projects(snapshot_db, immutable=False)
+                return _read_projects(resolved_db_path, immutable=False)
+            if not wal_exists:
+                return _read_projects(resolved_db_path, immutable=True)
+            db_before = _file_fingerprint(resolved_db_path)
+            wal_before = _file_fingerprint(wal_path)
+            with tempfile.TemporaryDirectory(prefix="hermes-projects-db-") as temp_dir:
+                snapshot_db = Path(temp_dir) / resolved_db_path.name
+                snapshot_wal = snapshot_db.with_name(f"{snapshot_db.name}-wal")
+                snapshot_shm = snapshot_db.with_name(f"{snapshot_db.name}-shm")
+                shutil.copy2(resolved_db_path, snapshot_db)
+                try:
+                    shutil.copy2(wal_path, snapshot_wal)
+                except FileNotFoundError:
+                    continue
+                if shm_path.exists():
+                    try:
+                        shutil.copy2(shm_path, snapshot_shm)
+                    except FileNotFoundError:
+                        pass
+                db_after = _file_fingerprint(resolved_db_path)
+                wal_after = _file_fingerprint(wal_path)
+                if shm_path.exists():
+                    continue
+                if db_before != db_after or wal_before != wal_after:
+                    continue
+                return _read_projects(snapshot_db, immutable=False)
+        return None
 
     def _read_matrix() -> list[dict] | None:
         wal_exists, shm_exists = _sidecar_state()
