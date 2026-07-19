@@ -28,7 +28,7 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     # to the handler while widening the slice enough to cover the new helper
     # state and the unchanged localStorage/update-url writes.
     completion_block = MESSAGES_JS[completion_pos : completion_pos + 1000]
-    settled_block = MESSAGES_JS[settled_pos : settled_pos + 1800]
+    settled_block = MESSAGES_JS[settled_pos : settled_pos + 2500]
 
     for block in (completion_block, settled_block):
         assert "localStorage.setItem('hermes-webui-session',S.session.session_id);" in block
