@@ -17726,22 +17726,36 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("Connection", "close")
     end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+    # EventSource automatically returns the last received SSE id on transport
+    # reconnect. Seed only newer backlog entries in that case so already-rendered
+    # terminal bytes (including ANSI cursor controls) are not written twice. A
+    # genuinely new viewer has no cursor and receives the full bounded backlog.
+    after_seq = None
+    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
+    if last_event_id:
+        try:
+            after_seq = max(0, int(last_event_id))
+        except ValueError:
+            pass
+    output = term.subscribe(after_seq=after_seq)
     try:
         while True:
             try:
-                event, data = term.output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_seq, event, data = output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 handler.wfile.write(b": terminal heartbeat\n\n")
                 handler.wfile.flush()
-                if term.closed.is_set() and term.output.empty():
+                if term.closed.is_set() and output.empty():
                     _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
                     break
                 continue
-            _sse(handler, event, data)
+            _sse_with_id(handler, event, data, event_id=event_seq)
             if event in ("terminal_closed", "terminal_error"):
                 break
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass
+    finally:
+        term.unsubscribe(output)
     return True
 
 
