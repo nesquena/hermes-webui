@@ -1166,22 +1166,6 @@ def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
         return copy.deepcopy(payload)
 
 
-def _store_cached_providers(
-    cache_key: tuple[Any, ...],
-    payload: dict[str, Any],
-    generation: int | None = None,
-) -> dict[str, Any]:
-    with _providers_cache_lock:
-        if generation is not None and generation != _providers_cache_generation:
-            return copy.deepcopy(payload)
-        # Single-entry by design: /api/providers is cacheable only for the
-        # active profile/config snapshot, so clear older snapshots to avoid
-        # retaining unbounded provider metadata across profile switches.
-        _providers_cache.clear()
-        _providers_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
-    return copy.deepcopy(payload)
-
-
 def invalidate_providers_cache() -> None:
     """Clear cached ``GET /api/providers`` responses."""
     global _providers_cache_generation
@@ -3181,27 +3165,27 @@ def get_providers() -> dict[str, Any]:
     if state == "wait" and in_flight is not None:
         return _wait_provider_build(in_flight, cache_key)
 
-    providers_cfg: dict[str, Any] = cfg.get("providers") or {}
-    if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
-
-    # Add OAuth providers even if not in _PROVIDER_DISPLAY
-    known_ids.update(_OAUTH_PROVIDERS)
-
-    sorted_known_ids = sorted(known_ids)
-    import api.config as config_module
-    import api.profiles as profiles
-
-    active_profile_name = profiles.get_active_profile_name()
-    request_thread_env = dict(getattr(config_module._thread_ctx, "env", {}))
-    request_block_process_env_fallback = bool(
-        getattr(config_module._thread_ctx, "block_process_env_fallback", False),
-    )
-
     if in_flight is None:
         raise RuntimeError("Failed to claim provider build state")
 
     try:
+        providers_cfg: dict[str, Any] = cfg.get("providers") or {}
+        if isinstance(providers_cfg, dict):
+            known_ids.update(providers_cfg.keys())
+
+        # Add OAuth providers even if not in _PROVIDER_DISPLAY
+        known_ids.update(_OAUTH_PROVIDERS)
+
+        sorted_known_ids = sorted(known_ids)
+        import api.config as config_module
+        import api.profiles as profiles
+
+        active_profile_name = profiles.get_active_profile_name()
+        request_thread_env = dict(getattr(config_module._thread_ctx, "env", {}))
+        request_block_process_env_fallback = bool(
+            getattr(config_module._thread_ctx, "block_process_env_fallback", False),
+        )
+
         result = _build_providers_payload(
             cfg=cfg,
             sorted_known_ids=sorted_known_ids,
