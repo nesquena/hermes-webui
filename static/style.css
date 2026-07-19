@@ -7021,10 +7021,10 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
     max-width:calc(100vw - 24px);
   }
   /* Modal scales to viewport width on phones with reasonable padding.
-	   Ensure it's on screen and scrollable */
-	.kanban-modal-overlay{align-items:flex-start;overflow-y:auto;padding:12px;}
-	.kanban-modal{padding:16px 16px 14px;border-radius:14px;}
-	.kanban-modal-row-inline{flex-direction:column;gap:0;}
+     Ensure it's on screen and scrollable */
+  .kanban-modal-overlay{align-items:flex-start;overflow-y:auto;padding:12px;}
+  .kanban-modal{padding:16px 16px 14px;border-radius:14px;}
+  .kanban-modal-row-inline{flex-direction:column;gap:0;}
 }
 
 /* ── Logs panel (#1455) ───────────────────────────────────────────────────── */
