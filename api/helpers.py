@@ -1,6 +1,8 @@
 """
 Hermes Web UI -- HTTP helper functions.
 """
+import base64 as _base64
+import binascii as _binascii
 import functools
 import json as _json
 import logging
@@ -576,6 +578,61 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
     return _redact_fn_cached(text)
 
 
+_RASTER_IMAGE_DATA_URI_PREFIXES = (
+    ("data:image/png;base64,", "png"),
+    ("data:image/jpeg;base64,", "jpeg"),
+    ("data:image/jpg;base64,", "jpeg"),
+    ("data:image/gif;base64,", "gif"),
+    ("data:image/webp;base64,", "webp"),
+    ("data:image/bmp;base64,", "bmp"),
+)
+
+
+def _is_native_raster_data_uri(text: str) -> bool:
+    """Return whether *text* starts with a matching raster data URI header.
+
+    Native image content is opaque binary, not text that the credential regexes
+    can safely rewrite. Validate the declared MIME against decoded magic bytes
+    before taking that fast path; SVG and arbitrary ``data:`` strings continue
+    through the normal response redaction boundary.
+    """
+    if not isinstance(text, str):
+        return False
+    image_kind = None
+    payload_start = 0
+    for prefix, candidate_kind in _RASTER_IMAGE_DATA_URI_PREFIXES:
+        if text.startswith(prefix):
+            image_kind = candidate_kind
+            payload_start = len(prefix)
+            break
+    if image_kind is None:
+        return False
+
+    # 24 base64 characters decode to 18 bytes, enough for every signature
+    # below. Slicing keeps this check constant-space even for multi-megabyte
+    # images.
+    sample = text[payload_start:payload_start + 24]
+    if len(sample) < 4:
+        return False
+    sample += "=" * (-len(sample) % 4)
+    try:
+        head = _base64.b64decode(sample, validate=True)
+    except (_binascii.Error, ValueError):
+        return False
+
+    if image_kind == "png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if image_kind == "jpeg":
+        return head.startswith(b"\xff\xd8\xff")
+    if image_kind == "gif":
+        return head.startswith((b"GIF87a", b"GIF89a"))
+    if image_kind == "webp":
+        return head.startswith(b"RIFF") and head[8:12] == b"WEBP"
+    if image_kind == "bmp":
+        return head.startswith(b"BM")
+    return False
+
+
 def _redact_value(v, *, _enabled: bool | None = None):
     """Recursively redact credentials from strings, dicts, and lists.
 
@@ -585,7 +642,22 @@ def _redact_value(v, *, _enabled: bool | None = None):
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {k: _redact_value(val, _enabled=_enabled) for k, val in v.items()}
+        result = {}
+        is_native_image_part = (
+            v.get("type") == "image_url"
+            and isinstance(v.get("image_url"), dict)
+        )
+        for key, value in v.items():
+            if is_native_image_part and key == "image_url":
+                result[key] = {
+                    image_key: image_value
+                    if image_key == "url" and _is_native_raster_data_uri(image_value)
+                    else _redact_value(image_value, _enabled=_enabled)
+                    for image_key, image_value in value.items()
+                }
+            else:
+                result[key] = _redact_value(value, _enabled=_enabled)
+        return result
     if isinstance(v, list):
         return [_redact_value(item, _enabled=_enabled) for item in v]
     return v
