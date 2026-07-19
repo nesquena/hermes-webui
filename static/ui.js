@@ -10093,7 +10093,7 @@ function _renderLockManualInstruction(target, res){
   code.style.background='rgba(0,0,0,0.05)';
   code.style.padding='6px';
   code.style.margin='4px 0';
-  code.style.fontFamily='ui-monospace,monospace';
+  code.style.fontFamily='var(--font-mono)';
   code.style.borderRadius='4px';
   code.style.whiteSpace='pre-wrap';
   code.style.wordBreak='break-all';
