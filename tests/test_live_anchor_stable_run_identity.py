@@ -134,6 +134,64 @@ def test_runtime_journal_lifecycle_shell_preserves_stable_run_id(monkeypatch):
     assert row["identity"]["stream_id"] == stream_id
 
 
+@pytest.mark.parametrize(
+    ("event_run_id", "event_id"),
+    [
+        ({"bad": "id"}, None),
+        ("run-conflicting-envelope", "run-conflicting-event-id:1"),
+    ],
+)
+def test_runtime_journal_malformed_envelope_run_id_falls_back_to_transport_cursor(
+    monkeypatch,
+    event_run_id,
+    event_id,
+):
+    from api import routes
+
+    stream_id = "stream-current-1"
+    event = {
+        "event": "token",
+        "seq": 1,
+        "run_id": event_run_id,
+        "payload": {"text": "hello"},
+    }
+    if event_id is not None:
+        event["event_id"] = event_id
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda lookup_id: {
+            "session_id": "session-malformed-envelope",
+            "run_id": stream_id,
+            "stream_id": stream_id,
+            "last_seq": 1,
+            "last_event_id": f"{stream_id}:1",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda loaded_session_id, lookup_id: {"events": [event]},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    scene = snapshot["anchor_activity_scene"]
+    row = scene["activity_rows"][0]
+
+    assert scene["identity"]["run_id"] == stream_id
+    assert row["run_id"] == stream_id
+    assert row["identity"]["run_id"] == stream_id
+    assert snapshot["last_event_id"] == f"{stream_id}:1"
+    assert (
+        routes._parse_run_journal_after_seq(
+            {"after_event_id": [snapshot["last_event_id"]]},
+            stream_id,
+        )
+        == 1
+    )
+
+
 @pytest.mark.skipif(
     NODE is None, reason="node is required for browser hydration regression coverage"
 )
