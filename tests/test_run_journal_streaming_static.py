@@ -25,7 +25,6 @@ def test_streaming_journals_sse_events_before_queue_delivery():
     assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
 
 
-
 def test_streaming_compacts_all_successful_agent_result_writebacks():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     run_src = src[src.index("def _run_agent_streaming("):]
