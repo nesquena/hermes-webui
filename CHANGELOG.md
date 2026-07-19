@@ -15,6 +15,12 @@
 
 ### Fixed
 
+- **Watching the same terminal from two tabs no longer splits the output stream.** Terminal output is now broadcast to every subscribed viewer instead of draining from one shared queue, so a second tab (or a reconnect) sees the full stream rather than a random half. SSE responses carry event `id:`s and a reconnecting viewer replays only events after its `Last-Event-ID` cursor (fresh viewers still get the full bounded backlog). Thanks @ai-ag2026. (#5836)
+
+- **A turn that ends in an error no longer shows impossible "still running" tool work or a wrong duration.** On a terminal error, the settled (and reloaded) Worklog now freezes the turn's duration before cleanup and seals any still-projected tool rows as done, so a settled/reloaded transcript can't disagree with the terminal state. Successful and cancel paths are unchanged. Thanks @webtecnica. (#6323, #6309)
+
+- **Docker: experimental builds are now published to ghcr.** The image release workflow previously fired only on stable `v*` tags, so Docker/Portainer users couldn't track the experimental channel at all. It now also builds on `exp-v*` tags, publishing a floating `:experimental` tag (and marking the GitHub release as a prerelease) while the stable `:latest` / `v*` path is unchanged. Thanks @webtecnica. (#6329, #6298)
+
 - **A gateway command-approval card with no `approval_id` is now respondable.** When a gateway `approval.request` omits both `approval_id` and the legacy `id`, WebUI now synthesizes a non-empty `uuid4().hex` id instead of leaving it blank, so the approval card can be answered (matching the `#527` stable-uuid design). The downstream respond path resolves by `run_id` independently, so the synthetic id causes no mismatch; a provided or legacy id is preserved verbatim. Thanks @webtecnica. (#6168, #6008)
 
 - **The update check no longer lets an unexpected exception escape the route.** `POST /api/updates/check` now wraps `check_for_updates()` in a defensive guard that returns a clean `500` (and logs) instead of propagating, giving the endpoint the same exception protection as its siblings. Defensive hardening only — it does not change the success path. Thanks @webtecnica. (#6180)
