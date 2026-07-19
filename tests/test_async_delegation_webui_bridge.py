@@ -998,7 +998,7 @@ def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):
     whose origin_ui_session_id is A must start the wakeup turn in A (origin
     wins), and still take exactly one durable claim + one ack."""
     _reset_wakeup_state()
-    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     # The session-key index would route to session "B" ...
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "session-B"
@@ -1057,7 +1057,7 @@ def test_async_completion_with_unresolvable_target_retries_not_silent_drop(monke
     route through the bounded retry (so the durable row stays retryable), NOT a
     bare return that would leave it pending forever with no ack and no retry."""
     _reset_wakeup_state()
-    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     retried: list[dict] = []
     monkeypatch.setattr(
