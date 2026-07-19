@@ -8654,6 +8654,8 @@ function _preferencesPayloadFromUi(){
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
+  const fallbackNoticesCb=$('settingsShowFallbackNotices');
+  if(fallbackNoticesCb) payload.show_fallback_notices=fallbackNoticesCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
@@ -8787,6 +8789,11 @@ async function _autosavePreferencesSettings(payload){
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
     if(payload&&payload.show_tps!==undefined){
       window._showTps=!!(saved&&saved.show_tps);
+      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+      if(typeof renderMessages==='function') renderMessages();
+    }
+    if(payload&&payload.show_fallback_notices!==undefined){
+      window._showFallbackNotices=!!(saved&&saved.show_fallback_notices!==false);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
     }
@@ -9242,6 +9249,17 @@ async function loadSettingsPanel(){
       window._fadeTextEffect=fadeTextCb.checked;
       fadeTextCb.addEventListener('change',()=>{
         window._fadeTextEffect=fadeTextCb.checked;
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const fallbackNoticesCb=$('settingsShowFallbackNotices');
+    if(fallbackNoticesCb){
+      fallbackNoticesCb.checked=settings.show_fallback_notices!==false;
+      window._showFallbackNotices=fallbackNoticesCb.checked;
+      fallbackNoticesCb.addEventListener('change',()=>{
+        window._showFallbackNotices=fallbackNoticesCb.checked;
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+        if(typeof renderMessages==='function') renderMessages();
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -12494,6 +12512,7 @@ async function saveSettings(andClose){
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
+  body.show_fallback_notices=!!($('settingsShowFallbackNotices')||{}).checked;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;

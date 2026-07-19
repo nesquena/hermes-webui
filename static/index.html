@@ -1321,6 +1321,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowFallbackNotices" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_fallback_notices">Show fallback notices</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fallback_notices">Display a persistent inline notice in the chat stream when a model fallback occurs, showing which model served the response. On by default.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsTerminalAutoExpand" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_terminal_auto_expand">Auto-expand terminal on output</span>
               </label>
