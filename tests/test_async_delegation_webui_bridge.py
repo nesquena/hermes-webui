@@ -203,6 +203,56 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
     assert registry._completion_consumed == set()
 
 
+def test_claim_failure_and_queue_failure_arm_durable_restore_for_both_consumers(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_durable_delivery_api(monkeypatch)
+    async_delivery = sys.modules["tools.async_delegation"]
+    async_delivery.claim_event_delivery = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("durable store unavailable")
+    )
+    async_delivery.get_durable_delegation = lambda _delegation_id: (_ for _ in ()).throw(
+        RuntimeError("durable store unavailable")
+    )
+    evt = _async_delegation_event()
+    registry.completion_queue.put(evt)
+    registry.completion_queue.put = lambda _evt: (_ for _ in ()).throw(
+        RuntimeError("queue unavailable")
+    )
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
+
+    try:
+        assert streaming._drain_webui_process_notifications("webui-session-1") == []
+        assert peu.async_delivery_retry_timer_count() == 1
+
+        _reset_wakeup_state()
+        cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
+        bp._process_one(dict(evt))
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
+
+
+def test_unaccepted_live_turn_claim_is_released_and_requeued_on_teardown(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    evt = _async_delegation_event()
+    claim = peu.claim_async_delegation_delivery(evt, "webui-next-turn")
+    assert claim is not None
+    pending = [(evt, claim, "delegation notification", registry.completion_queue)]
+
+    streaming._release_pending_async_delegations(
+        pending,
+        session_id="webui-session-1",
+    )
+
+    assert pending == []
+    assert len(delivery["release"]) == 1
+    assert registry.completion_queue.qsize() == 1
+    assert peu.legacy_async_delivery_dedupe_size() == 0
+
+
 def test_acceptance_ack_and_queue_failure_schedules_durable_recovery(monkeypatch):
     _reset_wakeup_state()
     delivery = _install_fake_durable_delivery_api(monkeypatch)

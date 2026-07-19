@@ -2087,7 +2087,9 @@ def _drain_webui_process_notifications(
             try:
                 claim = claim_async_delegation_delivery(evt, "webui-next-turn")
             except Exception:
-                skipped_events.append(evt)
+                # Durable claim capability exists but its store is unavailable.
+                # Keep the durable hint so queue failure still arms a sweep.
+                async_retry_events.append((evt, True))
                 continue
             if claim is None:
                 schedule_async_delegation_claim_retry(evt, completion_queue)
@@ -2169,14 +2171,37 @@ def _drain_webui_process_notifications(
     return notifications
 
 
+def _release_pending_async_delegations(
+    pending_async_acceptances: list,
+    *,
+    session_id: str,
+) -> None:
+    """Release claims prepared for a turn that failed before acceptance."""
+    pending = list(pending_async_acceptances)
+    pending_async_acceptances.clear()
+    for evt, claim, _notification, completion_queue in pending:
+        release_async_delegation_delivery(evt, claim)
+        requeue_async_delegation_event(
+            evt,
+            completion_queue,
+            durable=bool(getattr(claim, "durable", False)),
+        )
+        logger.warning(
+            "Released unaccepted async delegation during session %s teardown",
+            session_id,
+        )
+
+
 def _accept_pending_async_delegations(
     pending_async_acceptances: list,
     *,
     session_id: str,
 ) -> list[str]:
     """ACK turn-bound delegation claims and return rejected notifications."""
+    pending = list(pending_async_acceptances)
+    pending_async_acceptances.clear()
     rejected_notifications: list[str] = []
-    for evt, claim, notification, completion_queue in pending_async_acceptances:
+    for evt, claim, notification, completion_queue in pending:
         try:
             complete_async_delegation_delivery(evt, claim)
         except Exception:
@@ -7359,6 +7384,7 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    _pending_async_acceptances = []
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -8789,7 +8815,7 @@ def _run_agent_streaming(
             )
             _ckpt_thread.start()
 
-            _pending_async_acceptances = []
+            _pending_async_acceptances.clear()
             _process_notifications = _drain_webui_process_notifications(
                 session_id,
                 pending_async_acceptances=_pending_async_acceptances,
@@ -10692,6 +10718,12 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        # A failure after the next-turn drain but before the acceptance helper
+        # must not strand process-local or durable claims removed from the queue.
+        _release_pending_async_delegations(
+            _pending_async_acceptances,
+            session_id=session_id,
+        )
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
         # _sessions[stream_id] entry that get_stats() pruning never reclaims (its

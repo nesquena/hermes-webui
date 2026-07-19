@@ -887,6 +887,7 @@ def _requeue_async_delegation_event(
     evt: dict,
     *,
     claim=None,
+    durable: bool | None = None,
     delay: float = 0.5,
 ) -> bool:
     """Retry without enqueueing new work once drain shutdown has started."""
@@ -896,7 +897,11 @@ def _requeue_async_delegation_event(
         completion_queue,
         delay=delay,
         stop_event=_DRAIN_STOP,
-        durable=(bool(getattr(claim, "durable", False)) if claim is not None else None),
+        durable=(
+            durable
+            if durable is not None
+            else (bool(getattr(claim, "durable", False)) if claim is not None else None)
+        ),
     )
 
 
@@ -1022,7 +1027,10 @@ def _process_async_delegation_event(
     try:
         claim = claim_async_delegation_delivery(evt, "webui-background")
     except Exception:
-        _requeue_async_delegation_event(process_registry, evt)
+        # Reaching this branch means the durable claim capability was present
+        # but unavailable. Preserve that knowledge so a simultaneous queue
+        # failure can arm the restore sweep without another store read.
+        _requeue_async_delegation_event(process_registry, evt, durable=True)
         return
     if claim is None:
         completion_queue = getattr(process_registry, "completion_queue", None)

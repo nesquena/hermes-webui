@@ -21,6 +21,9 @@ def test_webui_injects_process_notifications_without_persisting_them_as_user_tex
     assert "_process_notifications = _drain_webui_process_notifications(" in src
     assert "pending_async_acceptances=_pending_async_acceptances" in src
     assert "_accept_pending_async_delegations(" in src
+    assert "_pending_async_acceptances = []" in src
+    assert "_release_pending_async_delegations(" in src
+    assert "pending_async_acceptances.clear()" in src
     assert "[*_process_notifications, msg_text]" in src
     assert "_build_native_multimodal_message(workspace_ctx, _agent_msg_text" in src
     assert "persist_user_message=msg_text" in src
