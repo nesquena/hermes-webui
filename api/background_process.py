@@ -48,6 +48,16 @@ import time
 import uuid
 from typing import Any, Optional
 
+from api.process_event_utils import (
+    ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    claim_async_delegation_delivery,
+    complete_async_delegation_delivery,
+    completion_delivery_id,
+    release_async_delegation_delivery,
+    requeue_async_delegation_event,
+    schedule_async_delegation_claim_retry,
+)
+
 logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
@@ -541,9 +551,9 @@ def _build_payload(evt: dict, session_id: str) -> dict:
       ``(session_id, event_id)`` to dedupe across reconnects.
     """
     # ProcessRegistry completion events use the field name ``session_id`` for
-    # the process id. Alias it locally before exposing it as payload ``task_id``
-    # to avoid confusing that wire-format name with the WebUI session id.
-    process_id = str(evt.get("session_id") or "")
+    # the process id. Async delegation completions carry ``delegation_id``
+    # instead; expose either stable delivery id as payload ``task_id``.
+    process_id = completion_delivery_id(evt)
     payload: dict[str, Any] = {
         "session_id": str(session_id),
         "task_id": process_id,
@@ -872,6 +882,185 @@ def _resolve_wakeup_target(
     return owner
 
 
+def _requeue_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    claim=None,
+    delay: float = 0.5,
+) -> bool:
+    """Retry without enqueueing new work once drain shutdown has started."""
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    return requeue_async_delegation_event(
+        evt,
+        completion_queue,
+        delay=delay,
+        stop_event=_DRAIN_STOP,
+        durable=(bool(getattr(claim, "durable", False)) if claim is not None else None),
+    )
+
+
+def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
+    """Retry durable routing, or one bounded best-effort legacy routing pass."""
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    if schedule_async_delegation_claim_retry(
+        evt,
+        completion_queue,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    ):
+        return
+    if evt.get("_webui_routing_retry_attempted"):
+        return
+    retry_evt = dict(evt)
+    retry_evt["_webui_routing_retry_attempted"] = True
+    _requeue_async_delegation_event(
+        process_registry,
+        retry_evt,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    )
+
+
+def _record_async_delegation_accepted(
+    evt: dict,
+    *,
+    session_id: str,
+    claim,
+) -> None:
+    """ACK durable delivery and publish live-view state after turn acceptance."""
+
+    complete_async_delegation_delivery(evt, claim)
+    payload = _build_payload(evt, session_id)
+    try:
+        _emit_bg_task_complete_events_coalesced(session_id, payload)
+    except Exception:
+        logger.debug(
+            "async delegation live-view emit failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _start_async_delegation_wakeup_turn(
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    delegation_id: str,
+    evt: dict,
+    claim,
+    process_registry,
+) -> None:
+    """Start one autonomous delegation turn and ACK only after acceptance."""
+
+    def _runner() -> None:
+        try:
+            from api.routes import start_session_turn
+
+            resp = start_session_turn(
+                session_id,
+                wakeup_prompt,
+                source="process_wakeup",
+            )
+            raw_status = (resp or {}).get("_status")
+            if raw_status is None:
+                status = 200 if (resp or {}).get("stream_id") else 500
+            else:
+                status = int(raw_status)
+            if 200 <= status < 300:
+                _record_async_delegation_accepted(
+                    evt,
+                    session_id=session_id,
+                    claim=claim,
+                )
+                logger.info(
+                    "async delegation wakeup turn accepted for session %s "
+                    "(stream_id=%s)",
+                    session_id,
+                    (resp or {}).get("stream_id"),
+                )
+                return
+
+            release_async_delegation_delivery(evt, claim)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                logger.info(
+                    "async delegation wakeup paused for session %s; delivery remains retryable",
+                    session_id,
+                )
+            else:
+                logger.debug(
+                    "async delegation wakeup not accepted for session %s: "
+                    "status=%s err=%r; requeued",
+                    session_id,
+                    status,
+                    (resp or {}).get("error"),
+                )
+        except Exception:
+            release_async_delegation_delivery(evt, claim)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            logger.warning(
+                "async delegation wakeup turn failed for session %s; requeued",
+                session_id,
+                exc_info=True,
+            )
+
+    threading.Thread(
+        target=_runner,
+        name=f"hermes-webui-delegation-wakeup-{str(session_id)[:8]}",
+        daemon=True,
+    ).start()
+
+
+def _process_async_delegation_event(
+    evt: dict,
+    *,
+    session_id: str,
+    delegation_id: str,
+    process_registry,
+) -> None:
+    """Claim and route one async completion without private registry markers."""
+
+    try:
+        claim = claim_async_delegation_delivery(evt, "webui-background")
+    except Exception:
+        _requeue_async_delegation_event(process_registry, evt)
+        return
+    if claim is None:
+        completion_queue = getattr(process_registry, "completion_queue", None)
+        schedule_async_delegation_claim_retry(evt, completion_queue)
+        return
+
+    try:
+        wakeup_prompt_raw = format_wakeup_prompt(evt)
+        wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
+        if not wakeup_prompt:
+            raise RuntimeError("async delegation completion could not be formatted")
+
+        # Do not persist async results in the process-local deferred list. If a
+        # foreground turn owns the session, release the durable claim and retry
+        # from the shared queue; the core record therefore remains restart-safe.
+        if _session_has_active_turn(session_id):
+            release_async_delegation_delivery(evt, claim)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            return
+
+        _start_async_delegation_wakeup_turn(
+            session_id,
+            wakeup_prompt,
+            delegation_id=delegation_id,
+            evt=evt,
+            claim=claim,
+            process_registry=process_registry,
+        )
+    except Exception:
+        release_async_delegation_delivery(evt, claim)
+        _requeue_async_delegation_event(process_registry, evt, claim=claim)
+        logger.warning(
+            "server-side async delegation dispatch failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -887,7 +1076,7 @@ def _process_one(evt: dict) -> None:
     except Exception:
         _process_registry = None
 
-    process_id = str(evt.get("session_id") or "")
+    process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
     # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
@@ -917,13 +1106,19 @@ def _process_one(evt: dict) -> None:
             "process_complete drop: no recoverable session_key for process_id=%r",
             process_id,
         )
+        if evt.get("type") == "async_delegation":
+            _retry_unmapped_async_delegation_event(_process_registry, evt)
         return
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
     if not session_id:
         # No mapping — could be a cron/gateway process that uses the same
-        # registry but a non-WebUI session_key. Ignore.
+        # registry but a non-WebUI session_key. Durable delegation events stay
+        # pending and are retried because their WebUI ownership mapping can be
+        # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
+        if evt.get("type") == "async_delegation":
+            _retry_unmapped_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
     # session_id above came from PROCESS_SESSION_INDEX.get(session_key), and
@@ -945,6 +1140,14 @@ def _process_one(evt: dict) -> None:
         session_key_resolved_sid=session_id,
         proc_session=_ps_xs,
     )
+    if evt.get("type") == "async_delegation":
+        _process_async_delegation_event(
+            evt,
+            session_id=session_id,
+            delegation_id=process_id,
+            process_registry=_process_registry,
+        )
+        return
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain
     # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
@@ -1056,7 +1259,7 @@ def _process_one(evt: dict) -> None:
         )
 
 
-def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str) -> None:
+def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str) -> bool:
     """Persist a deferred process-completion wakeup for later redelivery.
 
     Called from ``_process_one`` when a completion arrives while a turn is
@@ -1068,10 +1271,11 @@ def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str)
 
     Idempotent per process_id: if the same process_id is already queued for
     this session (kill_process racing the reader thread), it is not appended
-    twice. Best-effort — never raises into the drain loop.
+    twice. Returns whether the prompt is safely queued; never raises into the
+    drain loop.
     """
     if not session_id or not wakeup_prompt:
-        return
+        return False
     from api import config as _cfg
 
     try:
@@ -1080,14 +1284,16 @@ def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str)
             if process_id and any(
                 e.get("process_id") == process_id for e in entries
             ):
-                return
+                return True
             entries.append(
                 {"process_id": process_id, "wakeup_prompt": wakeup_prompt}
             )
+        return True
     except Exception:
         logger.debug(
             "record_deferred_wakeup failed for session %s", session_id, exc_info=True
         )
+        return False
 
 
 def claim_deferred_wakeups(session_id: str) -> list[dict]:
