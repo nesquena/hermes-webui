@@ -18670,7 +18670,7 @@ function loadMarkdownInline(container){
     const mediaSessionId = (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
     const publicMediaUrl = 'api/media?path=' + encodeURIComponent(path);
     const mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '');
-    const downloadUrl = publicMediaUrl + '&download=1';
+    const downloadUrl = mediaUrl + '&download=1';
     fetch(mediaUrl)
       .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
       .then(text => {
