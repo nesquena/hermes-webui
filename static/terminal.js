@@ -17,6 +17,7 @@ const TERMINAL_UI={
   resizeStartHeight:0,
   lastAppliedTheme:null,
   lastAppliedFontFamily:null,
+  fontFitFrame:null,
 };
 
 const TERMINAL_HEIGHT_DEFAULT=260;
@@ -131,6 +132,15 @@ function _terminalThemesEqual(left,right){
   return leftKeys.length===rightKeys.length&&leftKeys.every(key=>Object.prototype.hasOwnProperty.call(right,key)&&left[key]===right[key]);
 }
 
+function _scheduleTerminalFontFit(term){
+  if(TERMINAL_UI.fontFitFrame!==null)return;
+  TERMINAL_UI.fontFitFrame=requestAnimationFrame(()=>{
+    TERMINAL_UI.fontFitFrame=null;
+    if(TERMINAL_UI.term!==term||!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
+    _fitTerminal();
+  });
+}
+
 function syncComposerTerminalAppearance(){
   if(!TERMINAL_UI.term)return;
   const term=TERMINAL_UI.term;
@@ -143,6 +153,7 @@ function syncComposerTerminalAppearance(){
   if(TERMINAL_UI.lastAppliedFontFamily!==fontFamily){
     term.options.fontFamily=fontFamily;
     TERMINAL_UI.lastAppliedFontFamily=fontFamily;
+    _scheduleTerminalFontFit(term);
   }
 }
 
@@ -603,6 +614,10 @@ function expandComposerTerminal(opts){
 }
 
 function _disposeXterm(){
+  if(TERMINAL_UI.fontFitFrame!==null){
+    if(typeof cancelAnimationFrame==='function')cancelAnimationFrame(TERMINAL_UI.fontFitFrame);
+    TERMINAL_UI.fontFitFrame=null;
+  }
   if(TERMINAL_UI.term){
     try{TERMINAL_UI.term.dispose();}catch(_){}
   }
