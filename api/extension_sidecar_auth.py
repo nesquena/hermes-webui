@@ -146,9 +146,12 @@ def ensure_token(ext_id: str) -> Optional[str]:
                 os.chmod(d, 0o700)
             except OSError:
                 pass  # best-effort dir hardening; file perms are the real guard
-            # Write to a unique temp, fsync, then atomically rename into place so
-            # the final path is never observed empty/half-written (the O_EXCL
-            # expose-before-write race).
+            # Write to a unique temp, fsync, then publish with atomic
+            # create-or-fail (os.link, the repo's TOCTOU-safe idiom — see
+            # session_recovery.py:627). Unlike os.replace, link does NOT clobber:
+            # if another process already published, ours fails, we drop our temp,
+            # and everyone reads the single winning file. This closes both the
+            # empty-file-exposure race AND the cross-process clobber race.
             tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
             fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
@@ -156,12 +159,20 @@ def ensure_token(ext_id: str) -> Optional[str]:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            os.replace(tmp, path)
-            tmp = None
             try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
+                os.link(str(tmp), str(path))
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+            except FileExistsError:
+                pass  # another writer won; we return the winner via _stable_read below
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                tmp = None
         except OSError:
             # Persistence failed → report unavailable. Do NOT return the
             # in-memory token (the _load_key trap: core would inject a secret the
