@@ -815,6 +815,22 @@ def test_kanban_review_feedback_static_ui_fixes_exist():
     assert "kanban-stats-grid" in PANELS
 
 
+def test_kanban_modal_mobile_responsive_css():
+    """On narrow phones (<=640px) a tall kanban modal must stay reachable: the
+    overlay scrolls (overflow-y:auto) and top-aligns its content
+    (align-items:flex-start) so nothing is clipped above the fold."""
+    # Each @media (max-width: 640px) block closes with a "\n}" at column 0
+    # (interior rules are indented), so this cleanly isolates each block.
+    blocks = re.findall(r"@media\s*\(max-width:\s*640px\)\s*\{(.*?)\n\}", STYLE, flags=re.S)
+    block = next((b for b in blocks if ".kanban-modal-overlay" in b), None)
+    assert block, "kanban-modal-overlay has no mobile (<=640px) rules"
+
+    overlay = re.search(r"\.kanban-modal-overlay\s*\{([^}]*)\}", block)
+    props = overlay.group(1)
+    assert "overflow-y:auto" in props, f"overlay must be scrollable. Got: {props}"
+    assert "align-items:flex-start" in props, f"overlay must top-align content. Got: {props}"
+
+
 def test_kanban_task_detail_renderer_executes_with_log_and_formats_feedback():
     import json
     import subprocess
