@@ -4372,6 +4372,7 @@ def _sanitize_messages_for_api(
     messages,
     *,
     cfg: dict = None,
+    session_id: str | None = None,
     effective_model: str | None = None,
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
@@ -4394,6 +4395,13 @@ def _sanitize_messages_for_api(
     remaining replay gap where an older native image in the saved transcript kept
     causing 400s on every later text-only turn (#2297).
     """
+    if session_id:
+        try:
+            from api.session_media import hydrate_session_media_urls
+
+            messages = hydrate_session_media_urls(messages, session_id)
+        except Exception:
+            logger.warning("Could not hydrate session media for %s", session_id, exc_info=True)
     strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
@@ -9029,6 +9037,7 @@ def _run_agent_streaming(
                 conversation_history=_sanitize_messages_for_api(
                     _previous_context_messages,
                     cfg=_cfg,
+                    session_id=session_id,
                     effective_model=resolved_model,
                     effective_provider=resolved_provider,
                     effective_base_url=resolved_base_url,
@@ -9514,6 +9523,7 @@ def _run_agent_streaming(
                                     conversation_history=_sanitize_messages_for_api(
                                         _previous_context_messages,
                                         cfg=_cfg,
+                                        session_id=session_id,
                                         effective_model=resolved_model,
                                         effective_provider=resolved_provider,
                                         effective_base_url=resolved_base_url,
@@ -10746,6 +10756,7 @@ def _run_agent_streaming(
                             conversation_history=_sanitize_messages_for_api(
                                 _previous_context_messages,
                                 cfg=_cfg,
+                                session_id=session_id,
                                 effective_model=resolved_model,
                                 effective_provider=resolved_provider,
                                 effective_base_url=resolved_base_url,

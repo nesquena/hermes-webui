@@ -1365,6 +1365,17 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        # A large native image otherwise occurs in both messages and
+        # context_messages, so every session read and JSON response repeats its
+        # base64 work. Persist a private reference and hydrate only when a later
+        # model call needs the original data URL.
+        try:
+            from api.session_media import externalize_large_session_media
+
+            externalize_large_session_media(self.messages, self.session_id)
+            externalize_large_session_media(self.context_messages, self.session_id)
+        except Exception:
+            logger.warning("Could not externalize session media for %s", self.session_id, exc_info=True)
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
