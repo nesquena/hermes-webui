@@ -15821,7 +15821,7 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
-    const fallbackNoticeHtml = (!isUser&&m._fallbackNotice) ? _fallbackNoticeHtml(m._fallbackNotice) : '';
+    const fallbackNoticeHtml = (!isUser&&m._fallbackNotice&&window._showFallbackNotices!==false) ? _fallbackNoticeHtml(m._fallbackNotice) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
