@@ -5,6 +5,8 @@
 
 ### Changed
 
+- **Transparent Stream can now hide its per-event timestamp chips.** A new opt-in setting (Settings → the Transparent Stream activity area) lets you suppress the small per-event timestamp chips inside Transparent Stream while keeping the assistant response footer time visible — narrowing the visual noise without removing timing information entirely. Default is unchanged (chips shown). Thanks @rodboev. (#6130, #6099)
+
 - **Internal: removed a dead `rowIndex` parameter from the settled-scene row projector.** `attachLiveStream`'s `pushRow` helper carried an unused positional index left over from before final-segment eligibility moved to a row-identity `WeakSet`; dropping it is a pure no-op refactor (differential execution confirms byte-identical settled scenes — ordering, dedupe, final-prefix suppression, and sequence assignment all unchanged). Thanks @webtecnica. (#6258)
 
 - **Docs: reconciled the assistant-reply lifecycle RFCs/contracts with shipped behavior.** The Stable Assistant Turn Anchors and Live-to-Final RFCs, `docs/CONTRACTS.md`, and the Phase 0 architecture inventory were updated from "proposed/scaffold" framing to "accepted/implemented" to match what actually ships (single assistant-turn owner projecting one `activity_scene_v1` into Compact Worklog / Transparent Stream / Final answer). Documentation-only — no runtime behavior or CI-gate change; the one code touch is a corrected comment header in `static/assistant_turn_anchors.js`. Remaining hardening stays tracked under #3400. Thanks @franksong2702. (#6144)
