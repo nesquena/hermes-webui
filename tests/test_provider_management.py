@@ -546,6 +546,126 @@ class TestGetProviders:
         finally:
             prov.invalidate_providers_cache()
 
+    def test_post_registration_build_setup_error_clears_inflight_and_retries(self, monkeypatch, tmp_path):
+        """Setup failure after claiming build should wake waiters and allow retry."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+
+        setup_blocked = threading.Event()
+        release_setup = threading.Event()
+        build_payload_calls = {"value": 0}
+        original_get_active_profile_name = profiles.get_active_profile_name
+
+        def broken_active_profile_name():
+            setup_blocked.set()
+            release_setup.wait(2)
+            raise RuntimeError("post-registration setup failure")
+
+        def succeed_payload(
+            cfg,
+            sorted_known_ids,
+            active_profile_name,
+            request_thread_env,
+            request_block_process_env_fallback,
+            providers_cfg,
+        ):
+            build_payload_calls["value"] += 1
+            return {
+                "providers": [{
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "has_key": False,
+                    "configurable": True,
+                    "key_source": "none",
+                    "is_self_hosted": False,
+                    "base_url": None,
+                    "is_plugin_provider": False,
+                    "is_oauth": False,
+                    "auth_error": None,
+                    "models": [],
+                    "models_total": 0,
+                }],
+                "active_provider": "openai",
+            }
+
+        monkeypatch.setattr(profiles, "get_active_profile_name", broken_active_profile_name)
+        monkeypatch.setattr(prov, "_build_providers_payload", succeed_payload)
+
+        waiter = threading.Event()
+        real_wait_provider_build = prov._wait_provider_build
+
+        def spy_wait_provider_build(state, cache_key):
+            waiter.set()
+            return real_wait_provider_build(state, cache_key)
+
+        monkeypatch.setattr(prov, "_wait_provider_build", spy_wait_provider_build)
+
+        errors = {}
+
+        def call_get_providers(label):
+            try:
+                prov.get_providers()
+            except BaseException as exc:
+                errors[label] = exc
+
+        lead_started = False
+        follower_started = False
+        lead = threading.Thread(target=call_get_providers, args=("lead",))
+        follower = threading.Thread(target=call_get_providers, args=("waiter",))
+
+        try:
+            lead.start()
+            lead_started = True
+            assert setup_blocked.wait(2)
+
+            follower.start()
+            follower_started = True
+            assert waiter.wait(2)
+
+            cache_key = prov._providers_cache_key(prov.get_config())
+            assert cache_key in prov._providers_build_inflight
+
+            release_setup.set()
+
+            lead.join(2)
+            follower.join(2)
+
+            assert not lead.is_alive()
+            assert not follower.is_alive()
+            assert isinstance(errors.get("lead"), RuntimeError)
+            assert isinstance(errors.get("waiter"), RuntimeError)
+            assert errors["lead"].args == errors["waiter"].args == ("post-registration setup failure",)
+
+            assert cache_key not in prov._providers_build_inflight
+            assert cache_key not in prov._providers_cache
+
+            monkeypatch.setattr(
+                profiles,
+                "get_active_profile_name",
+                original_get_active_profile_name,
+            )
+            result = prov.get_providers()
+            ids = {entry["id"] for entry in result["providers"]}
+            assert ids == {"openai"}
+            assert build_payload_calls["value"] == 1
+        finally:
+            release_setup.set()
+            if lead_started:
+                lead.join(2)
+            if follower_started:
+                follower.join(2)
+            monkeypatch.setattr(profiles, "get_active_profile_name", original_get_active_profile_name)
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
     def test_complete_provider_build_cache_publication_lock_error_wakes_waiter_and_clears_inflight(self, monkeypatch, tmp_path):
         """Cache publication lock failure must wake waiters and be recoverable."""
         _install_fake_hermes_cli(monkeypatch)
