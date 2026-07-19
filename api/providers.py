@@ -36,8 +36,8 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
-    _custom_provider_slug_from_name,
     _get_label_for_model,
+    _custom_provider_slug_from_name,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
     _read_live_provider_model_ids,
@@ -48,6 +48,7 @@ from api.config import (
     invalidate_models_cache,
     reload_config,
 )
+from api.helpers import _sanitize_error
 from api.plugin_providers import (
     effective_provider_display_name,
     effective_provider_env_var,
@@ -141,6 +142,9 @@ _providers_cache_lock = threading.Lock()
 _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
 
+_CODEX_RESET_REDEMPTION_LOCKS: dict[str, threading.Lock] = {}
+_CODEX_RESET_REDEMPTION_LOCKS_LOCK = threading.Lock()
+
 # Per-home worker pool configuration for probe tail-latency reduction (#3787)
 _ACCOUNT_USAGE_WORKERS_PER_HOME = 2
 
@@ -178,6 +182,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 from urllib import request as urllib_request
 
 from agent.account_usage import fetch_account_usage
@@ -220,6 +225,9 @@ def _snapshot_payload(snapshot):
         "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)),
     }
+    banked_resets = _subprocess_coerce_banked_resets(getattr(snapshot, "banked_resets", None))
+    if banked_resets is not None:
+        payload["banked_resets"] = banked_resets
     pool = getattr(snapshot, "pool", None)
     if isinstance(pool, dict):
         payload["pool"] = pool
@@ -350,6 +358,7 @@ def _codex_snapshot_from_usage_payload(payload):
         ))
 
     details = []
+    banked_resets = None
     credits = payload.get("credits")
     if isinstance(credits, dict) and credits.get("has_credits"):
         balance = _number(credits.get("balance"))
@@ -357,6 +366,13 @@ def _codex_snapshot_from_usage_payload(payload):
             details.append("Credits balance: $" + format(float(balance), ".2f"))
         elif credits.get("unlimited"):
             details.append("Credits balance: unlimited")
+    reset_credits = payload.get("rate_limit_reset_credits")
+    if isinstance(reset_credits, dict):
+        banked_resets = _subprocess_coerce_banked_resets(
+            reset_credits,
+            redeemable=True,
+            reason_code=None,
+        )
 
     return SimpleNamespace(
         provider="openai-codex",
@@ -365,6 +381,7 @@ def _codex_snapshot_from_usage_payload(payload):
         plan=_title_case_slug(payload.get("plan_type")),
         windows=tuple(windows),
         details=tuple(details),
+        banked_resets=banked_resets,
         available=bool(windows or details),
         unavailable_reason=None,
         fetched_at=datetime.now(timezone.utc),
@@ -420,14 +437,46 @@ def _safe_unavailable_reason(reason):
     return text[:180]
 
 
-def _entry_exhausted_ttl_seconds(error_code):
+def _subprocess_count_value(value: Any) -> int | None:
+    number = _number(value)
+    if number is None:
+        return None
+    try:
+        return max(0, int(number))
+    except (TypeError, ValueError):
+        return None
+
+
+def _subprocess_coerce_banked_resets(value: Any, *, redeemable: bool | None = None, reason_code: str | None = None, complete: bool | None = None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        count = _subprocess_count_value(value.get("available_count"))
+        redeemable = value.get("redeemable") if redeemable is None else redeemable
+        reason_code = value.get("reason_code") if reason_code is None else reason_code
+        complete = value.get("complete") if complete is None else complete
+    else:
+        count = _subprocess_count_value(getattr(value, "available_count", value))
+        if complete is None:
+            complete = getattr(value, "complete", None)
+    if count is None:
+        return None
+    return {
+        "available_count": count,
+        "redeemable": bool(redeemable) if redeemable is not None else False,
+        "reason_code": (str(reason_code).strip() or None) if reason_code is not None else None,
+        "complete": bool(complete) if complete is not None else True,
+    }
+
+
+def _subprocess_entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
     return 60 * 60
 
 
-def _entry_pool_exhausted_until(entry):
+def _subprocess_entry_pool_exhausted_until(entry):
     if str(_entry_value(entry, "last_status") or "").strip().lower() != "exhausted":
         return None
     reset_at = _parse_dt(getattr(entry, "last_error_reset_at", None))
@@ -436,17 +485,17 @@ def _entry_pool_exhausted_until(entry):
     status_at = _parse_dt(getattr(entry, "last_status_at", None))
     if status_at is None:
         return None
-    return status_at + timedelta(seconds=_entry_exhausted_ttl_seconds(_entry_value(entry, "last_error_code")))
+    return status_at + timedelta(seconds=_subprocess_entry_exhausted_ttl_seconds(_entry_value(entry, "last_error_code")))
 
 
-def _entry_is_pool_exhausted(entry):
-    exhausted_until = _entry_pool_exhausted_until(entry)
+def _subprocess_entry_is_pool_exhausted(entry):
+    exhausted_until = _subprocess_entry_pool_exhausted_until(entry)
     return exhausted_until is not None and datetime.now(timezone.utc) < exhausted_until
 
 
-def _entry_pool_exhausted_reason(entry):
+def _subprocess_entry_pool_exhausted_reason(entry):
     code = _entry_value(entry, "last_error_code")
-    reset_at = _entry_pool_retry_after(entry)
+    reset_at = _subprocess_entry_pool_retry_after(entry)
     reason = "Credential pool marked this credential exhausted"
     if code:
         reason += " after provider status " + code
@@ -455,8 +504,8 @@ def _entry_pool_exhausted_reason(entry):
     return reason + "."
 
 
-def _entry_pool_retry_after(entry):
-    return _iso(_entry_pool_exhausted_until(entry))
+def _subprocess_entry_pool_retry_after(entry):
+    return _iso(_subprocess_entry_pool_exhausted_until(entry))
 
 
 def _fetch_codex_entry_snapshot(entry):
@@ -524,6 +573,25 @@ def _codex_pool_snapshot(entries, rows, queried):
     available_rows = [row for row in rows if row.get("status") == "available"]
     exhausted_rows = [row for row in rows if row.get("status") == "exhausted"]
     failed_rows = [row for row in rows if row.get("status") not in {"available", "exhausted"}]
+    known_banked_reset_count = 0
+    known_banked_reset_rows = 0
+    total_banked_reset_rows = len(rows)
+    for row in rows:
+        row_banked_resets = _subprocess_coerce_banked_resets(row.get("banked_resets"))
+        if row_banked_resets is None:
+            continue
+        known_banked_reset_rows += 1
+        known_banked_reset_count += row_banked_resets["available_count"]
+    pool_banked_resets = None
+    if known_banked_reset_rows > 0:
+        pool_banked_resets = _subprocess_coerce_banked_resets(
+            {
+                "available_count": known_banked_reset_count,
+                "complete": known_banked_reset_rows == total_banked_reset_rows,
+            },
+            redeemable=len(entries) == 1,
+            reason_code=None if len(entries) == 1 else "ambiguous_pool",
+        )
     plans = []
     for row in rows:
         plan = row.get("plan")
@@ -538,6 +606,7 @@ def _codex_pool_snapshot(entries, rows, queried):
         "failed_credentials": len(failed_rows),
         "plans": plans,
         "next_reset_at": _next_reset_at(rows),
+        "banked_resets": pool_banked_resets,
         "best_remaining_by_window": best_windows,
         "credentials": rows,
     }
@@ -565,30 +634,20 @@ def _codex_pool_snapshot(entries, rows, queried):
         plan=plan,
         windows=windows,
         details=tuple(details),
+        banked_resets=pool_banked_resets,
         available=bool(available_rows),
-        unavailable_reason=None if available_rows else "No Codex pool credentials returned available account limits.",
+        unavailable_reason=(
+            None
+            if available_rows
+            else "No Codex pool credentials returned available account limits."
+        ),
         fetched_at=datetime.now(timezone.utc),
         pool=pool,
     )
 
 
-def _codex_pool_exhausted_row(entry, index):
-    label = _safe_entry_label(entry, index)
-    retry_after = _entry_pool_retry_after(entry)
-    return {
-        "label": label,
-        "status": "exhausted",
-        "plan": None,
-        "windows": [],
-        "details": [],
-        "unavailable_reason": _entry_pool_exhausted_reason(entry),
-        "retry_after": retry_after,
-        "fetched_at": None,
-    }
-
-
 def _probe_codex_pool_entry(item):
-    index, entry = item
+    index, entry, preserve_exhausted, exhausted_reason, retry_after = item
     label = _safe_entry_label(entry, index)
     did_query_count = 0
     try:
@@ -601,16 +660,27 @@ def _probe_codex_pool_entry(item):
     windows = _snapshot_windows_payload(snapshot) if snapshot is not None else []
     details = _snapshot_details_payload(snapshot) if snapshot is not None else []
     snapshot_available = _snapshot_available(snapshot)
-    status = "available" if snapshot_available else "unavailable"
+    status = "exhausted" if preserve_exhausted else ("available" if snapshot_available else "unavailable")
+    banked_resets = _subprocess_coerce_banked_resets(
+        getattr(snapshot, "banked_resets", None),
+        redeemable=False if preserve_exhausted else None,
+    ) if snapshot is not None else None
     row = {
         "label": label,
         "status": status,
         "plan": getattr(snapshot, "plan", None) if snapshot is not None else None,
         "windows": windows,
         "details": details,
-        "unavailable_reason": None if snapshot_available else _safe_unavailable_reason(reason or getattr(snapshot, "unavailable_reason", None)),
+        "banked_resets": banked_resets,
+        "unavailable_reason": (
+            exhausted_reason
+            if preserve_exhausted
+            else None if snapshot_available else _safe_unavailable_reason(reason or getattr(snapshot, "unavailable_reason", None))
+        ),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)) if snapshot is not None else None,
     }
+    if preserve_exhausted:
+        row["retry_after"] = retry_after
     return index, row, did_query_count
 
 
@@ -626,10 +696,14 @@ def _fetch_codex_account_usage_from_pool():
         probe_items = []
         queried = 0
         for index, entry in enumerate(entries, start=1):
-            if _entry_is_pool_exhausted(entry):
-                rows_by_index[index] = _codex_pool_exhausted_row(entry, index)
-            else:
-                probe_items.append((index, entry))
+            exhausted = _subprocess_entry_is_pool_exhausted(entry)
+            probe_items.append((
+                index,
+                entry,
+                exhausted,
+                _subprocess_entry_pool_exhausted_reason(entry) if exhausted else None,
+                _subprocess_entry_pool_retry_after(entry) if exhausted else None,
+            ))
         if probe_items:
             max_workers = min(_CODEX_POOL_MAX_WORKERS, len(probe_items))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -851,6 +925,55 @@ def _safe_entry_label(entry, index):
     if len(label) > 64:
         label = label[:61].rstrip() + "..."
     return label
+
+
+def _safe_codex_reset_message(message):
+    text = " ".join(str(message or "").split())
+    if not text:
+        return None
+    lowered = text.lower()
+    sensitive_terms = ("access_token", "refresh_token", "authorization", "bearer", "jwt", "secret")
+    if any(term in lowered for term in sensitive_terms):
+        return "Codex reset redemption failed."
+    if len(text) <= 600:
+        return text
+    truncated = text[:600].rstrip()
+    last_space = truncated.rfind(" ")
+    if last_space >= 480:
+        truncated = truncated[:last_space].rstrip()
+    return truncated + "..."
+
+
+def _count_value(value: Any) -> int | None:
+    number = _quota_number(value)
+    if number is None:
+        return None
+    try:
+        return max(0, int(number))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_banked_resets(value: Any, *, redeemable: bool | None = None, reason_code: str | None = None, complete: bool | None = None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        count = _count_value(value.get("available_count"))
+        redeemable = value.get("redeemable") if redeemable is None else redeemable
+        reason_code = value.get("reason_code") if reason_code is None else reason_code
+        complete = value.get("complete") if complete is None else complete
+    else:
+        count = _count_value(getattr(value, "available_count", value))
+        if complete is None:
+            complete = getattr(value, "complete", None)
+    if count is None:
+        return None
+    return {
+        "available_count": count,
+        "redeemable": bool(redeemable) if redeemable is not None else False,
+        "reason_code": (str(reason_code).strip() or None) if reason_code is not None else None,
+        "complete": bool(complete) if complete is not None else True,
+    }
 
 
 def _entry_pool_retry_after(entry):
@@ -1566,6 +1689,13 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
         "fetched_at": _isoformat_utc(getattr(snapshot, "fetched_at", None)),
     }
     pool = getattr(snapshot, "pool", None)
+    total_credentials = _count_value(pool.get("total_credentials")) if isinstance(pool, dict) else None
+    banked_resets = _coerce_banked_resets(
+        getattr(snapshot, "banked_resets", None),
+        redeemable=result["provider"] == "openai-codex" and (pool is None or total_credentials == 1),
+    )
+    if banked_resets is not None:
+        result["banked_resets"] = banked_resets
     if isinstance(pool, dict):
         result["pool"] = pool
     return result
@@ -1646,6 +1776,7 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
         plan=payload.get("plan"),
         windows=windows,
         details=tuple(payload.get("details") or ()),
+        banked_resets=payload.get("banked_resets") if isinstance(payload.get("banked_resets"), dict) else None,
         available=bool(payload.get("available")),
         unavailable_reason=payload.get("unavailable_reason"),
         fetched_at=payload.get("fetched_at"),
@@ -2094,6 +2225,421 @@ def _provider_account_usage_status(provider: str, display_name: str, *, refresh:
         "account_limits": account_limits,
         "message": message,
     }
+
+
+def _codex_reset_result(
+    ok: bool,
+    state: str,
+    message: str,
+    *,
+    reason_code: str | None = None,
+    available_count: Any = None,
+    windows_reset: Any = None,
+) -> dict[str, Any]:
+    result = {
+        "ok": bool(ok),
+        "state": str(state or "failed").strip() or "failed",
+        "message": _safe_codex_reset_message(message) or "Codex reset redemption failed.",
+        "reason_code": (str(reason_code).strip() or None) if reason_code is not None else None,
+    }
+    sanitized_available_count = _count_value(available_count)
+    if sanitized_available_count is not None:
+        result["available_count"] = sanitized_available_count
+    sanitized_windows_reset = _count_value(windows_reset)
+    if sanitized_windows_reset is not None:
+        result["windows_reset"] = sanitized_windows_reset
+    return result
+
+
+def _codex_reset_conflict(message: str, *, reason_code: str, quota_status: dict[str, Any], http_status: int = 409) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "http_status": http_status,
+        "quota_status": quota_status,
+        "redemption": _codex_reset_result(False, "conflict", message, reason_code=reason_code),
+    }
+
+
+def _codex_reset_response(http_status: int, quota_status: dict[str, Any], redemption: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": bool(redemption.get("ok")),
+        "http_status": http_status,
+        "quota_status": quota_status,
+        "redemption": redemption,
+    }
+
+
+def _result_value(result: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(result, dict) and name in result:
+            value = result.get(name)
+            if value is not None:
+                return value
+        try:
+            value = getattr(result, name)
+        except Exception:
+            value = None
+        if value is not None:
+            return value
+    return None
+
+
+def _codex_reset_lock_key(*, profile_home: str | None, provider: str) -> str:
+    return f"{str(profile_home or '').strip()}: {str(provider).strip().lower()}"
+
+
+def _codex_reset_target_lock_keys(*, credential: dict[str, str]) -> tuple[tuple[str, ...], str | None]:
+    source = str(credential.get("source") or "").strip().lower()
+    base_url = str(credential.get("base_url") or "").strip()
+    api_key = str(credential.get("api_key") or "").strip()
+    target_fingerprint = hashlib.sha256(f"{base_url}|{api_key}".encode("utf-8")).hexdigest()
+    lock_keys = [f"target:{target_fingerprint}"]
+
+    if source == "hermes-auth-store":
+        try:
+            from hermes_cli.auth import _read_codex_tokens
+
+            raw = _read_codex_tokens()
+            if not isinstance(raw, dict):
+                return (), "unknown_account"
+            tokens = raw.get("tokens")
+            if not isinstance(tokens, dict):
+                return (), "unknown_account"
+
+            stored_access_token = tokens.get("access_token")
+            if not isinstance(stored_access_token, str) or not stored_access_token:
+                return (), "unknown_account"
+            if stored_access_token != api_key:
+                return (), "credential_target_changed"
+
+            account_id = _credential_pool_entry_value(tokens, "account_id", "chatgpt_account_id")
+            if isinstance(account_id, str):
+                account_id = account_id.strip()
+            if isinstance(account_id, str) and account_id:
+                lock_keys.append(f"account:{hashlib.sha256(account_id.encode('utf-8')).hexdigest()}")
+            return tuple(sorted(lock_keys)), None
+
+        except Exception:
+            return (), "unknown_account"
+
+    return (lock_keys[0],), None
+
+
+def _acquire_codex_reset_lock(lock_key: str) -> threading.Lock | None:
+    with _CODEX_RESET_REDEMPTION_LOCKS_LOCK:
+        lock = _CODEX_RESET_REDEMPTION_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _CODEX_RESET_REDEMPTION_LOCKS[lock_key] = lock
+        if not lock.acquire(blocking=False):
+            return None
+        return lock
+
+
+def _release_codex_reset_lock(lock: threading.Lock | None) -> None:
+    if lock is not None:
+        lock.release()
+
+
+def _safe_codex_reset_warning(message: Any) -> str | None:
+    return _safe_codex_reset_message(message)
+
+
+def _normalize_codex_base_url(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return raw.rstrip("/")
+
+
+def _credential_pool_entry_value(entry: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(entry, dict) and name in entry:
+            value = entry.get(name)
+        else:
+            try:
+                value = getattr(entry, name)
+            except Exception:
+                value = None
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            return value
+    return None
+
+
+def _resolve_codex_reset_credential() -> tuple[dict[str, str] | None, str]:
+    try:
+        from hermes_cli.auth import resolve_codex_runtime_credentials
+
+        resolved = resolve_codex_runtime_credentials()
+    except Exception as exc:
+        return None, _safe_codex_reset_warning(exc) or "Failed to resolve Codex credentials."
+
+    if not isinstance(resolved, dict):
+        return None, "Failed to resolve a concrete Codex credential target."
+
+    provider = str(resolved.get("provider") or "").strip().lower()
+    if provider and provider != "openai-codex":
+        return None, "Credential resolver returned a non-Codex account target."
+
+    base_url = _normalize_codex_base_url(resolved.get("base_url"))
+    api_key = str(resolved.get("api_key") or "").strip() or None
+    if not base_url or not api_key:
+        return None, "Credential resolver did not provide a complete runtime target."
+
+    return {
+        "provider": provider or "openai-codex",
+        "source": str(resolved.get("source") or "").strip() or "hermes-auth-store",
+        "base_url": base_url,
+        "api_key": api_key,
+    }, ""
+
+
+def _validate_codex_reset_pool_binding(credential: dict[str, str]) -> str:
+    try:
+        from agent.credential_pool import load_pool
+    except Exception:
+        return "Could not validate Codex credential pool state for redemption."
+
+    try:
+        pool = load_pool("openai-codex")
+        entries = pool.entries() if hasattr(pool, "entries") else None
+    except Exception:
+        return "Could not validate Codex credential pool state for redemption."
+
+    if not isinstance(entries, list):
+        return "Codex credential pool state was unreadable during redemption."
+
+    if len(entries) == 0:
+        return ""
+
+    if len(entries) != 1:
+        return "Codex reset redemption is unavailable while multiple credentials are configured."
+
+    entry = entries[0]
+    entry_api_key = str(_credential_pool_entry_value(entry, "runtime_api_key", "access_token") or "").strip()
+    entry_base_url = _normalize_codex_base_url(_credential_pool_entry_value(entry, "runtime_base_url", "base_url"))
+    if entry_base_url is None:
+        entry_base_url = credential["base_url"]
+    if not entry_api_key:
+        return "Codex pool credential state is malformed for reset redemption."
+
+    if entry_api_key != credential["api_key"] or entry_base_url != credential["base_url"]:
+        return "Codex reset credential target changed between resolution and redemption."
+
+    return ""
+
+
+
+def _annotate_codex_reset_refresh_warning(
+    quota_status: dict[str, Any],
+    warning: str,
+) -> dict[str, Any]:
+    safe_warning = _safe_codex_reset_warning(warning) or "The post-spend status refresh could not be confirmed."
+    refreshed = dict(quota_status)
+    refreshed_message = str(refreshed.get("message") or "").strip()
+    if safe_warning and safe_warning not in refreshed_message:
+        refreshed["message"] = f"{refreshed_message} {safe_warning}".strip()
+    account_limits = refreshed.get("account_limits") if isinstance(refreshed.get("account_limits"), dict) else None
+    if account_limits is None:
+        account_limits = {"available": False}
+    else:
+        account_limits = dict(account_limits)
+    unavailable_reason = str(account_limits.get("unavailable_reason") or "").strip()
+    if safe_warning not in unavailable_reason:
+        account_limits["unavailable_reason"] = f"{unavailable_reason} {safe_warning}".strip() if unavailable_reason else safe_warning
+    refreshed["account_limits"] = account_limits
+    return refreshed
+
+
+def _codex_reset_unknown_quota_status(*, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "provider": "openai-codex",
+        "status": "unavailable",
+        "message": message,
+        "account_limits": {
+            "available": False,
+            "unavailable_reason": message,
+        },
+    }
+
+
+def _normalize_codex_reset_redemption(result: Any) -> dict[str, Any]:
+    state = str(_result_value(result, "state", "status", "result") or "failed").strip().lower() or "failed"
+    available_count = _result_value(result, "available_count")
+    windows_reset = _result_value(result, "windows_reset")
+    redeemed = _result_value(result, "redeemed")
+    ok = state == "reset" and redeemed is True
+    reason_code = _result_value(result, "reason_code")
+    message = _result_value(result, "message", "detail", "summary")
+    if state == "not_exhausted":
+        return _codex_reset_result(
+            False,
+            state,
+            message or "Current Codex usage is not exhausted; confirm force to redeem anyway.",
+            reason_code=reason_code,
+            available_count=available_count,
+            windows_reset=windows_reset,
+        )
+    if ok:
+        return _codex_reset_result(
+            True,
+            state,
+            message or "Codex reset redeemed.",
+            reason_code=reason_code,
+            available_count=available_count,
+            windows_reset=windows_reset,
+        )
+    return _codex_reset_result(
+        False,
+        state,
+        message or "Codex reset was not redeemed.",
+        reason_code=reason_code,
+        available_count=available_count,
+        windows_reset=windows_reset,
+    )
+
+
+def redeem_codex_reset_credit_status(*, force: bool = False) -> dict[str, Any]:
+    provider_id = (_active_provider_id() or "").strip().lower()
+    profile_lock = None
+    target_locks: list[threading.Lock] = []
+    if not isinstance(force, bool):
+        return _codex_reset_conflict(
+            "force must be a boolean",
+            reason_code="invalid_force",
+            quota_status=get_provider_quota("openai-codex"),
+            http_status=400,
+        )
+    if provider_id != "openai-codex":
+        quota_status = get_provider_quota("openai-codex")
+        return _codex_reset_conflict(
+            "Codex reset redemption is only available when OpenAI Codex is the active provider.",
+            reason_code="wrong_provider",
+            quota_status=quota_status,
+            http_status=400,
+        )
+
+    lock_key = _codex_reset_lock_key(profile_home=str(_get_hermes_home()), provider="openai-codex")
+    profile_lock = _acquire_codex_reset_lock(lock_key)
+    if not profile_lock:
+        return _codex_reset_conflict(
+            "A Codex reset redemption is already in progress for this profile. Try again after completion.",
+            reason_code="in_progress",
+            quota_status=get_provider_quota("openai-codex"),
+            http_status=409,
+        )
+    try:
+        credential, resolve_error = _resolve_codex_reset_credential()
+        if credential is None:
+            return _codex_reset_conflict(
+                resolve_error,
+                reason_code="unknown_account",
+                quota_status=get_provider_quota("openai-codex"),
+            )
+
+        target_lock_keys, target_lock_error = _codex_reset_target_lock_keys(credential=credential)
+        if target_lock_error is not None:
+            return _codex_reset_conflict(
+                (
+                    "The resolved Codex credential target could not be verified for reset serialization."
+                    if target_lock_error == "unknown_account"
+                    else "The resolved Codex credential target changed before redemption."
+                ),
+                reason_code=target_lock_error,
+                quota_status=get_provider_quota("openai-codex"),
+            )
+
+        for target_lock_key in target_lock_keys:
+            lock = _acquire_codex_reset_lock(target_lock_key)
+            if not lock:
+                return _codex_reset_conflict(
+                    "A Codex reset redemption is already in progress for this account. Try again after completion.",
+                    reason_code="in_progress",
+                    quota_status=get_provider_quota("openai-codex"),
+                    http_status=409,
+                )
+            target_locks.append(lock)
+
+        target_validation_error = _validate_codex_reset_pool_binding(credential)
+        if target_validation_error:
+            if "multiple credentials" in target_validation_error:
+                reason_code = "ambiguous_pool"
+            elif "changed" in target_validation_error:
+                reason_code = "credential_target_changed"
+            elif "unreadable" in target_validation_error:
+                reason_code = "unknown_account"
+            else:
+                reason_code = "unknown_account"
+            return _codex_reset_conflict(
+                target_validation_error,
+                reason_code=reason_code,
+                quota_status=get_provider_quota("openai-codex"),
+            )
+
+        try:
+            from agent.account_usage import redeem_codex_reset_credit
+
+            raw_result = redeem_codex_reset_credit(
+                base_url=credential["base_url"],
+                api_key=credential["api_key"],
+                force=force,
+            )
+        except Exception as exc:
+            return _codex_reset_response(
+                502,
+                get_provider_quota("openai-codex"),
+                _codex_reset_result(False, "failed", _sanitize_error(exc), reason_code="helper_error"),
+            )
+
+        redemption = _normalize_codex_reset_redemption(raw_result)
+        if redemption.get("state") == "unavailable":
+            redemption = _codex_reset_result(
+                False,
+                "unknown_outcome",
+                "The Codex backend did not return a definitive redemption result. The reset outcome is unknown; refresh account status before trying again.",
+                reason_code="unknown_outcome",
+                available_count=redemption.get("available_count"),
+                windows_reset=redemption.get("windows_reset"),
+            )
+
+        try:
+            invalidate_account_usage_status_cache("openai-codex")
+        except Exception:
+            logger.debug("Failed to invalidate openai-codex account usage cache", exc_info=True)
+
+        refreshed_status = None
+        refresh_failed = False
+        try:
+            refreshed_status = get_provider_quota("openai-codex", refresh=True)
+        except Exception:
+            refresh_failed = True
+            logger.debug("Failed Codex reset post-consume refresh", exc_info=True)
+
+        if refresh_failed:
+            refreshed_status = _annotate_codex_reset_refresh_warning(
+                _codex_reset_unknown_quota_status(
+                    message="The post-spend status refresh could not be confirmed; remaining reset count may be stale.",
+                ),
+                "The post-spend status refresh could not be confirmed; remaining reset count may be stale.",
+            )
+
+        if not isinstance(refreshed_status, dict):
+            refreshed_status = _codex_reset_unknown_quota_status(
+                message="The post-spend status refresh returned no usable result; remaining reset count may be stale.",
+            )
+
+        return _codex_reset_response(
+            200,
+            refreshed_status,
+            redemption,
+        )
+    finally:
+        for target_lock in reversed(target_locks):
+            _release_codex_reset_lock(target_lock)
+        _release_codex_reset_lock(profile_lock)
 
 
 def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:

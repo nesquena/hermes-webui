@@ -10840,6 +10840,168 @@ function _providerQuotaRetryAfterText(value){
   return retry?t('provider_quota_retry_after',retry):'';
 }
 
+function _providerQuotaResetRequestForce(status){
+  const accountLimits=status&&status.account_limits;
+  const pool=accountLimits&&accountLimits.pool;
+  const poolRows=pool&&pool.credentials;
+  const singleExhaustedPool=!!(
+    status&&status.status==='unavailable'&&
+    pool&&pool.total_credentials===1&&
+    (pool.exhausted_credentials===1||(
+      Array.isArray(poolRows)&&poolRows.length===1&&
+      poolRows[0]&&poolRows[0].status==='exhausted'
+    ))
+  );
+  if(singleExhaustedPool) return false;
+  const windows=Array.isArray(accountLimits&&accountLimits.windows)?accountLimits.windows:[];
+  return !windows.some(w=>{
+    const rawRemaining=w&&w.remaining_percent;
+    if(rawRemaining===null||rawRemaining===undefined||rawRemaining==='') return false;
+    const remaining=Number(rawRemaining);
+    return Number.isFinite(remaining)&&remaining<=0;
+  });
+}
+
+function _providerQuotaBankedResetState(status){
+  const accountLimits=status&&status.account_limits;
+  const bankedResets=accountLimits&&accountLimits.banked_resets;
+  const count=bankedResets&&bankedResets.available_count;
+  if((status&&status.provider)!=='openai-codex'||!accountLimits) return {count:null,canRedeem:false};
+  const countKnown=count!==null&&count!==undefined&&Number.isFinite(Number(count))&&Number(count)>=0;
+  if(!countKnown) return {count:null,canRedeem:false};
+  return {
+    count:Number(count),
+    canRedeem:countKnown&&count>0&&!!(bankedResets&&bankedResets.redeemable),
+  };
+}
+
+function _parseProviderQuotaApiError(error){
+  if(!error||typeof error!=='object') return null;
+  const body=typeof error.body==='string'?error.body:'';
+  if(!body) return null;
+  try{
+    const parsed=JSON.parse(body);
+    return parsed&&typeof parsed==='object'?parsed:null;
+  }catch(_e){
+    return null;
+  }
+}
+
+async function _redeemProviderQuotaReset(card,button,status){
+  if(!card||!button) return;
+  const requiresForce=_providerQuotaResetRequestForce(status);
+  const confirmMessage=requiresForce
+    ? t('provider_quota_reset_force_message')
+    : t('provider_quota_reset_confirm_message');
+  const ok=await showConfirmDialog({
+    title:t('provider_quota_reset_force_title'),
+    message:confirmMessage,
+    confirmLabel:t('provider_quota_reset_confirm'),
+    danger:true,
+    focusCancel:true,
+  });
+  if(!ok){
+    if(card.isConnected){
+      button.disabled=false;
+      button.textContent=t('provider_quota_reset_action');
+      button.removeAttribute('aria-busy');
+    }
+    return;
+  }
+
+  button.disabled=true;
+  button.textContent=t('provider_quota_reset_busy');
+  button.setAttribute('aria-busy','true');
+  let unknownOutcome=false;
+  try{
+    let next;
+    try{
+      next=await api('/api/provider/openai-codex/reset',{method:'POST',body:JSON.stringify({force:requiresForce}),retries:0,timeoutMs:90000});
+      if(next&&next.quota_status){
+        next={...next.quota_status,redemption:next.redemption||null};
+      }
+    }catch(error){
+      const parsed=_parseProviderQuotaApiError(error);
+      if(parsed&&parsed.quota_status){
+        next={...parsed.quota_status,redemption:parsed.redemption||{ok:false,state:'failed',message:error.message||t('provider_quota_reset_failed')}};
+      }else{
+        let reconciled;
+        try{
+          reconciled=await _fetchProviderQuotaStatus(true);
+        }catch(reconcileError){
+          reconciled=null;
+        }
+        if(reconciled&&typeof reconciled==='object'){
+          next=reconciled;
+        }else{
+          const fallbackMessage=t('provider_quota_reset_unknown_outcome');
+          next={
+            ok:false,
+            status:'unavailable',
+            provider:status&&status.provider||'openai-codex',
+            display_name: status&&status.display_name||null,
+            supported:true,
+            quota: null,
+            account_limits: status&&status.account_limits||null,
+            message:fallbackMessage,
+            client_fetched_at:new Date().toISOString(),
+          };
+        }
+        next.redemption = {
+          ...(next.redemption&&typeof next.redemption==='object'?next.redemption:{ok:false,state:'unknown',message:t('provider_quota_reset_unknown_outcome')}),
+          message:t('provider_quota_reset_unknown_outcome'),
+        };
+        unknownOutcome=true;
+      }
+    }
+    const redemptionState=String(next&&next.redemption&&next.redemption.state||'').toLowerCase();
+    if(redemptionState==='unknown'||redemptionState==='unknown_outcome') unknownOutcome=true;
+    const fresh=_buildProviderQuotaCard(next);
+    if(fresh){
+      card.replaceWith(fresh);
+      const announcer=$('a11yAnnouncer');
+      const message=next&&next.redemption&&next.redemption.message;
+      if(announcer&&message){
+        announcer.textContent='';
+        const announce=()=>{ announcer.textContent=message; };
+        if(typeof requestAnimationFrame==='function') requestAnimationFrame(announce);
+        else announce();
+      }
+      if(typeof renderProviderCostChart==='function') renderProviderCostChart(fresh);
+      if(unknownOutcome){
+        const unknownResetButton=typeof fresh?.querySelector === 'function'
+          ? fresh.querySelector('[data-provider-quota-reset]')
+          : null;
+        if(unknownResetButton){
+          unknownResetButton.disabled=true;
+          unknownResetButton.setAttribute('aria-busy','true');
+          unknownResetButton.setAttribute('aria-disabled','true');
+        }
+        if(button){
+          button.disabled=true;
+          button.setAttribute('aria-busy','true');
+          button.setAttribute('aria-disabled','true');
+        }
+        if(typeof showToast === 'function'){
+          showToast(t('provider_quota_reset_unknown_outcome'));
+        }
+      }
+      return;
+    }
+  }catch(error){
+    if(unknownOutcome){
+      if(typeof showToast==='function') showToast(t('provider_quota_reset_unknown_outcome'));
+      return;
+    }
+    if(typeof showToast==='function') showToast(error&&error.message?error.message:t('provider_quota_reset_failed'));
+  }
+  if(card.isConnected && !unknownOutcome){
+    button.disabled=false;
+    button.textContent=t('provider_quota_reset_action');
+    button.removeAttribute('aria-busy');
+  }
+}
+
 function _providerQuotaUnavailableReason(credential){
   const structured=_providerQuotaRetryAfterText(credential&&credential.retry_after);
   if(structured) return structured;
@@ -10884,6 +11046,9 @@ function _buildProviderQuotaPoolBreakdown(accountLimits){
     const windows=Array.isArray(credential&&credential.windows)?credential.windows:[];
     const details=Array.isArray(credential&&credential.details)?credential.details.filter(Boolean):[];
     const unavailableReason=_providerQuotaUnavailableReason(credential);
+    const rowBankedResets=credential&&credential.banked_resets&&Number.isFinite(Number(credential.banked_resets.available_count))
+      ?`<div class="provider-quota-pool-note">${esc(t('provider_quota_banked_resets',Number(credential.banked_resets.available_count)))}</div>`
+      :'';
     const windowHtml=windows.length?windows.map(w=>{
       const remaining=_formatProviderQuotaPercent(w&&w.remaining_percent);
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
@@ -10899,6 +11064,7 @@ function _buildProviderQuotaPoolBreakdown(accountLimits){
           <span>${esc(label)}${esc(plan)}</span>
           <strong>${esc(statusText)}</strong>
         </div>
+        ${rowBankedResets}
         <div class="provider-quota-pool-windows">${windowHtml}</div>
         ${detailHtml}
       </div>
@@ -10923,6 +11089,7 @@ function _buildProviderQuotaCard(status){
   const providerBase=status.display_name||status.provider||t('provider_quota_active_provider');
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
   const quota=status.quota||null;
+  const bankedResetState=_providerQuotaBankedResetState(status);
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
@@ -10945,7 +11112,10 @@ function _buildProviderQuotaCard(status){
       ? `<div class="provider-quota-details">${details.map(d=>`<span>${esc(d)}</span>`).join('')}</div>`
       : '';
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
-    body=windowHtml+detailHtml+poolHtml;
+    const redemption=status.redemption&&status.redemption.message
+      ? `<div class="provider-quota-feedback provider-quota-feedback-${status.redemption.ok===false?'error':'success'}">${esc(status.redemption.message)}</div>`
+      : '';
+    body=windowHtml+detailHtml+redemption+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
   }else if(status.status==='available'&&quota){
     body=`
@@ -10955,6 +11125,9 @@ function _buildProviderQuotaCard(status){
     `;
   }else{
     body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_unavailable'))}</div>`;
+  }
+  if(status.redemption&&status.redemption.message&&body.indexOf('provider-quota-feedback')===-1){
+    body=`<div class="provider-quota-feedback provider-quota-feedback-${status.redemption.ok===false?'error':'success'}">${esc(status.redemption.message)}</div>`+body;
   }
   card.innerHTML=`
     <div class="provider-quota-header">
@@ -10966,12 +11139,15 @@ function _buildProviderQuotaCard(status){
       <div class="provider-quota-actions">
         <span class="provider-quota-badge">${esc(_providerQuotaStatusLabel(state))}</span>
         <button class="provider-quota-refresh" type="button" data-provider-quota-refresh title="${esc(t('provider_quota_refresh_title'))}">${esc(t('provider_quota_refresh_usage'))}</button>
+        ${bankedResetState.canRedeem?`<button class="provider-quota-refresh provider-quota-reset-btn" type="button" data-provider-quota-reset>${esc(t('provider_quota_reset_action')+' ('+bankedResetState.count+')')}</button>`:''}
       </div>
     </div>
     <div class="provider-quota-body">${body}</div>
   `;
   const refreshBtn=card.querySelector('[data-provider-quota-refresh]');
   if(refreshBtn) refreshBtn.addEventListener('click',()=>_refreshProviderQuota(card,refreshBtn));
+  const resetBtn=card.querySelector('[data-provider-quota-reset]');
+  if(resetBtn) resetBtn.addEventListener('click',()=>_redeemProviderQuotaReset(card,resetBtn,status));
   const poolDetails=card.querySelector('.provider-quota-pool');
   if(poolDetails){
     poolDetails.addEventListener('toggle',()=>{

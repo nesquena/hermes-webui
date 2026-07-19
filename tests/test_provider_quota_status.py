@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import inspect
@@ -16,6 +17,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import api.config as config
 import api.profiles as profiles
 
@@ -61,6 +63,41 @@ def _restore_config(old_cfg, old_mtime):
     config.cfg.update(old_cfg)
     config._cfg_mtime = old_mtime
     config._cfg_path = old_path
+
+
+def test_codex_subprocess_helper_namespace_is_disjoint():
+    import api.providers as providers
+
+    outer_tree = ast.parse((ROOT / "api" / "providers.py").read_text(encoding="utf-8"))
+    child_tree = ast.parse(providers._ACCOUNT_USAGE_SUBPROCESS_CODE)
+
+    def top_level_defs(tree):
+        return [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+    def call_count(tree, target):
+        return sum(
+            1
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == target
+        )
+
+    helper_names = {
+        "_entry_exhausted_ttl_seconds": "_subprocess_entry_exhausted_ttl_seconds",
+        "_entry_pool_exhausted_until": "_subprocess_entry_pool_exhausted_until",
+        "_entry_is_pool_exhausted": "_subprocess_entry_is_pool_exhausted",
+    }
+
+    for old_name, child_name in helper_names.items():
+        assert top_level_defs(outer_tree).count(old_name) == 1
+        assert top_level_defs(child_tree).count(old_name) == 0
+        assert top_level_defs(outer_tree).count(child_name) == 0
+        assert top_level_defs(child_tree).count(child_name) == 1
+        assert call_count(outer_tree, old_name) >= 1
+        assert call_count(child_tree, child_name) >= 1
+        assert call_count(child_tree, old_name) == 0
+        assert call_count(outer_tree, child_name) == 0
 
 
 def test_openrouter_quota_fetches_key_endpoint_and_sanitizes_response(monkeypatch, tmp_path):
@@ -213,6 +250,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 ),
             ),
             details=("Credits balance: $12.50",),
+            banked_resets=SimpleNamespace(available_count=2),
             unavailable_reason=None,
         )
 
@@ -255,6 +293,12 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
             },
         ],
         "details": ["Credits balance: $12.50"],
+        "banked_resets": {
+            "available_count": 2,
+            "complete": True,
+            "redeemable": True,
+            "reason_code": None,
+        },
         "available": True,
         "unavailable_reason": None,
         "fetched_at": "2030-03-17T12:30:00Z",
@@ -355,10 +399,20 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
             "headers": headers,
         })
         payload = {
-            "plan_type": "pro" if headers.get("chatgpt-account-id") == "acct-primary" else "plus",
+            "plan_type": (
+                "pro" if headers.get("chatgpt-account-id") == "acct-primary" else "plus"
+            ),
             "rate_limit": {
-                "primary_window": {"used_percent": 15 if headers.get("chatgpt-account-id") == "acct-primary" else 95, "reset_at": 1_900_000_000},
+                "primary_window": {
+                    "used_percent": (
+                        15 if headers.get("chatgpt-account-id") == "acct-primary" else 95
+                    ),
+                    "reset_at": 1_900_000_000,
+                },
                 "secondary_window": {"used_percent": 40, "reset_at": "2030-03-24T12:30:00Z"},
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 2 if headers.get("chatgpt-account-id") == "acct-primary" else 0,
             },
             "credits": {"has_credits": True, "balance": 12.5},
         }
@@ -382,24 +436,37 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert entries_called == [True]
     assert [call["url"] for call in seen] == [
         "https://chatgpt.com/backend-api/wham/usage",
+        "https://chatgpt.com/backend-api/wham/usage",
     ]
-    assert [call["timeout"] for call in seen] == [4.0]
+    assert [call["timeout"] for call in seen] == [4.0, 4.0]
     assert seen[0]["headers"]["authorization"] == f"Bearer {primary_token}"
     assert seen[0]["headers"]["chatgpt-account-id"] == "acct-primary"
     assert snapshot["provider"] == "openai-codex"
     assert snapshot["source"] == "usage_api_pool"
     assert snapshot["windows"][0]["label"] == "Session"
     assert snapshot["windows"][0]["used_percent"] == 15
-    assert snapshot["details"] == ["1/2 credentials available", "1 exhausted", "Plans: Pro"]
+    assert snapshot["banked_resets"] == {
+        "available_count": 2,
+        "complete": True,
+        "redeemable": False,
+        "reason_code": "ambiguous_pool",
+    }
+    assert snapshot["details"] == ["1/2 credentials available", "1 exhausted", "Plans: Pro, Plus"]
     assert snapshot["available"] is True
     assert snapshot["pool"] == {
         "total_credentials": 2,
-        "queried_credentials": 1,
+        "queried_credentials": 2,
         "available_credentials": 1,
         "exhausted_credentials": 1,
         "failed_credentials": 0,
-        "plans": ["Pro"],
+        "plans": ["Pro", "Plus"],
         "next_reset_at": "2030-03-17T17:46:40Z",
+        "banked_resets": {
+            "available_count": 2,
+            "complete": True,
+            "redeemable": False,
+            "reason_code": "ambiguous_pool",
+        },
         "best_remaining_by_window": [
             {
                 "label": "Session",
@@ -423,6 +490,12 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "label": "Team primary",
                 "status": "available",
                 "plan": "Pro",
+                "banked_resets": {
+                    "available_count": 2,
+                    "complete": True,
+                    "redeemable": True,
+                    "reason_code": None,
+                },
                 "windows": [
                     {
                         "label": "Session",
@@ -446,12 +519,33 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
             {
                 "label": "Plus backup",
                 "status": "exhausted",
-                "plan": None,
-                "windows": [],
-                "details": [],
+                "plan": "Plus",
+                "windows": [
+                    {
+                        "label": "Session",
+                        "used_percent": 95.0,
+                        "remaining_percent": 5.0,
+                        "reset_at": "2030-03-17T17:46:40Z",
+                        "detail": None,
+                    },
+                    {
+                        "label": "Weekly",
+                        "used_percent": 40.0,
+                        "remaining_percent": 60.0,
+                        "reset_at": "2030-03-24T12:30:00Z",
+                        "detail": None,
+                    },
+                ],
+                "details": ["Credits balance: $12.50"],
+                "banked_resets": {
+                    "available_count": 0,
+                    "complete": True,
+                    "redeemable": False,
+                    "reason_code": None,
+                },
                 "unavailable_reason": "Credential pool marked this credential exhausted; retry after 2030-03-17T18:46:40Z.",
                 "retry_after": "2030-03-17T18:46:40Z",
-                "fetched_at": None,
+                "fetched_at": snapshot["pool"]["credentials"][1]["fetched_at"],
             },
         ],
     }
@@ -652,7 +746,8 @@ def test_codex_account_usage_subprocess_sanitizes_pool_entry_errors(monkeypatch,
                     label="Bad token",
                     runtime_api_key="header.payload.signature",
                     runtime_base_url="https://chatgpt.com/backend-api/codex",
-                    last_status=None,
+                    last_status="exhausted",
+                    last_status_at=2_000_000_000,
                 ),
             ]
 
@@ -680,8 +775,10 @@ def test_codex_account_usage_subprocess_sanitizes_pool_entry_errors(monkeypatch,
 
     assert fetch_calls == [("openai-codex", None, None)]
     assert snapshot["available"] is False
-    assert snapshot["pool"]["failed_credentials"] == 1
-    assert snapshot["pool"]["credentials"][0]["unavailable_reason"] == "Usage unavailable for this credential."
+    assert snapshot["pool"]["failed_credentials"] == 0
+    assert snapshot["pool"]["exhausted_credentials"] == 1
+    assert snapshot["pool"]["credentials"][0]["status"] == "exhausted"
+    assert "Credential pool marked this credential exhausted" in snapshot["pool"]["credentials"][0]["unavailable_reason"]
     assert "eyJsecret" not in output
     assert "Bearer" not in output
 
@@ -764,7 +861,12 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
             "exhausted_credentials": 1,
             "failed_credentials": 0,
             "credentials": [
-                {"label": "Credential 1", "status": "available", "windows": []},
+                {
+                    "label": "Credential 1",
+                    "status": "available",
+                    "windows": [],
+                    "banked_resets": {"available_count": 2, "complete": True},
+                },
                 {
                     "label": "Credential 2",
                     "status": "exhausted",
@@ -773,6 +875,12 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
                 },
             ],
         },
+        "banked_resets": {
+            "available_count": 2,
+            "complete": False,
+            "redeemable": False,
+            "reason_code": "ambiguous_pool",
+        },
     }
 
     snapshot = providers._account_usage_payload_to_snapshot(payload)
@@ -780,6 +888,36 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
 
     assert serialized["windows"][0]["remaining_percent"] == 75.0
     assert serialized["pool"] == payload["pool"]
+    assert serialized["banked_resets"] == payload["banked_resets"]
+
+
+@pytest.mark.parametrize("total_credentials, expected_redeemable", [
+    (1, True),
+    (2, False),
+    (0, False),
+    (None, False),
+    ("invalid", False),
+])
+def test_codex_banked_reset_redeemability_parses_pool_cardinality_once(total_credentials, expected_redeemable):
+    import api.providers as providers
+
+    snapshot = SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api_pool",
+        title="Account limits",
+        plan=None,
+        windows=(),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at=None,
+        pool={"total_credentials": total_credentials},
+        banked_resets=SimpleNamespace(available_count=1),
+    )
+
+    serialized = providers._serialize_account_usage_snapshot(snapshot)
+
+    assert serialized["banked_resets"]["redeemable"] is expected_redeemable
 
 
 def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_path):
@@ -1251,24 +1389,34 @@ def test_provider_quota_card_has_manual_refresh_control():
     assert "refresh=1" in panels
     assert "cache:'no-store'" in panels
     assert "data-provider-quota-refresh" in panels
+    assert 'class="provider-quota-refresh" type="button" data-provider-quota-refresh' in panels
     assert "provider_quota_refresh_usage" in panels
     assert "provider_quota_refresh_succeeded" in panels
     assert "provider_quota_refresh_failed" in panels
     assert "card.isConnected&&button" in panels
     assert "provider_quota_last_checked" in panels
+    header_start = panels.index('<div class="provider-quota-header">')
+    header_end = panels.index('<div class="provider-quota-body">', header_start)
+    header = panels[header_start:header_end]
+    assert header.index("data-provider-quota-refresh") < header.index("data-provider-quota-reset")
+    assert "bankedResetState.count" in header
 
 
 def test_provider_quota_i18n_keys_exist_for_all_locales():
-    """Provider quota UI keys must be present in every locale block."""
+    """Provider quota UI keys must exist, with reset copy allowed to fall back to English."""
     i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
     locale_count = len(
         re.findall(r"^  (?:[A-Za-z_][A-Za-z0-9_]*|'[^']+'):\s*\{", i18n, re.MULTILINE)
     )
     keys = sorted(set(re.findall(r"provider_quota_[a-z0-9_]+", (ROOT / "static" / "panels.js").read_text(encoding="utf-8"))))
+    from tests.test_provider_quota_locale_helpers import RESET_FALLBACK_KEYS
+
+    english_fallback_only = RESET_FALLBACK_KEYS
     assert locale_count >= 1
     assert "provider_quota_retry_after" in keys
     for key in keys:
-        assert len(re.findall(rf"^\s+{re.escape(key)}:", i18n, re.MULTILINE)) == locale_count, key
+        expected = 1 if key in english_fallback_only else locale_count
+        assert len(re.findall(rf"^\s+{re.escape(key)}:", i18n, re.MULTILINE)) == expected, key
 
 
 def test_settings_label_and_description_i18n_keys_exist_for_all_locales():
@@ -1300,6 +1448,7 @@ def test_provider_quota_styles_exist():
         ".provider-quota-details",
         ".provider-quota-window",
         ".provider-quota-actions",
+        ".provider-quota-reset-btn",
         ".provider-quota-refresh",
         ".provider-quota-checked",
         ".provider-quota-pool",
@@ -1310,6 +1459,11 @@ def test_provider_quota_styles_exist():
         ".provider-quota-window-detail",
     ):
         assert token in css
+    assert ".provider-quota-header{flex-wrap:wrap;}" in css
+    refresh_style = css[css.index(".provider-quota-refresh"):css.index(".provider-quota-refresh") + 300]
+    assert "flex:0 0 auto" in refresh_style
+    assert ".provider-quota-refresh.provider-quota-reset-btn" in css
+    assert "min-height:44px" in css
 
 
 # ── Regression tests for #1912 ────────────────────────────────────────────────
