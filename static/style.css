@@ -1522,12 +1522,15 @@
   .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important;}
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
-  /* Window drag is scoped to the inert center/spacer (see .app-titlebar-inner / -spacer) rather than the
-     whole bar: a child `no-drag` inside a `drag` parent is unreliable in strict webviews (e.g. WKWebView),
-     which swallow clicks on titlebar controls like the profile switcher. Keep interactive controls out of any drag region. */
+  /* Window drag is scoped to inert filler siblings (.app-titlebar-drag) and the spacer rather than the
+     whole bar or the center inner: a child `no-drag` inside a `drag` parent is unreliable in strict webviews
+     (e.g. WKWebView), which swallow clicks on titlebar controls. The center inner holds the interactive,
+     inline-renamable session title, so it must stay out of any drag region — the flank fillers preserve the
+     full window-drag surface without covering an interactive element. Keep interactive controls out of any drag region. */
   .app-titlebar{display:flex;align-items:center;justify-content:center;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:var(--app-titlebar-safe-top);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;position:relative;z-index:20;}
   .app-titlebar-left{display:flex;align-items:center;gap:4px;}
-  .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;-webkit-app-region:drag;}
+  .app-titlebar-drag{flex:1 1 0;align-self:stretch;min-width:0;-webkit-app-region:drag;}
+  .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;-webkit-app-region:no-drag;}
   /* Profile switcher — optional, opt-in via settings; sits in the titlebar left flex group */
   .app-titlebar-profile{display:inline-flex;align-items:center;gap:4px;height:28px;flex-shrink:0;background:none;border:1px solid var(--border2);color:var(--muted);border-radius:6px;cursor:pointer;padding:0 8px;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s,border-color .15s;font-size:11px;font-weight:500;white-space:nowrap;-webkit-app-region:no-drag;}
   .app-titlebar-profile:hover{background:var(--hover-bg);color:var(--text);border-color:var(--border);}
