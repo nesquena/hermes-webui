@@ -1722,7 +1722,6 @@ class Session:
             # messages could push it higher, but the on-disk layout puts scenes
             # AFTER messages, so this is a generous safety ceiling only.
             _METADATA_SCAN_MAX_BYTES = 4 * 1024 * 1024
-            metadata_scanned = 0
             with open(p, 'r', encoding='utf-8') as f:
                 while True:
                     if limit and len(messages) >= limit:
