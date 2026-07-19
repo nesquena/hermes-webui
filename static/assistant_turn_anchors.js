@@ -1015,6 +1015,29 @@
     });
   }
 
+  function _activitySceneOutcomeEvent(event){
+    if(!event||typeof event!=='object') return null;
+    const payload=_own(event,'payload');
+    return Object.freeze({
+      ..._copyObject(event),
+      kind:_cleanString(_own(event,'kind'))||null,
+      status:_cleanString(_own(event,'status'))||null,
+      source_event_type:_cleanString(_own(event,'source_event_type'))||null,
+      event_id:_cleanString(_own(event,'event_id'))||null,
+      local_id:_cleanString(_own(event,'local_id'))||null,
+      run_id:_cleanString(_own(event,'run_id'))||null,
+      stream_id:_cleanString(_own(event,'stream_id'))||null,
+      seq:_own(event,'seq')??null,
+      created_at:_own(event,'created_at')??null,
+      payload:_sanitizePayload(payload),
+    });
+  }
+
+  function _activitySceneOutcomeEvents(events){
+    if(!Array.isArray(events)) return Object.freeze([]);
+    return Object.freeze(events.map(_activitySceneOutcomeEvent).filter(Boolean));
+  }
+
   function projectAssistantTurnAnchorActivityScene(input, options){
     const anchor=_anchorFromProjectionInput(input);
     const opts=(options&&typeof options==='object')?options:{};
@@ -1030,6 +1053,8 @@
         final_message_ref:null,
         terminal_state:null,
         activity_rows:Object.freeze([]),
+        artifacts:Object.freeze([]),
+        side_effects:Object.freeze([]),
       });
     }
     const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
@@ -1045,6 +1070,8 @@
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
       terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
       activity_rows:Object.freeze(rows),
+      artifacts:_activitySceneOutcomeEvents(anchor.artifacts),
+      side_effects:_activitySceneOutcomeEvents(anchor.side_effects),
     });
   }
 

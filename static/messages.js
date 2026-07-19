@@ -3787,6 +3787,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
+  function _anchorSceneHasOutcomeCollections(scene){
+    if(!scene||scene.version!=='activity_scene_v1') return false;
+    return (Array.isArray(scene.artifacts)&&scene.artifacts.length>0)
+      ||(Array.isArray(scene.side_effects)&&scene.side_effects.length>0);
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
@@ -3802,9 +3807,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+    if(scene&&Array.isArray(scene.activity_rows)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
-      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';
+      const hasOutcomes=_anchorSceneHasOutcomeCollections(scene);
+      const shouldPersistScene=hasWorklogRows||hasOutcomes||(scene.activity_rows.length&&scene.mode==='hide_all_activity');
       if(!shouldPersistScene) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;

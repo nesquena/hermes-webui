@@ -487,6 +487,116 @@ console.log(JSON.stringify({{
     assert "&&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)" in SESSIONS_JS.replace("\n", "")
 
 
+@pytest.mark.skipif(not NODE, reason="node is required for settled Anchor scene coverage")
+def test_projected_outcomes_survive_settlement_and_reload():
+    functions = "\n".join(
+        [
+            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
+            _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
+            _js_function_source(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows"),
+            _js_function_source(MESSAGES_JS, "_anchorSceneHasOutcomeCollections"),
+            _js_function_source(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant"),
+        ]
+    )
+    script = f"""
+const fs=require('fs');
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{window:{{isFinalAnswerOnlyMode:()=>false}},console}};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8'),sandbox,{{filename:'assistant_turn_anchors.js'}});
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'settled_outcome_helpers.js'}});
+vm.runInContext(`
+const api=window.HermesAssistantTurnAnchors;
+const registry=api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-settled',
+  stream_id:'stream-settled',
+  run_id:'run-settled',
+}});
+api.applyAssistantTurnAnchorSourceEvents(registry, [
+  {{event:'artifact_reference', payload:{{path:'reports/final.md', kind:'workspace_file'}}, event_id:'run-settled:7', seq:7}},
+  {{event:'state_saved', payload:{{kind:'memory', name:'settled-state'}}, event_id:'run-settled:8', seq:8}},
+], {{session_id:'sid-settled', stream_id:'stream-settled', run_id:'run-settled'}});
+var projectedScene=api.projectAssistantTurnAnchorActivityScene(registry, {{mode:'compact_worklog'}});
+var _anchorRegistry=registry;
+var streamId='stream-settled';
+var persisted=null;
+function _projectLiveAnchorActivityScene(){{ return projectedScene; }}
+function _completeSettledAnchorSceneForTurn(messages,lastAsstIndex,scene){{
+  return {{
+    ...scene,
+    final_message_ref:'message-final',
+    activity_rows:Array.isArray(scene.activity_rows)?scene.activity_rows:[],
+  }};
+}}
+function _persistSettledAnchorScene(message,scene,messageIndex){{ persisted={{message,scene,messageIndex}}; }}
+const messages=[
+  {{role:'user',content:'write the report'}},
+  {{role:'assistant',content:'done'}},
+];
+const promoted=_attachProjectedAnchorSceneToLastAssistant(messages);
+const reloadScene=JSON.parse(JSON.stringify(messages[1]._anchor_activity_scene));
+const reloadRegistry=api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-settled',
+  stream_id:'stream-settled',
+  run_id:'run-settled',
+}});
+const hydrated=_applyAnchorRegistryOutcomesFromActivityScene(
+  api,
+  reloadRegistry,
+  reloadScene,
+  {{session_id:'sid-settled', stream_id:'stream-settled', run_id:'run-settled'}}
+);
+globalThis.result={{
+  projectedScene,
+  promoted,
+  persisted,
+  messageScene:messages[1]._anchor_activity_scene,
+  reloadScene,
+  hydrated,
+  reloadRegistry,
+}};
+`, sandbox, {{filename:'settled_outcome_probe.js'}});
+console.log(JSON.stringify(sandbox.result));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["projectedScene"]["activity_rows"] == []
+    assert data["projectedScene"]["artifacts"][0]["payload"] == {
+        "kind": "workspace_file",
+        "path": "reports/final.md",
+    }
+    assert data["projectedScene"]["side_effects"][0]["payload"] == {
+        "kind": "memory",
+        "name": "settled-state",
+    }
+    assert data["promoted"] is False
+    assert data["persisted"]["messageIndex"] == 1
+    assert data["messageScene"] == data["reloadScene"]
+    assert data["reloadScene"]["activity_rows"] == []
+    assert [event["payload"]["path"] for event in data["reloadScene"]["artifacts"]] == [
+        "reports/final.md"
+    ]
+    assert [event["payload"]["name"] for event in data["reloadScene"]["side_effects"]] == [
+        "settled-state"
+    ]
+    assert data["hydrated"] is True
+    assert [event["payload"]["path"] for event in data["reloadRegistry"]["anchor"]["artifacts"]] == [
+        "reports/final.md"
+    ]
+    assert [
+        event["payload"]["name"]
+        for event in data["reloadRegistry"]["anchor"]["side_effects"]
+    ] == ["settled-state"]
+
+
 @pytest.mark.skipif(not NODE, reason="node is required for recovery identity coverage")
 def test_outcome_merge_fails_closed_on_missing_or_wrong_scene_identity():
     functions = "\n".join(
