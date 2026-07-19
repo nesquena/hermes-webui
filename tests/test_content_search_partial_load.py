@@ -121,7 +121,6 @@ def test_load_messages_head_large_metadata_prefix(tmp_path, monkeypatch):
     (which modern sessions always supply from message_count)."""
     import json as _json
     import api.models as models
-    from pathlib import Path
 
     session_dir = tmp_path / "sessions"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +165,6 @@ def _run_search(query, session_dir, *, first_payloads, total_messages):
     import api.models as models
     import api.routes as routes
 
-    monkey_SESSION_DIR = session_dir
     models.SESSION_DIR = session_dir
     models.SESSIONS = OrderedDict()
     routes.SESSION_DIR = session_dir
