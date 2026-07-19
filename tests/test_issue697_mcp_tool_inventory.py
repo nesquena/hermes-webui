@@ -5,6 +5,7 @@ import types
 from unittest.mock import MagicMock, patch
 
 from api.routes import (
+    _handle_mcp_servers_list,
     _handle_mcp_tools_list,
     _mcp_schema_summary,
     _mcp_tool_summary,
@@ -225,6 +226,68 @@ class TestMcpToolInventoryApi:
         assert payload["source"] == "none"
         assert payload["tools"] == []
         mock_runtime.assert_called_once_with()
+
+    def test_root_request_does_not_use_ownerless_named_profile_agent_inventory(
+        self, monkeypatch, tmp_path
+    ):
+        from api import routes
+
+        root_home = tmp_path / "default"
+        work_home = tmp_path / "profiles" / "work"
+        root_home.mkdir(parents=True)
+        work_home.mkdir(parents=True)
+        monkeypatch.setattr(routes, "get_active_hermes_home", lambda: root_home)
+        monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+        monkeypatch.setattr(routes, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(
+            routes,
+            "_active_profile_mcp_config_data",
+            lambda: {"mcp_servers": {"shared": {"command": "root-shared"}}},
+        )
+
+        fake_mcp_mod = types.ModuleType("tools.mcp_tool")
+        fake_mcp_mod.get_mcp_status = lambda: [
+            {
+                "name": "shared",
+                "connected": True,
+                "tools": 3,
+            }
+        ]
+        monkeypatch.setitem(sys.modules, "tools.mcp_tool", fake_mcp_mod)
+
+        fake_registry_mod = types.ModuleType("tools.registry")
+
+        class _Registry:
+            def get_all_tool_names(self):
+                return ["shared_tool"]
+
+            def get_toolset_for_tool(self, name):
+                return "mcp-shared"
+
+            def get_schema(self, name):
+                return {"name": name, "description": "Ownerless named-profile tool"}
+
+        fake_registry_mod.registry = _Registry()
+        monkeypatch.setitem(sys.modules, "tools.registry", fake_registry_mod)
+
+        servers_handler = MagicMock()
+        servers_handler.path = "/api/mcp/servers"
+        servers_handler.command = "GET"
+        _handle_mcp_servers_list(servers_handler)
+        servers = _json_payload(servers_handler)["servers"]
+
+        assert servers[0]["name"] == "shared"
+        assert servers[0]["active"] is False
+        assert servers[0]["tool_count"] is None
+
+        tools_handler = _make_handler()
+        _handle_mcp_tools_list(tools_handler)
+        payload = _json_payload(tools_handler)
+
+        assert payload["source"] == "none"
+        assert payload["tools"] == []
+        assert payload["unavailable_servers"] == ["shared"]
 
     def test_schema_summary_uses_parameter_names_types_required_and_descriptions_only(self):
         schema = {

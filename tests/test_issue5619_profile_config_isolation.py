@@ -140,10 +140,27 @@ def test_mcp_list_keeps_work_profile_snapshot_during_default_reload(
     routes = harness.routes
     harness.request_scope.profile = "work"
     original_load = routes._load_yaml_config_file_raw
+    reload_started = threading.Event()
+    reload_finished = threading.Event()
+    reload_errors = []
+    reload_thread_holder = {}
+
+    def reload_default():
+        try:
+            harness.request_scope.profile = "default"
+            reload_started.set()
+            harness.config.reload_config()
+            reload_finished.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            reload_errors.append(exc)
 
     def load_then_reload(config_path):
         config_data = original_load(config_path)
-        _reload_default_in_other_thread(harness)
+        reload_thread = threading.Thread(target=reload_default)
+        reload_thread_holder["thread"] = reload_thread
+        reload_thread.start()
+        assert reload_started.wait(timeout=5)
+        assert not reload_finished.wait(timeout=0.1)
         return config_data
 
     monkeypatch.setattr(routes, "_load_yaml_config_file_raw", load_then_reload)
@@ -153,6 +170,11 @@ def test_mcp_list_keeps_work_profile_snapshot_during_default_reload(
     routes._handle_mcp_servers_list(handler)
 
     assert [row["name"] for row in _payload(handler)["servers"]] == ["work-mcp"]
+    reload_thread = reload_thread_holder["thread"]
+    reload_thread.join(timeout=5)
+    assert not reload_thread.is_alive()
+    assert not reload_errors
+    assert reload_finished.is_set()
 
 
 def test_provider_catalog_keeps_work_profile_snapshot_during_default_reload(
@@ -346,6 +368,73 @@ def test_mcp_write_holds_profile_config_lock_through_save(
     assert "new-work-mcp" not in default_config["mcp_servers"]
 
 
+def test_mcp_list_waits_for_profile_write_lock(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    routes = harness.routes
+    entered_save = threading.Event()
+    release_save = threading.Event()
+    list_attempted = threading.Event()
+    list_finished = threading.Event()
+    errors = []
+    list_result = {}
+    original_save = routes._save_yaml_config_file
+
+    def paused_save(path, config_data):
+        if path == harness.work_home / "config.yaml":
+            entered_save.set()
+            assert release_save.wait(timeout=5)
+        return original_save(path, config_data)
+
+    monkeypatch.setattr(routes, "_save_yaml_config_file", paused_save)
+    monkeypatch.setattr(routes, "_mcp_runtime_status_by_name", lambda: {})
+
+    def update_work():
+        try:
+            harness.request_scope.profile = "work"
+            handler = _handler()
+            handler.command = "PUT"
+            routes._handle_mcp_server_update(
+                handler,
+                "new-work-mcp",
+                {"command": "run-new-work-mcp"},
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def list_work():
+        try:
+            assert entered_save.wait(timeout=5)
+            harness.request_scope.profile = "work"
+            handler = _handler()
+            list_attempted.set()
+            routes._handle_mcp_servers_list(handler)
+            list_result["payload"] = _payload(handler)
+            list_finished.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    update_thread = threading.Thread(target=update_work)
+    list_thread = threading.Thread(target=list_work)
+    update_thread.start()
+    list_thread.start()
+
+    assert entered_save.wait(timeout=5)
+    assert list_attempted.wait(timeout=5)
+    assert not list_finished.wait(timeout=0.1)
+    release_save.set()
+    update_thread.join(timeout=5)
+    list_thread.join(timeout=5)
+
+    assert not update_thread.is_alive()
+    assert not list_thread.is_alive()
+    assert not errors
+    names = [row["name"] for row in list_result["payload"]["servers"]]
+    assert "new-work-mcp" in names
+    assert "default-mcp" not in names
+
+
 def test_profile_snapshot_expands_env_from_request_profile_raw_yaml(
     profile_config_harness, monkeypatch
 ):
@@ -367,6 +456,47 @@ def test_profile_snapshot_expands_env_from_request_profile_raw_yaml(
     snapshot = config.get_config_snapshot()
 
     assert snapshot["providers"]["work-provider"]["api_key"] == "work-secret"
+
+
+def test_mcp_notes_get_expands_named_profile_env_from_raw_yaml(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    config = harness.config
+    routes = harness.routes
+    harness.work_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "webui_external_notes_sources": "${NOTES_ENABLED}",
+                "mcp_servers": {
+                    "joplin": {"command": "run-joplin"},
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    harness.work_home.joinpath(".env").write_text(
+        "NOTES_ENABLED=true\n",
+        encoding="utf-8",
+    )
+    with config._yaml_file_cache_lock:
+        config._yaml_file_cache.clear()
+    monkeypatch.setenv("NOTES_ENABLED", "false")
+    monkeypatch.delenv("HERMES_WEBUI_EXTERNAL_NOTES_SOURCES", raising=False)
+    monkeypatch.setattr(routes, "_mcp_runtime_status_by_name", lambda: {})
+    monkeypatch.setattr(routes, "_joplin_recent_ai_notes", lambda limit=6: [])
+    harness.request_scope.profile = "work"
+
+    handler = _handler()
+    handler.path = "/api/notes/sources"
+    routes._handle_notes_sources_list(handler)
+    payload = _payload(handler)
+
+    assert payload["enabled"] is True
+    assert payload["source"] == "none"
+    assert [source["name"] for source in payload["sources"]] == ["joplin"]
+    assert payload["sources"][0]["tool_source"] == "configured_hint"
 
 
 def test_named_profile_snapshot_does_not_expand_missing_env_from_process(
@@ -400,11 +530,14 @@ def test_profile_env_cleanup_preserves_replaced_thread_env(
     harness = profile_config_harness
     config = harness.config
     replacement_env = {"PROFILE_TOKEN": "replacement-secret"}
+    replacement_token = object()
     original_expand = config._expand_env_vars
     config._thread_ctx.__dict__.pop("env", None)
+    config._thread_ctx.__dict__.pop("env_scope_token", None)
 
     def replace_env_during_expand(obj):
         config._thread_ctx.env = replacement_env
+        config._thread_ctx.env_scope_token = replacement_token
         return original_expand(obj)
 
     monkeypatch.setattr(config, "_expand_env_vars", replace_env_during_expand)
@@ -416,7 +549,9 @@ def test_profile_env_cleanup_preserves_replaced_thread_env(
 
     assert result["token"] == "replacement-secret"
     assert config._thread_ctx.env is replacement_env
+    assert config._thread_ctx.env_scope_token is replacement_token
     config._thread_ctx.env = {}
+    config._thread_ctx.env_scope_token = None
 
 
 def test_model_resolution_uses_one_profile_snapshot_after_other_profile_reload(

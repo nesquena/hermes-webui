@@ -2831,6 +2831,7 @@ from api.config import (
     _get_config_path,
     _load_yaml_config_file,
     _load_yaml_config_file_raw,
+    _expand_env_vars_for_profile_home,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -26367,16 +26368,31 @@ def _active_profile_mcp_config_path() -> Path:
     return Path(active_home).expanduser() / "config.yaml"
 
 
+def _active_profile_mcp_expansion_home(config_path: Path) -> Path:
+    try:
+        active_home = get_active_hermes_home()
+        if active_home:
+            return Path(active_home).expanduser()
+    except Exception:
+        pass
+    return Path(config_path).expanduser().parent
+
+
 def _active_profile_mcp_config_data() -> dict:
     """Return the same active-profile MCP config snapshot used by MCP writes."""
-    cfg = _load_yaml_config_file_raw(_active_profile_mcp_config_path())
-    return cfg if isinstance(cfg, dict) else {}
+    config_path = _active_profile_mcp_config_path()
+    expansion_home = _active_profile_mcp_expansion_home(config_path)
+    with _cfg_lock:
+        raw = _load_yaml_config_file_raw(config_path)
+        snapshot = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+        expanded = _expand_env_vars_for_profile_home(snapshot, expansion_home)
+    return expanded if isinstance(expanded, dict) else {}
 
 
 def _active_profile_allows_ownerless_mcp_inventory() -> bool:
     """Ownerless Agent registry/runtime data is safe only outside TLS switching."""
     try:
-        return bool(_is_isolated_profile_mode() or _is_root_profile(get_active_profile_name()))
+        return bool(_is_isolated_profile_mode())
     except Exception:
         return False
 
