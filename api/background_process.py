@@ -62,6 +62,9 @@ logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
+_PROCESS_RECOVERY_DONE = False
+_PROCESS_CHECKPOINT_RECOVERED = False
+_PROCESS_RECOVERY_LOCK = threading.Lock()
 
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
@@ -1617,6 +1620,58 @@ def _drain_loop() -> None:
             logger.warning("bg_task_complete event handling failed", exc_info=True)
 
 
+def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> int:
+    """Recover core background processes and restore WebUI routing metadata.
+
+    The core gateway performs this during gateway startup, but this WebUI host
+    previously started only the queue drain. That left checkpointed processes
+    invisible after a WebUI restart.
+    """
+    global _PROCESS_CHECKPOINT_RECOVERED, _PROCESS_RECOVERY_DONE
+    if process_registry is None:
+        try:
+            from tools.process_registry import process_registry
+        except ImportError:
+            # Hermes Agent is optional in isolated WebUI/test environments.
+            # The drain loop already treats a missing registry as unavailable;
+            # startup recovery must preserve that fail-soft contract.
+            logger.debug("process recovery unavailable: Hermes Agent is not installed")
+            return 0
+    if get_session_fn is None:
+        from api.models import get_session as get_session_fn
+
+    with _PROCESS_RECOVERY_LOCK:
+        if _PROCESS_RECOVERY_DONE:
+            return 0
+
+        recovered = 0
+        if not _PROCESS_CHECKPOINT_RECOVERED:
+            recovered = process_registry.recover_from_checkpoint()
+            _PROCESS_CHECKPOINT_RECOVERED = True
+
+        for row in process_registry.list_sessions():
+            process_id = str(row.get("session_id") or "")
+            if not process_id:
+                continue
+            try:
+                proc_session = process_registry.get(process_id)
+                session_key = str(getattr(proc_session, "session_key", "") or "")
+                if not session_key or get_session_fn(session_key, metadata_only=True) is None:
+                    continue
+            except Exception:
+                logger.warning(
+                    "Could not resolve recovered WebUI process %r",
+                    process_id,
+                    exc_info=True,
+                )
+                continue
+            register_process_session(session_key, session_key)
+        _PROCESS_RECOVERY_DONE = True
+        if recovered:
+            logger.info("Recovered %d background process(es) for WebUI", recovered)
+        return recovered
+
+
 def register_process_session(session_key: str, session_id: str) -> None:
     """Bind a process-registry session_key to a WebUI session_id.
 
@@ -1663,6 +1718,12 @@ def start_drain_thread() -> bool:
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
+        try:
+            recover_processes_for_webui()
+        except Exception:
+            # Recovery is best-effort. A corrupt checkpoint or transient I/O
+            # error must not disable notifications for newly spawned tasks.
+            logger.warning("background process recovery failed", exc_info=True)
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,
