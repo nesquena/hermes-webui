@@ -200,6 +200,39 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
                 "#previewEditArea",
                 "el => getComputedStyle(el).fontFamily",
             )
+            runtime_token_font = page.evaluate("""
+                () => {
+                  const style = document.createElement('style');
+                  style.id = 'runtime-font-sentinel';
+                  style.textContent = ':root { --font-mono: "RuntimeMono", monospace; }';
+                  document.head.appendChild(style);
+                  return getComputedStyle(document.documentElement).getPropertyValue('--font-mono');
+                }
+            """)
+            edited_runtime_token_font = page.evaluate("""
+                () => {
+                  const style = document.getElementById('runtime-font-sentinel');
+                  style.textContent = ':root { --font-mono: "EditedRuntimeMono", monospace; }';
+                  return getComputedStyle(document.documentElement).getPropertyValue('--font-mono');
+                }
+            """)
+            linked_stylesheet_font = page.evaluate("""
+                async () => {
+                  const link = document.createElement('link');
+                  const encodedCss = encodeURIComponent(':root { --font-mono: "LinkedRuntimeMono", monospace; }');
+                  link.rel = 'stylesheet';
+                  link.href = 'data:text/css,' + encodedCss;
+                  return await new Promise((resolve) => {
+                    link.onload = () => {
+                      resolve(getComputedStyle(document.documentElement).getPropertyValue('--font-mono'));
+                    };
+                    link.onerror = () => {
+                      resolve(getComputedStyle(document.documentElement).getPropertyValue('--font-mono'));
+                    };
+                    document.head.appendChild(link);
+                  });
+                }
+            """)
         finally:
             if browser is not None:
                 browser.close()
@@ -209,6 +242,9 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
     assert "MonoFontSentinel" in fenced_code_font
     assert "ConvoFontSentinel" in message_edit_font
     assert "MonoFontSentinel" in preview_edit_font
+    assert "RuntimeMono" in runtime_token_font
+    assert "EditedRuntimeMono" in edited_runtime_token_font
+    assert "LinkedRuntimeMono" in linked_stylesheet_font
 
 
 def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attributes():
@@ -227,6 +263,24 @@ def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attr
         TERMINAL_JS,
         re.S,
     )
+    assert "const terminalHead=document.head" in TERMINAL_JS
+    assert "if(terminalHead){" in TERMINAL_JS
+    assert "terminalHeadStylesheetLoadListener" in TERMINAL_JS
+    assert re.search(
+        r"new\s+MutationObserver\(syncComposerTerminalAppearance\)\.observe\(terminalHead,\{\s*attributes:\s*true,\s*attributeFilter:\s*\[\s*['\"]href['\"],\s*['\"]media['\"],\s*['\"]disabled['\"]\s*\],\s*childList:\s*true,\s*subtree:\s*true,\s*characterData:\s*true,\s*\}\)",
+        TERMINAL_JS,
+        re.S,
+    )
+    head_decl=TERMINAL_JS.index("const terminalHead=document.head")
+    head_guard=TERMINAL_JS.index("if(terminalHead){")
+    head_load_listener=TERMINAL_JS.index("terminalHead.addEventListener('load',terminalHeadStylesheetLoadListener,true)")
+    head_observer=TERMINAL_JS.index("new MutationObserver(syncComposerTerminalAppearance).observe(terminalHead,{")
+    assert head_decl < head_guard < head_load_listener < head_observer
+    assert re.search(
+        r"terminalHead\.addEventListener\(\s*['\"]load['\"],\s*terminalHeadStylesheetLoadListener,\s*true\s*\)",
+        TERMINAL_JS,
+        re.S,
+    )
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -239,11 +293,13 @@ const styles={{
 }};
 const rootInline={{}};
 let dark=false;
-let observerCallback=null;
-let observedTarget=null;
-let observedOptions=null;
+let observerCallbacks={{}};
+let observedTargets=[];
+let observedOptions={{}};
 let fitCalls=0;
 let resizeSchedules=0;
+let terminalHeadLoadListener=null;
+let terminalHeadLoadListenerOptions=null;
 let nextAnimationFrameId=1;
 const animationFrames=new Map();
 const writes=[];
@@ -261,10 +317,12 @@ function flushAnimationFrames(){{
 }}
 
 class FakeMutationObserver {{
-  constructor(callback){{ observerCallback=callback; }}
+  constructor(callback){{ this.callback=callback; }}
   observe(target,options){{
-    observedTarget=target;
-    observedOptions=options;
+    const targetName = target===document.documentElement ? 'documentElement' : target===document.head ? 'head' : 'other';
+    observedTargets.push(targetName);
+    observedOptions[targetName]=options;
+    observerCallbacks[targetName]=this.callback;
   }}
 }}
 
@@ -311,6 +369,16 @@ global.window={{
 global.MutationObserver=FakeMutationObserver;
 global.document={{
   documentElement:root,
+  head:{{
+    addEventListener(type,listener,options){{
+      if(type==='load'){{
+        terminalHeadLoadListener=listener;
+        terminalHeadLoadListenerOptions=options;
+      }}
+    }},
+    removeEventListener(){{
+    }},
+  }},
   getElementById(){{ return null; }},
 }};
 global.getComputedStyle=()=>({{
@@ -346,7 +414,7 @@ const unchangedPendingFrames=pendingAnimationFrames();
 writes.length=0;
 const fitsBeforeUnrelated=fitCalls;
 document.documentElement.style.setProperty('--unrelated-outline-offset','3px');
-observerCallback([{{attributeName:'style'}}]);
+observerCallbacks.documentElement([{{attributeName:'style'}}]);
 const unrelatedStyleWrites=[...writes];
 const unrelatedFitDelta=fitCalls-fitsBeforeUnrelated;
 const unrelatedPendingFrames=pendingAnimationFrames();
@@ -354,7 +422,7 @@ const unrelatedPendingFrames=pendingAnimationFrames();
 writes.length=0;
 const fitsBeforeTheme=fitCalls;
 styles['--code-bg']='#222222';
-observerCallback([{{attributeName:'style'}}]);
+observerCallbacks.documentElement([{{attributeName:'style'}}]);
 const themeOnlyWrites=[...writes];
 const backgroundAfterChange=first.options.theme.background;
 const themeOnlyFitDelta=fitCalls-fitsBeforeTheme;
@@ -364,8 +432,8 @@ writes.length=0;
 resizeSchedules=0;
 const fitsBeforeFont=fitCalls;
 styles['--font-mono']='"Extension Mono",monospace';
-observerCallback([{{attributeName:'style'}}]);
-observerCallback([{{attributeName:'style'}}]);
+observerCallbacks.head([{{type:'childList'}}]);
+observerCallbacks.head([{{type:'characterData'}}]);
 const fontOnlyWrites=[...writes];
 const fontAfterChange=first.options.fontFamily;
 const fontFitDeltaBeforeFrame=fitCalls-fitsBeforeFont;
@@ -374,8 +442,35 @@ flushAnimationFrames();
 const fontFitDeltaAfterFrame=fitCalls-fitsBeforeFont;
 const fontResizeSchedules=resizeSchedules;
 
+writes.length=0;
+resizeSchedules=0;
+const fitsBeforeNonStylesheetLoad=fitCalls;
+styles['--font-mono']='\"Non Stylesheet Mono\",monospace';
+ terminalHeadLoadListener&&terminalHeadLoadListener({{target:{{
+  tagName:'SCRIPT',
+  getAttribute:()=>null,
+}}}});
+const nonStylesheetLoadWrites=[...writes];
+const nonStylesheetLoadFitDelta=fitCalls-fitsBeforeNonStylesheetLoad;
+const nonStylesheetLoadPendingFrames=pendingAnimationFrames();
+
+writes.length=0;
+const fitsBeforeStylesheetLoad=fitCalls;
+styles['--font-mono']='\"Stylesheet Load Mono\",monospace';
+terminalHeadLoadListener&&terminalHeadLoadListener({{target:{{
+  tagName:'LINK',
+  getAttribute(name){{ return name==='rel'?'stylesheet':null; }},
+}}}});
+const stylesheetLoadWrites=[...writes];
+const stylesheetLoadFontAfterChange=first.options.fontFamily;
+const stylesheetLoadFitDeltaBeforeFrame=fitCalls-fitsBeforeStylesheetLoad;
+const stylesheetLoadPendingFramesBeforeFlush=pendingAnimationFrames();
+flushAnimationFrames();
+const stylesheetLoadFitDeltaAfterFrame=fitCalls-fitsBeforeStylesheetLoad;
+const stylesheetLoadResizeSchedules=resizeSchedules;
+
 styles['--font-mono']='"Disposed Mono",monospace';
-observerCallback([{{attributeName:'style'}}]);
+observerCallbacks.documentElement([{{attributeName:'style'}}]);
 const pendingFitBeforeDispose=pendingAnimationFrames();
 _disposeXterm();
 const pendingFitAfterDispose=pendingAnimationFrames();
@@ -408,7 +503,19 @@ process.stdout.write(JSON.stringify({{
   fontPendingFramesBeforeFlush,
   fontFitDeltaAfterFrame,
   fontResizeSchedules,
-  observerUsesRoot:observedTarget===document.documentElement,
+  nonStylesheetLoadWrites,
+  nonStylesheetLoadFitDelta,
+  nonStylesheetLoadPendingFrames,
+  stylesheetLoadWrites,
+  stylesheetLoadFontAfterChange,
+  stylesheetLoadFitDeltaBeforeFrame,
+  stylesheetLoadPendingFramesBeforeFlush,
+  stylesheetLoadFitDeltaAfterFrame,
+  stylesheetLoadResizeSchedules,
+  terminalHeadLoadListenerRegistered: typeof terminalHeadLoadListener === 'function',
+  terminalHeadLoadListenerOptions,
+  observerTargets:observedTargets,
+  observerCallbacks:Object.keys(observerCallbacks),
   observedOptions,
   pendingFitBeforeDispose,
   pendingFitAfterDispose,
@@ -449,10 +556,29 @@ process.stdout.write(JSON.stringify({{
     assert observed["fontPendingFramesBeforeFlush"] == 1
     assert observed["fontFitDeltaAfterFrame"] == 1
     assert observed["fontResizeSchedules"] == 1
-    assert observed["observerUsesRoot"] is True
-    assert observed["observedOptions"] == {
+    assert observed["terminalHeadLoadListenerRegistered"] is True
+    assert observed["terminalHeadLoadListenerOptions"] is True
+    assert observed["nonStylesheetLoadWrites"] == []
+    assert observed["nonStylesheetLoadFitDelta"] == 0
+    assert observed["nonStylesheetLoadPendingFrames"] == 0
+    assert observed["stylesheetLoadWrites"] == ["fontFamily"]
+    assert observed["stylesheetLoadFontAfterChange"] == '"Stylesheet Load Mono",monospace'
+    assert observed["stylesheetLoadFitDeltaBeforeFrame"] == 0
+    assert observed["stylesheetLoadPendingFramesBeforeFlush"] == 1
+    assert observed["stylesheetLoadFitDeltaAfterFrame"] == 1
+    assert observed["stylesheetLoadResizeSchedules"] == 1
+    assert observed["observerTargets"] == ["documentElement", "head"]
+    assert observed["observerCallbacks"] == ["documentElement", "head"]
+    assert observed["observedOptions"]["documentElement"] == {
         "attributes": True,
         "attributeFilter": ["class", "data-skin", "style"],
+    }
+    assert observed["observedOptions"]["head"] == {
+        "attributes": True,
+        "attributeFilter": ["href", "media", "disabled"],
+        "childList": True,
+        "subtree": True,
+        "characterData": True,
     }
     assert observed["pendingFitBeforeDispose"] == 1
     assert observed["pendingFitAfterDispose"] == 0

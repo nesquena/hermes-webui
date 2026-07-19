@@ -749,4 +749,25 @@ if(window.MutationObserver){
     attributes:true,
     attributeFilter:['class','data-skin','style'],
   });
+
+  const terminalHead=document.head;
+  if(terminalHead){
+    const terminalHeadStylesheetLoadListener=(event)=>{
+      const target=event && event.target;
+      if(!target||typeof target.tagName!=='string'||target.tagName.toLowerCase()!=='link')return;
+      const rel=typeof target.getAttribute==='function'
+        ? target.getAttribute('rel')
+        : target.rel;
+      if(!String(rel||'').toLowerCase().split(/\s+/).includes('stylesheet'))return;
+      syncComposerTerminalAppearance();
+    };
+    terminalHead.addEventListener('load',terminalHeadStylesheetLoadListener,true);
+    new MutationObserver(syncComposerTerminalAppearance).observe(terminalHead,{
+      attributes:true,
+      attributeFilter:['href','media','disabled'],
+      childList:true,
+      subtree:true,
+      characterData:true,
+    });
+  }
 }
