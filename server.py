@@ -725,25 +725,24 @@ def main() -> None:
         httpd.server_close()
         _log_shutdown_audit()
         try:
-            from api.gateway_watcher import stop_watcher
-            stop_watcher()
+            from api.gateway_watcher import stop_watcher; stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")
         try:
-            from api.session_lifecycle import drain_all_on_shutdown
-            drain_all_on_shutdown()
+            from api.session_lifecycle import drain_all_on_shutdown; drain_all_on_shutdown()
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
-            from api.background_process import stop_drain_thread
-            stop_drain_thread()
+            from api.background_process import stop_drain_thread; stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
         try:
-            from api.background_process import stop_session_channel_reaper
-            stop_session_channel_reaper()
+            from api.background_process import stop_session_channel_reaper; stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
-
+        try:
+            from api.web_push import shutdown_web_push_delivery; shutdown_web_push_delivery()
+        except Exception:
+            logger.debug("Failed to stop Web Push delivery during shutdown", exc_info=True)
 if __name__ == '__main__':
     main()

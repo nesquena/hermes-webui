@@ -7,6 +7,7 @@ pytest
 pytest-timeout
 pytest-asyncio
 pytest-shard
+requests
 ruff
 mcp
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but

@@ -375,6 +375,17 @@ Full list of environment variables:
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `300` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions — an evicted session lazily reloads from its JSON sidecar on next access |
 
+### Web Push setup
+
+Closed-app notifications need VAPID keys and the optional `pywebpush` dependency. Generate a key pair with `vapid --gen`, then set these values before starting WebUI:
+
+```bash
+export HERMES_WEBUI_VAPID_PUBLIC_KEY='...'
+export HERMES_WEBUI_VAPID_PRIVATE_KEY='...'
+export HERMES_WEBUI_VAPID_SUBJECT='mailto:you@example.com'
+pip install pywebpush
+```
+
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 
 ---

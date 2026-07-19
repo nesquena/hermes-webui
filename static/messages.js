@@ -8542,6 +8542,201 @@ function requestNotificationPermission(){
     return p;
   });
 }
+
+function _webPushUrlBase64ToUint8Array(base64String){
+  const normalized=String(base64String||'').replace(/-/g,'+').replace(/_/g,'/');
+  const padding='='.repeat((4-normalized.length%4)%4);
+  const raw=atob(normalized+padding);
+  return Uint8Array.from(raw,ch=>ch.charCodeAt(0));
+}
+
+async function _webPushRegistration(){
+  if(!(navigator.serviceWorker&&navigator.serviceWorker.getRegistration)) return null;
+  const direct=await navigator.serviceWorker.getRegistration().catch(()=>null);
+  if(direct) return direct;
+  if(!navigator.serviceWorker.ready) return null;
+  return Promise.race([
+    navigator.serviceWorker.ready.catch(()=>null),
+    new Promise(res=>setTimeout(()=>res(null),2000))
+  ]);
+}
+
+async function _getWebPushSubscription(){
+  const reg=await _webPushRegistration();
+  if(!(reg&&reg.pushManager&&reg.pushManager.getSubscription)) return null;
+  return reg.pushManager.getSubscription().catch(()=>null);
+}
+
+let _webPushUiRefreshGeneration=0;
+let _webPushMutationGeneration=0;
+let _webPushMutationPending=false;
+function _isCurrentWebPushUiRefresh(gen,activeProfile){
+  return gen===_webPushUiRefreshGeneration&&String((S&&S.activeProfile)||'')===activeProfile;
+}
+function _beginWebPushMutation(){
+  if(_webPushMutationPending) return null;
+  _webPushMutationPending=true;
+  _webPushMutationGeneration+=1;
+  const btn=$('pushSubscriptionButton');
+  if(btn){
+    btn.disabled=true;
+    if(btn.setAttribute) btn.setAttribute('aria-busy','true');
+  }
+  return {
+    generation:_webPushMutationGeneration,
+    profile:String((S&&S.activeProfile)||''),
+    sessionId:String((S&&S.session&&S.session.session_id)||''),
+  };
+}
+function _isCurrentWebPushMutation(mutation){
+  return !mutation||(
+    mutation.generation===_webPushMutationGeneration
+    &&mutation.profile===String((S&&S.activeProfile)||'')
+  );
+}
+function _finishWebPushMutation(mutation){
+  if(!mutation) return;
+  if(mutation.generation!==_webPushMutationGeneration) return;
+  _webPushMutationPending=false;
+}
+
+async function _getWebPushServerStatus(endpoint=''){
+  const qs=endpoint?`?endpoint=${encodeURIComponent(String(endpoint))}`:'';
+  try{
+    return await api(`/api/push/status${qs}`,{timeoutToast:false});
+  }catch(e){
+    return {
+      enabled:false,
+      configured:true,
+      dependency_available:true,
+      active_profile_subscribed:false,
+      any_profile_subscribed:false,
+      error:e&&e.message||'',
+    };
+  }
+}
+
+const WEB_PUSH_SETUP_URL='https://github.com/nesquena/hermes-webui#web-push-setup';
+function _webPushSetupMessage(){return `${t('web_push_server_not_configured')} ${WEB_PUSH_SETUP_URL}`;}
+
+async function subscribeToWebPush(){
+  if(!(navigator.serviceWorker&&window.PushManager)){
+    throw new Error(t('web_push_unsupported'));
+  }
+  const mutation=arguments[0];
+  const server=await _getWebPushServerStatus();
+  if(!server.enabled){
+    throw new Error(server.configured ? t('web_push_server_unavailable') : _webPushSetupMessage());
+  }
+  const permission=await requestNotificationPermission();
+  if(permission!=='granted'){
+    throw new Error(t('web_push_permission_required'));
+  }
+  const reg=await _webPushRegistration();
+  if(!(reg&&reg.pushManager&&reg.pushManager.subscribe)){
+    throw new Error(t('web_push_service_worker_unready'));
+  }
+  const keyData=await api('/api/push/vapid-public-key',{timeoutToast:false});
+  const applicationServerKey=_webPushUrlBase64ToUint8Array(keyData&&keyData.public_key||'');
+  let subscription=await reg.pushManager.getSubscription().catch(()=>null);
+  if(!subscription){
+    subscription=await reg.pushManager.subscribe({
+      userVisibleOnly:true,
+      applicationServerKey,
+    });
+  }
+  const payload=subscription&&subscription.toJSON?subscription.toJSON():JSON.parse(JSON.stringify(subscription||{}));
+  if(mutation&&!_isCurrentWebPushMutation(mutation)) return subscription;
+  await api('/api/push/subscribe',{
+    method:'POST',
+    body:JSON.stringify({
+      subscription:payload,
+      expected_profile:mutation&&mutation.profile||'',
+      session_id:mutation&&mutation.sessionId||'',
+    }),
+  });
+  if(mutation&&!_isCurrentWebPushMutation(mutation)) return subscription;
+  if(typeof showToast==='function') showToast(t('web_push_enabled_toast'),3000);
+  await refreshWebPushUi();
+  return subscription;
+}
+
+async function unsubscribeFromWebPush(){
+  const mutation=arguments[0];
+  const reg=await _webPushRegistration();
+  const subscription=await _getWebPushSubscription();
+  if(subscription){
+    if(mutation&&!_isCurrentWebPushMutation(mutation)) return;
+    const payload=await api('/api/push/subscribe',{
+      method:'DELETE',
+      body:JSON.stringify({
+        endpoint:subscription.endpoint,
+        expected_profile:mutation&&mutation.profile||'',
+      }),
+    });
+    if(payload && !payload.any_profile_subscribed_after && (!mutation||_isCurrentWebPushMutation(mutation))){
+      try{ await subscription.unsubscribe(); }catch(_){}
+    }
+  }else if(reg&&reg.pushManager&&reg.pushManager.getSubscription){
+    await reg.pushManager.getSubscription().catch(()=>null);
+  }
+  if(mutation&&!_isCurrentWebPushMutation(mutation)) return;
+  if(typeof showToast==='function') showToast(t('web_push_disabled_toast'),3000);
+  await refreshWebPushUi();
+}
+
+async function refreshWebPushUi(){
+  const statusEl=$('pushSubscriptionStatus');
+  const btn=$('pushSubscriptionButton');
+  const wrap=$('pushSubscriptionButtonWrap');
+  if(!(statusEl&&btn&&wrap)) return;
+  const refreshGeneration=++_webPushUiRefreshGeneration;
+  const activeProfile=String((S&&S.activeProfile)||'');
+  if(!(navigator.serviceWorker&&window.PushManager)){
+    wrap.style.display='none';
+    statusEl.textContent=t('web_push_unsupported');
+    return;
+  }
+  const subscription=await _getWebPushSubscription();
+  if(!_isCurrentWebPushUiRefresh(refreshGeneration,activeProfile)) return;
+  const server=await _getWebPushServerStatus(subscription&&subscription.endpoint||'');
+  if(!_isCurrentWebPushUiRefresh(refreshGeneration,activeProfile)) return;
+  if(!server.enabled){
+    wrap.style.display='none';
+    statusEl.textContent=server.configured ? t('web_push_server_unavailable') : _webPushSetupMessage();
+    return;
+  }
+  const mutationPending=typeof _webPushMutationPending==='boolean'&&_webPushMutationPending;
+  const active=!!(subscription&&server.active_profile_subscribed);
+  wrap.style.display='';
+  btn.textContent=active?t('web_push_disable_btn'):t('web_push_enable_btn');
+  btn.setAttribute('data-i18n',active?'web_push_disable_btn':'web_push_enable_btn');
+  btn.disabled=mutationPending;
+  if(btn.setAttribute) btn.setAttribute('aria-busy',mutationPending?'true':'false');
+  btn.onclick=()=>{void toggleWebPushSubscription();};
+  statusEl.textContent=active
+    ? t('web_push_status_active')
+    : (Notification.permission==='denied' ? t('web_push_status_permission_blocked') : t('web_push_status_available'));
+}
+
+async function toggleWebPushSubscription(){
+  const mutation=_beginWebPushMutation();
+  if(!mutation) return;
+  try{
+    const subscription=await _getWebPushSubscription();
+    if(!_isCurrentWebPushMutation(mutation)) return;
+    const server=await _getWebPushServerStatus(subscription&&subscription.endpoint||'');
+    if(!_isCurrentWebPushMutation(mutation)) return;
+    if(subscription&&server.active_profile_subscribed) await unsubscribeFromWebPush(mutation);
+    else await subscribeToWebPush(mutation);
+  }catch(e){
+    if(typeof showToast==='function') showToast(t('web_push_error_prefix')+e.message,4000,'error');
+  }finally{
+    _finishWebPushMutation(mutation);
+    await refreshWebPushUi();
+  }
+}
+
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
   // #4416: `forceHidden` means the caller already determined the tab was hidden

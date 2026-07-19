@@ -1276,8 +1276,12 @@
                   <button type="button" class="sm-btn" id="notificationPermissionButton" onclick="requestNotificationPermission()" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
                 </span>
                 <button type="button" class="sm-btn" onclick="sendBrowserNotification('Hermes test','Notifications are ready.',{force:true});" style="padding:5px 10px;font-size:12px" data-i18n="notifications_test_btn">Send test</button>
+                <span id="pushSubscriptionButtonWrap" style="display:none">
+                  <button type="button" class="sm-btn" id="pushSubscriptionButton" onclick="toggleWebPushSubscription()" style="padding:5px 10px;font-size:12px" data-i18n="web_push_enable_btn">Enable push</button>
+                </span>
                 <span id="notificationPermissionStatus" style="font-size:11px;color:var(--muted)"></span>
               </div>
+              <div id="pushSubscriptionStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
