@@ -14113,7 +14113,17 @@ def handle_post(handler, parsed) -> bool:
             channel = settings.get("update_channel")
         from api.updates import check_for_updates
 
-        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates, channel=channel))
+        logger.info("checking for updates (force=%s, include_agent=%s, channel=%s)", force, include_agent_updates, channel)
+        # Defensive-only guard: wrap check_for_updates() for consistent
+        # exception protection across all route handlers. Does NOT fix #6086
+        # (root cause is likely signal/process-group reaping, per maintainer analysis).
+        try:
+            payload = check_for_updates(force=force, include_agent=include_agent_updates, channel=channel)
+        except Exception:
+            logger.exception("update check failed unexpectedly (defensive guard caught exception)")
+            return bad(handler, "Update check failed, see server log for details", status=500)
+        logger.info("update check completed")
+        return j(handler, payload)
 
     if parsed.path == "/api/extensions/toggle":
         from api.extensions import ExtensionToggleError, set_extension_user_enabled
