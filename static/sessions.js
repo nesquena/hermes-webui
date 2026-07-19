@@ -1410,8 +1410,15 @@ async function newSession(flash, options={}){
     if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
+      reqBody.profile=options.profile||(
+        _activeProject&&_activeProject!==NO_PROJECT_FILTER&&
+        String(_activeProject.project_id)===String(options.project_id)
+          ? _activeProject.profile
+          : S.activeProfile||'default'
+      );
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
-      reqBody.project_id=_activeProject;
+      reqBody.project_id=_activeProject.project_id;
+      reqBody.profile=_activeProject.profile||'default';
     }
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
@@ -1448,7 +1455,7 @@ async function newSession(flash, options={}){
       // safe default that matches the user's configured route. S.session.model_provider
       // is the previous-session fallback when the dropdown is unhydrated.
       //
-      // Guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
+      // #2518 guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
       // @provider:model string already carries a foreign provider namespace from
       // a previous session that was served by a different backend. Attaching
       // the current _activeProvider to such a slug would let the server's fast
@@ -1640,6 +1647,9 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
+    const defaultWorkspace=(typeof data.default_workspace==='string'&&data.default_workspace)||null;
+    S._profileDefaultWorkspace=defaultWorkspace;
+    S._profileSwitchWorkspace=defaultWorkspace;
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     if(data.default_model) window._defaultModel=data.default_model;
@@ -2577,9 +2587,36 @@ function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSe
   return filter === 'cli' ? renderedCliSessionCount : renderedWebuiSessionCount;
 }
 
-function _setActiveProjectFilter(projectId) {
-  const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
-  if (_activeProject === next) return;
+function _canonicalProjectFilterProfile(profile) {
+  const name = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const rootNames = new Set(['default']);
+  if(typeof S === 'object' && S){
+    if(Array.isArray(S.rootProfileNames)){
+      for(const rootName of S.rootProfileNames){
+        if(typeof rootName === 'string' && rootName.trim()) rootNames.add(rootName.trim());
+      }
+    }
+    if(S.activeProfileIsDefault && typeof S.activeProfile === 'string' && S.activeProfile.trim()){
+      rootNames.add(S.activeProfile.trim());
+    }
+  }
+  return rootNames.has(name) ? 'default' : name;
+}
+
+function _projectFilterIdentity(project) {
+  if(!project||!project.project_id) return null;
+  return {profile:_canonicalProjectFilterProfile(project.profile),project_id:String(project.project_id)};
+}
+
+function _projectFilterMatches(filter, row) {
+  return !!filter&&filter!==NO_PROJECT_FILTER&&!!row&&
+    _canonicalProjectFilterProfile(filter.profile)===_canonicalProjectFilterProfile(row.profile)&&
+    filter.project_id===String(row.project_id||'');
+}
+
+function _setActiveProjectFilter(project) {
+  const next = project === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : _projectFilterIdentity(project);
+  if (_activeProject === next || _projectFilterMatches(_activeProject,next)) return;
   _activeProject = next;
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
@@ -3878,7 +3915,7 @@ let _allProjects = [];  // cached project list
 // to be something a user-created project_id can never collide with, which
 // double-underscore prefixes provide.
 const NO_PROJECT_FILTER = '__none__';
-let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
+let _activeProject = null;  // filter identity (null = all, NO_PROJECT_FILTER = unassigned only)
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
@@ -5384,6 +5421,9 @@ function _applySessionListPayload(sessData, projData, opts){
   }
   _syncSessionAttentionSoundState(_allSessions);
   _pruneLineageReportCacheToVisibleSessions(_allSessions);
+  S.rootProfileNames = Array.isArray(projData.root_profile_names)
+    ? projData.root_profile_names.filter(name=>typeof name === 'string' && name.trim())
+    : ['default'];
   _allProjects = projData.projects||[];
   // Capture the recovering-from-error state BEFORE clearing it: the error banner
   // DOM was rendered outside the signature path, so if this payload heals with
@@ -7403,7 +7443,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
-    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    if(s.default_hidden&&!_projectFilterMatches(_activeProject,s)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
@@ -7411,7 +7451,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(_activeProject===NO_PROJECT_FILTER){
       if(s.project_id) continue;
     } else if(_activeProject){
-      if(s.project_id!==_activeProject) continue;
+      if(!_projectFilterMatches(_activeProject,s)) continue;
     }
     referenceRaw.push(s);
     if(s.archived){
@@ -7454,7 +7494,7 @@ function _scopedSidebarReferenceRows(isCli){
     if(_isCliSession(s)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
-    else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
+    else if(_activeProject){ if(!_projectFilterMatches(_activeProject,s)) return false; }
     return true;
   });
 }
@@ -7462,6 +7502,37 @@ function _scopedSidebarReferenceRows(isCli){
 function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
+}
+
+function _projectRequestPayload(project, extra){
+  const payload={
+    project_id:project.project_id,
+    profile:project.profile||'default',
+  };
+  if(extra&&typeof extra==='object'){
+    for(const [key,value] of Object.entries(extra)){
+      if(value!==undefined) payload[key]=value;
+    }
+  }
+  return payload;
+}
+
+function _projectUsesActiveProfile(project){
+  const targetProfile=(project&&typeof project.profile==='string'&&project.profile.trim())
+    ? project.profile.trim()
+    : 'default';
+  const activeProfile=S.activeProfile||'default';
+  return typeof _profileMatchesActiveProfile==='function'
+    ? _profileMatchesActiveProfile(targetProfile,activeProfile)
+    : targetProfile===activeProfile;
+}
+
+function _ensureActiveProfileForProject(project){
+  if(!project||_projectUsesActiveProfile(project)) return Promise.resolve(false);
+  if(typeof _switchProfileForSessionLoad==='function'){
+    return Promise.resolve(_switchProfileForSessionLoad(project.profile||'default')).then(()=>true);
+  }
+  return Promise.resolve(false);
 }
 
 function _attachProjectQuickCreateButton(chip, project){
@@ -7487,23 +7558,30 @@ function _attachProjectQuickCreateButton(chip, project){
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id});
+        await newSession(false,_projectRequestPayload(project));
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
       return;
     }
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
-    _setActiveProjectFilter(project.project_id);
+    let switchedProfile=false;
     try{
-      await newSession(false,{project_id:project.project_id});
+      switchedProfile=await _ensureActiveProfileForProject(project);
+    }catch(err){
+      if(typeof showToast==='function') showToast('Profile switch failed: '+(err&&err.message||err));
+      return;
+    }
+    _setActiveProjectFilter(project);
+    try{
+      await newSession(false,_projectRequestPayload(project));
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
       try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
       try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
     }catch(err){
-      _setActiveProjectFilter(previousProject);
+      if(!switchedProfile) _setActiveProjectFilter(previousProject);
       if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
     }
   };
@@ -7652,7 +7730,7 @@ function renderSessionListFromCache(){
     // Project chips
     for(const p of _allProjects){
       const chip=document.createElement('span');
-      chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
+      chip.className='project-chip'+(_projectFilterMatches(_activeProject,p)?' active':'');
       if(p.color){
         const dot=document.createElement('span');
         dot.className='color-dot';
@@ -7665,7 +7743,7 @@ function renderSessionListFromCache(){
       let _pClickTimer=null;
       chip.onclick=(e)=>{
         clearTimeout(_pClickTimer);
-        _pClickTimer=setTimeout(()=>{_pClickTimer=null;_setActiveProjectFilter(p.project_id);},220);
+        _pClickTimer=setTimeout(()=>{_pClickTimer=null;_setActiveProjectFilter(p);},220);
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
@@ -8037,7 +8115,7 @@ function renderSessionListFromCache(){
     // to need the project marker. As a flex-flow sibling it stays visible
     // regardless of title length and sits next to the timestamp on the right.
     if(s.project_id){
-      const proj=_allProjects.find(p=>p.project_id===s.project_id);
+      const proj=_allProjects.find(p=>_projectFilterMatches(_projectFilterIdentity(s),p));
       if(proj){
         const dot=document.createElement('span');
         dot.className='session-project-dot';
@@ -9087,7 +9165,7 @@ function _showProjectPicker(session, anchorEl){
   for(const p of _allProjects){
     if (_profileHidesProject(p.profile)) continue;
     const item=document.createElement('div');
-    item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
+    item.className='project-picker-item'+(_projectFilterMatches(_projectFilterIdentity(session),p)?' active':'');
     if(p.color){
       const dot=document.createElement('span');
       dot.className='color-dot';
@@ -9236,7 +9314,7 @@ function _startProjectRename(proj, chip){
     _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
-        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{name:inp.value.trim()}))});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
@@ -9294,7 +9372,7 @@ function _showProjectContextMenu(e, proj, chip){
     dot.onclick=async()=>{
       menu.remove();
       try {
-        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{name:proj.name,color:hex}))});
         await renderSessionList();
         showToast('Color updated');
       } catch(e) {
@@ -9330,8 +9408,8 @@ async function _confirmDeleteProject(proj){
   });
   if(!ok){return;}
   try {
-    await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
-    if(_activeProject===proj.project_id) _activeProject=null;
+    await api('/api/projects/delete',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj))});
+    if(_projectFilterMatches(_activeProject,proj)) _activeProject=null;
     await renderSessionList();
     showToast('Project deleted');
   } catch(e) {

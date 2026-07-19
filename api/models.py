@@ -6005,15 +6005,28 @@ def _backfill_project_profiles_if_needed(projects: list) -> bool:
     return mutated
 
 
-def load_projects(*, _migrate: bool = True) -> list:
+def load_projects(
+    *,
+    _migrate: bool = True,
+    include_db: bool = False,
+    profile_name: str | None = None,
+) -> list:
     """Load project list from disk. Returns list of project dicts.
 
     On first call, runs a one-time migration to back-fill the `profile` field
     on legacy untagged projects (#1614). Disable via `_migrate=False` for
     callsites that want the raw on-disk shape (test fixtures, e.g.).
+    DB-backed rows are read-only and opt-in so mutation paths don't snapshot
+    adapter results into projects.json. JSON rows win on duplicate ids.
     """
     global _projects_migrated
     if not PROJECTS_FILE.exists():
+        if include_db:
+            from api.projects_db_adapter import load_projects_from_db
+
+            db_projects = load_projects_from_db(profile_name=profile_name)
+            if db_projects is not None:
+                return db_projects
         return []
     try:
         projects = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
@@ -6030,9 +6043,9 @@ def load_projects(*, _migrate: bool = True) -> list:
                 # rows (which a mutation route could then write back,
                 # silently overwriting the migration).
                 try:
-                    return json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
+                    projects = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
                 except Exception:
-                    return projects
+                    pass
             if _backfill_project_profiles_if_needed(projects):
                 try:
                     save_projects(projects)
@@ -6043,7 +6056,58 @@ def load_projects(*, _migrate: bool = True) -> list:
             else:
                 # Nothing to migrate — already tagged.
                 _projects_migrated = True
+    if include_db:
+        from api.projects_db_adapter import load_projects_from_db
+
+        db_projects = load_projects_from_db(profile_name=profile_name)
+        if db_projects:
+            seen = {project_identity_key(p) for p in projects}
+            for project in db_projects:
+                key = project_identity_key(project)
+                if key in seen:
+                    continue
+                seen.add(key)
+                projects.append(project)
     return projects
+
+
+def project_identity_matches(project: dict, project_id: str | None, profile_name: str | None) -> bool:
+    if project.get('project_id') != project_id:
+        return False
+    from api.profiles import _profiles_match
+
+    return _profiles_match(project.get('profile'), profile_name)
+
+
+def project_identity_key(project: dict) -> tuple[str, object]:
+    """Return the dedupe key shared by JSON and database project rows."""
+    from api.profiles import _is_root_profile
+
+    profile = str(project.get('profile') or 'default').strip() or 'default'
+    if _is_root_profile(profile):
+        profile = 'default'
+    return profile, project.get('project_id')
+
+
+def load_projects_for_profiles(profile_names: list[str]) -> list:
+    """Load JSON projects plus DB-backed rows for each named profile."""
+    projects = load_projects()
+    from api.projects_db_adapter import load_projects_from_db
+
+    seen = {project_identity_key(p) for p in projects}
+    for profile_name in profile_names:
+        profile = str(profile_name or 'default').strip() or 'default'
+        db_projects = load_projects_from_db(profile_name=profile)
+        if not db_projects:
+            continue
+        for project in db_projects:
+            key = project_identity_key(project)
+            if key in seen:
+                continue
+            seen.add(key)
+            projects.append(project)
+    return projects
+
 
 def save_projects(projects) -> None:
     """Write project list to disk."""
