@@ -135,6 +135,8 @@ def test_extension_sidecar_proxy_requires_consent_and_reconfirms_after_origin_ch
         "origin": "http://127.0.0.1:17787",
         "proxy_path": "/api/extensions/templates/sidecar/",
         "upstream_url": "http://127.0.0.1:17787/v1/ping?debug=1",
+        "proxy_auth": "legacy",
+        "auth_token": None,
     }
 
     encoded_target = resolve_extension_sidecar_proxy_target("templates", "v1%2Fprivate")
@@ -963,3 +965,144 @@ def test_extension_sidecar_proxy_consent_route_is_wired(monkeypatch):
         "status": 200,
         "data": {"ok": True, "id": "templates", "approved": True},
     }
+
+
+# ── token-v1 proxy auth (§9.1/§9.2) ─────────────────────────────────────────
+
+def _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787"):
+    return _configure_manifest_extension(
+        monkeypatch,
+        tmp_path,
+        {
+            "extensions": [
+                {
+                    "id": "templates",
+                    "sidecar": {
+                        "type": "loopback",
+                        "origin": origin,
+                        "proxy_auth": "token-v1",
+                    },
+                }
+            ]
+        },
+    )
+
+
+def test_token_v1_injects_persisted_token_when_auth_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "pw")
+    from api.auth import _invalidate_password_hash_cache
+    _invalidate_password_hash_cache()
+    _token_v1_manifest(monkeypatch, tmp_path)
+    from api.extensions import (
+        resolve_extension_sidecar_proxy_target,
+        set_extension_sidecar_proxy_consent,
+    )
+    import api.extension_sidecar_auth as sc
+
+    set_extension_sidecar_proxy_consent("templates", True)
+    target = resolve_extension_sidecar_proxy_target("templates", "v1/ping")
+    assert target["proxy_auth"] == "token-v1"
+    assert target["auth_token"] and len(target["auth_token"]) > 30
+    assert target["auth_token"] == sc.current_token("templates")
+
+
+def test_token_v1_auth_off_allows_loopback_origin(tmp_path, monkeypatch):
+    _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787")
+    from api.extensions import (
+        resolve_extension_sidecar_proxy_target,
+        set_extension_sidecar_proxy_consent,
+    )
+
+    set_extension_sidecar_proxy_consent("templates", True)
+    target = resolve_extension_sidecar_proxy_target("templates", "v1/ping")
+    assert target["auth_token"]  # loopback allowed even with auth off
+
+
+def test_token_v1_auth_off_blocks_non_loopback_origin(tmp_path, monkeypatch):
+    _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787")
+    import api.extensions as extensions
+    from api.extensions import (
+        ExtensionSidecarProxyError,
+        resolve_extension_sidecar_proxy_target,
+        set_extension_sidecar_proxy_consent,
+    )
+
+    set_extension_sidecar_proxy_consent("templates", True)
+    monkeypatch.setattr(extensions, "_sidecar_origin_is_loopback", lambda origin: False)
+    with pytest.raises(ExtensionSidecarProxyError) as exc:
+        resolve_extension_sidecar_proxy_target("templates", "v1/ping")
+    assert exc.value.status == 503
+
+
+def test_unknown_proxy_auth_value_rejects_sidecar(tmp_path, monkeypatch):
+    _configure_manifest_extension(
+        monkeypatch,
+        tmp_path,
+        {
+            "extensions": [
+                {
+                    "id": "templates",
+                    "sidecar": {
+                        "type": "loopback",
+                        "origin": "http://127.0.0.1:17787",
+                        "proxy_auth": "totally-bogus",
+                    },
+                }
+            ]
+        },
+    )
+    from api.extensions import (
+        ExtensionSidecarProxyError,
+        set_extension_sidecar_proxy_consent,
+    )
+
+    # Unknown proxy_auth -> _sidecar_from_manifest_entry rejects the record, so the
+    # sidecar never becomes available/consentable (fail closed, not silent-open).
+    # The rejection surfaces at consent time (the earliest resolve path).
+    with pytest.raises(ExtensionSidecarProxyError):
+        set_extension_sidecar_proxy_consent("templates", True)
+
+
+def test_status_payload_flags_auth_required_when_auth_off(tmp_path, monkeypatch):
+    _token_v1_manifest(monkeypatch, tmp_path)
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    sidecars = status.get("sidecars") or []
+    tmpl = next((s for s in sidecars if s.get("id") == "templates"), None)
+    assert tmpl is not None
+    proxy = tmpl["proxy"]
+    assert proxy["proxy_auth"] == "token-v1"
+    assert proxy["auth_required"] is True
+
+
+def test_inbound_x_hermes_header_is_stripped(monkeypatch):
+    from api.routes import _extension_sidecar_proxy_request_headers
+
+    class H:
+        headers = {
+            "X-Hermes-Sidecar-Token": "forged",
+            "X-Custom": "ok",
+            "Cookie": "secret",
+        }
+
+    out = _extension_sidecar_proxy_request_headers(H())
+    assert "X-Custom" in out
+    assert not any(k.lower().startswith("x-hermes-") for k in out)
+    assert not any(k.lower() == "cookie" for k in out)
+
+
+def test_token_module_persists_and_rotates(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "st"))
+    import importlib
+    import api.extension_sidecar_auth as sc
+    importlib.reload(sc)
+    try:
+        tok = sc.ensure_token("templates")
+        assert tok and sc.current_token("templates") == tok
+        assert sc.current_token("never") is None
+        assert sc.ensure_token("../evil") is None
+        new = sc.reset_token("templates")
+        assert new and new != tok and sc.current_token("templates") == new
+    finally:
+        importlib.reload(sc)

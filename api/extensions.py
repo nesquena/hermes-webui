@@ -811,6 +811,16 @@ def _normalize_loopback_sidecar_origin(value: object) -> Optional[str]:
     return f"{parsed.scheme}://{display_host}{':' + str(port) if port is not None else ''}"
 
 
+def _sidecar_origin_is_loopback(origin: object) -> bool:
+    """True only when the origin host is a canonical loopback address. Used to
+    gate the auth-off token-v1 posture: with WebUI auth off we proxy a token-v1
+    sidecar ONLY when its origin is provably loopback (127.0.0.1/localhost/::1)."""
+    if not isinstance(origin, str):
+        return False
+    parsed = urlsplit(origin)
+    return (parsed.hostname or "").lower() in _LOOPBACK_SIDECAR_HOSTS
+
+
 def _normalize_sidecar_health_path(value: object) -> Optional[str]:
     """Return a safe sidecar health path, or None when unsafe.
 
@@ -898,6 +908,21 @@ def _sidecar_from_manifest_entry(
             return None
     else:
         health_path = _DEFAULT_SIDECAR_HEALTH_PATH
+    # proxy_auth negotiation (token-v1). Absent = explicit legacy (unauthenticated
+    # proxy→sidecar, unchanged behavior for any pre-existing declaration). token-v1
+    # = core mints+injects a per-extension token and the sidecar validates it.
+    # Any unknown value fails closed (reject the sidecar) so a typo can never
+    # silently downgrade to unauthenticated.
+    raw_proxy_auth = raw.get("proxy_auth")
+    if raw_proxy_auth is None:
+        proxy_auth = "legacy"
+    elif raw_proxy_auth in ("legacy", "token-v1"):
+        proxy_auth = str(raw_proxy_auth)
+    else:
+        _add_diagnostic_warning(
+            diagnostics, "sidecar_proxy_auth_unsupported", _SIDECAR_WARNING_SOURCE
+        )
+        return None
     sidecar_id = _manifest_entry_text(entry, "id")
     name = _manifest_entry_text(entry, "name")
     return {
@@ -907,6 +932,7 @@ def _sidecar_from_manifest_entry(
         "origin": origin,
         "health_path": health_path,
         "health_url": f"{origin}{health_path}",
+        "proxy_auth": proxy_auth,
     }
 
 
@@ -1159,15 +1185,29 @@ def _sidecar_proxy_public_status(
     approved_origin: Optional[str],
     *,
     available: bool,
+    proxy_auth: str = "legacy",
 ) -> Dict[str, Any]:
     consented = bool(available and approved_origin == origin)
     origin_changed = bool(available and approved_origin and approved_origin != origin)
+    # token-v1 with WebUI auth OFF: consent is grantable by any unauthenticated
+    # local caller, so the panel must tell the user to enable auth BEFORE they
+    # wire up a sidecar (consent-time surfacing, §9.1), rather than only failing
+    # at first proxied request.
+    auth_required = False
+    if available and proxy_auth == "token-v1":
+        try:
+            from api.auth import is_auth_enabled
+            auth_required = not is_auth_enabled()
+        except Exception:
+            auth_required = False
     return {
         "available": available,
         "consented": consented,
         "consent_required": bool(available and not consented),
         "path": _extension_sidecar_proxy_path(extension_id),
         "origin_changed": origin_changed,
+        "proxy_auth": proxy_auth,
+        "auth_required": auth_required,
     }
 
 
@@ -1216,6 +1256,7 @@ def _extension_sidecar_records(
             sidecar["origin"],
             item.get("approved_origin"),
             available=available,
+            proxy_auth=sidecar.get("proxy_auth", "legacy"),
         )
         item["duplicate_id"] = id_counts.get(ext_id, 0) > 1
         item["proxy"] = proxy
@@ -1564,6 +1605,17 @@ def set_extension_sidecar_proxy_consent(extension_id: object, approved: object) 
             if sidecar is None or proxy.get("available") is not True:
                 raise ExtensionSidecarProxyError("Extension sidecar proxy is unavailable", status=409)
             consent_map[ext_id] = sidecar["origin"]
+            # Mint the per-extension token now (get-or-create) so it exists before
+            # the first proxied request — belt-and-suspenders with the lazy mint in
+            # resolve_extension_sidecar_proxy_target. Best-effort: a persistence
+            # failure surfaces later as a 503 at forward time, never as an
+            # ephemeral token.
+            if sidecar.get("proxy_auth") == "token-v1":
+                try:
+                    from api import extension_sidecar_auth as _sc_auth
+                    _sc_auth.ensure_token(ext_id)
+                except Exception:
+                    pass
         else:
             consent_map.pop(ext_id, None)
         _write_extension_state(
@@ -1625,11 +1677,42 @@ def resolve_extension_sidecar_proxy_target(
     upstream_url = f"{sidecar['origin']}{normalized_path}"
     if query:
         upstream_url = f"{upstream_url}?{query}"
+
+    # token-v1 auth (§9.1/§9.2). Legacy sidecars proxy unchanged; token-v1
+    # sidecars get a per-extension secret injected, and only proxy when the
+    # trust posture is sound.
+    proxy_auth = sidecar.get("proxy_auth", "legacy")
+    inject_token: Optional[str] = None
+    if proxy_auth == "token-v1":
+        from api.auth import is_auth_enabled
+        from api import extension_sidecar_auth as _sc_auth
+
+        if not is_auth_enabled():
+            # Auth off: the consent endpoint itself is unauthenticated, so any
+            # local caller could self-grant + drive the sidecar. Only allow when
+            # the sidecar origin is provably loopback (local_unprotected posture);
+            # never proxy an auth-off token-v1 call to a non-loopback origin.
+            if not _sidecar_origin_is_loopback(sidecar["origin"]):
+                raise ExtensionSidecarProxyError(
+                    "Sidecar proxy requires WebUI authentication for non-loopback "
+                    "origins; set a password in Settings.",
+                    status=503,
+                )
+        token = _sc_auth.current_token(ext_id) or _sc_auth.ensure_token(ext_id)
+        if not token:
+            # Token could not be persisted+read → fail closed rather than proxy
+            # unauthenticated (never inject an ephemeral secret).
+            raise ExtensionSidecarProxyError(
+                "Sidecar proxy auth token is unavailable", status=503
+            )
+        inject_token = token
     return {
         "extension_id": ext_id,
         "origin": sidecar["origin"],
         "proxy_path": proxy["path"],
         "upstream_url": upstream_url,
+        "proxy_auth": proxy_auth,
+        "auth_token": inject_token,
     }
 
 
