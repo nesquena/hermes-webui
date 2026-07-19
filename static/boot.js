@@ -2536,6 +2536,7 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 function applyEmptyStateSuggestionPref(){
   if(!$('emptyState')) return;
   $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStateWelcome===true);
 }
 
 window.addEventListener('resize',()=>{
@@ -3223,6 +3224,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
+    window._hideEmptyStateWelcome=s.hide_empty_state_welcome===true;
     applyEmptyStateSuggestionPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
     // It caused scroll-up flicker on long sessions, so it's off for everyone
@@ -3378,6 +3380,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     document.documentElement.dataset.conversationOutline='disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
+    window._hideEmptyStateWelcome=false;
     applyEmptyStateSuggestionPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;

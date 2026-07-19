@@ -8641,6 +8641,8 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const hideEmptyWelcomeCb=$('settingsHideEmptyWelcome');
+  if(hideEmptyWelcomeCb) payload.hide_empty_state_welcome=hideEmptyWelcomeCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -8792,6 +8794,10 @@ async function _autosavePreferencesSettings(payload){
     }
     if(payload&&payload.hide_empty_state_suggestions!==undefined){
       window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
+      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+    }
+    if(payload&&payload.hide_empty_state_welcome!==undefined){
+      window._hideEmptyStateWelcome=!!(saved&&saved.hide_empty_state_welcome);
       if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
     }
     if(payload&&payload.show_conversation_outline!==undefined){
@@ -9195,6 +9201,17 @@ async function loadSettingsPanel(){
       if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
       hideSuggestionsCb.addEventListener('change',()=>{
         window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
+        if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const hideEmptyWelcomeCb=$('settingsHideEmptyWelcome');
+    if(hideEmptyWelcomeCb){
+      hideEmptyWelcomeCb.checked=settings.hide_empty_state_welcome===true;
+      window._hideEmptyStateWelcome=hideEmptyWelcomeCb.checked;
+      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+      hideEmptyWelcomeCb.addEventListener('change',()=>{
+        window._hideEmptyStateWelcome=hideEmptyWelcomeCb.checked;
         if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
         _schedulePreferencesAutosave();
       },{once:false});
