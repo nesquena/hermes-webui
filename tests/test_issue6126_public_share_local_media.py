@@ -75,7 +75,13 @@ def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
         ("ipv6 loopback", "http://[::1]/private.png"),
         ("ipv4-mapped private ipv6", "http://[::ffff:192.168.1.1]/private.png"),
         ("ipv4-mapped loopback ipv6", "http://[::ffff:127.0.0.1]/private.png"),
+        ("percent encoded loopback host", "http://%31%32%37.0.0.1/private.png"),
+        ("fullwidth loopback host", "http://１２７.０.０.１/private.png"),
         ("backslash media path", "https://hermes.example.test\\api\\media?path=/tmp/private.png"),
+        (
+            "dot segment media path",
+            "https://hermes.example.test/api/foo/../media?path=/tmp/private.png",
+        ),
         (
             "double encoded media path",
             "https://hermes.example.test/app/%2561pi/media?path=/tmp/private.png",
@@ -101,11 +107,39 @@ def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
     assert "127.1" not in content
     assert "0177.0.0.1" not in content
     assert "0x7f.1" not in content
+    assert "%31%32%37.0.0.1" not in content
+    assert "１２７.０.０.１" not in content
     assert "[::1]" not in content
     assert "::ffff:192.168.1.1" not in content
     assert "::ffff:127.0.0.1" not in content
     assert "\\api\\media" not in content
+    assert "/api/foo/../media" not in content
     assert "%2561pi" not in content
+
+
+def test_public_share_snapshot_sanitizes_title_media_references():
+    import api.shares as shares
+
+    class Session:
+        pass
+
+    local_title_session = Session()
+    local_title_session.title = "MEDIA:file:///tmp/title-secret.png"
+    local_title_session.messages = [{"role": "assistant", "content": "shareable"}]
+
+    local_snapshot = shares.build_share_snapshot(local_title_session)
+
+    assert local_snapshot["title"] == OMITTED_ATTACHMENT
+    assert "file://" not in local_snapshot["title"]
+    assert "/tmp/title-secret.png" not in local_snapshot["title"]
+
+    public_title_session = Session()
+    public_title_session.title = "Title MEDIA:https://cdn.example.test/title.png"
+    public_title_session.messages = [{"role": "assistant", "content": "shareable"}]
+
+    public_snapshot = shares.build_share_snapshot(public_title_session)
+
+    assert public_snapshot["title"] == "Title MEDIA:https://cdn.example.test/title.png"
 
 
 def test_authenticated_media_route_stays_private(monkeypatch):

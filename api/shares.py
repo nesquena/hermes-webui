@@ -12,11 +12,13 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import re
 import secrets
 import tempfile
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -179,6 +181,12 @@ def _hostname_looks_like_browser_ipv4_literal(hostname: str) -> bool:
         return _BROWSER_IPV4_LITERAL_RE.fullmatch(str(hostname or "").rstrip(".")) is not None
 
 
+def _browser_normalized_hostname(hostname: str) -> str:
+    decoded = unquote(str(hostname or ""), errors="strict")
+    normalized = unicodedata.normalize("NFKC", decoded)
+    return normalized.encode("idna").decode("ascii").strip(".").lower()
+
+
 def _media_url_path_for_boundary_check(path: str) -> str:
     decoded = str(path or "")
     for _ in range(4):
@@ -186,13 +194,19 @@ def _media_url_path_for_boundary_check(path: str) -> str:
         if next_decoded == decoded:
             break
         decoded = next_decoded
-    return decoded.replace("\\", "/")
+    decoded = decoded.replace("\\", "/")
+    normalized = posixpath.normpath(decoded)
+    if normalized == ".":
+        return ""
+    if decoded.startswith("/") and not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized
 
 
 def _is_public_media_url(raw_ref: str) -> bool:
     try:
         parsed = urlsplit(str(raw_ref or "").replace("\\", "/"))
-        hostname = (parsed.hostname or "").strip(".").lower()
+        hostname = _browser_normalized_hostname(parsed.hostname or "")
     except ValueError:
         return False
     if parsed.scheme.lower() not in {"http", "https"} or not hostname:
@@ -319,6 +333,7 @@ def build_share_snapshot(session) -> dict:
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
     title = _force_redact_credentials(_raw_title or "Untitled")
+    title = _omit_local_media_references(title)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {
         "title": title,
