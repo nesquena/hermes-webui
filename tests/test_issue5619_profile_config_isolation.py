@@ -524,33 +524,94 @@ def test_named_profile_snapshot_does_not_expand_missing_env_from_process(
     assert explicit["providers"]["work-provider"]["api_key"] == "${PROFILE_TOKEN}"
 
 
-def test_profile_env_cleanup_preserves_replaced_thread_env(
-    profile_config_harness, monkeypatch
+@pytest.mark.parametrize("replacement_api", ["set", "clear"])
+@pytest.mark.parametrize("raise_during_expand", [False, True])
+def test_profile_env_cleanup_preserves_real_thread_env_replacement(
+    profile_config_harness, monkeypatch, replacement_api, raise_during_expand
 ):
     harness = profile_config_harness
     config = harness.config
     replacement_env = {"PROFILE_TOKEN": "replacement-secret"}
-    replacement_token = object()
     original_expand = config._expand_env_vars
     config._thread_ctx.__dict__.pop("env", None)
     config._thread_ctx.__dict__.pop("env_scope_token", None)
+    config._thread_ctx.block_process_env_fallback = False
 
     def replace_env_during_expand(obj):
-        config._thread_ctx.env = replacement_env
-        config._thread_ctx.env_scope_token = replacement_token
+        if replacement_api == "set":
+            config._set_thread_env(**replacement_env)
+        else:
+            config._clear_thread_env()
+        if raise_during_expand:
+            raise RuntimeError("replacement exit")
         return original_expand(obj)
 
     monkeypatch.setattr(config, "_expand_env_vars", replace_env_during_expand)
 
-    result = config._expand_env_vars_for_profile_home(
-        {"token": "${PROFILE_TOKEN}"},
-        harness.work_home,
-    )
+    if raise_during_expand:
+        with pytest.raises(RuntimeError, match="replacement exit"):
+            config._expand_env_vars_for_profile_home(
+                {"token": "${PROFILE_TOKEN}"},
+                harness.work_home,
+            )
+    else:
+        result = config._expand_env_vars_for_profile_home(
+            {"token": "${PROFILE_TOKEN}"},
+            harness.work_home,
+        )
+        expected_token = (
+            "replacement-secret"
+            if replacement_api == "set"
+            else "${PROFILE_TOKEN}"
+        )
+        assert result["token"] == expected_token
 
-    assert result["token"] == "replacement-secret"
-    assert config._thread_ctx.env is replacement_env
-    assert config._thread_ctx.env_scope_token is replacement_token
-    config._thread_ctx.env = {}
+    expected_env = replacement_env if replacement_api == "set" else {}
+    assert config._thread_ctx.env == expected_env
+    assert bool(getattr(config._thread_ctx, "block_process_env_fallback", False)) is True
+    config._clear_thread_env()
+    config._thread_ctx.block_process_env_fallback = False
+    config._thread_ctx.env_scope_token = None
+
+
+@pytest.mark.parametrize("replacement_api", ["set", "clear"])
+@pytest.mark.parametrize("raise_during_expand", [False, True])
+def test_process_config_refresh_preserves_real_thread_env_replacement(
+    profile_config_harness, monkeypatch, replacement_api, raise_during_expand
+):
+    harness = profile_config_harness
+    config = harness.config
+    config_path = harness.work_home / "config.yaml"
+    replacement_env = {"PROFILE_TOKEN": "replacement-secret"}
+    config_path.write_text(
+        yaml.safe_dump({"token": "${PROFILE_TOKEN}"}, sort_keys=False),
+        encoding="utf-8",
+    )
+    with config._yaml_file_cache_lock:
+        config._yaml_file_cache.clear()
+    original_expand = config._expand_env_vars
+    config._clear_thread_env()
+    config._thread_ctx.block_process_env_fallback = True
+
+    def replace_env_during_expand(obj):
+        if replacement_api == "set":
+            config._set_thread_env(**replacement_env)
+        else:
+            config._clear_thread_env()
+        if raise_during_expand:
+            raise RuntimeError("replacement exit")
+        return original_expand(obj)
+
+    monkeypatch.setattr(config, "_expand_env_vars", replace_env_during_expand)
+
+    with config._cfg_lock:
+        config._refresh_config_cache(config_path)
+
+    expected_env = replacement_env if replacement_api == "set" else {}
+    assert config._thread_ctx.env == expected_env
+    assert bool(getattr(config._thread_ctx, "block_process_env_fallback", False)) is False
+    config._clear_thread_env()
+    config._thread_ctx.block_process_env_fallback = False
     config._thread_ctx.env_scope_token = None
 
 

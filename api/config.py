@@ -637,13 +637,13 @@ def _expand_env_vars_for_profile_home(obj, profile_home: Path | str | None):
     previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
     scope_token = object()
     try:
-        _set_thread_env(**thread_env)
+        _thread_ctx.env = thread_env
         _thread_ctx.env_scope_token = scope_token
         _thread_ctx.block_process_env_fallback = True
         return _expand_env_vars(obj)
     finally:
-        _thread_ctx.block_process_env_fallback = previous_block
         if getattr(_thread_ctx, "env_scope_token", None) is scope_token:
+            _thread_ctx.block_process_env_fallback = previous_block
             _thread_ctx.env = previous_thread_env if previous_thread_env is not None else {}
             _thread_ctx.env_scope_token = previous_scope_token
 
@@ -728,8 +728,8 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                         _thread_ctx.env_scope_token = _process_scope_token
                         _cfg_cache.update(_expand_env_vars(loaded))
                     finally:
-                        _thread_ctx.block_process_env_fallback = _prev_block
                         if getattr(_thread_ctx, "env_scope_token", None) is _process_scope_token:
+                            _thread_ctx.block_process_env_fallback = _prev_block
                             _thread_ctx.env = _prev_env if _prev_env is not None else {}
                             _thread_ctx.env_scope_token = _prev_scope_token
                 # Stamp _cfg_mtime whenever the file parsed to a dict — INCLUDING
@@ -9384,10 +9384,12 @@ def _evict_session_agent(session_id: str) -> None:
 
 def _set_thread_env(**kwargs):
     _thread_ctx.env = kwargs
+    _thread_ctx.env_scope_token = object()
 
 
 def _clear_thread_env():
     _thread_ctx.env = {}
+    _thread_ctx.env_scope_token = object()
 
 
 # ── Per-session agent locks ───────────────────────────────────────────────────
