@@ -570,6 +570,14 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification["type"],
             error_classification.get("hint", ""),
         )
+        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
+        _turn_duration_seconds = 0.0
+        try:
+            _pending_ts = getattr(session, 'pending_started_at', None)
+            if _pending_ts:
+                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
+        except Exception:
+            pass
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         session.pending_user_message = None
@@ -588,6 +596,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
             "timestamp": int(time.time()),
             "_error": True,
+            "_turnDuration": round(_turn_duration_seconds, 3),
         }
         if error_payload.get("details"):
             error_message["provider_details"] = error_payload["details"]
