@@ -54,6 +54,7 @@ from api.process_event_utils import (
     complete_async_delegation_delivery,
     completion_delivery_id,
     release_async_delegation_delivery,
+    requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
 )
 
@@ -881,22 +882,48 @@ def _resolve_wakeup_target(
     return owner
 
 
-def _requeue_async_delegation_event(process_registry, evt: dict) -> None:
-    """Best-effort retry path for a claim or dispatch failure."""
-    try:
-        completion_queue = getattr(process_registry, "completion_queue", None)
-        if completion_queue is not None:
-            _DRAIN_STOP.wait(0.5)
-            completion_queue.put(evt)
-    except Exception:
-        logger.warning("Failed to requeue async delegation event", exc_info=True)
+def _requeue_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    claim=None,
+    delay: float = 0.5,
+) -> bool:
+    """Retry without enqueueing new work once drain shutdown has started."""
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    return requeue_async_delegation_event(
+        evt,
+        completion_queue,
+        delay=delay,
+        stop_event=_DRAIN_STOP,
+        durable=(bool(getattr(claim, "durable", False)) if claim is not None else None),
+    )
+
+
+def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
+    """Retry durable routing, or one bounded best-effort legacy routing pass."""
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    if schedule_async_delegation_claim_retry(
+        evt,
+        completion_queue,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    ):
+        return
+    if evt.get("_webui_routing_retry_attempted"):
+        return
+    retry_evt = dict(evt)
+    retry_evt["_webui_routing_retry_attempted"] = True
+    _requeue_async_delegation_event(
+        process_registry,
+        retry_evt,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    )
 
 
 def _record_async_delegation_accepted(
     evt: dict,
     *,
     session_id: str,
-    delegation_id: str,
     claim,
 ) -> None:
     """ACK durable delivery and publish live-view state after turn acceptance."""
@@ -942,7 +969,6 @@ def _start_async_delegation_wakeup_turn(
                 _record_async_delegation_accepted(
                     evt,
                     session_id=session_id,
-                    delegation_id=delegation_id,
                     claim=claim,
                 )
                 logger.info(
@@ -954,7 +980,7 @@ def _start_async_delegation_wakeup_turn(
                 return
 
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "async delegation wakeup paused for session %s; delivery remains retryable",
@@ -970,7 +996,7 @@ def _start_async_delegation_wakeup_turn(
                 )
         except Exception:
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
             logger.warning(
                 "async delegation wakeup turn failed for session %s; requeued",
                 session_id,
@@ -1014,7 +1040,7 @@ def _process_async_delegation_event(
         # from the shared queue; the core record therefore remains restart-safe.
         if _session_has_active_turn(session_id):
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
             return
 
         _start_async_delegation_wakeup_turn(
@@ -1027,7 +1053,7 @@ def _process_async_delegation_event(
         )
     except Exception:
         release_async_delegation_delivery(evt, claim)
-        _requeue_async_delegation_event(process_registry, evt)
+        _requeue_async_delegation_event(process_registry, evt, claim=claim)
         logger.warning(
             "server-side async delegation dispatch failed for session %s",
             session_id,
@@ -1081,11 +1107,7 @@ def _process_one(evt: dict) -> None:
             process_id,
         )
         if evt.get("type") == "async_delegation":
-            schedule_async_delegation_claim_retry(
-                evt,
-                getattr(_process_registry, "completion_queue", None),
-                delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
-            )
+            _retry_unmapped_async_delegation_event(_process_registry, evt)
         return
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
@@ -1096,11 +1118,7 @@ def _process_one(evt: dict) -> None:
         # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         if evt.get("type") == "async_delegation":
-            schedule_async_delegation_claim_retry(
-                evt,
-                getattr(_process_registry, "completion_queue", None),
-                delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
-            )
+            _retry_unmapped_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
     # session_id above came from PROCESS_SESSION_INDEX.get(session_key), and

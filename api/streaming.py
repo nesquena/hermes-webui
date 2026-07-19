@@ -68,6 +68,7 @@ from api.process_event_utils import (
     complete_async_delegation_delivery,
     completion_delivery_id,
     release_async_delegation_delivery,
+    requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
 )
 
@@ -2027,6 +2028,7 @@ def _drain_webui_process_notifications(
 
     notifications: list[str] = []
     skipped_events: list[dict] = []
+    async_retry_events: list[tuple[dict, bool]] = []
     completion_queue = getattr(process_registry, 'completion_queue', None)
     if completion_queue is None:
         return []
@@ -2107,7 +2109,9 @@ def _drain_webui_process_notifications(
                     # Stale async events are an explicit terminal disposition.
                     complete_async_delegation_delivery(evt, claim)
                 elif pending_async_acceptances is not None:
-                    pending_async_acceptances.append((evt, claim, notification))
+                    pending_async_acceptances.append(
+                        (evt, claim, notification, completion_queue)
+                    )
                 else:
                     # Direct callers without a live agent turn retain the
                     # historical synchronous acceptance behavior used by
@@ -2117,7 +2121,9 @@ def _drain_webui_process_notifications(
                 if notification_added:
                     notifications.pop()
                 release_async_delegation_delivery(evt, claim)
-                skipped_events.append(evt)
+                async_retry_events.append(
+                    (evt, bool(getattr(claim, "durable", False)))
+                )
                 logger.warning(
                     "Failed to accept async delegation completion for session %s",
                     session_id,
@@ -2148,6 +2154,12 @@ def _drain_webui_process_notifications(
         # replayed forever on later turns.
         _mark_process_completion_consumed(process_registry, evt_sid)
 
+    for evt, durable in async_retry_events:
+        requeue_async_delegation_event(
+            evt,
+            completion_queue,
+            durable=durable,
+        )
     for evt in skipped_events:
         try:
             completion_queue.put(evt)
@@ -2155,6 +2167,32 @@ def _drain_webui_process_notifications(
             logger.debug("Failed to requeue process completion event", exc_info=True)
             break
     return notifications
+
+
+def _accept_pending_async_delegations(
+    pending_async_acceptances: list,
+    *,
+    session_id: str,
+) -> list[str]:
+    """ACK turn-bound delegation claims and return rejected notifications."""
+    rejected_notifications: list[str] = []
+    for evt, claim, notification, completion_queue in pending_async_acceptances:
+        try:
+            complete_async_delegation_delivery(evt, claim)
+        except Exception:
+            release_async_delegation_delivery(evt, claim)
+            requeue_async_delegation_event(
+                evt,
+                completion_queue,
+                durable=bool(getattr(claim, "durable", False)),
+            )
+            rejected_notifications.append(notification)
+            logger.warning(
+                "Async delegation was not accepted into session %s; retrying later",
+                session_id,
+                exc_info=True,
+            )
+    return rejected_notifications
 
 
 def _attachment_name(att) -> str:
@@ -8784,27 +8822,10 @@ def _run_agent_streaming(
             # boundary: immediately before invoking the agent with the message
             # that contains their notifications. A failed ACK is removed from
             # this turn and requeued so retry cannot create a duplicate prompt.
-            _rejected_async_notifications = []
-            for _evt, _claim, _notification in _pending_async_acceptances:
-                try:
-                    complete_async_delegation_delivery(_evt, _claim)
-                except Exception:
-                    release_async_delegation_delivery(_evt, _claim)
-                    try:
-                        from tools.process_registry import process_registry as _process_registry
-
-                        _process_registry.completion_queue.put(_evt)
-                    except Exception:
-                        logger.warning(
-                            "Failed to requeue async delegation after acceptance ACK failure",
-                            exc_info=True,
-                        )
-                    _rejected_async_notifications.append(_notification)
-                    logger.warning(
-                        "Async delegation was not accepted into session %s; retrying later",
-                        session_id,
-                        exc_info=True,
-                    )
+            _rejected_async_notifications = _accept_pending_async_delegations(
+                _pending_async_acceptances,
+                session_id=session_id,
+            )
             if _rejected_async_notifications:
                 for _notification in _rejected_async_notifications:
                     try:

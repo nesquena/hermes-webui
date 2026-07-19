@@ -167,6 +167,49 @@ def schedule_async_delegation_claim_retry(
     return _arm_async_delegation_restore_sweep(completion_queue, retry_delay)
 
 
+def requeue_async_delegation_event(
+    evt: Any,
+    completion_queue: Any,
+    *,
+    delay: float = 0.0,
+    stop_event: threading.Event | None = None,
+    durable: bool | None = None,
+) -> bool:
+    """Requeue an async event, falling back to the durable restore sweep.
+
+    Callers pass the queue reference they already resolved so an import failure
+    cannot strand a released durable claim. Legacy events without a durable row
+    still get one best-effort direct requeue; durable events additionally arm a
+    restore sweep when the direct queue write fails.
+    """
+    if not isinstance(evt, dict) or evt.get("type") != "async_delegation":
+        return False
+    if completion_queue is None:
+        return False
+    retry_delay = max(0.0, float(delay))
+    if retry_delay:
+        if stop_event is not None:
+            if stop_event.wait(retry_delay):
+                return False
+        else:
+            time.sleep(retry_delay)
+    try:
+        completion_queue.put(dict(evt))
+        return True
+    except Exception:
+        logger.warning("Failed to requeue async delegation event", exc_info=True)
+        if durable is True:
+            return _arm_async_delegation_restore_sweep(
+                completion_queue,
+                ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+            )
+        return schedule_async_delegation_claim_retry(
+            evt,
+            completion_queue,
+            delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+        )
+
+
 def _cancel_async_delegation_claim_retry(_delegation_id: str) -> None:
     # Retry is a shared durable-store sweep, not a per-delegation timer. It must
     # remain armed because other pending records may rely on the same sweep.

@@ -178,7 +178,6 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
         bp._record_async_delegation_accepted(
             evt,
             session_id=session_id,
-            delegation_id=delegation_id,
             claim=claim,
         )
 
@@ -202,6 +201,96 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
     assert delivery["mark"] == []
     assert delivery["legacy"] == []
     assert registry._completion_consumed == set()
+
+
+def test_acceptance_ack_and_queue_failure_schedules_durable_recovery(monkeypatch):
+    _reset_wakeup_state()
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    async_delivery = sys.modules["tools.async_delegation"]
+
+    async_delivery.complete_event_delivery = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("ACK failed")
+    )
+    async_delivery.mark_completion_delivered = lambda _delegation_id: False
+    async_delivery.mark_async_delegation_consumed = lambda _delegation_id: (_ for _ in ()).throw(
+        RuntimeError("legacy ACK failed")
+    )
+    async_delivery.get_durable_delegation = lambda _delegation_id: (_ for _ in ()).throw(
+        RuntimeError("durable store temporarily unavailable")
+    )
+
+    class _FailingQueue:
+        def put(self, _evt):
+            raise RuntimeError("queue unavailable")
+
+    evt = _async_delegation_event()
+    delivery["pending_ids"].add(evt["delegation_id"])
+    claim = peu.claim_async_delegation_delivery(evt, "webui-next-turn")
+    assert claim is not None
+
+    try:
+        rejected = streaming._accept_pending_async_delegations(
+            [(evt, claim, "delegation notification", _FailingQueue())],
+            session_id="webui-session-1",
+        )
+        assert rejected == ["delegation notification"]
+        assert len(delivery["release"]) == 1
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
+
+
+def test_requeue_put_failure_arms_durable_restore_sweep(monkeypatch):
+    _reset_wakeup_state()
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+
+    class _FailingQueue:
+        def put(self, _evt):
+            raise RuntimeError("queue unavailable")
+
+    registry = _FakeProcessRegistry()
+    registry.completion_queue = _FailingQueue()
+    evt = _async_delegation_event()
+    delivery["pending_ids"].add(evt["delegation_id"])
+
+    try:
+        bp._requeue_async_delegation_event(registry, evt)
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
+
+
+def test_requeue_stops_without_enqueuing_during_shutdown():
+    _reset_wakeup_state()
+    registry = _FakeProcessRegistry()
+    bp._DRAIN_STOP.set()
+    try:
+        bp._requeue_async_delegation_event(registry, _async_delegation_event())
+        assert registry.completion_queue.empty()
+    finally:
+        bp._DRAIN_STOP.clear()
+
+
+def test_background_unmapped_legacy_event_is_requeued_best_effort(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_durable_delivery_api(monkeypatch)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.01)
+    evt = _async_delegation_event(
+        delegation_id=None,
+        session_id="proc_legacy_retry",
+        session_key="legacy-unmapped-session",
+    )
+
+    bp._process_one(evt)
+
+    assert _wait_until(lambda: registry.completion_queue.qsize() == 1)
+    retried = registry.completion_queue.get_nowait()
+    assert retried["session_id"] == "proc_legacy_retry"
+    assert retried["_webui_routing_retry_attempted"] is True
+
+    bp._process_one(retried)
+    assert registry.completion_queue.empty()
 
 
 def test_background_wakeup_releases_claim_when_dispatch_fails(monkeypatch):
@@ -426,8 +515,9 @@ def test_streaming_live_turn_defers_ack_until_agent_acceptance_boundary(monkeypa
     assert len(notifications) == 1
     assert len(pending) == 1
     assert delivery["complete"] == []
-    evt, claim, notification = pending[0]
+    evt, claim, notification, completion_queue = pending[0]
     assert notification == notifications[0]
+    assert completion_queue is registry.completion_queue
     peu.complete_async_delegation_delivery(evt, claim)
     assert len(delivery["complete"]) == 1
 
@@ -481,6 +571,36 @@ def test_streaming_next_turn_releases_and_requeues_when_complete_fails(monkeypat
     assert len(delivery["release"]) == 1
     assert registry.completion_queue.qsize() == 1
     assert registry._completion_consumed == set()
+
+
+def test_streaming_synchronous_ack_and_queue_failure_arms_durable_restore(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    async_delivery = sys.modules["tools.async_delegation"]
+
+    async_delivery.complete_event_delivery = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("complete failed")
+    )
+    async_delivery.mark_completion_delivered = lambda _delegation_id: False
+    async_delivery.mark_async_delegation_consumed = lambda _delegation_id: (_ for _ in ()).throw(
+        RuntimeError("legacy marker failed")
+    )
+    async_delivery.get_durable_delegation = lambda _delegation_id: (_ for _ in ()).throw(
+        RuntimeError("durable store temporarily unavailable")
+    )
+    registry.completion_queue.put(_async_delegation_event())
+    registry.completion_queue.put = lambda _evt: (_ for _ in ()).throw(
+        RuntimeError("queue unavailable")
+    )
+
+    try:
+        notifications = streaming._drain_webui_process_notifications("webui-session-1")
+        assert notifications == []
+        assert len(delivery["release"]) == 1
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
 
 
 def test_streaming_next_turn_drain_routes_via_process_session_index_mapping(monkeypatch):
