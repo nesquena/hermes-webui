@@ -24,35 +24,45 @@ Design notes (from the reviewed design doc, §9.2):
   * Unlike ``auth._load_key``, we NEVER return an in-memory-only token: if the
     file cannot be persisted+re-read, we report "unavailable" so core fails
     closed (503) rather than injecting a secret no sidecar can ever read.
-  * The token is re-read from disk per request (mtime-cached) so rotation /
-    deletion takes effect with no restart, and a cached OLD token can't keep
-    validating after the file changes.
+  * The token is re-read from disk per request (fingerprint-cached on
+    inode/mtime/ctime/size) so rotation / deletion takes effect with no restart,
+    and a stale cached token can't keep validating after the file changes.
+  * Cross-process mint uses an O_CREAT|O_EXCL no-clobber claim so concurrent
+    first-mint across processes converges on a single winning file; losers
+    re-read the winner rather than clobbering it.
 """
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import threading
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from api.config import STATE_DIR
-
-# Extension ids are validated upstream (``_valid_extension_id``); re-assert a
-# strict grammar here so this module is safe to call directly and a bad id can
-# never escape the token directory.
-import re as _re
-_EXT_ID_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Keep this grammar identical to ``_EXTENSION_ID_RE`` in ``api/extensions.py`` —
+# a narrower pattern here silently 503s legally-named extensions (uppercase,
+# dots, up to 128 chars). The pattern is filesystem-safe as a filename: no path
+# separators, cannot start with a dot, so no dotfile / ".."-prefix tricks.
+_EXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# Injected/validated tokens are exactly secrets.token_urlsafe output: url-safe
+# base64 alphabet. Reject anything else (bounds length, and stops a malformed
+# token file's contents from reaching a header where a ValueError could echo it).
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
 
 _TOKEN_DIR_NAME = "sidecar-auth"
 _TOKEN_BYTES = 32  # secrets.token_urlsafe(32) -> ~43 url-safe chars
 
-# Per-request read cache: ext_id -> (token, mtime_ns, size). Guarded by _LOCK.
+# Per-request read cache: ext_id -> (token, fingerprint). Guarded by _LOCK.
 _LOCK = threading.Lock()
-_CACHE: Dict[str, Tuple[str, int, int]] = {}
+_CACHE: Dict[str, Tuple[str, Tuple]] = {}
 
 
 def _token_dir() -> Path:
+    # Resolve STATE_DIR dynamically (mirrors ``_extension_state_dir`` in
+    # api/extensions.py) so tests and relocated installs see the current dir
+    # rather than the value cached at import time.
+    from api.config import STATE_DIR
     return STATE_DIR / _TOKEN_DIR_NAME
 
 
@@ -64,14 +74,26 @@ def _valid_ext_id(ext_id: object) -> bool:
     return isinstance(ext_id, str) and bool(_EXT_ID_RE.match(ext_id))
 
 
+def _fingerprint(path: Path) -> Optional[Tuple]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_dev, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
 def _read_token_file(path: Path) -> Optional[str]:
-    """Return the stripped token text, or None on any problem (fail closed)."""
+    """Return the token text iff it is present and well-formed, else None
+    (fail closed). Only a valid token-v1 shape is ever returned, so malformed
+    file contents can never reach a header."""
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     tok = raw.strip()
-    return tok or None
+    if not tok or not _TOKEN_RE.match(tok):
+        return None
+    return tok
 
 
 def ensure_token(ext_id: str) -> Optional[str]:
@@ -80,8 +102,9 @@ def ensure_token(ext_id: str) -> Optional[str]:
     (caller must then treat the sidecar proxy as unavailable / 503) — we never
     hand back an ephemeral token a sidecar could never read.
 
-    Idempotent + atomic: safe to call at startup, on gallery install, and on
-    consent grant. Concurrent callers converge on one file.
+    Idempotent + atomic across processes: an O_CREAT|O_EXCL claim means the
+    first writer wins and concurrent losers re-read the winning file rather than
+    overwriting it.
     """
     if not _valid_ext_id(ext_id):
         return None
@@ -92,12 +115,10 @@ def ensure_token(ext_id: str) -> Optional[str]:
         return existing
 
     with _LOCK:
-        # Re-check under lock — another thread may have just created it.
         existing = _read_token_file(path)
         if existing is not None:
             return existing
         token = secrets.token_urlsafe(_TOKEN_BYTES)
-        tmp: Optional[Path] = None
         try:
             d = _token_dir()
             d.mkdir(parents=True, exist_ok=True)
@@ -105,74 +126,70 @@ def ensure_token(ext_id: str) -> Optional[str]:
                 os.chmod(d, 0o700)
             except OSError:
                 pass  # best-effort dir hardening; file perms are the real guard
-            # Atomic create: write a unique temp then rename into place.
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            # No-clobber create: O_EXCL fails if another process won the race.
+            try:
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                # A concurrent writer won — read theirs, don't overwrite.
+                return _read_token_file(path)
             try:
                 os.write(fd, token.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            os.replace(tmp, path)
             try:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
         except OSError:
-            # Persistence failed — clean up temp and report unavailable. Do NOT
-            # return the in-memory token (that is the _load_key trap: core would
-            # inject a secret the sidecar can never read → permanent 401 that
-            # looks like a token mismatch).
-            if tmp is not None:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+            # Persistence failed → report unavailable. Do NOT return the
+            # in-memory token (the _load_key trap: core would inject a secret the
+            # sidecar can never read → permanent 401 that looks like a mismatch).
             return None
-        # Confirm by RE-READING from disk — only a persisted, readable token is
-        # ever returned/injected.
+        # Confirm by RE-READING from disk — only a persisted, readable, valid
+        # token is ever returned/injected.
         persisted = _read_token_file(path)
         if persisted is not None:
-            _CACHE[ext_id] = (persisted, *_stat_key(path))
+            fp = _fingerprint(path)
+            if fp is not None:
+                _CACHE[ext_id] = (persisted, fp)
         return persisted
-
-
-def _stat_key(path: Path) -> Tuple[int, int]:
-    try:
-        st = path.stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return (0, 0)
 
 
 def current_token(ext_id: str) -> Optional[str]:
     """Return the current on-disk token for validation/injection, re-reading the
-    file when its mtime/size changed since last read (so rotation + deletion take
-    effect immediately and a stale cached token stops validating). Does NOT mint.
-    Returns None when no token exists (fail closed)."""
+    file when its fingerprint (inode/mtime/ctime/size) changed since last read —
+    so rotation + deletion take effect immediately and a stale cached token stops
+    validating. Does NOT mint. Returns None when no token exists (fail closed)."""
     if not _valid_ext_id(ext_id):
         return None
     path = _token_path(ext_id)
-    key = _stat_key(path)
-    if key == (0, 0):
+    fp = _fingerprint(path)
+    if fp is None:
         with _LOCK:
             _CACHE.pop(ext_id, None)
         return None
     with _LOCK:
         cached = _CACHE.get(ext_id)
-        if cached is not None and (cached[1], cached[2]) == key:
+        if cached is not None and cached[1] == fp:
             return cached[0]
     tok = _read_token_file(path)
+    # Re-fingerprint after the read to avoid caching new content under an old
+    # stat key (the stat/read race); cache only when both agree.
+    fp2 = _fingerprint(path)
     with _LOCK:
-        if tok is None:
+        if tok is None or fp2 is None:
             _CACHE.pop(ext_id, None)
+        elif fp2 == fp:
+            _CACHE[ext_id] = (tok, fp)
         else:
-            _CACHE[ext_id] = (tok, *key)
+            _CACHE.pop(ext_id, None)  # changed mid-read; don't cache, retry next call
     return tok
 
 
 def reset_token(ext_id: str) -> Optional[str]:
-    """Rotate: delete then re-mint. Returns the new token or None on failure."""
+    """Rotate: delete then re-mint. Returns the new token or None on failure.
+    (Recovery entry point; also usable by a future 'reset token' action.)"""
     if not _valid_ext_id(ext_id):
         return None
     with _LOCK:

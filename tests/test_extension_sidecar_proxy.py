@@ -1073,7 +1073,7 @@ def test_status_payload_flags_auth_required_when_auth_off(tmp_path, monkeypatch)
     assert tmpl is not None
     proxy = tmpl["proxy"]
     assert proxy["proxy_auth"] == "token-v1"
-    assert proxy["auth_required"] is True
+    assert proxy["posture"] == "local_unprotected"  # auth off -> panel warns pre-consent
 
 
 def test_inbound_x_hermes_header_is_stripped(monkeypatch):
@@ -1093,16 +1093,85 @@ def test_inbound_x_hermes_header_is_stripped(monkeypatch):
 
 
 def test_token_module_persists_and_rotates(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "st"))
-    import importlib
     import api.extension_sidecar_auth as sc
-    importlib.reload(sc)
-    try:
-        tok = sc.ensure_token("templates")
-        assert tok and sc.current_token("templates") == tok
-        assert sc.current_token("never") is None
-        assert sc.ensure_token("../evil") is None
-        new = sc.reset_token("templates")
-        assert new and new != tok and sc.current_token("templates") == new
-    finally:
-        importlib.reload(sc)
+
+    # Patch the dynamic dir resolver (mirrors how _extension_state_dir is patched
+    # elsewhere) so the token lands in an isolated tmp dir, not the shared session
+    # state dir.
+    token_dir = tmp_path / "sidecar-auth"
+    monkeypatch.setattr(sc, "_token_dir", lambda: token_dir)
+    sc._CACHE.clear()
+    tok = sc.ensure_token("templates")
+    assert tok and sc.current_token("templates") == tok
+    assert (token_dir / "templates.token").exists()
+    assert sc.current_token("never") is None            # fail closed
+    assert sc.ensure_token("../evil") is None            # path-escape rejected
+    # canonical (wider) id grammar is honored: uppercase/dot ids work
+    assert sc.ensure_token("RSS.Feeds") is not None
+    new = sc.reset_token("templates")
+    assert new and new != tok and sc.current_token("templates") == new
+    sc._CACHE.clear()
+
+
+def test_token_v1_route_injects_token_and_strips_response(monkeypatch):
+    # The 5 most load-bearing lines: the injected token must reach the upstream
+    # Request, and any x-hermes-* on the response must be stripped before it
+    # reaches the browser. (Fable coreA item 3.)
+    from api import routes
+
+    captured = {}
+
+    class FakeResponse:
+        def __init__(self):
+            self.status = 200
+            self.headers = {
+                "Content-Type": "application/json",
+                "X-Hermes-Echo": "leak-me",  # must be stripped from client response
+            }
+
+        def read(self, *_a):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeOpener:
+        def open(self, request, timeout=10):
+            captured["headers"] = {k.lower(): v for k, v in request.header_items()}
+            return FakeResponse()
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        "api.extensions.resolve_extension_sidecar_proxy_target",
+        lambda extension_id, proxy_path, query="": {
+            "extension_id": extension_id,
+            "origin": "http://127.0.0.1:17787",
+            "proxy_path": "/api/extensions/templates/sidecar/",
+            "upstream_url": "http://127.0.0.1:17787/v1/ping",
+            "proxy_auth": "token-v1",
+            "auth_token": "injected-token-abc",
+        },
+    )
+    monkeypatch.setattr(
+        routes, "_extension_sidecar_proxy_same_origin_opener", lambda o: FakeOpener()
+    )
+
+    handler = FakeHandler()
+    handler.headers = {
+        "Accept": "application/json",
+        "Host": "webui.local",
+        "Origin": "http://webui.local",
+        "Referer": "http://webui.local/",
+    }
+    result = routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/extensions/templates/sidecar/v1/ping", query=""),
+    )
+    assert result is True
+    # token injected on the way to the sidecar
+    assert captured["headers"].get("x-hermes-sidecar-token") == "injected-token-abc"
+    # token/x-hermes header stripped on the way back to the browser
+    assert handler.header("X-Hermes-Echo") is None

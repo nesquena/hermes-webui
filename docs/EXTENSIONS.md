@@ -189,13 +189,17 @@ direct one. The `proxy_auth` field closes that gap:
 - **`token-v1`** (recommended for any sidecar that mutates state) — WebUI mints a
   per-extension secret at `STATE_DIR/sidecar-auth/<id>.token` (mode `0600`) and
   injects it as the `X-Hermes-Sidecar-Token` header on every proxied request. The
-  sidecar must validate that header on every route except `/health` and reject
-  mismatches with `401`. The canonical scaffold in the extensions repository
-  (`examples/`, see `docs/SIDECAR_CONTRACT.md`) does this for you — do not hand-roll
-  it.
-- **absent** — explicit **legacy** mode (no token; unchanged behavior). Only
-  appropriate for read-only, non-sensitive sidecars.
-- Any **unknown** value fails closed (the sidecar declaration is rejected).
+  sidecar resolves the token file in this order — `HERMES_EXT_SIDECAR_TOKEN_FILE`
+  → `$HERMES_WEBUI_STATE_DIR/sidecar-auth/<id>.token` →
+  `$HERMES_HOME/webui/sidecar-auth/<id>.token` → platform default
+  (`~/.hermes/webui/…`, `%LOCALAPPDATA%\hermes\webui\…` on Windows) — and must
+  validate the header on every route except `/health`, returning **`401` on a
+  missing/mismatched token** and **`503` when the token file is absent/unreadable**.
+  The canonical scaffold in the extensions repository (`examples/`, see
+  `docs/SIDECAR_CONTRACT.md`) does all of this for you — do not hand-roll it.
+- **absent (or the explicit literal `"legacy"`)** — **legacy** mode (no token;
+  unchanged behavior). Only appropriate for read-only, non-sensitive sidecars.
+- Any **other** value fails closed (the sidecar declaration is rejected).
 
 **Auth-off posture:** WebUI authentication is optional and off by default. Because
 the consent endpoint itself is unauthenticated in that mode, a `token-v1` sidecar is

@@ -1189,17 +1189,18 @@ def _sidecar_proxy_public_status(
 ) -> Dict[str, Any]:
     consented = bool(available and approved_origin == origin)
     origin_changed = bool(available and approved_origin and approved_origin != origin)
-    # token-v1 with WebUI auth OFF: consent is grantable by any unauthenticated
-    # local caller, so the panel must tell the user to enable auth BEFORE they
-    # wire up a sidecar (consent-time surfacing, §9.1), rather than only failing
-    # at first proxied request.
-    auth_required = False
+    # token-v1 posture (§9.1). "protected" = WebUI auth on. "local_unprotected" =
+    # auth off: forwarding still succeeds for the loopback origin, but consent is
+    # grantable by any unauthenticated local caller, so the panel should warn the
+    # operator to enable authentication. Named a posture (not "auth_required")
+    # because nothing is actually blocked in the loopback case.
+    posture = None
     if available and proxy_auth == "token-v1":
         try:
             from api.auth import is_auth_enabled
-            auth_required = not is_auth_enabled()
+            posture = "protected" if is_auth_enabled() else "local_unprotected"
         except Exception:
-            auth_required = False
+            posture = None
     return {
         "available": available,
         "consented": consented,
@@ -1207,7 +1208,7 @@ def _sidecar_proxy_public_status(
         "path": _extension_sidecar_proxy_path(extension_id),
         "origin_changed": origin_changed,
         "proxy_auth": proxy_auth,
-        "auth_required": auth_required,
+        "posture": posture,
     }
 
 
@@ -1605,17 +1606,16 @@ def set_extension_sidecar_proxy_consent(extension_id: object, approved: object) 
             if sidecar is None or proxy.get("available") is not True:
                 raise ExtensionSidecarProxyError("Extension sidecar proxy is unavailable", status=409)
             consent_map[ext_id] = sidecar["origin"]
-            # Mint the per-extension token now (get-or-create) so it exists before
-            # the first proxied request — belt-and-suspenders with the lazy mint in
-            # resolve_extension_sidecar_proxy_target. Best-effort: a persistence
-            # failure surfaces later as a 503 at forward time, never as an
-            # ephemeral token.
+            # For token-v1, mint the per-extension token NOW and fail the consent
+            # if it can't be persisted+read — otherwise we'd persist consent and
+            # then 503 on every request (a mint failure must surface at grant
+            # time, not as a mysterious later error).
             if sidecar.get("proxy_auth") == "token-v1":
-                try:
-                    from api import extension_sidecar_auth as _sc_auth
-                    _sc_auth.ensure_token(ext_id)
-                except Exception:
-                    pass
+                from api import extension_sidecar_auth as _sc_auth
+                if not _sc_auth.ensure_token(ext_id):
+                    raise ExtensionSidecarProxyError(
+                        "Could not provision the sidecar auth token", status=503
+                    )
         else:
             consent_map.pop(ext_id, None)
         _write_extension_state(
