@@ -1243,7 +1243,8 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
     return cookie[cookie_name].OutputString()
 
 
-def clear_profile_cookie(handler) -> None:
+def build_clear_profile_cookie() -> str:
+    """Build a Set-Cookie header that clears the active-profile cookie."""
     import http.cookies as _hc
 
     cookie = _hc.SimpleCookie()
@@ -1253,4 +1254,8 @@ def clear_profile_cookie(handler) -> None:
     cookie[cookie_name]['httponly'] = True
     cookie[cookie_name]['samesite'] = 'Lax'
     cookie[cookie_name]['max-age'] = '0'
-    handler.send_header('Set-Cookie', cookie[cookie_name].OutputString())
+    return cookie[cookie_name].OutputString()
+
+
+def clear_profile_cookie(handler) -> None:
+    handler.send_header('Set-Cookie', build_clear_profile_cookie())

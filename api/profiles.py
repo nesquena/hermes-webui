@@ -2637,15 +2637,13 @@ def delete_profile_api(name: str) -> dict:
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
 
-    # If deleting the active profile, switch to default first
-    if _active_profile == name:
-        try:
-            switch_profile('default')
-        except RuntimeError:
-            raise RuntimeError(
-                f"Cannot delete active profile '{name}' while an agent is running. "
-                "Cancel or wait for it to finish."
-            )
+    # Browser profile switches are per-request cookie/TLS scoped. Deleting the
+    # request-active profile would leave that browser holding an unknown
+    # HttpOnly cookie and all routes would reject before it can switch away.
+    if _profiles_match(get_active_profile_name(), name):
+        raise RuntimeError(
+            f"Cannot delete active profile '{name}'. Switch to another profile first."
+        )
 
     try:
         from hermes_cli.profiles import delete_profile

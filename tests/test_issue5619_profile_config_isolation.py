@@ -42,6 +42,29 @@ def _payload(handler) -> dict:
     return json.loads(body.decode("utf-8"))
 
 
+def _server_handler(path: str, *, command: str = "GET"):
+    from server import Handler
+
+    handler = Handler.__new__(Handler)
+    handler.path = path
+    handler.command = command
+    handler.headers = {"Cookie": "hermes_profile=ghost"}
+    handler.wfile = MagicMock()
+    handler.send_response = MagicMock()
+    handler.send_header = MagicMock()
+    handler.end_headers = MagicMock()
+    handler._safe_webui_print = MagicMock()
+    return handler
+
+
+def _sent_headers(handler, name: str) -> list[str]:
+    return [
+        args[1]
+        for args, _kwargs in handler.send_header.call_args_list
+        if args and args[0] == name
+    ]
+
+
 @pytest.fixture
 def profile_config_harness(tmp_path, monkeypatch):
     from api import config, routes
@@ -636,3 +659,70 @@ def test_strict_profile_cookie_rejects_invalid_and_unknown_profiles(
     empty_handler = SimpleNamespace(headers={"Cookie": "theme=dark; hermes_profile="})
     with pytest.raises(InvalidProfileCookie):
         get_profile_cookie(empty_handler, reject_invalid=True)
+
+
+def test_invalid_profile_cookie_clears_cookie_and_recovers_login(monkeypatch):
+    import server
+    from api.helpers import InvalidProfileCookie
+
+    handler = _server_handler("/login?next=/")
+    monkeypatch.setattr(
+        server,
+        "get_profile_cookie",
+        lambda _handler, *, reject_invalid=False: (_ for _ in ()).throw(
+            InvalidProfileCookie("Invalid or unknown active profile cookie")
+        ),
+    )
+    monkeypatch.setattr(server, "check_auth", MagicMock())
+    monkeypatch.setattr(server, "handle_get", MagicMock())
+
+    server.Handler.do_GET(handler)
+
+    handler.send_response.assert_called_once_with(303)
+    assert _sent_headers(handler, "Location") == ["/login?next=/"]
+    clear_headers = _sent_headers(handler, "Set-Cookie")
+    assert len(clear_headers) == 1
+    assert clear_headers[0].startswith("hermes_profile=")
+    assert "Max-Age=0" in clear_headers[0]
+    server.check_auth.assert_not_called()
+    server.handle_get.assert_not_called()
+
+
+def test_invalid_profile_cookie_clears_cookie_and_blocks_api_dispatch(monkeypatch):
+    import server
+    from api.helpers import InvalidProfileCookie
+
+    handler = _server_handler("/api/models")
+    monkeypatch.setattr(
+        server,
+        "get_profile_cookie",
+        lambda _handler, *, reject_invalid=False: (_ for _ in ()).throw(
+            InvalidProfileCookie("Invalid or unknown active profile cookie")
+        ),
+    )
+    monkeypatch.setattr(server, "check_auth", MagicMock())
+    monkeypatch.setattr(server, "handle_get", MagicMock())
+
+    server.Handler.do_GET(handler)
+
+    handler.send_response.assert_called_once_with(400)
+    clear_headers = _sent_headers(handler, "Set-Cookie")
+    assert len(clear_headers) == 1
+    assert "Max-Age=0" in clear_headers[0]
+    payload = json.loads(handler.wfile.write.call_args[0][0].decode("utf-8"))
+    assert payload["profile_cookie_reset"] is True
+    server.check_auth.assert_not_called()
+    server.handle_get.assert_not_called()
+
+
+def test_delete_profile_rejects_request_active_profile(monkeypatch):
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    profiles.set_request_profile("work")
+    try:
+        with pytest.raises(RuntimeError, match="Switch to another profile first"):
+            profiles.delete_profile_api("work")
+    finally:
+        profiles.clear_request_profile()

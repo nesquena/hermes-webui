@@ -1,5 +1,7 @@
 """Regression tests for issue #697 — searchable global MCP tool inventory."""
 import json
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 from api.routes import (
@@ -86,6 +88,66 @@ class TestMcpToolInventoryApi:
         assert "secret-token" not in raw
         assert "default" not in raw
         assert "Authorization" not in raw
+
+    @patch("api.routes._mcp_runtime_status_by_name")
+    @patch("api.routes.get_config_for_profile_home")
+    @patch("api.routes.get_active_hermes_home")
+    def test_legacy_runtime_status_without_owner_metadata_still_lists_tools(
+        self, mock_home, mock_cfg, mock_runtime, tmp_path
+    ):
+        mock_home.return_value = tmp_path / "profiles" / "work"
+        mock_cfg.return_value = {
+            "mcp_servers": {"legacy": {"command": "legacy-cmd"}}
+        }
+        mock_runtime.return_value = {
+            "legacy": {
+                "name": "legacy",
+                "connected": True,
+                "tools": [{"name": "legacy_tool"}],
+            }
+        }
+
+        h = _make_handler()
+        _handle_mcp_tools_list(h)
+        payload = _json_payload(h)
+
+        assert payload["source"] == "mcp_runtime_status"
+        assert [tool["name"] for tool in payload["tools"]] == ["legacy_tool"]
+        assert payload["tools"][0]["active"] is True
+
+    @patch("api.routes._mcp_runtime_status_by_name")
+    @patch("api.routes.get_config_for_profile_home")
+    @patch("api.routes.get_active_hermes_home")
+    def test_legacy_registry_without_owner_metadata_still_lists_tools(
+        self, mock_home, mock_cfg, mock_runtime, monkeypatch, tmp_path
+    ):
+        mock_home.return_value = tmp_path / "profiles" / "work"
+        mock_cfg.return_value = {
+            "mcp_servers": {"legacy": {"command": "legacy-cmd"}}
+        }
+        mock_runtime.return_value = {}
+
+        fake_registry_mod = types.ModuleType("tools.registry")
+
+        class _Registry:
+            def get_all_tool_names(self):
+                return ["legacy_tool"]
+
+            def get_toolset_for_tool(self, name):
+                return "mcp-legacy"
+
+            def get_schema(self, name):
+                return {"name": name, "description": "Legacy tool"}
+
+        fake_registry_mod.registry = _Registry()
+        monkeypatch.setitem(sys.modules, "tools.registry", fake_registry_mod)
+
+        h = _make_handler()
+        _handle_mcp_tools_list(h)
+        payload = _json_payload(h)
+
+        assert payload["source"] == "tool_registry"
+        assert [tool["name"] for tool in payload["tools"]] == ["legacy_tool"]
 
     def test_schema_summary_uses_parameter_names_types_required_and_descriptions_only(self):
         schema = {

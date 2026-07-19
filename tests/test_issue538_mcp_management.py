@@ -143,8 +143,8 @@ class TestMcpList:
         """YAML numeric false-y values should not show a disabled server as enabled."""
         assert _parse_mcp_enabled(0) is False
 
-    def test_active_home_writes_ignore_external_config_override(self, monkeypatch, tmp_path):
-        """MCP writes pin the active profile config even when reads use HERMES_CONFIG_PATH."""
+    def test_root_profile_writes_honor_external_config_override(self, monkeypatch, tmp_path):
+        """Root/default MCP writes use the same HERMES_CONFIG_PATH as reads."""
         from api import config, profiles, routes
 
         active_home = tmp_path / 'active-home'
@@ -162,6 +162,47 @@ class TestMcpList:
         monkeypatch.setenv('HERMES_CONFIG_PATH', str(override_path))
         monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: active_home)
         monkeypatch.setattr(routes, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, 'get_active_profile_name', lambda: 'default')
+        monkeypatch.setattr(routes, '_is_root_profile', lambda name: name == 'default')
+        monkeypatch.setattr(routes, '_is_isolated_profile_mode', lambda: False)
+        monkeypatch.setattr(routes, '_mcp_runtime_status_by_name', lambda: {})
+        config.reload_config()
+
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert [srv['name'] for srv in payload['servers']] == ['override-srv']
+
+        h = _make_handler()
+        h.command = 'PUT'
+        _handle_mcp_server_update(h, 'new-srv', {'command': 'new-command'})
+        saved = yaml.safe_load(override_path.read_text(encoding='utf-8'))
+        active_home_saved = yaml.safe_load(active_home.joinpath('config.yaml').read_text(encoding='utf-8'))
+        assert 'new-srv' in saved['mcp_servers']
+        assert 'new-srv' not in active_home_saved['mcp_servers']
+
+    def test_named_profile_writes_ignore_external_config_override(self, monkeypatch, tmp_path):
+        """Named-profile MCP writes stay inside the active profile home."""
+        from api import config, profiles, routes
+
+        active_home = tmp_path / 'profiles' / 'work'
+        override_path = tmp_path / 'root-config' / 'config.yaml'
+        active_home.mkdir(parents=True)
+        override_path.parent.mkdir()
+        active_home.joinpath('config.yaml').write_text(
+            yaml.safe_dump({'mcp_servers': {'work-srv': {'command': 'work'}}}, sort_keys=False),
+            encoding='utf-8',
+        )
+        override_path.write_text(
+            yaml.safe_dump({'mcp_servers': {'override-srv': {'command': 'override'}}}, sort_keys=False),
+            encoding='utf-8',
+        )
+        monkeypatch.setenv('HERMES_CONFIG_PATH', str(override_path))
+        monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, 'get_active_profile_name', lambda: 'work')
+        monkeypatch.setattr(routes, '_is_root_profile', lambda name: name == 'default')
+        monkeypatch.setattr(routes, '_is_isolated_profile_mode', lambda: False)
         monkeypatch.setattr(routes, '_mcp_runtime_status_by_name', lambda: {})
         config.reload_config()
 

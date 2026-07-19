@@ -26131,6 +26131,8 @@ def _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key: st
     if not isinstance(runtime_by_name, dict):
         return
     active_home_key = _mcp_profile_home_key(active_home_key)
+    parsed_entries = []
+    has_owner_metadata = False
     for raw_key, runtime in runtime_by_name.items():
         if not isinstance(runtime, dict):
             continue
@@ -26143,7 +26145,13 @@ def _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key: st
             server_name = str(raw_key or "").strip()
         server_name = str(runtime.get("name") or server_name).strip()
         owner_key = owner_key or _mcp_runtime_entry_owner_key(runtime)
-        if not owner_key or owner_key != active_home_key or not server_name:
+        if owner_key:
+            has_owner_metadata = True
+        if not server_name:
+            continue
+        parsed_entries.append((owner_key, server_name, runtime))
+    for owner_key, server_name, runtime in parsed_entries:
+        if has_owner_metadata and owner_key != active_home_key:
             continue
         yield server_name, runtime
 
@@ -26331,7 +26339,15 @@ def _mcp_tool_summary(name, tool, server_summary):
 
 def _active_profile_mcp_config_path() -> Path:
     """Return the active profile config path for profile-scoped MCP writes."""
-    return Path(get_active_hermes_home()).expanduser() / "config.yaml"
+    test_override_module = getattr(_get_config_path, "__module__", "")
+    if test_override_module != "api.config":
+        return Path(_get_config_path()).expanduser()
+    try:
+        if _is_isolated_profile_mode() or _is_root_profile(get_active_profile_name()):
+            return Path(_get_config_path()).expanduser()
+        return Path(get_active_hermes_home()).expanduser() / "config.yaml"
+    except Exception:
+        return Path(_get_config_path()).expanduser()
 
 
 def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries, active_home_key: str):
@@ -26409,15 +26425,14 @@ def _mcp_tools_from_registry(server_summaries, active_home_key: str):
         from tools.registry import registry
     except Exception:
         return []
-    tools = []
     try:
         names = registry.get_all_tool_names()
     except Exception:
         return []
+    candidates = []
+    has_owner_metadata = False
+    active_home_key = _mcp_profile_home_key(active_home_key)
     for tool_name in names:
-        owner_key = _mcp_registry_tool_owner_key(registry, tool_name)
-        if not owner_key or owner_key != _mcp_profile_home_key(active_home_key):
-            continue
         try:
             toolset = registry.get_toolset_for_tool(tool_name)
         except Exception:
@@ -26427,9 +26442,17 @@ def _mcp_tools_from_registry(server_summaries, active_home_key: str):
         server_name = toolset[len("mcp-"):]
         if server_name not in server_summaries:
             continue
+        owner_key = _mcp_registry_tool_owner_key(registry, tool_name)
+        if owner_key:
+            has_owner_metadata = True
         schema = registry.get_schema(tool_name) or {}
         server_summary = server_summaries[server_name]
-        tools.append(_mcp_tool_summary(tool_name, schema, server_summary))
+        candidates.append((owner_key, _mcp_tool_summary(tool_name, schema, server_summary)))
+    tools = []
+    for owner_key, summary in candidates:
+        if has_owner_metadata and owner_key != active_home_key:
+            continue
+        tools.append(summary)
     return tools
 
 

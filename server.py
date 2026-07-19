@@ -101,7 +101,15 @@ logger = logging.getLogger(__name__)
 
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j, get_profile_cookie, InvalidProfileCookie, _build_csp_report_only_policy, _CLIENT_DISCONNECT_ERRORS
+from api.helpers import (
+    j,
+    t,
+    get_profile_cookie,
+    InvalidProfileCookie,
+    build_clear_profile_cookie,
+    _build_csp_report_only_policy,
+    _CLIENT_DISCONNECT_ERRORS,
+)
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -368,17 +376,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
+        parsed = urlparse(self.path)
         try:
             cookie_profile = get_profile_cookie(self, reject_invalid=True)
             if cookie_profile:
                 set_request_profile(cookie_profile)
-            parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
         except InvalidProfileCookie as exc:
-            return j(self, {'error': str(exc)}, status=400)
+            return self._handle_invalid_profile_cookie(parsed, exc)
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
@@ -392,6 +400,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
+
+    def _handle_invalid_profile_cookie(self, parsed, exc: InvalidProfileCookie):
+        clear_header = build_clear_profile_cookie()
+        path = getattr(parsed, "path", "") or "/"
+        if getattr(self, "command", "") == "GET" and path in {"/", "/login"}:
+            location = path
+            query = getattr(parsed, "query", "")
+            if query:
+                location = f"{location}?{query}"
+            return t(self, "", status=303, extra_headers={
+                "Location": location,
+                "Set-Cookie": clear_header,
+            })
+        return j(
+            self,
+            {"error": str(exc), "profile_cookie_reset": True},
+            status=400,
+            extra_headers={"Set-Cookie": clear_header},
+        )
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
@@ -409,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
         except InvalidProfileCookie as exc:
-            return j(self, {'error': str(exc)}, status=400)
+            return self._handle_invalid_profile_cookie(parsed, exc)
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
