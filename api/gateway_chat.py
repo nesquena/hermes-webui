@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.request
 from typing import Any
@@ -336,6 +337,8 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    if not approval_id:
+        approval_id = uuid.uuid4().hex
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
