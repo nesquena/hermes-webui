@@ -1276,10 +1276,14 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     helper_body = src.split("function _applyToAnchor", 1)[1].split(
         "function _mergeSettledToolCallsWithLiveMetadata", 1
     )[0]
+    registry_helper_body = src.split("function _liveAnchorRegistryForActivityScene", 1)[
+        1
+    ].split("function attachLiveStream", 1)[0]
 
     assert "window._liveAnchorRegistries=window._liveAnchorRegistries||new Map()" in src
     assert "_anchorRegistryMap.get(streamId)" in src
-    assert "_anchorRegistryMap.set(streamId,_anchorRegistry)" in src
+    assert "let _anchorRegistry=_liveAnchorRegistryForActivityScene(" in src
+    assert "registryMap.set(streamId,registry)" in registry_helper_body
     assert "createAssistantTurnAnchorRegistry" in src
     assert "applyAssistantTurnAnchorSourceEvent" in src
     assert "const eventId=(sseEvent&&sseEvent.lastEventId)||raw.event_id||raw.lastEventId||raw.last_event_id||'';" in helper_body
