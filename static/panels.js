@@ -10719,6 +10719,7 @@ const _SELF_HOSTED_DEFAULT_BASE_URLS = Object.freeze({
   ollama: 'http://localhost:11434/v1',
   lmstudio: 'http://localhost:1234/v1',
 });
+let _providersPanelLoadGeneration = 0;
 
 async function _fetchProviderQuotaStatus(force=false){
   const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
@@ -10731,20 +10732,19 @@ async function loadProvidersPanel(){
   const list=$('providersList');
   const empty=$('providersEmpty');
   if(!list) return;
+  const generation=++_providersPanelLoadGeneration;
+  const providersPromise = api('/api/providers');
+  const quotaPromise = _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
   try{
-    const data=await api('/api/providers');
-    const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
+    const data=await providersPromise;
+    if(generation!==_providersPanelLoadGeneration) return;
     const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
     list.innerHTML='';
     _providerCardEls.clear();
-    const quotaCard=_buildProviderQuotaCard(quota);
-    if(quotaCard){
-      list.appendChild(quotaCard);
-      renderProviderCostChart(quotaCard); // async, fire-and-forget
-    }
     if(providers.length===0){
       list.style.display='none';
       if(empty) empty.style.display='';
+      await quotaPromise;
       return;
     }
     if(empty) empty.style.display='none';
@@ -10752,7 +10752,20 @@ async function loadProvidersPanel(){
     for(const p of providers){
       list.appendChild(_buildProviderCard(p));
     }
+    const quota = await quotaPromise;
+    if(generation!==_providersPanelLoadGeneration) return;
+    const quotaCard=_buildProviderQuotaCard(quota);
+    if(quotaCard){
+      const currentQuotaCard=list.querySelector('.provider-quota-card');
+      if(currentQuotaCard){
+        currentQuotaCard.replaceWith(quotaCard);
+      }else{
+        list.prepend(quotaCard);
+      }
+      renderProviderCostChart(quotaCard); // async, fire-and-forget
+    }
   }catch(e){
+    if(generation!==_providersPanelLoadGeneration) return;
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+esc(e.message||String(e))+'</div>';
   }
 }

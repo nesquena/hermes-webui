@@ -5,10 +5,14 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import threading
+import time
 import sys
 import types
 import urllib.error
 import urllib.request
+
+import pytest
 
 import api.config as config
 import api.profiles as profiles
@@ -99,6 +103,864 @@ class TestGetProviders:
             assert first == second
             assert calls == ["openai"]
         finally:
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+    def test_get_providers_cold_path_parallelizes_provider_probes(self, monkeypatch, tmp_path):
+        """Cold providers path should complete in roughly max-provider latency, not sum."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        delays = {
+            "openai-codex": 0.25,
+            "xai-oauth": 0.25,
+            "nous": 0.25,
+        }
+        started = {}
+        started_lock = threading.Lock()
+        request_thread_id = threading.get_ident()
+        credential_threads = []
+        barrier = threading.Barrier(len(delays))
+
+        def _fake_read_live_provider_model_ids(pid: str):
+            delay = delays.get(pid)
+            if delay is not None:
+                with started_lock:
+                    started[pid] = time.perf_counter()
+                try:
+                    barrier.wait(timeout=0.5)
+                except threading.BrokenBarrierError:
+                    pass
+                time.sleep(delay)
+                return [f"{pid}-live"]
+            return []
+
+        fake_models = sys.modules["hermes_cli.models"]
+        fake_models.provider_model_ids = lambda pid: (
+            _fake_read_live_provider_model_ids(pid) if pid in delays else []
+        )
+        fake_auth = sys.modules["hermes_cli.auth"]
+        fake_auth.get_auth_status = lambda _pid: {}
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {
+            "openai-codex": "OpenAI Codex",
+            "xai-oauth": "xAI",
+            "nous": "Nous",
+        })
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {
+            "openai-codex": [],
+            "xai-oauth": [],
+            "nous": [],
+        })
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset({"openai-codex", "xai-oauth", "nous"}))
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(
+            prov,
+            "_provider_has_key",
+            lambda _pid: credential_threads.append(threading.get_ident()) or False,
+        )
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_read_live_provider_model_ids", _fake_read_live_provider_model_ids)
+
+        try:
+            result = prov.get_providers()
+        finally:
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+        ids = {entry["id"] for entry in result["providers"]}
+        assert ids == {"openai-codex", "xai-oauth", "nous"}
+        assert barrier.broken is False
+        assert set(started.keys()) == set(delays)
+        assert set(credential_threads) == {request_thread_id}
+
+    def test_get_providers_bedrock_entry_uses_structural_credentials_without_live_probe(self, monkeypatch, tmp_path):
+        """Bedrock card construction should use structural env signals, not live auth probes."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        tmp_path.joinpath(".env").write_text(
+            "AWS_ACCESS_KEY_ID=provider-path-id\n"
+            "AWS_SECRET_ACCESS_KEY=provider-path-secret\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", raising=False)
+        monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", raising=False)
+        monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE", raising=False)
+
+        calls = []
+
+        fake_auth = sys.modules["hermes_cli.auth"]
+        fake_auth.get_auth_status = lambda pid: calls.append(pid) or {
+            "logged_in": True,
+            "key_source": "env",
+        }
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {
+            "bedrock": "AWS Bedrock",
+            "openai": "OpenAI",
+        })
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {
+            "bedrock": [{"id": "bedrock-model", "label": "Bedrock Model"}],
+            "openai": [],
+        })
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "process-id")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "process-secret")
+        result = None
+        try:
+            result = prov.get_providers()
+        finally:
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+        assert result is not None
+
+        ids = {entry["id"]: entry for entry in result["providers"]}
+        assert ids["bedrock"]["has_key"] is True
+        assert ids["bedrock"]["key_source"] == "env_var"
+        assert calls == []
+
+    def test_get_providers_workers_inherit_request_context(self, monkeypatch, tmp_path):
+        """Context-variable overrides propagate from request thread into worker providers."""
+        _install_fake_hermes_cli(monkeypatch)
+
+        hermes_constants = pytest.importorskip("hermes_constants")
+        secret_scope = pytest.importorskip("agent.secret_scope")
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"strange": "Strange"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"strange": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset({"strange"}))
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: False)
+
+        captured = []
+
+        def fake_auth_status(_pid):
+            captured.append((
+                hermes_constants.get_hermes_home(),
+                dict(secret_scope.current_secret_scope() or {}),
+            ))
+            return {"logged_in": True, "key_source": "env"}
+
+        fake_auth = sys.modules["hermes_cli.auth"]
+        fake_auth.get_auth_status = fake_auth_status
+
+        def _run_scenario(home_path, secret_map):
+            home_token = hermes_constants.set_hermes_home_override(home_path)
+            scope_token = secret_scope.set_secret_scope(dict(secret_map))
+            try:
+                return prov.get_providers()
+            finally:
+                secret_scope.reset_secret_scope(scope_token)
+                hermes_constants.reset_hermes_home_override(home_token)
+                prov.invalidate_providers_cache()
+
+        home_a = tmp_path / "home-a"
+        home_a.mkdir()
+        home_b = tmp_path / "home-b"
+        home_b.mkdir()
+        secrets_a = {"HOME_A_SENTINEL": "value-from-a"}
+        secrets_b = {"HOME_B_SENTINEL": "value-from-b"}
+
+        prov.invalidate_providers_cache()
+        try:
+            # Exercise two distinct homes/secret maps sequentially, invalidating
+            # the providers cache between runs so each actually rebuilds and
+            # calls the worker-thread auth probe again (#3957).
+            captured.clear()
+            result_a = _run_scenario(home_a, secrets_a)
+            ids_a = {entry["id"]: entry for entry in result_a["providers"]}
+            assert ids_a["strange"]["has_key"] is True
+            assert captured == [(home_a, secrets_a)]
+
+            captured.clear()
+            result_b = _run_scenario(home_b, secrets_b)
+            ids_b = {entry["id"]: entry for entry in result_b["providers"]}
+            assert ids_b["strange"]["has_key"] is True
+            assert captured == [(home_b, secrets_b)]
+
+            # No leakage: the second run's captured scope/home must not carry
+            # any trace of the first run's home or secrets.
+            assert captured[0][0] != home_a
+            assert "HOME_A_SENTINEL" not in captured[0][1]
+        finally:
+            prov.invalidate_providers_cache()
+
+    def test_get_providers_singleflight_reuses_inflight_build(self, monkeypatch, tmp_path):
+        """Concurrent callers for the same cache key share one provider build."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        provider_ids = [f"provider-{i:02d}" for i in range(24)]
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {pid: pid for pid in provider_ids})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {pid: [] for pid in provider_ids})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: False)
+
+        started = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+        seen = set()
+        active = {"value": 0}
+        max_active = {"value": 0}
+        call_count = {"value": 0}
+
+        def fake_build_entry(
+            pid,
+            initial_has_key,
+            providers_cfg,
+            active_profile_name,
+            request_thread_env,
+            request_block_process_env_fallback,
+        ):
+            with lock:
+                call_count["value"] += 1
+                active["value"] += 1
+                if active["value"] > max_active["value"]:
+                    max_active["value"] = active["value"]
+                seen.add(str(pid))
+                if active["value"] >= prov._PROVIDERS_MAX_WORKERS:
+                    started.set()
+            try:
+                release.wait()
+            finally:
+                with lock:
+                    active["value"] -= 1
+            return {
+                "id": str(pid),
+                "display_name": str(pid),
+                "has_key": bool(initial_has_key),
+                "configurable": True,
+                "is_self_hosted": False,
+                "base_url": None,
+                "is_plugin_provider": False,
+                "is_oauth": False,
+                "key_source": "none",
+                "auth_error": None,
+                "models": [],
+                "models_total": 0,
+            }
+
+        monkeypatch.setattr(prov, "_build_provider_entry", fake_build_entry)
+
+        waiter_entered = threading.Event()
+        real_wait_provider_build = prov._wait_provider_build
+
+        def spy_wait_provider_build(state, cache_key):
+            waiter_entered.set()
+            return real_wait_provider_build(state, cache_key)
+
+        monkeypatch.setattr(prov, "_wait_provider_build", spy_wait_provider_build)
+
+        outputs = {}
+        def first_call():
+            outputs["first"] = prov.get_providers()
+
+        def second_call():
+            outputs["second"] = prov.get_providers()
+
+        t1 = threading.Thread(target=first_call)
+        t2 = threading.Thread(target=second_call)
+        t1.start()
+        assert started.wait(2)
+        t2.start()
+        assert waiter_entered.wait(2)
+        release.set()
+        t1.join()
+        t2.join()
+
+        assert not t1.is_alive()
+        assert not t2.is_alive()
+        assert call_count["value"] == len(provider_ids)
+        assert max_active["value"] <= prov._PROVIDERS_MAX_WORKERS
+        assert outputs["first"]["providers"] != []
+        assert outputs["second"]["providers"] is not outputs["first"]["providers"]
+
+        third = prov.get_providers()
+        assert third["providers"] is not outputs["first"]["providers"]
+
+    def test_invalidate_during_blocked_build_starts_new_generation_and_ignores_stale_completion(
+        self, monkeypatch, tmp_path,
+    ):
+        """Invalidating mid-build bumps the generation so a late-completing stale build cannot clobber a newer cached result (#6010)."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+
+        lock = threading.Lock()
+        build_calls = []
+        old_entered = threading.Event()
+        release_old = threading.Event()
+        new_entered = threading.Event()
+        release_new = threading.Event()
+
+        def fake_build(
+            cfg,
+            sorted_known_ids,
+            active_profile_name,
+            request_thread_env,
+            request_block_process_env_fallback,
+            providers_cfg,
+        ):
+            with lock:
+                call_id = len(build_calls)
+                build_calls.append(call_id)
+            if call_id == 0:
+                old_entered.set()
+                release_old.wait(2)
+            else:
+                new_entered.set()
+                release_new.wait(2)
+            return {
+                "providers": [{
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "has_key": False,
+                    "configurable": True,
+                    "key_source": "none",
+                    "call_id": call_id,
+                }],
+                "active_provider": None,
+            }
+
+        monkeypatch.setattr(prov, "_build_providers_payload", fake_build)
+
+        outputs = {}
+
+        def _old_call():
+            outputs["old"] = prov.get_providers()
+
+        try:
+            t_old = threading.Thread(target=_old_call)
+            t_old.start()
+            assert old_entered.wait(2)
+
+            # Invalidate while the old build is still blocked — this must bump
+            # the generation and drop the old build's in-flight registration so
+            # a concurrent caller starts a brand-new build rather than waiting
+            # on the now-stale one.
+            prov.invalidate_providers_cache()
+
+            def _new_call():
+                outputs["new"] = prov.get_providers()
+
+            t_new = threading.Thread(target=_new_call)
+            t_new.start()
+            assert new_entered.wait(2)
+
+            # Complete the NEW build first, then let the stale OLD build finish.
+            release_new.set()
+            t_new.join(2)
+            release_old.set()
+            t_old.join(2)
+
+            assert outputs["new"]["providers"][0]["call_id"] == 1
+            assert outputs["old"]["providers"][0]["call_id"] == 0
+
+            # A subsequent cached read must reflect the new build, not the
+            # late-completing stale one.
+            cached = prov.get_providers()
+            assert cached["providers"][0]["call_id"] == 1
+        finally:
+            prov.invalidate_providers_cache()
+
+    def test_failed_aggregate_build_clears_inflight_state_and_retries_succeed(
+        self, monkeypatch, tmp_path,
+    ):
+        """A build that raises must not leave stale in-flight/cache state (#6010).
+
+        A subsequent request for the same cache key should retry the build
+        (not hang waiting on a dead in-flight entry) and succeed.
+        """
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+
+        attempt = {"value": 0}
+
+        def flaky_build(
+            cfg,
+            sorted_known_ids,
+            active_profile_name,
+            request_thread_env,
+            request_block_process_env_fallback,
+            providers_cfg,
+        ):
+            attempt["value"] += 1
+            if attempt["value"] == 1:
+                raise RuntimeError("simulated aggregate build failure")
+            return {
+                "providers": [{
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "has_key": False,
+                    "configurable": True,
+                    "key_source": "none",
+                }],
+                "active_provider": None,
+            }
+
+        monkeypatch.setattr(prov, "_build_providers_payload", flaky_build)
+
+        try:
+            with pytest.raises(RuntimeError, match="simulated aggregate build failure"):
+                prov.get_providers()
+
+            cache_key = prov._providers_cache_key(prov.get_config())
+            assert cache_key not in prov._providers_build_inflight
+            assert cache_key not in prov._providers_cache
+
+            result = prov.get_providers()
+            ids = {entry["id"] for entry in result["providers"]}
+            assert ids == {"openai"}
+            assert attempt["value"] == 2
+        finally:
+            prov.invalidate_providers_cache()
+
+    def test_complete_provider_build_cache_publication_lock_error_wakes_waiter_and_clears_inflight(self, monkeypatch, tmp_path):
+        """Cache publication lock failure must wake waiters and be recoverable."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: False)
+
+        payload_begun = threading.Event()
+        release = threading.Event()
+        build_calls = {"value": 0}
+
+        def flaky_build_payload(
+            cfg,
+            sorted_known_ids,
+            active_profile_name,
+            request_thread_env,
+            request_block_process_env_fallback,
+            providers_cfg,
+        ):
+            build_calls["value"] += 1
+            payload_begun.set()
+            release.wait(2)
+            return {
+                "providers": [{
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "has_key": False,
+                    "configurable": True,
+                    "is_self_hosted": False,
+                    "base_url": None,
+                    "is_plugin_provider": False,
+                    "is_oauth": False,
+                    "key_source": "none",
+                    "auth_error": None,
+                    "models": [],
+                    "models_total": 0,
+                }],
+                "active_provider": "openai",
+            }
+
+        monkeypatch.setattr(prov, "_build_providers_payload", flaky_build_payload)
+
+        original_cache_lock = prov._providers_cache_lock
+        exit_counter = {"count": 0}
+        injected_failures = {"count": 0}
+        armed = threading.Event()
+        completion_error = RuntimeError("cache publication failed")
+
+        class _OneShotFailingCacheLock:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                return self._inner.__enter__()
+
+            def __exit__(self, exc_type, exc, tb):
+                exit_counter["count"] += 1
+                self._inner.__exit__(exc_type, exc, tb)
+                if armed.is_set() and injected_failures["count"] == 0:
+                    injected_failures["count"] += 1
+                    raise completion_error
+
+        failing_cache_lock = _OneShotFailingCacheLock(original_cache_lock)
+        monkeypatch.setattr(prov, "_providers_cache_lock", failing_cache_lock)
+
+        waiter = threading.Event()
+        real_wait_provider_build = prov._wait_provider_build
+
+        def spy_wait_provider_build(state, cache_key):
+            waiter.set()
+            return real_wait_provider_build(state, cache_key)
+
+        monkeypatch.setattr(prov, "_wait_provider_build", spy_wait_provider_build)
+        errors = {}
+
+        def call_get_providers(label):
+            try:
+                prov.get_providers()
+            except BaseException as exc:
+                errors[label] = exc
+
+        lead = threading.Thread(target=call_get_providers, args=("lead",))
+        follower = threading.Thread(target=call_get_providers, args=("waiter",))
+        lead_started = False
+        follower_started = False
+
+        try:
+            lead.start()
+            lead_started = True
+            assert payload_begun.wait(2)
+            follower.start()
+            follower_started = True
+            assert waiter.wait(2)
+            armed.set()
+
+            release.set()
+            lead.join(2)
+            follower.join(2)
+
+            assert not lead.is_alive()
+            assert not follower.is_alive()
+            assert isinstance(errors.get("lead"), RuntimeError)
+            assert isinstance(errors.get("waiter"), RuntimeError)
+            assert errors["lead"].args == errors["waiter"].args == completion_error.args
+            assert injected_failures["count"] == 1
+            assert exit_counter["count"] >= 1
+
+            assert "cache publication failed" in str(errors["lead"])
+            monkeypatch.setattr(prov, "_providers_cache_lock", original_cache_lock)
+
+            cache_key = prov._providers_cache_key(prov.get_config())
+            assert cache_key not in prov._providers_build_inflight
+
+            result = prov.get_providers()
+            ids = {entry["id"] for entry in result["providers"]}
+            assert ids == {"openai"}
+            assert build_calls["value"] == 2
+        finally:
+            release.set()
+            if lead_started:
+                lead.join(2)
+            if follower_started:
+                follower.join(2)
+            monkeypatch.setattr(prov, "_providers_cache_lock", original_cache_lock)
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+    def test_complete_provider_build_skips_stale_publication_after_generation_bump(self, monkeypatch, tmp_path):
+        """TOCTOU generation bump between pre-check and lock must not cache stale completion."""
+        _install_fake_hermes_cli(monkeypatch)
+        from api import providers as prov
+
+        cache_key = ("toctou-generation", "providers")
+        stale_payload = {
+            "providers": [{"id": "stale", "display_name": "Stale", "has_key": False}],
+            "active_provider": None,
+        }
+        fresh_cache_value = (999.0, {"providers": [{"id": "fresh"}], "active_provider": "fresh"})
+        original_cache_lock = prov._providers_cache_lock
+        original_generation = prov._providers_cache_generation
+
+        prov._providers_cache.clear()
+        prov._providers_cache[cache_key] = fresh_cache_value
+        prov._providers_cache_generation = 0
+        bump_state = {"count": 0}
+
+        class _GenerationBumpCacheLock:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                if bump_state["count"] == 0:
+                    prov._providers_cache_generation += 1
+                    bump_state["count"] += 1
+                return self._inner.__enter__()
+
+            def __exit__(self, exc_type, exc, tb):
+                return self._inner.__exit__(exc_type, exc, tb)
+
+        bumping_lock = _GenerationBumpCacheLock(original_cache_lock)
+        monkeypatch.setattr(prov, "_providers_cache_lock", bumping_lock)
+
+        stale_state = prov._ProvidersBuildInFlight(0)
+
+        try:
+            cached_before = prov._providers_cache[cache_key]
+            result = prov._complete_provider_build(cache_key, stale_state, payload=stale_payload)
+
+            assert result == stale_payload
+            assert prov._providers_cache.get(cache_key) is cached_before
+            assert prov._providers_cache[cache_key] == fresh_cache_value
+            assert bump_state["count"] == 1
+            assert prov._providers_cache_generation == 1
+        finally:
+            monkeypatch.setattr(prov, "_providers_cache_lock", original_cache_lock)
+            prov._providers_cache_generation = original_generation
+            if hasattr(prov, "invalidate_providers_cache"):
+                prov.invalidate_providers_cache()
+
+    def test_build_provider_entry_outer_fallback_preserves_env_key_source(self, monkeypatch, tmp_path):
+        """Outer catch should retain env key source for configured API-key providers."""
+        _install_fake_hermes_cli(monkeypatch)
+        (tmp_path / ".env").write_text("LM_API_KEY=lmstudio-fallback-key\n", encoding="utf-8")
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"lmstudio": "LM Studio"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"lmstudio": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+
+        plugin_probe_calls = {"value": 0}
+
+        def _raise_plugin_probe(_provider_id):
+            plugin_probe_calls["value"] += 1
+            if plugin_probe_calls["value"] == 1:
+                raise RuntimeError("forcing fallback")
+            return False
+
+        monkeypatch.setattr(prov, "is_plugin_model_provider", _raise_plugin_probe)
+
+        entry = prov._build_provider_entry(
+            provider_id="lmstudio",
+            initial_has_key=True,
+            providers_cfg={},
+            active_profile_name="",
+            request_thread_env={},
+            block_process_env_fallback=False,
+        )
+
+        assert entry is not None
+        assert entry["has_key"] is True
+        assert entry["key_source"] == "env_file"
+        assert plugin_probe_calls["value"] >= 2
+
+    def test_build_provider_entry_initial_bedrock_key_source_prefers_env_var_for_structural_credentials(self, monkeypatch, tmp_path):
+        """Initial bedrock credentials from structural signals should report env_var."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"bedrock": "AWS Bedrock"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"bedrock": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+
+        entry = prov._build_provider_entry(
+            provider_id="bedrock",
+            initial_has_key=True,
+            providers_cfg={},
+            active_profile_name="",
+            request_thread_env={
+                "AWS_ACCESS_KEY_ID": "thread-access-key",
+                "AWS_SECRET_ACCESS_KEY": "thread-secret-key",
+            },
+            block_process_env_fallback=False,
+        )
+
+        assert entry is not None
+        assert entry["has_key"] is True
+        assert entry["key_source"] == "env_var"
+        assert "thread-access-key" not in str(entry)
+        assert "thread-secret-key" not in str(entry)
+
+    def test_build_provider_entry_initial_bedrock_key_source_falls_back_config_yaml(self, monkeypatch, tmp_path):
+        """Initial bedrock credentials without structural signals should report config_yaml."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        for env_name in (
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_PROFILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+        ):
+            monkeypatch.delenv(env_name, raising=False)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"bedrock": "AWS Bedrock"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"bedrock": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+
+        entry = prov._build_provider_entry(
+            provider_id="bedrock",
+            initial_has_key=True,
+            providers_cfg={},
+            active_profile_name="",
+            request_thread_env={},
+            block_process_env_fallback=False,
+        )
+
+        assert entry is not None
+        assert entry["has_key"] is True
+        assert entry["key_source"] == "config_yaml"
+
+    def test_build_provider_entry_cleans_up_request_context_after_setup_error(self, monkeypatch, tmp_path):
+        """Partial request-context setup failure must not leave thread-local/profile residue."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+        from api import config as provider_cfg
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+
+        original_clear_thread_env = provider_cfg._clear_thread_env
+        clear_thread_env_calls = {"value": 0}
+        set_thread_env_calls = {"value": 0}
+
+        original_set_thread_env = provider_cfg._set_thread_env
+
+        def flaky_set_thread_env(**kwargs):
+            set_thread_env_calls["value"] += 1
+            if set_thread_env_calls["value"] == 1:
+                # Partially apply caller state, then fail to prove the finally
+                # cleanup still runs and restores worker-local context.
+                provider_cfg._thread_ctx.env = dict(kwargs)
+                raise RuntimeError("simulated context setup failure")
+            return original_set_thread_env(**kwargs)
+
+        def tracked_clear_thread_env():
+            clear_thread_env_calls["value"] += 1
+            return original_clear_thread_env()
+
+        try:
+            profiles.clear_request_profile()
+            provider_cfg._clear_thread_env()
+            provider_cfg._thread_ctx.block_process_env_fallback = False
+            assert getattr(profiles._tls, "profile", None) is None
+            assert provider_cfg._thread_ctx.env == {}
+            assert provider_cfg._thread_ctx.block_process_env_fallback is False
+
+            monkeypatch.setattr(provider_cfg, "_set_thread_env", flaky_set_thread_env)
+            monkeypatch.setattr(provider_cfg, "_clear_thread_env", tracked_clear_thread_env)
+
+            entry = prov._build_provider_entry(
+                provider_id="openai",
+                initial_has_key=True,
+                providers_cfg={},
+                active_profile_name="quarantine-profile",
+                request_thread_env={"THREAD_ENV_KEY": "thread-env-value"},
+                block_process_env_fallback=False,
+            )
+
+            assert entry is not None
+            assert set_thread_env_calls["value"] == 1
+            assert clear_thread_env_calls["value"] == 1
+            assert getattr(profiles._tls, "profile", None) is None
+            assert provider_cfg._thread_ctx.env == {}
+            assert provider_cfg._thread_ctx.block_process_env_fallback is False
+        finally:
+            # Ensure this test never leaves request/thread state on the shared
+            # pytest worker thread, even on assertion failure.
+            monkeypatch.setattr(provider_cfg, "_set_thread_env", original_set_thread_env)
+            monkeypatch.setattr(provider_cfg, "_clear_thread_env", original_clear_thread_env)
+            profiles.clear_request_profile()
+            provider_cfg._clear_thread_env()
+            provider_cfg._thread_ctx.block_process_env_fallback = False
+
+    def test_bedrock_structural_credentials_require_complete_access_key_pair(self, monkeypatch):
+        """A lone AWS access-key field is not a usable Bedrock credential signal."""
+        from api import providers as prov
+
+        for env_name in (
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            *prov._BEDROCK_SINGLE_CREDENTIAL_ENV_SIGNALS,
+        ):
+            monkeypatch.delenv(env_name, raising=False)
+
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "access-key-without-secret")
+        assert prov._provider_has_structural_bedrock_credentials() is False
+
+    def test_get_providers_bedrock_structural_credentials_respect_profile_thread_local(self, monkeypatch, tmp_path):
+        """Bedrock should read process-thread credentials, not raw process env, in named profiles."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "process-id")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "process-secret")
+        profile_home = tmp_path / "profiles" / "work"
+        profile_home.mkdir(parents=True)
+        (tmp_path / ".env").write_text(
+            "OTHER_SHARED_KEY=from-process-file\n",
+            encoding="utf-8",
+        )
+        (profile_home / ".env").write_text(
+            "OTHER_PROFILE_KEY=from-profile\n",
+            encoding="utf-8",
+        )
+
+        from api import providers as prov
+
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"bedrock": "AWS Bedrock"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"bedrock": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+
+        profiles.set_request_profile("work")
+        try:
+            with profiles.profile_env_for_active_request_readonly("test"):
+                no_profile_keys = prov.get_providers()
+            bedrock = next((p for p in no_profile_keys["providers"] if p["id"] == "bedrock"), None)
+            assert bedrock is not None
+            assert bedrock["has_key"] is False
+
+            (profile_home / ".env").write_text(
+                "AWS_ACCESS_KEY_ID=profile-id\nAWS_SECRET_ACCESS_KEY=profile-secret\n",
+                encoding="utf-8",
+            )
+            with profiles.profile_env_for_active_request_readonly("test"):
+                result = prov.get_providers()
+            bedrock = next((p for p in result["providers"] if p["id"] == "bedrock"), None)
+            assert bedrock is not None
+            assert bedrock["has_key"] is True
+
+        finally:
+            profiles.clear_request_profile()
             if hasattr(prov, "invalidate_providers_cache"):
                 prov.invalidate_providers_cache()
 
