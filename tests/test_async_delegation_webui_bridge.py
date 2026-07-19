@@ -1077,3 +1077,35 @@ def test_async_completion_with_unresolvable_target_retries_not_silent_drop(monke
     assert delivery["claim"] == []
     assert delivery["complete"] == []
 
+
+def test_next_turn_drain_respects_origin_over_session_key_index(monkeypatch):
+    """Codex-caught combine gap: the next-turn drain must NOT deliver/claim/ACK a
+    completion to the session-key-index session when the event carries an exact
+    origin_ui_session_id for a DIFFERENT session. Otherwise the drain wins the
+    shared-queue race and ACKs the completion to the wrong session, leaving the
+    true origin empty. Origin is authoritative in the drain, mirroring
+    _resolve_completion_target in the background path."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    # The session-key index would route this event to session "B" ...
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "session-B"
+    evt = _async_delegation_event(origin_ui_session_id="session-A")
+    registry.completion_queue.put(evt)
+
+    # ... but a drain for session B must SKIP it (origin says A), taking no
+    # claim and no ack, and leaving the event on the queue for A.
+    notifications_b = streaming._drain_webui_process_notifications("session-B")
+    assert notifications_b == []
+    assert delivery["claim"] == []
+    assert delivery["complete"] == []
+
+    # A drain for the origin session A delivers + acks exactly once.
+    notifications_a = streaming._drain_webui_process_notifications("session-A")
+    assert len(notifications_a) == 1
+    assert "ASYNC DELEGATION BATCH COMPLETE" in notifications_a[0]
+    assert [consumer for _evt, consumer in delivery["claim"]] == ["webui-next-turn"]
+    assert len(delivery["complete"]) == 1
+    assert delivery["release"] == []
+
+
