@@ -947,3 +947,77 @@ def test_delete_profile_rejects_request_active_profile(monkeypatch):
             profiles.delete_profile_api("work")
     finally:
         profiles.clear_request_profile()
+
+
+def _install_delete_profile_stub(monkeypatch, delete_calls):
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    profiles_module = types.ModuleType("hermes_cli.profiles")
+
+    def fake_delete_profile(name, *, yes=False):
+        delete_calls.append((name, yes))
+
+    profiles_module.delete_profile = fake_delete_profile
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_module)
+
+
+def test_delete_profile_fails_closed_when_process_active_switch_is_busy(monkeypatch):
+    from api import profiles
+
+    delete_calls = []
+    switch_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+
+    def busy_switch(name, *, process_wide=True):
+        switch_calls.append((name, process_wide))
+        raise RuntimeError("Cannot switch profiles while an agent is running.")
+
+    monkeypatch.setattr(profiles, "switch_profile", busy_switch)
+    profiles.set_request_profile("default")
+    try:
+        with pytest.raises(RuntimeError, match="Cannot switch profiles"):
+            profiles.delete_profile_api("work")
+    finally:
+        profiles.clear_request_profile()
+
+    assert switch_calls == [("default", True)]
+    assert delete_calls == []
+    assert profiles._active_profile == "work"
+
+
+def test_delete_profile_switches_process_active_default_before_deleting(monkeypatch):
+    from api import profiles
+
+    delete_calls = []
+    switch_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+
+    def switch_to_default(name, *, process_wide=True):
+        switch_calls.append((name, process_wide))
+        profiles._active_profile = name
+        return {"active": name}
+
+    def record_delete_profile(name, *, yes=False):
+        delete_calls.append((name, yes, profiles._active_profile))
+
+    sys.modules["hermes_cli.profiles"].delete_profile = record_delete_profile
+    monkeypatch.setattr(profiles, "switch_profile", switch_to_default)
+    profiles.set_request_profile("default")
+    try:
+        result = profiles.delete_profile_api("work")
+    finally:
+        profiles.clear_request_profile()
+
+    assert result == {"ok": True, "name": "work"}
+    assert switch_calls == [("default", True)]
+    assert delete_calls == [("work", True, "default")]
+    assert profiles._active_profile == "default"

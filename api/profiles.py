@@ -2645,6 +2645,13 @@ def delete_profile_api(name: str) -> dict:
             f"Cannot delete active profile '{name}'. Switch to another profile first."
         )
 
+    # The request-active check above protects the browser's cookie/TLS scope.
+    # Process-wide authority is separate: if it still points at the target,
+    # switch it to root/default first and let switch_profile fail closed while
+    # streams are active, before any persisted profile state is removed.
+    if _profiles_match(_active_profile, name):
+        switch_profile("default", process_wide=True)
+
     try:
         from hermes_cli.profiles import delete_profile
         delete_profile(name, yes=True)
