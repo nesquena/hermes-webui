@@ -7323,8 +7323,15 @@ function getModelLabel(modelId){
   //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
   //   @custom:qwen397b-64k               -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
+    // Prefer the operator-supplied label from the API catalog (populated into
+    // _dynamicModelLabels from /api/models). Deriving from the id breaks for
+    // namespaced ids like @custom:claude-code:us.anthropic.claude-opus-4-5-...-v1:0
+    // where lastIndexOf(':') lands on the ":0" tail and yields "0".
+    if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
     const rest=rawId.slice('@custom:'.length);
-    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
+    // Strip the "<provider-slug>:" prefix (first segment only), keep the full
+    // model id — including any ":" inside it (e.g. version "...-v1:0").
+    if(rest.includes(':')) return rest.slice(rest.indexOf(':')+1)||rawId;
     if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
     return rest||rawId;
   }
