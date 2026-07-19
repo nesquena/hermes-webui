@@ -1474,8 +1474,9 @@ async function send(){
           else if(typeof expandSidebar==='function') expandSidebar();
           if(typeof renderSessionList==='function') await renderSessionList();
         } finally {
-          $('msg').value='';autoResize();hideCmdDropdown();return;
+          $('msg').value='';autoResize();hideCmdDropdown();
         }
+        return;
       }
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
