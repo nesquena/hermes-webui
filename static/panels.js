@@ -8794,11 +8794,11 @@ async function _autosavePreferencesSettings(payload){
     }
     if(payload&&payload.hide_empty_state_suggestions!==undefined){
       window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+      if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();
     }
     if(payload&&payload.hide_empty_state_welcome!==undefined){
       window._hideEmptyStateWelcome=!!(saved&&saved.hide_empty_state_welcome);
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+      if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();
     }
     if(payload&&payload.show_conversation_outline!==undefined){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
@@ -9198,10 +9198,10 @@ async function loadSettingsPanel(){
     if(hideSuggestionsCb){
       hideSuggestionsCb.checked=settings.hide_empty_state_suggestions===true;
       window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+      if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();
       hideSuggestionsCb.addEventListener('change',()=>{
         window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-        if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -9209,10 +9209,10 @@ async function loadSettingsPanel(){
     if(hideEmptyWelcomeCb){
       hideEmptyWelcomeCb.checked=settings.hide_empty_state_welcome===true;
       window._hideEmptyStateWelcome=hideEmptyWelcomeCb.checked;
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+      if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();
       hideEmptyWelcomeCb.addEventListener('change',()=>{
         window._hideEmptyStateWelcome=hideEmptyWelcomeCb.checked;
-        if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();
         _schedulePreferencesAutosave();
       },{once:false});
     }

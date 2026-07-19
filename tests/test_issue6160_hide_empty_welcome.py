@@ -30,7 +30,7 @@ def test_empty_state_has_hideable_welcome_css():
 
 def test_boot_applies_saved_hide_welcome_preference():
     js = BOOT.read_text(encoding="utf-8")
-    assert "function applyEmptyStateSuggestionPref()" in js
+    assert "function applyEmptyStatePref()" in js
     assert "window._hideEmptyStateWelcome=s.hide_empty_state_welcome===true" in js
     assert "window._hideEmptyStateWelcome=false" in js
     assert "$('emptyState').classList.toggle('no-welcome',window._hideEmptyStateWelcome===true)" in js
@@ -42,7 +42,7 @@ def test_panels_round_trip_and_hot_apply_hide_welcome():
     assert "payload.hide_empty_state_welcome=hideEmptyWelcomeCb.checked;" in js
     assert "hideEmptyWelcomeCb.checked=settings.hide_empty_state_welcome===true;" in js
     assert "window._hideEmptyStateWelcome=hideEmptyWelcomeCb.checked;" in js
-    assert "if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();" in js
+    assert "if(typeof applyEmptyStatePref==='function') applyEmptyStatePref();" in js
 
 
 def test_hide_welcome_i18n_all_locales():
