@@ -22282,6 +22282,7 @@ def _handle_chat_sync(handler, body):
                 conversation_history=_sanitize_messages_for_api(
                     _previous_context_messages,
                     cfg=get_config(),
+                    session_id=s.session_id,
                     effective_model=_model,
                     effective_provider=_provider,
                     effective_base_url=_base_url,
@@ -24221,7 +24222,7 @@ def _handle_session_compress(handler, body):
     try:
         from api.streaming import _sanitize_messages_for_api
 
-        messages = _sanitize_messages_for_api(s.messages)
+        messages = _sanitize_messages_for_api(s.messages, session_id=s.session_id)
         if len(messages) < 4:
             return bad(handler, "Not enough conversation to compress (need at least 4 messages).")
 
@@ -24382,7 +24383,7 @@ def _handle_session_compress(handler, body):
             )
             if current_stream_state != original_stream_state:
                 return bad(handler, "Session stream state changed during compression; please retry.", 409)
-            if _sanitize_messages_for_api(s.messages) != original_messages:
+            if _sanitize_messages_for_api(s.messages, session_id=s.session_id) != original_messages:
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
             from api.session_ops import _truncation_watermark_for
