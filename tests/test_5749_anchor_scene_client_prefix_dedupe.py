@@ -8,7 +8,19 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 def _function_body(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.index(marker)
-    brace = src.index("{", start)
+    params = src.index("(", start)
+    depth = 0
+    close = -1
+    for idx in range(params, len(src)):
+        if src[idx] == "(":
+            depth += 1
+        elif src[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    assert close != -1, f"{name} params did not close"
+    brace = src.index("{", close)
     depth = 0
     for idx in range(brace, len(src)):
         if src[idx] == "{":
@@ -32,6 +44,7 @@ def test_settled_scene_keys_live_token_prefix_dedupe_to_final_answer_identity():
     assert "lastProjectedToolIndex=projectedRows.reduce" in settle_body
     assert "finalSegmentLiveProseRows" in settle_body
     assert "rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)" in settle_body
+    assert "finalKey.startsWith(textKey)||finalKey.endsWith(textKey)" in settle_body
     assert "rowHasNonLiveDuplicate" not in settle_body
     assert "_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)" in settle_body
     assert "(shorter/longer)>=0.9" in final_overlap_body

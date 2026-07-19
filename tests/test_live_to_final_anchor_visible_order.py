@@ -1002,6 +1002,63 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     assert "rowTextKey.includes(existing)||existing.includes(rowTextKey)" in overlap
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settled_anchor_scene_suppresses_final_suffix_live_accumulator():
+    final_answer = "Inspecting the fixture before the tool call. Lifecycle gate final answer."
+    suffix_text = "Lifecycle gate final answer."
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))},'utf8');
+{_EXTRACT_FUNC_JS}
+global.window = {{ chatActivityMode(){{ return 'compact_worklog'; }} }};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+function _anchorSceneActiveMode(){{ return 'compact_worklog'; }}
+function _anchorSceneFinalAnswerText(message){{ return message && (message.content || ''); }}
+function _anchorSceneRowsByMessageIndex(){{ return new Map(); }}
+function _anchorSceneMessageRef(message){{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement(){{ return 0; }}
+function _anchorSceneRowDisplayHintForMode(row){{ return row && row.display_hint || 'activity_row'; }}
+const scene = _completeSettledAnchorSceneForTurn([
+  {{role:'user', content:'Prompt', id:'user-1'}},
+  {{role:'assistant', content:{json.dumps(final_answer)}, id:'assistant-1'}},
+], 1, {{
+  mode:'compact_worklog',
+  final_answer:{json.dumps(final_answer)},
+  activity_rows:[
+    {{role:'thinking', text:'Checking the fixture', status:'running', local_id:'live-thinking:stream:1'}},
+    {{role:'tool', text:'tool output', status:'running', local_id:'live-tool:stream:1', tool_call_id:'call-1'}},
+    {{
+      role:'prose',
+      kind:'process_prose',
+      source_event_type:'token',
+      local_id:'live-prose:stream:2',
+      text:{json.dumps(suffix_text)},
+      status:'running',
+    }},
+  ],
+}});
+process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
+  role: row.role,
+  local_id: row.local_id || '',
+  text: row.text || '',
+  status: row.status || '',
+}}))));
+"""
+    rows = _run_node_script(script)
+
+    assert all(row["text"] != suffix_text for row in rows)
+    assert [row["role"] for row in rows] == ["thinking", "tool"]
+
+
 def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     live_identity = _function_body(MESSAGES_JS, "_anchorSceneRowHasLiveIdentity")

@@ -3607,13 +3607,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // prefix snapshot then survives into the persisted scene and renders as a
     // duplicate of the answer's beginning. A live-prose row belongs to the
     // final segment iff no PROJECTED tool row follows it; pre-tool narration
-    // that happens to prefix the final answer stays protected.
+    // that happens to overlap the final answer stays protected.
     const lastProjectedToolIndex=projectedRows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
     const finalSegmentLiveProseRows=new WeakSet();
     projectedRows.forEach((row,idx)=>{
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
-    const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
+    const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&(finalKey.startsWith(textKey)||finalKey.endsWith(textKey));
     const pushRow=(row)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
