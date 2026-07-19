@@ -105,8 +105,11 @@ Anchor rows reattach without duplication or loss. It waits for the durable serve
 snapshot, then clears browser recovery caches before returning so the assertion
 cannot pass from local `INFLIGHT` state alone. The fixture includes a tool boundary
 without preceding process prose and, after reattachment, emits another reasoning
-event that must append with a new Anchor identity before settlement. Both scenarios
-use isolated temporary state and no provider credentials.
+event that must append with a new Anchor identity before settlement. At terminal,
+the scenario starts another real sidebar navigation and holds the draft-save await
+open so `done` lands in the session-switch ownership window; returning must still
+show the same settled Worklog after settlement and hard reload. Both scenarios use
+isolated temporary state and no provider credentials.
 
 ```bash
 pip install -r requirements.txt playwright

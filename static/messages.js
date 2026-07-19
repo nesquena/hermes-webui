@@ -3540,7 +3540,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return undefined;
   }
-  function _completeSettledAnchorSceneForTurn(messages, lastAsstIndex, projectedScene){
+  function _completeSettledAnchorSceneForTurn(messages, lastAsstIndex, projectedScene, options={}){
     if(!Array.isArray(messages)||lastAsstIndex<0) return projectedScene;
     const lastAsst=messages[lastAsstIndex];
     if(!lastAsst||lastAsst.role!=='assistant') return projectedScene;
@@ -3553,10 +3553,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
     const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
+    const finalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
-    const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
-      ? messageFinalAnswer
-      : (typeof base.final_answer==='string'?base.final_answer:'');
+    const finalAnswer=_anchorSceneCleanText(finalAnswerHint)
+      ? finalAnswerHint
+      : (_anchorSceneCleanText(messageFinalAnswer)
+        ? messageFinalAnswer
+        : (typeof base.final_answer==='string'?base.final_answer:''));
     const finalKey=_anchorSceneTextKey(finalAnswer);
     const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true});
     const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);
@@ -3653,8 +3656,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return scene;
   }
   let _persistAnchorSceneWarned=false;
-  function _anchorSceneMessageOffsetForPersist(){
-    const raw=(typeof _oldestIdx!=='undefined')?_oldestIdx:0;
+  function _anchorSceneMessageOffsetForPersist(messageOffsetOverride){
+    const raw=(messageOffsetOverride!==undefined&&messageOffsetOverride!==null)
+      ? messageOffsetOverride
+      : ((typeof _oldestIdx!=='undefined')?_oldestIdx:0);
     const offset=Number(raw);
     return Number.isFinite(offset)&&offset>0?Math.floor(offset):0;
   }
@@ -3664,10 +3669,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Number.isFinite(idx)||idx<0) return messageIndex;
     return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
   }
-  function _persistSettledAnchorScene(message, scene, messageIndex){
+  function _persistSettledAnchorScene(message, scene, messageIndex, options={}){
     if(!activeSid||!message||!scene||typeof api!=='function') return;
     try{
-      const messageOffset=_anchorSceneMessageOffsetForPersist();
+      const messageOffset=_anchorSceneMessageOffsetForPersist(options.messageOffset);
       api('/api/session/anchor-scene',{
         method:'POST',
         timeoutMs:8000,
@@ -3719,7 +3724,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
-  function _attachProjectedAnchorSceneToLastAssistant(messages){
+  function _attachProjectedAnchorSceneToLastAssistant(messages, options={}){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
     let lastAsstIndex=-1;
@@ -3733,14 +3738,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene,options);
     if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
       const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';
       if(!shouldPersistScene) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
-      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
+      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, options);
       return hasWorklogRows;
     }
     return false;
@@ -5823,6 +5828,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.activeStreamId=null;
         }
         let lastAsst=null;
+        // A session switch starts by changing _loadingSessionId while the old
+        // pane and its chat EventSource can still own the finishing stream. Do
+        // not mutate that transitioning pane, but do settle and persist THIS
+        // closure's Anchor scene against the completed payload. Otherwise the
+        // final transcript survives the switch while its Worklog disappears.
+        if(!isActiveSession&&Array.isArray(completedSession.messages)){
+          const completedMessages=completedSession.messages;
+          const completedLastAsst=[...completedMessages].reverse().find(m=>m&&m.role==='assistant')||null;
+          if(reasoningText&&completedLastAsst&&!completedLastAsst.reasoning) completedLastAsst.reasoning=reasoningText;
+          if(completedLastAsst&&typeof completedLastAsst.content==='string'&&completedLastAsst.content){
+            const split=_splitThinkFromContent(completedLastAsst.content,completedLastAsst.reasoning);
+            if(split.content!==completedLastAsst.content){
+              completedLastAsst.content=split.content;
+              if(split.reasoning) completedLastAsst.reasoning=split.reasoning;
+            }
+          }
+          if(completedLastAsst&&d.usage&&typeof d.usage.duration_seconds==='number'){
+            completedLastAsst._turnDuration=d.usage.duration_seconds;
+          }
+          _attachProjectedAnchorSceneToLastAssistant(completedMessages,{
+            messageOffset:completedSession._messages_offset||0,
+            finalAnswer:_stripXmlToolCalls(assistantText.slice(segmentStart)),
+          });
+        }
         if(isActiveSession){
           // Capture previous session totals BEFORE overwriting S.session with the new
           // cumulative values from the done event. prevIn/prevOut are the totals as of

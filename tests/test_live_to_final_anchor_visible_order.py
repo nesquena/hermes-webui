@@ -891,11 +891,11 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")
     msg_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
 
-    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);" in attach
+    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, options);" in attach
     assert "api('/api/session/anchor-scene'" in persist
     assert "session_id:activeSid" in persist
     assert "stream_id:streamId" in persist
-    assert "const messageOffset=_anchorSceneMessageOffsetForPersist();" in persist
+    assert "const messageOffset=_anchorSceneMessageOffsetForPersist(options.messageOffset);" in persist
     assert "message_index:_anchorSceneAbsoluteMessageIndexForPersist(messageIndex,messageOffset)" in persist
     assert "message_window_index:messageIndex" in persist
     assert "message_offset:messageOffset" in persist
@@ -905,13 +905,29 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     assert "content:String(content||'').replace(/\\s+/g,' ').trim()" in msg_ref
 
 
+def test_done_persists_owned_anchor_scene_during_session_switch_window():
+    done = _event_listener_body(MESSAGES_JS, "done")
+
+    background_idx = done.index("if(!isActiveSession&&Array.isArray(completedSession.messages)){")
+    attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(completedMessages,{", background_idx)
+    active_idx = done.index("if(isActiveSession){", background_idx)
+    assert background_idx < attach_idx < active_idx
+    assert "messageOffset:completedSession._messages_offset||0" in done[background_idx:active_idx]
+    assert "finalAnswer:_stripXmlToolCalls(assistantText.slice(segmentStart))" in done[background_idx:active_idx]
+    assert "S.session=completedSession" not in done[background_idx:active_idx]
+
+    complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
+    assert "const finalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';" in complete
+    assert "const finalAnswer=_anchorSceneCleanText(finalAnswerHint)" in complete
+
+
 def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
     complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     reasoning_text = _function_body(MESSAGES_JS, "_anchorSceneMessageReasoningText")
 
-    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);" in attach
+    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene,options);" in attach
     assert "for(let idx=lastAsstIndex-1;idx>=0;idx-=1)" in complete
     assert "messages.slice(turnStart+1,lastAsstIndex+1)" in complete
     assert "message.reasoning||message._reasoning||message.reasoning_content||message.thinking" in reasoning_text
@@ -1443,7 +1459,8 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
     visible_text = _function_body(MESSAGES_JS, "_anchorSceneContentVisibleText")
 
     assert "const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);" in complete
-    assert "const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)" in complete
+    assert "const finalAnswer=_anchorSceneCleanText(finalAnswerHint)" in complete
+    assert "_anchorSceneCleanText(messageFinalAnswer)" in complete
     assert "_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true})" in complete
     assert "for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)" in complete
     assert "options=(options&&typeof options==='object')?options:{};" in rows_by_message

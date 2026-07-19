@@ -166,6 +166,67 @@ def _anchor_projection_snapshot(page) -> dict:
     )
 
 
+def _lifecycle_client_snapshot(page) -> dict:
+    return page.evaluate(
+        """() => {
+          const registries = window._liveAnchorRegistries;
+          const anchorApi = window.HermesAssistantTurnAnchors;
+          const registryScenes = [];
+          if (registries && typeof registries.entries === 'function') {
+            for (const [streamId, registry] of registries.entries()) {
+              let scene = null;
+              try {
+                scene = anchorApi && typeof anchorApi.projectAssistantTurnAnchorActivityScene === 'function'
+                  ? anchorApi.projectAssistantTurnAnchorActivityScene(registry, {mode: 'compact_worklog'})
+                  : null;
+              } catch (error) {
+                scene = {error: String(error)};
+              }
+              const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
+              registryScenes.push({
+                streamId,
+                rowCount: rows.length,
+                rows: rows.map(row => ({
+                  role: row && row.role || null,
+                  source: row && row.source_event_type || null,
+                  localId: row && row.local_id || null,
+                  status: row && row.status || null,
+                })),
+              });
+            }
+          }
+          const sessionId = typeof S !== 'undefined' && S.session && S.session.session_id || null;
+          const loadingSessionId = typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null;
+          const inflight = typeof INFLIGHT === 'object' && INFLIGHT ? INFLIGHT : {};
+          const messages = typeof S !== 'undefined' && Array.isArray(S.messages) ? S.messages : [];
+          return {
+            sessionId,
+            loadingSessionId,
+            currentPane: typeof _isSessionCurrentPane === 'function' && sessionId
+              ? _isSessionCurrentPane(sessionId)
+              : null,
+            busy: Boolean(typeof S !== 'undefined' && S.busy),
+            activeStreamId: typeof S !== 'undefined' && S.activeStreamId || null,
+            registryScenes,
+            inflight: Object.entries(inflight).map(([sid, value]) => ({
+              sessionId: sid,
+              streamId: value && value.streamId || null,
+              reattach: Boolean(value && value.reattach),
+              anchorRowCount: Array.isArray(
+                value && value.anchorActivityScene && value.anchorActivityScene.activity_rows
+              ) ? value.anchorActivityScene.activity_rows.length : 0,
+            })),
+            messages: messages.map(message => ({
+              role: message && message.role || null,
+              live: Boolean(message && message._live),
+              anchorStreamId: message && message._anchor_stream_id || null,
+              hasAnchorScene: Boolean(message && message._anchor_activity_scene),
+            })),
+          };
+        }"""
+    )
+
+
 def _wait_for_live_anchor_projection(page) -> dict:
     try:
         page.wait_for_function(
@@ -486,10 +547,15 @@ def _capture_anchor_scene_requests(page):
     def on_request(request):
         if "/api/session/anchor-scene" not in request.url:
             return
+        try:
+            payload = request.post_data_json
+        except Exception:
+            payload = request.post_data
         events.append({
             "type": "request",
             "method": request.method,
             "url": request.url,
+            "payload": payload,
         })
 
     def on_response(response):
@@ -795,6 +861,7 @@ def main() -> int:
     page = None
     errors = []
     anchor_scene_requests = []
+    pre_terminal_client_snapshot = None
     try:
         proc, log, log_path, base_url = _start_webui_server(repo_root, env, artifact_dir)
         playwright = sync_playwright().start()
@@ -972,7 +1039,43 @@ def main() -> int:
             arg=FINAL_ACK_TEXT,
             timeout=10000,
         )
-        gateway.release_terminal.set()
+        if SCENARIO == "session-reattach":
+            page.evaluate(
+                """() => {
+                  const originalSave = _saveComposerDraftNow;
+                  let releaseSave;
+                  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+                  window.__releaseLifecycleDraftSave = releaseSave;
+                  _saveComposerDraftNow = async (...args) => {
+                    await saveGate;
+                    return originalSave(...args);
+                  };
+                }"""
+            )
+            page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
+            page.wait_for_function(
+                "({loadingSid, activeSid}) => _loadingSessionId === loadingSid && "
+                "S.session && S.session.session_id === activeSid && S.activeStreamId",
+                arg={"loadingSid": seed_session_id, "activeSid": active_session_id},
+                timeout=10000,
+            )
+            pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
+            gateway.release_terminal.set()
+            page.wait_for_function(
+                "sid => S.session && S.session.session_id === sid && S.busy === false",
+                arg=active_session_id,
+                timeout=10000,
+            )
+            page.evaluate("window.__releaseLifecycleDraftSave()")
+            page.wait_for_function(
+                "sid => S.session && S.session.session_id === sid && !S.busy && !S.activeStreamId",
+                arg=seed_session_id,
+                timeout=15000,
+            )
+            page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
+        else:
+            pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
+            gateway.release_terminal.set()
         page.wait_for_function(
             """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
               !document.querySelector('#liveAssistantTurn') &&
@@ -1044,6 +1147,8 @@ def main() -> int:
                         "test_bite": TEST_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
+                        "pre_terminal_client": pre_terminal_client_snapshot,
+                        "post_failure_client": _lifecycle_client_snapshot(page),
                         "anchor_projection": _anchor_projection_snapshot(page),
                         "gateway_events": gateway.emitted_events,
                         "dom": _activity_snapshot(page),
