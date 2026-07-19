@@ -12816,32 +12816,42 @@ def handle_get(handler, parsed) -> bool:
                         limited_sidecar_messages,
                         state_db_messages,
                     )
-                    if (
-                        limited_display_base_offset
-                        and limited_sidecar_messages is not None
-                        and (
-                            len(_all_msgs) != len(limited_sidecar_messages)
+                    if limited_display_base_offset and limited_sidecar_messages is not None:
+                        state_snapshot_still_safe = (
+                            _state_db_has_no_timestamped_rows_before_sidecar(
+                                s,
+                                limited_sidecar_messages,
+                            )
+                        )
+                        if (
+                            not state_snapshot_still_safe
+                            or len(_all_msgs) != len(limited_sidecar_messages)
                             or not _session_messages_have_prefix(
                                 _all_msgs,
                                 limited_sidecar_messages,
                             )
-                        )
-                    ):
-                        # The parent offset is safe only when the exact state.db
-                        # snapshot used for this response adds no identity beyond
-                        # the direct child. Revalidate after the read to close the
-                        # guard/read TOCTOU window; otherwise a late parent replay
-                        # would be counted once in the merged child and again in
-                        # the metadata-derived parent offset.
-                        limited_sidecar_messages = (
-                            _webui_sidecar_lineage_messages_for_display(s)
-                        )
-                        limited_display_base_offset = 0
-                        _all_msgs = _limited_webui_messages_for_display_with_sidecar(
-                            s,
-                            limited_sidecar_messages,
-                            state_db_messages,
-                        )
+                        ):
+                            # The parent offset is safe only when the exact
+                            # post-read state.db snapshot still proves that no
+                            # rows can be sorted before the direct child. Recheck
+                            # the strict-before/NULL/equal-boundary proof after
+                            # the main read to close the guard/read TOCTOU window;
+                            # otherwise a late bridge row can be absent from the
+                            # child-only append merge while the response still
+                            # publishes a metadata-derived parent offset.
+                            limited_sidecar_messages = (
+                                _webui_sidecar_lineage_messages_for_display(s)
+                            )
+                            limited_display_base_offset = 0
+                            state_db_messages = get_state_db_session_messages(
+                                sid,
+                                profile=_session_profile,
+                            )
+                            _all_msgs = _limited_webui_messages_for_display_with_sidecar(
+                                s,
+                                limited_sidecar_messages,
+                                state_db_messages,
+                            )
                 else:
                     _all_msgs = merge_session_messages_append_only(
                         _webui_sidecar_lineage_messages_for_display(s),

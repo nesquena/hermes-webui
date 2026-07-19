@@ -1201,6 +1201,107 @@ def test_msg_limit_single_hop_fast_path_falls_back_for_state_db_only_prefix_row(
     ]
 
 
+def test_msg_limit_single_hop_fast_path_revalidates_late_state_db_prefix_row(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_late_state_prefix"
+    child_sid = "continuation_child_late_state_prefix"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "user", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    state_only_prefix = {"role": "user", "content": "late state.db bridge", "timestamp": 250.0}
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    since_timestamp, selected_sidecar, base_offset = (
+        routes._state_db_since_timestamp_for_limited_display(
+            child,
+            msg_limit=30,
+        )
+    )
+    assert since_timestamp is None
+    assert selected_sidecar == child_messages
+    assert base_offset == len(parent_messages)
+    assert captured["lineage_loads"] == 0
+
+    real_reader = routes.get_state_db_session_messages
+    injected = {"done": False}
+
+    def wrapped_reader(sid, *args, **kwargs):
+        if sid == child_sid and not injected["done"]:
+            _append_state_db_rows(tmp_path / "state.db", child_sid, [state_only_prefix])
+            injected["done"] = True
+        return real_reader(sid, *args, **kwargs)
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", wrapped_reader)
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+
+    expected_count = len(parent_messages) + 1 + len(child_messages)
+    assert first.status == 200
+    assert injected["done"] is True
+    assert captured["lineage_loads"] >= 1
+    first_payload = first.response_json["session"]
+    assert first_payload["message_count"] == expected_count
+    assert first_payload["_messages_offset"] == len(parent_messages) + 1 + 470
+    assert [msg["content"] for msg in first_payload["messages"]] == [
+        f"child {idx}" for idx in range(470, 500)
+    ]
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        f"&msg_limit=30&msg_before={first_payload['_messages_offset']}"
+    )
+    routes.handle_get(second, urlparse(second.path))
+
+    assert second.status == 200
+    second_payload = second.response_json["session"]
+    assert second_payload["message_count"] == expected_count
+    assert second_payload["_messages_offset"] == len(parent_messages) + 1 + 440
+    first_contents = {msg["content"] for msg in first_payload["messages"]}
+    second_contents = {msg["content"] for msg in second_payload["messages"]}
+    assert not first_contents.intersection(second_contents)
+    assert [msg["content"] for msg in second_payload["messages"]] == [
+        f"child {idx}" for idx in range(440, 470)
+    ]
+
+
 
 def test_msg_limit_single_hop_fast_path_falls_back_for_equal_timestamp_state_db_prefix(
     monkeypatch,
