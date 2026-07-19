@@ -85,15 +85,33 @@ def _fingerprint(path: Path) -> Optional[Tuple]:
 def _read_token_file(path: Path) -> Optional[str]:
     """Return the token text iff it is present and well-formed, else None
     (fail closed). Only a valid token-v1 shape is ever returned, so malformed
-    file contents can never reach a header."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    tok = raw.strip()
-    if not tok or not _TOKEN_RE.match(tok):
-        return None
+    file contents can never reach a header. Thin wrapper over the stable reader."""
+    tok, _fp = _stable_read(path)
     return tok
+
+
+def _stable_read(path: Path) -> Tuple[Optional[str], Optional[Tuple]]:
+    """Read the token together with a fingerprint that is verified to bracket the
+    read (fingerprint before AND after; retry on any mid-read change). Guarantees
+    the returned (token, fingerprint) pair reflects a single consistent on-disk
+    state — never new content under an old stat key, and never a value that
+    changed underneath us. Returns (None, None) when absent/malformed/racing."""
+    for _ in range(4):  # bounded retry; a file being rotated settles fast
+        fp_before = _fingerprint(path)
+        if fp_before is None:
+            return (None, None)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return (None, None)
+        fp_after = _fingerprint(path)
+        if fp_after != fp_before:
+            continue  # changed mid-read — retry for a consistent snapshot
+        tok = raw.strip()
+        if not tok or not _TOKEN_RE.match(tok):
+            return (None, None)
+        return (tok, fp_before)
+    return (None, None)  # never settled — fail closed
 
 
 def ensure_token(ext_id: str) -> Optional[str]:
@@ -102,9 +120,10 @@ def ensure_token(ext_id: str) -> Optional[str]:
     (caller must then treat the sidecar proxy as unavailable / 503) — we never
     hand back an ephemeral token a sidecar could never read.
 
-    Idempotent + atomic across processes: an O_CREAT|O_EXCL claim means the
-    first writer wins and concurrent losers re-read the winning file rather than
-    overwriting it.
+    Idempotent + atomic across processes: the token is written to a unique temp
+    file then atomically renamed into place, so the final path is only ever
+    visible fully-written. Concurrent writers each rename their own temp; the
+    last rename wins and all callers then read the same complete file.
     """
     if not _valid_ext_id(ext_id):
         return None
@@ -119,6 +138,7 @@ def ensure_token(ext_id: str) -> Optional[str]:
         if existing is not None:
             return existing
         token = secrets.token_urlsafe(_TOKEN_BYTES)
+        tmp: Optional[Path] = None
         try:
             d = _token_dir()
             d.mkdir(parents=True, exist_ok=True)
@@ -126,17 +146,18 @@ def ensure_token(ext_id: str) -> Optional[str]:
                 os.chmod(d, 0o700)
             except OSError:
                 pass  # best-effort dir hardening; file perms are the real guard
-            # No-clobber create: O_EXCL fails if another process won the race.
-            try:
-                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                # A concurrent writer won — read theirs, don't overwrite.
-                return _read_token_file(path)
+            # Write to a unique temp, fsync, then atomically rename into place so
+            # the final path is never observed empty/half-written (the O_EXCL
+            # expose-before-write race).
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
                 os.write(fd, token.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
+            os.replace(tmp, path)
+            tmp = None
             try:
                 os.chmod(path, 0o600)
             except OSError:
@@ -145,22 +166,26 @@ def ensure_token(ext_id: str) -> Optional[str]:
             # Persistence failed → report unavailable. Do NOT return the
             # in-memory token (the _load_key trap: core would inject a secret the
             # sidecar can never read → permanent 401 that looks like a mismatch).
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
             return None
-        # Confirm by RE-READING from disk — only a persisted, readable, valid
-        # token is ever returned/injected.
-        persisted = _read_token_file(path)
-        if persisted is not None:
-            fp = _fingerprint(path)
-            if fp is not None:
-                _CACHE[ext_id] = (persisted, fp)
+        # Return whatever is durably on disk now — under a concurrent mint this
+        # may be another writer's token, which is correct (all readers converge
+        # on the winning file). Only a persisted, well-formed token is returned.
+        persisted, fp = _stable_read(path)
+        if persisted is not None and fp is not None:
+            _CACHE[ext_id] = (persisted, fp)
         return persisted
 
 
 def current_token(ext_id: str) -> Optional[str]:
     """Return the current on-disk token for validation/injection, re-reading the
-    file when its fingerprint (inode/mtime/ctime/size) changed since last read —
-    so rotation + deletion take effect immediately and a stale cached token stops
-    validating. Does NOT mint. Returns None when no token exists (fail closed)."""
+    file when its fingerprint changed since last read — so rotation + deletion
+    take effect immediately and a stale cached token stops validating. Does NOT
+    mint. Returns None when no token exists (fail closed)."""
     if not _valid_ext_id(ext_id):
         return None
     path = _token_path(ext_id)
@@ -173,17 +198,12 @@ def current_token(ext_id: str) -> Optional[str]:
         cached = _CACHE.get(ext_id)
         if cached is not None and cached[1] == fp:
             return cached[0]
-    tok = _read_token_file(path)
-    # Re-fingerprint after the read to avoid caching new content under an old
-    # stat key (the stat/read race); cache only when both agree.
-    fp2 = _fingerprint(path)
+    tok, tok_fp = _stable_read(path)  # bracketed read: content matches tok_fp
     with _LOCK:
-        if tok is None or fp2 is None:
+        if tok is None or tok_fp is None:
             _CACHE.pop(ext_id, None)
-        elif fp2 == fp:
-            _CACHE[ext_id] = (tok, fp)
         else:
-            _CACHE.pop(ext_id, None)  # changed mid-read; don't cache, retry next call
+            _CACHE[ext_id] = (tok, tok_fp)
     return tok
 
 
