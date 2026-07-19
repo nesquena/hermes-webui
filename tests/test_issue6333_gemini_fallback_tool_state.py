@@ -2,6 +2,7 @@
 import copy
 import pathlib
 import sys
+import types
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -167,3 +168,55 @@ def test_non_google_route_does_not_prune_gemini_named_model_history():
     )
 
     assert result == messages, "only Google Gemini requests should receive the request-boundary repair"
+
+
+def test_transport_wrapper_repairs_google_request_copy_without_mutating_input(monkeypatch):
+    from api.streaming import _install_gemini_request_boundary_wrapper
+    import api.streaming as streaming
+
+    agent_pkg = types.ModuleType("agent")
+    agent_pkg.__path__ = []
+    transports_pkg = types.ModuleType("agent.transports")
+    transports_pkg.__path__ = []
+    chat_module = types.ModuleType("agent.transports.chat_completions")
+
+    class ChatCompletionsTransport:
+        def build_kwargs(self, model, messages, tools=None, **params):
+            return {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                **params,
+            }
+
+    chat_module.ChatCompletionsTransport = ChatCompletionsTransport
+    transports_pkg.chat_completions = chat_module
+    agent_pkg.transports = transports_pkg
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.transports", transports_pkg)
+    monkeypatch.setitem(sys.modules, "agent.transports.chat_completions", chat_module)
+
+    streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
+
+    messages = _prior_and_current_turn_history()
+    original = copy.deepcopy(messages)
+
+    _install_gemini_request_boundary_wrapper()
+    transport = ChatCompletionsTransport()
+    kwargs = transport.build_kwargs(
+        model="gemini-3-flash",
+        messages=messages,
+        tools=None,
+        base_url=GOOGLE_OPENAI_BASE,
+    )
+
+    result = kwargs["messages"]
+    assert messages == original, "the transport wrapper must repair only the outbound request copy"
+    assert any(
+        m.get("role") == "tool" and m.get("tool_call_id") == "call_prior"
+        for m in result
+    ), "prior completed turns must stay intact through the wrapped build path"
+    assert not any(
+        m.get("role") == "tool" and m.get("tool_call_id") == "call_current"
+        for m in result
+    ), "the wrapped build path must strip the current-turn unsigned group before Gemini sees it"
