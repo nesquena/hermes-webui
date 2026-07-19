@@ -336,6 +336,19 @@ def test_legacy_approval_records_run_id_for_response_relay():
         # (connection still open, run parked) — this test's stream already ran to
         # completion, which cleared active_stream_id and popped the mapping.
         _STREAM_RUN_IDS[stream_id] = "run-legacy-1"
+        from types import SimpleNamespace
+        from api import route_approvals as ra
+        with ra._lock:
+            ra._gateway_queues["sess-legacy-runid"] = [SimpleNamespace(data={
+                "command": "rm -rf /tmp/test",
+                "description": "Delete temporary files",
+                "pattern_key": "dangerous_command",
+                "pattern_keys": ["dangerous_command"],
+                "approval_id": "appr-legacy-runid",
+                "run_id": "run-legacy-1",
+            })]
+            live_entry = ra._gateway_queues["sess-legacy-runid"][0]
+        ra.submit_gateway_pending_mirror("sess-legacy-runid", live_entry.data)
         relay_session = MagicMock()
         relay_session.active_stream_id = stream_id
         captured = {}
@@ -447,8 +460,8 @@ def test_legacy_teardown_clears_stale_gateway_mirror_and_notifies_empty_state():
             ra._gateway_queues.pop(session_id, None)
 
 
-def test_legacy_teardown_preserves_live_gateway_head_mirror():
-    """A live gateway head must still be mirrored after legacy teardown runs."""
+def test_legacy_teardown_retires_live_gateway_head_mirror():
+    """A mapped legacy run retires its live gateway mirror during outer teardown."""
     from types import SimpleNamespace
     from api import route_approvals as ra
     from api.config import STREAMS, STREAMS_LOCK
@@ -507,14 +520,11 @@ def test_legacy_teardown_preserves_live_gateway_head_mirror():
 
         payloads = _drain_queue(subscriber)
         assert payloads, "Expected mirrored approval notifications"
-        assert payloads[-1]["pending"]["_gateway_mirror"] is True
-        assert payloads[-1]["pending_count"] == 1
+        assert payloads[-1]["pending"] is None
+        assert payloads[-1]["pending_count"] == 0
         with ra._lock:
             pending = ra._pending.get(session_id)
-            assert isinstance(pending, list)
-            assert len(pending) == 1
-            assert pending[0]["approval_id"] == approval_data["approval_id"]
-            assert pending[0]["_gateway_mirror"] is True
+            assert pending is None
     finally:
         ra._approval_sse_unsubscribe(session_id, subscriber)
         with STREAMS_LOCK:

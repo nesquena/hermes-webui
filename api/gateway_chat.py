@@ -7,7 +7,9 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from typing import Any
 
 from api.config import (
@@ -37,6 +39,13 @@ logger = logging.getLogger(__name__)
 
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}
+_STREAM_RUN_STARTING: set[str] = set()
+_STREAM_RUN_STARTING_LOCK = threading.Lock()
+
+
+def gateway_run_id_pending(stream_id: str) -> bool:
+    with _STREAM_RUN_STARTING_LOCK:
+        return stream_id in _STREAM_RUN_STARTING
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
@@ -365,88 +374,107 @@ def _run_gateway_runs_api_streaming(
     attachments=None, cfg=None, session=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
-    url_runs = f"{base_url.rstrip('/')}/v1/runs"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-Hermes-Session-Id": session_id,
-    }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-    message_content: Any = str(msg_text or "")
-    if attachments:
-        try:
-            from api.streaming import _build_native_multimodal_message
+    with _STREAM_RUN_STARTING_LOCK:
+        _STREAM_RUN_STARTING.add(stream_id)
+    try:
+        url_runs = f"{base_url.rstrip('/')}/v1/runs"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Hermes-Session-Id": session_id,
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        message_content: Any = str(msg_text or "")
+        if attachments:
+            try:
+                from api.streaming import _build_native_multimodal_message
 
-            message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
-        except Exception:
-            logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
-            message_content = str(msg_text or "")
-    from api.streaming import _strip_oob_blocks
+                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+            except Exception:
+                logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
+                message_content = str(msg_text or "")
+        from api.streaming import _strip_oob_blocks
 
-    instructions_parts = []
-    conversation_history = []
-    for entry in getattr(session, "context_messages", None) or []:
-        if not isinstance(entry, dict):
-            continue
-        role = str(entry.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = entry.get("content")
-        if content is not None:
-            content = _strip_oob_blocks(content)
+        instructions_parts = []
+        conversation_history = []
+        for entry in getattr(session, "context_messages", None) or []:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = entry.get("content")
+            if content is not None:
+                content = _strip_oob_blocks(content)
+                conversation_history.append({"role": role, "content": content})
+        for entry in prefill_messages or []:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role") or "").strip().lower()
+            content = entry.get("content")
+            if role == "system":
+                if isinstance(content, str) and content.strip():
+                    instructions_parts.append(content)
+                elif content is not None:
+                    instructions_parts.append(str(content))
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+            if content is not None:
+                content = _strip_oob_blocks(content)
             conversation_history.append({"role": role, "content": content})
-    for entry in prefill_messages or []:
-        if not isinstance(entry, dict):
-            continue
-        role = str(entry.get("role") or "").strip().lower()
-        content = entry.get("content")
-        if role == "system":
-            if isinstance(content, str) and content.strip():
-                instructions_parts.append(content)
-            elif content is not None:
-                instructions_parts.append(str(content))
-            continue
-        if role not in {"user", "assistant"}:
-            continue
-        if content is not None:
-            content = _strip_oob_blocks(content)
-        conversation_history.append({"role": role, "content": content})
-    run_input = message_content
-    if isinstance(run_input, list):
-        run_input = [{"role": "user", "content": run_input}]
-    run_body = {
-        "model": model or "default",
-        "input": run_input,
-        **body_extras,
-        "session_id": session_id,
-    }
-    if instructions_parts:
-        run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
-    if conversation_history:
-        run_body["conversation_history"] = conversation_history
-    req = urllib.request.Request(
-        url_runs,
-        data=json.dumps(run_body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    update_active_run(stream_id, phase="gateway-request")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        run_data = json.loads(resp.read(65536))
-    run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
-    if not run_id:
-        raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+        run_input = message_content
+        if isinstance(run_input, list):
+            run_input = [{"role": "user", "content": run_input}]
+        run_body = {
+            "model": model or "default",
+            "input": run_input,
+            **body_extras,
+            "session_id": session_id,
+        }
+        if instructions_parts:
+            run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
+        if conversation_history:
+            run_body["conversation_history"] = conversation_history
+        req = urllib.request.Request(
+            url_runs,
+            data=json.dumps(run_body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        update_active_run(stream_id, phase="gateway-request")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            run_data = json.loads(resp.read(65536))
+        run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
+        if not run_id:
+            raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+    except Exception:
+        with _STREAM_RUN_STARTING_LOCK:
+            _STREAM_RUN_STARTING.discard(stream_id)
+        raise
 
+    usage: dict = {}
     _STREAM_RUN_IDS[stream_id] = run_id
+    with _STREAM_RUN_STARTING_LOCK:
+        _STREAM_RUN_STARTING.discard(stream_id)
+    if cancel_event.is_set():
+        stop_confirmed = False
+        try:
+            stop_confirmed = stop_gateway_run(stream_id)
+        except Exception:
+            logger.debug("Failed to stop gateway run after pre-stream cancellation", exc_info=True)
+        if stop_confirmed:
+            put_gateway_event("cancel", {"message": "Cancelled by user"})
+            return None, usage
+        cancel_event.clear()
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
     headers_sse = dict(headers)
     headers_sse["Accept"] = "text/event-stream"
     req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
     final_text = ""
-    usage: dict = {}
     sse_event = "message"
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
@@ -474,7 +502,11 @@ def _run_gateway_runs_api_streaming(
                 approval_data = _gateway_runs_approval_event(payload)
                 if approval_data:
                     approval_data["run_id"] = run_id
-                    put_gateway_event("approval", approval_data)
+                    if not approval_data.get("approval_id"):
+                        approval_data["approval_id"] = f"gwrun:{run_id}:{uuid.uuid4().hex}"
+                    from api.route_approvals import submit_gateway_pending_mirror
+                    head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                    put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
                 sse_event = "message"
                 continue
             if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
@@ -518,6 +550,8 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.completed":
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=run_id)
                 if payload.get("error"):
                     raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
@@ -529,8 +563,12 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=run_id)
                 raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
             if payload_event == "run.cancelled":
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=run_id)
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
@@ -546,6 +584,40 @@ def _run_gateway_runs_api_streaming(
                 put_gateway_event("token", {"text": delta})
             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
     return final_text, usage
+
+
+def stop_gateway_run(stream_id: str) -> bool:
+    """Request gateway interruption and report whether it was acknowledged."""
+    run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+    if not run_id:
+        return False
+    from api.config import get_config
+
+    cfg = get_config()
+    base_url = _gateway_base_url(cfg)
+    api_key = _gateway_api_key()
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/v1/runs/{urllib.parse.quote(run_id, safe='')}/stop",
+        data=b"{}",
+        headers=headers,
+        method="POST",
+    )
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=10) as response:
+            final_url = str(getattr(response, "geturl", lambda: req.full_url)() or "")
+            status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+            return 200 <= status < 300 and final_url == req.full_url
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        logger.debug("Gateway stop failed for run %s", run_id, exc_info=True)
+        return False
 
 
 def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
@@ -683,6 +755,7 @@ def _run_gateway_chat_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
+    runs_api_pending_marked = False
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
@@ -724,6 +797,27 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
+        base_url = _gateway_base_url(cfg)
+        api_key = _gateway_api_key()
+        try:
+            from api.config import _main_model_request_overrides
+            _gw_overrides = _main_model_request_overrides(
+                cfg,
+                effective_model=model,
+                effective_provider=model_provider,
+            )
+        except Exception:
+            _gw_overrides = {}
+        _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
+        if _runs_api_enabled:
+            with _STREAM_RUN_STARTING_LOCK:
+                _STREAM_RUN_STARTING.add(stream_id)
+            runs_api_pending_marked = True
+        _use_runs_api = _runs_api_enabled and gateway_supports_approval(base_url, api_key)
+        if not _use_runs_api and runs_api_pending_marked:
+            with _STREAM_RUN_STARTING_LOCK:
+                _STREAM_RUN_STARTING.discard(stream_id)
+            runs_api_pending_marked = False
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
@@ -762,19 +856,6 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
             prefill_messages = []
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
-        try:
-            from api.config import _main_model_request_overrides
-            _gw_overrides = _main_model_request_overrides(
-                cfg,
-                effective_model=model,
-                effective_provider=model_provider,
-            )
-        except Exception:
-            _gw_overrides = {}
-        # Capability gate: use runs API when gateway advertises approval support.
-        _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
             if model_provider:
@@ -900,12 +981,13 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
-                            put_gateway_event("approval", approval_data)
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror
-                                submit_gateway_pending_mirror(session_id, approval_data)
+                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                                approval_data = {**(head or approval_data), "pending_count": total}
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
+                            put_gateway_event("approval", approval_data)
                         else:
                             logger.debug("Ignoring malformed gateway approval payload")
                         sse_event = "message"
@@ -1172,6 +1254,13 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
+        mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+        if mapped_run_id:
+            try:
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=mapped_run_id)
+            except Exception:
+                logger.debug("Failed to retire gateway pending mirrors during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
@@ -1188,4 +1277,7 @@ def _run_gateway_chat_streaming(
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
         _STREAM_RUN_IDS.pop(stream_id, None)
+        if runs_api_pending_marked:
+            with _STREAM_RUN_STARTING_LOCK:
+                _STREAM_RUN_STARTING.discard(stream_id)
         unregister_active_run(stream_id)

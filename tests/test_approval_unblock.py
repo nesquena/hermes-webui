@@ -232,10 +232,56 @@ class TestApprovalModuleExports:
         assert cb_start != -1, "_approval_notify_cb must exist"
         cb_end = STREAMING_SRC.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
         cb_body = STREAMING_SRC[cb_start:cb_end]
-        assert "_submit_pending_for_polling(session_id, approval_data)" in cb_body, \
+        assert "head, total = _submit_pending_for_polling(session_id, approval_data)" in cb_body, \
             "approval notify callback must mirror approval data into polling state"
+        assert '"pending_count": total' in cb_body, \
+            "approval notify callback must publish the reconciled pending count"
         assert "put('approval', approval_data)" in cb_body, \
             "approval notify callback must still push the SSE event"
+
+    def test_reversed_local_callbacks_publish_all_parked_entries(self):
+        """The local producer must count every exact parked entry, not only its head."""
+        import api.route_approvals as ra
+        from api import routes
+
+        sid = f"unit-reversed-local-{uuid.uuid4().hex[:8]}"
+        entry_a = _ApprovalEntry({
+            "command": "same-command",
+            "description": "same-description",
+            "pattern_key": "same-pattern",
+            "pattern_keys": ["same-pattern"],
+        })
+        entry_b = _ApprovalEntry(dict(entry_a.data))
+        events = []
+        with _lock:
+            _gateway_queues[sid] = [entry_a, entry_b]
+            ra._pending.pop(sid, None)
+
+        def local_producer(approval_data):
+            head, total = ra.submit_gateway_pending_mirror(sid, approval_data)
+            events.append((head, total))
+
+        try:
+            local_producer(entry_b.data)
+            local_producer(entry_a.data)
+
+            assert [total for _head, total in events] == [2, 2]
+            assert all(head["command"] == "same-command" for head, _total in events)
+            head_id = events[0][0]["approval_id"]
+            assert head_id == events[1][0]["approval_id"]
+            assert routes._resolve_approval_legacy(sid, head_id, "once") is True
+            assert entry_a.event.is_set()
+            assert not entry_b.event.is_set()
+            with _lock:
+                successor = ra._pending[sid][0]
+            assert successor["approval_id"] != head_id
+            with _lock:
+                assert ra.reconcile_gateway_pending_mirror_locked(sid)[1] == 1
+        finally:
+            with _lock:
+                ra._pending.pop(sid, None)
+                _gateway_queues.pop(sid, None)
+                ra._pending.pop(sid, None)
 
 
 # ── HTTP regression tests (test server, port 8788) ───────────────────────────
