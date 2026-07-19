@@ -1592,7 +1592,7 @@ async function send(){
       S.pendingFiles=[];
       if(typeof autoResize==='function') autoResize();
       if(typeof renderTray==='function') renderTray();
-      await loadSession(_branchChildSid,{throwOnMessageLoadFailure:true});
+      await loadSession(_branchChildSid,{throwOnMessageLoadFailure:true,internalBranchHandoff:true});
       if(!S.session||S.session.session_id!==_branchChildSid) throw new Error('Fork load did not activate the writable child.');
       if(S.session){
         S.session.model=_branchModelState.model;

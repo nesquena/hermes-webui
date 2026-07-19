@@ -137,12 +137,18 @@ def _send_harness(body: str) -> str:
     cmd_branch = _extract_async_function(commands_source, "cmdBranch")
     is_read_only = _extract_function(session_source, "_isReadOnlySession")
     is_branchable_read_only = _extract_function(session_source, "_isBranchableReadOnlySession")
+    real_load_session = _extract_async_function(session_source, "loadSession").replace(
+        "async function loadSession(",
+        "async function _realLoadSession(",
+        1,
+    )
     return _run_node(
         "\n".join([
             "const calls = [];",
             "const toasts = [];",
             "const loadedSessions = [];",
             "const restoreCalls = [];",
+            "const draftSaveCalls = [];",
             "let S = null;",
             "const composer = { value: 'What changed since yesterday?', dispatchEvent() {} };",
             "const document = { querySelector: () => null };",
@@ -163,6 +169,7 @@ def _send_harness(body: str) -> str:
             "const _composerTextWithPendingSelections = () => composer.value;",
             "const _pendingSelections = [];",
             "const _clearPendingSelections = () => {};",
+            "const _saveComposerDraftNow = (sid, text, files) => { draftSaveCalls.push({ sid, text, files: [...files] }); return Promise.resolve(); };",
             "const parseCommand = (text) => { const [name, ...rest] = text.slice(1).trim().split(/\\s+/); return { name, args: rest.join(' ') }; };",
             "const shouldInterceptCompressionRecoveryContinuation = () => false;",
             "const isCompressionUiRunning = () => false;",
@@ -171,7 +178,10 @@ def _send_harness(body: str) -> str:
             "const uploadPendingFiles = async ({ files }) => files.map(file => ({ name: file.name, path: file.name }));",
             "const setBusy = (busy) => { S.busy = busy; };",
             "let api = async (url, opts) => { const body = JSON.parse(opts.body); calls.push({ url, body }); if(url === '/api/session/branch') return { session_id: 'forked-session' }; return { stream_id: 'stream-1' }; };",
-            "let loadSession = async (sid) => { loadedSessions.push(sid); S.session = { session_id: sid, workspace: '/tmp', model: 'child-default', model_provider: 'child-provider', profile: 'child-profile' }; };",
+            "let _branchHandoffInProgress = false;",
+            real_load_session,
+            "let useRealLoadSession = false;",
+            "let loadSession = async (sid, opts = {}) => { if(opts.internalBranchHandoff || !useRealLoadSession){ loadedSessions.push(sid); S.session = { session_id: sid, workspace: '/tmp', model: 'child-default', model_provider: 'child-provider', profile: 'child-profile' }; return; } return await _realLoadSession(sid, opts); };",
             "const ensureLiveWorklogShell = () => {};",
             "const clearLiveToolCards = () => {};",
             "const appendThinking = () => {};",
@@ -840,7 +850,7 @@ def test_send_requests_strict_fork_load_failure_from_load_session():
         "console.log(JSON.stringify({ loadOptions, loadedSessions, calls }));"
     )
     payload = json.loads(result)
-    assert payload["loadOptions"] == {"throwOnMessageLoadFailure": True}
+    assert payload["loadOptions"] == {"throwOnMessageLoadFailure": True, "internalBranchHandoff": True}
     assert payload["loadedSessions"] == ["forked-session"]
     assert [call["url"] for call in payload["calls"]] == ["/api/session/branch", "/api/chat/start"]
 
@@ -952,25 +962,39 @@ def test_send_restores_payload_to_visible_child_when_fork_load_fails_after_activ
     assert payload["session"]["session_id"] == "forked-session"
 
 
-def test_send_restores_payload_to_source_when_unrelated_session_becomes_active_during_fork_load():
+def test_send_blocks_unrelated_session_load_during_branch_handoff():
     result = _send_harness(
-        "loadSession = async () => { "
-        "  S.session = { session_id: 'manual-session', workspace: '/tmp', model: 'manual-model', model_provider: 'manual-provider', profile: 'manual-profile' }; "
+        "let resolveBranch; const loadAttempts = []; "
+        "useRealLoadSession = true; "
+        "const originalLoadSession = loadSession; "
+        "loadSession = async (sid, opts = {}) => { loadAttempts.push({ sid, opts }); return await originalLoadSession(sid, opts); }; "
+        "api = async (url, opts) => { const body = JSON.parse(opts.body); calls.push({ url, body }); "
+        "  if(url === '/api/session/branch') return await new Promise(resolve => { resolveBranch = resolve; }); "
+        "  return { stream_id: 'stream-1' }; "
         "}; "
-        "await send(); "
-        "console.log(JSON.stringify({ calls, toasts, composer: composer.value, files: S.pendingFiles, restoreCalls, session: S.session }));"
+        "const first = send(); await Promise.resolve(); await loadSession('manual-session'); "
+        "const during = { session: S.session.session_id, composer: composer.value, files: [...S.pendingFiles], draftSaveCalls: [...draftSaveCalls], loadedSessions: [...loadedSessions] }; "
+        "resolveBranch({ session_id: 'forked-session' }); await first; "
+        "console.log(JSON.stringify({ calls, loadAttempts, during, session: S.session, loadedSessions, draftSaveCalls }));"
     )
     payload = json.loads(result)
-    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch"]
-    assert payload["toasts"][0][0] == "Fork failed: Fork load did not activate the writable child."
-    assert payload["composer"] == "What changed since yesterday?"
-    assert payload["files"] == [{"name": "notes.txt"}]
-    assert payload["restoreCalls"] == [{
-        "text": "What changed since yesterday?",
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch", "/api/chat/start"]
+    assert [attempt["sid"] for attempt in payload["loadAttempts"]] == ["manual-session", "forked-session"]
+    assert payload["loadAttempts"][0]["opts"] == {}
+    assert payload["loadAttempts"][1]["opts"] == {
+        "throwOnMessageLoadFailure": True,
+        "internalBranchHandoff": True,
+    }
+    assert payload["during"] == {
+        "session": "daily-summary",
+        "composer": "What changed since yesterday?",
         "files": [{"name": "notes.txt"}],
-        "sid": "daily-summary",
-    }]
-    assert payload["session"]["session_id"] == "manual-session"
+        "draftSaveCalls": [],
+        "loadedSessions": [],
+    }
+    assert payload["draftSaveCalls"] == []
+    assert payload["loadedSessions"] == ["forked-session"]
+    assert payload["session"]["session_id"] == "forked-session"
 
 
 def test_send_restores_payload_when_fork_load_does_not_activate_child():

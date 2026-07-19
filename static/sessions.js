@@ -1671,6 +1671,8 @@ async function loadSession(sid){
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
+  const _internalBranchHandoff=!!opts.internalBranchHandoff;
+  if(typeof _branchHandoffInProgress!=='undefined'&&_branchHandoffInProgress&&!_internalBranchHandoff) return;
   const _throwOnMessageLoadFailure=!!opts.throwOnMessageLoadFailure;
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
