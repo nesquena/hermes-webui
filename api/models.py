@@ -1684,8 +1684,6 @@ class Session:
         if not is_safe_session_id(sid):
             return [], None
         p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
-            return [], None
         if limit is None or limit <= 0:
             limit = 0
         if max_bytes is None:
@@ -1696,12 +1694,57 @@ class Session:
         # Helper: full-load-and-slice fallback. Used by every correctness escape
         # hatch below so all paths return the SAME normalized head that
         # get_session / Session.load would — never a short or denormalized one.
+        # Re-checks SESSIONS authority before returning: a session that becomes
+        # active (cached) DURING the streaming scan must not be replaced by the
+        # stale disk state we just read. (#6138 re-gate finding 1)
         def _full_load_head():
+            with LOCK:
+                cached_now = SESSIONS.get(sid)
+                cached_owns_now = (
+                    cached_now is not None
+                    and str(getattr(cached_now, 'session_id', '') or '') == str(sid)
+                )
+            if cached_owns_now:
+                cached_session = get_session(sid, metadata_only=False)
+                cached_msgs = (cached_session.messages or []) if cached_session else []
+                return (list(cached_msgs[:limit]) if limit else list(cached_msgs)), (
+                    len(cached_msgs)
+                )
             full = cls.load(sid)
             msgs = full.messages or []
             return (list(msgs[:limit]) if limit else list(msgs)), (
                 total_count if total_count is not None else len(msgs)
             )
+
+        # Cache-authority check. Consult SESSIONS BEFORE the sidecar existence
+        # check — this matches get_session()'s authority order. A cached
+        # messageful session can exist before any sidecar is written (active /
+        # pending sessions that all_sessions() overlays into searchable rows),
+        # so the old `if not p.exists(): return [], None` short-circuit silently
+        # dropped them from content search. (#6138 re-gate finding 1)
+        #
+        # LOCK is the same non-reentrant lock get_session() takes internally, so
+        # we release it before delegating to get_session() (which reacquires it)
+        # to avoid a self-deadlock.
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            cached_owns = (
+                cached is not None
+                and str(getattr(cached, 'session_id', '') or '') == str(sid)
+            )
+        if cached_owns:
+            # get_session handles the cache + disk-freshness + state.db +
+            # journal-retry contract end-to-end; reuse it so the head we return
+            # matches what GET /api/session would show for this session.
+            cached_session = get_session(sid, metadata_only=False)
+            cached_msgs = (cached_session.messages or []) if cached_session else []
+            total_count_cache = len(cached_msgs)
+            return (list(cached_msgs[:limit]) if limit else list(cached_msgs)), (
+                total_count_cache
+            )
+
+        if not p.exists():
+            return [], None
 
         try:
             # 1) Cheap metadata prefix → true message_count (does not parse the
@@ -1718,28 +1761,7 @@ class Session:
                 except Exception:
                     pass
 
-            # 2) Cache-aware path (blocker #1 from #6138 gate certification):
-            #    active/unsaved sessions live in SESSIONS and may carry messages
-            #    that have NOT been persisted to the sidecar yet. The streaming
-            #    scanner reads the sidecar directly, so it would silently miss
-            #    those messages. Under the same lock get_session uses, detect a
-            #    cached session and delegate to get_session() (which owns disk-
-            #    freshness, state.db sync, and journal-retry semantics) and slice
-            #    its NORMALIZED messages. The streaming scanner is only safe for
-            #    clean, uncached, fully persisted sessions.
-            with LOCK:
-                cached = SESSIONS.get(sid)
-            if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
-                # get_session handles the cache + disk-freshness + state.db
-                # contract end-to-end; reuse it so the head we return matches
-                # what GET /api/session would show for this session.
-                cached_session = get_session(sid, metadata_only=False)
-                cached_msgs = (cached_session.messages or []) if cached_session else []
-                return (list(cached_msgs[:limit]) if limit else list(cached_msgs)), (
-                    total_count if total_count is not None else len(cached_msgs)
-                )
-
-            # 3) Stream the file body to locate the "messages": [ opener and
+            # 2) Stream the file body to locate the "messages": [ opener and
             #    peel off raw array elements one at a time. Track whether we hit
             #    a safety cap so we can fall back rather than return a short head.
             decoder = json.JSONDecoder()
@@ -1850,12 +1872,19 @@ class Session:
             # stopped at the overcollect ceiling (not at end-of-array), there may
             # be more duplicates just past the window — fall back to a full load
             # rather than risk a short normalized head.
+            #
+            # The fallback must NOT depend on total_count: adjacent identical
+            # _partial runs are unbounded, so a fixed `2 * limit` raw window is
+            # not normalization-equivalent. A valid legacy sidecar without
+            # message_count (total_count is None) can stop after 2N raw
+            # duplicates, collapse to fewer than N normalized rows, and silently
+            # drop a needle at normalized message N. Fall back whenever the raw
+            # ceiling was reached and collapse still yielded fewer than limit,
+            # regardless of metadata count. (#6138 re-gate finding 2)
             if (
                 limit
                 and len(messages) < limit
                 and len(raw_messages) >= raw_target
-                and total_count is not None
-                and total_count > len(raw_messages)
             ):
                 return _full_load_head()
             return messages, total_count

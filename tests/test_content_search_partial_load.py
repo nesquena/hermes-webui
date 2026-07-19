@@ -13,6 +13,8 @@ never parsed. The search handler calls it instead of ``get_session()``.
 """
 from __future__ import annotations
 
+import pytest
+
 from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -166,7 +168,13 @@ def _run_search(query, session_dir, *, first_payloads, total_messages):
     import api.routes as routes
 
     models.SESSION_DIR = session_dir
-    models.SESSIONS = OrderedDict()
+    # IMPORTANT: clear SESSIONS IN PLACE rather than replacing the attribute.
+    # Other test files hold a top-level `from api.models import SESSIONS`
+    # reference captured at import time; rebinding models.SESSIONS to a new
+    # OrderedDict here would leave their reference pointing at the stale dict,
+    # breaking their `new_session()` / `s.session_id in SESSIONS` assertions
+    # when this file runs before them in suite order.
+    models.SESSIONS.clear()
     routes.SESSION_DIR = session_dir
 
     _write_session_file(
@@ -288,7 +296,10 @@ def test_load_messages_head_cache_aware_for_unsaved_messages(tmp_path, monkeypat
     dst = session_dir / f"{sid}.json"
     shutil.move(str(src), str(dst))
 
-    from api.models import Session, SESSIONS, LOCK
+    from api.models import Session, LOCK
+    # Use models.SESSIONS (attribute access) rather than `from api.models
+    # import SESSIONS` so we always see the current module-global dict —
+    # rebinding or stale references break other tests' SESSIONS assertions.
     cached = Session(
         session_id=sid,
         title="cached",
@@ -298,7 +309,7 @@ def test_load_messages_head_cache_aware_for_unsaved_messages(tmp_path, monkeypat
         ],
     )
     with LOCK:
-        SESSIONS[sid] = cached
+        models.SESSIONS[sid] = cached
     try:
         head, total = Session.load_messages_head(sid, 5)
         assert any(
@@ -309,7 +320,7 @@ def test_load_messages_head_cache_aware_for_unsaved_messages(tmp_path, monkeypat
         )
     finally:
         with LOCK:
-            SESSIONS.pop(sid, None)
+            models.SESSIONS.pop(sid, None)
 
 
 def test_load_messages_head_cap_exhaustion_falls_back_to_full(tmp_path, monkeypatch):
@@ -424,11 +435,127 @@ def test_load_messages_head_streaming_still_used_for_clean_uncached(tmp_path, mo
         str(session_dir / f"{sid}.json"),
     )
     # No SESSIONS entry → cache-aware path must defer to the streaming scanner.
-    from api.models import Session, SESSIONS, LOCK
+    from api.models import Session, LOCK
     with LOCK:
-        SESSIONS.pop(sid, None)
+        models.SESSIONS.pop(sid, None)
     head, total = Session.load_messages_head(sid, 5)
     assert total == 50, f"expected total=50 from metadata prefix, got {total}"
     assert len(head) == 5, (
         f"clean uncached session should return 5 messages via streaming, got {len(head)}"
+    )
+
+
+# ── Re-gate #6138 round-2 regressions (2026-07-19) ───────────────────────────
+# Two residual silent false-negative paths nesquena-hermes found after the
+# first three blockers were closed. Each reproducer mirrors the maintainer's
+# sandbox regression.
+
+
+def test_cached_messageful_session_without_sidecar_uses_authoritative_cache(
+    tmp_path, monkeypatch
+):
+    """Re-gate finding 1: a cached active session with NO sidecar on disk must
+    still be visible to content search.
+
+    all_sessions() overlays in-memory active/pending sessions into the
+    searchable rows even before a sidecar exists, so a cached messageful
+    session can appear in the session list while content search returned no
+    messages. The previous `if not p.exists(): return [], None` short-circuit
+    fired before the SESSIONS lookup, silently dropping them.
+
+    Mirrors the maintainer's `test_cached_messageful_session_without_sidecar_
+    uses_authoritative_cache` sandbox regression.
+    """
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    sid = "gate-cache-no-sidecar"
+    # Build a messageful cached session and DO NOT persist a sidecar.
+    from api.models import Session, LOCK
+    cached = Session(
+        session_id=sid,
+        title="no-sidecar",
+        messages=[
+            {"id": "m0", "role": "user", "content": "UNSAVEDNEEDLE"},
+        ],
+    )
+    with LOCK:
+        models.SESSIONS[sid] = cached
+    try:
+        # Sanity: no sidecar exists.
+        assert not (session_dir / f"{sid}.json").exists(), (
+            "test setup: sidecar must NOT exist for this regression"
+        )
+        head, total = Session.load_messages_head(sid, 5)
+        assert any(
+            "UNSAVEDNEEDLE" in str(m.get("content") or "") for m in head
+        ), (
+            f"cached session with no sidecar must still return its messages "
+            f"via SESSIONS authority; got {[m.get('content') for m in head]}"
+        )
+    finally:
+        with LOCK:
+            models.SESSIONS.pop(sid, None)
+
+
+@pytest.mark.parametrize(
+    "message_count, label",
+    [
+        (None, "missing message_count (legacy sidecar)"),
+        (15, "stale message_count (less than actual raw total)"),
+    ],
+)
+def test_duplicate_partial_run_longer_than_raw_multiplier_falls_back(
+    tmp_path, monkeypatch, message_count, label
+):
+    """Re-gate finding 2: a duplicate _partial run longer than `2 * limit` must
+    fall back to a full load, not silently return a short normalized head.
+
+    Adjacent identical `_partial` runs are unbounded, so the fixed `2 * limit`
+    raw over-collection window is not normalization-equivalent. With 12+
+    identical partials before a needle at normalized message `limit`, the
+    streaming scan stops at the raw ceiling, collapses to fewer than `limit`
+    normalized rows, and (pre-fix) silently dropped the needle. The fix removes
+    the `total_count is not None` gate so the fallback fires regardless of
+    metadata count — covering both missing (legacy) and stale message_count.
+
+    Mirrors the maintainer's `test_duplicate_partial_run_longer_than_raw_
+    multiplier_falls_back` sandbox regression.
+    """
+    import api.models as models
+    import json as _json
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    sid = "gate-long-dup-run"
+    # 12 identical _partial (>> 2 * limit=10) then a needle. Collapses to 1
+    # partial + needle = 2 normalized rows; the needle is at normalized msg 2.
+    raw = [
+        {"id": f"p{i}", "role": "assistant", "_partial": True, "content": "partial"}
+        for i in range(12)
+    ] + [{"id": "mN", "role": "user", "content": "NEEDLELONG"}]
+    payload = {
+        "session_id": sid,
+        "title": "long-dup",
+        "messages": raw,
+        "anchor_activity_scenes": [],
+    }
+    if message_count is not None:
+        payload["message_count"] = message_count
+    (session_dir / f"{sid}.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+    from api.models import Session
+    head, total = Session.load_messages_head(sid, 5)
+    assert any(
+        "NEEDLELONG" in str(m.get("content") or "") for m in head
+    ), (
+        f"duplicate run > 2*limit with {label}: needle at normalized msg 2 "
+        f"must be found after full-load fallback; got "
+        f"{[m.get('content') for m in head]}"
     )
