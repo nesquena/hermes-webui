@@ -985,3 +985,95 @@ print(json.dumps({{
     )
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout.strip().splitlines()[-1] == "0"
+
+
+# ── Combined-path coverage: #6185 origin-routing ⊕ #6159 durable-claims ──────
+# Neither PR alone exercises the interaction where the origin return address
+# overrides the mutable session-key index AND the routed delivery still flows
+# through the durable claim/complete ack. These guard the combine seam.
+
+
+def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):
+    """An async completion whose session-key index resolves to session B but
+    whose origin_ui_session_id is A must start the wakeup turn in A (origin
+    wins), and still take exactly one durable claim + one ack."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    # The session-key index would route to session "B" ...
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "session-B"
+    started: list[tuple[str, str, str]] = []
+
+    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+        started.append((session_id, prompt, delegation_id))
+        bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
+
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda session_id: False)
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", _accept)
+    monkeypatch.setattr(
+        bp, "_emit_bg_task_complete_events_coalesced", lambda session_id, payload: 1
+    )
+
+    # ... but the event carries the exact origin return address "session-A".
+    bp._process_one(_async_delegation_event(origin_ui_session_id="session-A"))
+
+    assert started, "wakeup turn was never started"
+    assert started[0][0] == "session-A", (
+        f"origin_ui_session_id must win over the index; started in {started[0][0]!r}"
+    )
+    assert [consumer for _evt, consumer in delivery["claim"]] == ["webui-background"]
+    assert len(delivery["complete"]) == 1  # exactly one ack, in the origin session
+    assert delivery["release"] == []
+
+
+def test_origin_only_completion_without_session_key_routes_and_acks(monkeypatch):
+    """A completion with no session_key at all but a valid origin_ui_session_id
+    survives the drop-paths (origin is a sufficient route) and delivers+acks."""
+    _reset_wakeup_state()
+    _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    started: list[str] = []
+
+    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+        started.append(session_id)
+        bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
+
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda session_id: False)
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", _accept)
+    monkeypatch.setattr(
+        bp, "_emit_bg_task_complete_events_coalesced", lambda session_id, payload: 1
+    )
+
+    evt = _async_delegation_event(origin_ui_session_id="session-A")
+    evt.pop("session_key", None)
+    bp._process_one(evt)
+
+    assert started == ["session-A"]
+    assert len(delivery["complete"]) == 1
+
+
+def test_async_completion_with_unresolvable_target_retries_not_silent_drop(monkeypatch):
+    """The combine caveat: an async event that resolves to an empty target must
+    route through the bounded retry (so the durable row stays retryable), NOT a
+    bare return that would leave it pending forever with no ack and no retry."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    retried: list[dict] = []
+    monkeypatch.setattr(
+        bp,
+        "_retry_unmapped_async_delegation_event",
+        lambda process_registry, evt: retried.append(dict(evt)),
+    )
+
+    # No session_key index entry and no origin_ui_session_id → empty target.
+    evt = _async_delegation_event()
+    evt.pop("session_key", None)
+    bp._process_one(evt)
+
+    assert len(retried) == 1, "unrouteable async event must be handed to the retry"
+    # No claim was taken and no ACK fired — the durable row stays pending, and
+    # NOTHING was completed (which would have been a spurious ack).
+    assert delivery["claim"] == []
+    assert delivery["complete"] == []
+
