@@ -1,10 +1,30 @@
 name: Conversation lifecycle (informational)
 
+# Scoped to the code this browser gate actually exercises — the chat
+# render/streaming surface — so it doesn't spin up playwright+chromium on
+# docs-only or unrelated changes. If none of these paths change, the run is
+# skipped entirely (GitHub treats a path-filtered no-match as "not triggered").
 on:
   pull_request:
     branches: [master]
+    paths:
+      - 'static/**'
+      - 'api/**.py'
+      - 'server.py'
+      - 'tests/browser_conversation_lifecycle.py'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/conversation-lifecycle.yml'
   push:
     branches: [master]
+    paths:
+      - 'static/**'
+      - 'api/**.py'
+      - 'server.py'
+      - 'tests/browser_conversation_lifecycle.py'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/conversation-lifecycle.yml'
 
 jobs:
   live-to-final:
