@@ -159,6 +159,7 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
     default=None,
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+_GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -289,6 +290,173 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
         dynamic_schema_overrides=entry.dynamic_schema_overrides,
     )
     _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+
+
+def _tool_call_has_google_thought_signature(tool_call) -> bool:
+    """Return True when a tool call already carries Gemini thought-signature metadata."""
+    if not isinstance(tool_call, dict):
+        return False
+    for candidate in (
+        tool_call,
+        tool_call.get('function'),
+        tool_call.get('extra_content'),
+        (tool_call.get('extra_content') or {}).get('google'),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ('thought_signature', 'thoughtSignature'):
+            if str(candidate.get(key) or '').strip():
+                return True
+    return False
+
+
+def _assistant_message_has_visible_content(message) -> bool:
+    content = message.get('content') if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, str) and part.strip():
+                return True
+            if isinstance(part, dict):
+                for key in ('text', 'content'):
+                    value = part.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return True
+        return False
+    return bool(content)
+
+
+def _request_targets_google_gemini_three(
+    model,
+    *,
+    base_url=None,
+    provider_profile=None,
+) -> bool:
+    model_lower = str(model or '').strip().lower()
+    if 'gemini-3' not in model_lower:
+        return False
+    base_lower = str(base_url or '').strip().lower()
+    if 'generativelanguage.googleapis.com' in base_lower:
+        return True
+    if provider_profile is None:
+        return False
+    module_name = str(getattr(type(provider_profile), '__module__', '') or '').lower()
+    provider_id = str(
+        getattr(provider_profile, 'provider_id', None)
+        or getattr(provider_profile, 'id', None)
+        or getattr(provider_profile, 'name', None)
+        or ''
+    ).strip().lower()
+    return 'google' in module_name or provider_id in {'google', 'gemini'}
+
+
+def _repair_google_gemini_current_turn_tool_state_for_request(
+    messages,
+    *,
+    model,
+    base_url=None,
+    provider_profile=None,
+):
+    """Return a request-only copy with Gemini-unsafe current-turn tool state removed.
+
+    This repair runs at the outbound request boundary, not on canonical session
+    history. Gemini 3 only requires current-turn tool-call replay to carry
+    thought signatures, and Hermes-native parallel groups sign only the first
+    call in the assistant message. So keep whole groups whose first call is
+    signed, and drop whole current-turn groups whose first call is unsigned.
+    """
+    if not isinstance(messages, list):
+        return messages
+    if not _request_targets_google_gemini_three(
+        model,
+        base_url=base_url,
+        provider_profile=provider_profile,
+    ):
+        return messages
+
+    last_user_index = None
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            last_user_index = idx
+            break
+    if last_user_index is None or last_user_index >= len(messages) - 1:
+        return messages
+
+    drop_assistant_indexes = set()
+    dropped_tool_call_ids: set[str] = set()
+    for idx in range(last_user_index + 1, len(messages)):
+        msg = messages[idx]
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            continue
+        tool_calls = msg.get('tool_calls')
+        if not isinstance(tool_calls, list) or not tool_calls:
+            continue
+        if _tool_call_has_google_thought_signature(tool_calls[0]):
+            continue
+        drop_assistant_indexes.add(idx)
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_id = tool_call.get('id') or tool_call.get('call_id') or ''
+            if tool_id:
+                dropped_tool_call_ids.add(str(tool_id))
+
+    if not drop_assistant_indexes and not dropped_tool_call_ids:
+        return messages
+
+    repaired = []
+    for idx, msg in enumerate(messages):
+        if idx <= last_user_index or not isinstance(msg, dict):
+            repaired.append(msg)
+            continue
+        if msg.get('role') == 'tool':
+            tool_call_id = str(msg.get('tool_call_id') or '').strip()
+            if tool_call_id and tool_call_id in dropped_tool_call_ids:
+                continue
+            repaired.append(msg)
+            continue
+        if idx in drop_assistant_indexes:
+            patched = dict(msg)
+            patched.pop('tool_calls', None)
+            if not _assistant_message_has_visible_content(patched):
+                continue
+            repaired.append(patched)
+            continue
+        repaired.append(msg)
+    return repaired
+
+
+def _install_gemini_request_boundary_wrapper() -> None:
+    """Patch the agent chat-completions transport with a request-boundary repair."""
+    global _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
+    if _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED:
+        return
+    try:
+        from agent.transports.chat_completions import ChatCompletionsTransport
+    except Exception:
+        logger.debug("gemini request-boundary wrapper: transport unavailable", exc_info=True)
+        return
+
+    original_build_kwargs = ChatCompletionsTransport.build_kwargs
+    if getattr(original_build_kwargs, "_webui_gemini_request_boundary_wrapper", False):
+        _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
+        return
+
+    def _wrapped_build_kwargs(self, model, messages, tools=None, **params):
+        repaired_messages = _repair_google_gemini_current_turn_tool_state_for_request(
+            messages,
+            model=model,
+            base_url=params.get('base_url'),
+            provider_profile=params.get('provider_profile'),
+        )
+        return original_build_kwargs(self, model, repaired_messages, tools, **params)
+
+    _wrapped_build_kwargs.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+    _wrapped_build_kwargs.__dict__["_webui_original_build_kwargs"] = original_build_kwargs
+    ChatCompletionsTransport.build_kwargs = _wrapped_build_kwargs
+    _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
 
 
 _PERSISTENT_MEMORY_FILES = (
@@ -4423,8 +4591,6 @@ def _replay_may_target_google(cfg, effective_provider) -> bool:
             if isinstance(entry, dict) and _is_google(entry.get('provider')):
                 return True
     return False
-
-
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -4452,7 +4618,6 @@ def _sanitize_messages_for_api(
     causing 400s on every later text-only turn (#2297).
     """
     strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
-    replay_google_tool_state = _replay_may_target_google(cfg, effective_provider)
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     valid_tool_call_ids: set = set()
@@ -4465,8 +4630,6 @@ def _sanitize_messages_for_api(
                     continue
                 tid = tc.get('id') or tc.get('call_id') or ''
                 if not tid:
-                    continue
-                if replay_google_tool_state and not _tool_call_has_thought_signature(tc):
                     continue
                 valid_tool_call_ids.add(tid)
 
@@ -7771,7 +7934,6 @@ def _run_agent_streaming(
         ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
-
         # Full-turn serialization is only needed for static/legacy skill-module
         # resolution, where process-global skill-module globals are still used.
         # Dynamic-capable modules continue concurrent execution.
@@ -7796,6 +7958,7 @@ def _run_agent_streaming(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_streaming_skill_home_patch_lock = True
 
+        _install_gemini_request_boundary_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
