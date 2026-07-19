@@ -96,6 +96,7 @@ logger = logging.getLogger(__name__)
 # path probes configured custom endpoints serially, so each provider needs a
 # short hard cap and graceful degradation.
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
+ATLASCLOUD_API_BASE_URL = "https://api.atlascloud.ai/v1"
 
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
@@ -1149,6 +1150,7 @@ _PROVIDER_DISPLAY = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "openai-api": "OpenAI API",
+    "atlascloud": "Atlas Cloud",
     "openai-codex": "OpenAI Codex",
     "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
@@ -1208,6 +1210,9 @@ _PROVIDER_ALIASES = {
     "deep-seek": "deepseek",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
+    "atlas": "atlascloud",
+    "atlas-cloud": "atlascloud",
+    "atlas_cloud": "atlascloud",
     "opencode": "opencode-zen",
     "grok": "xai",
     "x-ai": "xai",
@@ -1678,6 +1683,10 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
+    ],
+    "atlascloud": [
+        {"id": "qwen/qwen3.5-flash", "label": "Qwen3.5 Flash"},
+        {"id": "deepseek-ai/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
     ],
     "openai-codex": [
         {"id": "gpt-5.5", "label": "GPT-5.5"},
@@ -2631,6 +2640,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             base_url=config_base_url,
             resolve_alias=False,
         )
+        if config_provider == "atlascloud" and not config_base_url:
+            config_base_url = ATLASCLOUD_API_BASE_URL
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
     # at read time. ``local`` is not a registered provider, so passing it
@@ -2799,7 +2810,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # fired in the prefix==config_provider case, causing HTTP 404 from the
         # portal which requires the full provider/model id (#2177; sibling of
         # #854 / #894 for Nous, where this guard was originally added).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
+        _PORTAL_PROVIDERS = {"atlascloud", "nous", "opencode-zen", "opencode-go", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
             return model_id, config_provider, config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
@@ -6760,6 +6771,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for k in (
                 *_anthropic_env_vars,
                 "OPENAI_API_KEY",
+                "ATLASCLOUD_API_KEY",
                 "OPENROUTER_API_KEY",
                 "GOOGLE_API_KEY",
                 "GEMINI_API_KEY",
@@ -6794,6 +6806,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # picker without a manual config.yaml edit. Users without Codex OAuth will see
                 # picker entries but hit auth errors at inference time (#1189 known limitation).
                 detected_providers.add("openai-codex")
+            if all_env.get("ATLASCLOUD_API_KEY"):
+                detected_providers.add("atlascloud")
             if all_env.get("OPENROUTER_API_KEY"):
                 detected_providers.add("openrouter")
             if all_env.get("GOOGLE_API_KEY"):

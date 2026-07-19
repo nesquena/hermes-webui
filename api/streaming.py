@@ -8281,6 +8281,10 @@ def _run_agent_streaming(
             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
                 resolved_provider, resolved_api_key, resolved_base_url
             )
+            if resolved_provider == "atlascloud":
+                resolved_provider = "custom"
+                resolved_base_url = resolved_base_url or "https://api.atlascloud.ai/v1"
+                resolved_api_key = resolved_api_key or os.getenv("ATLASCLOUD_API_KEY", "").strip() or None
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
