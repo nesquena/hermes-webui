@@ -26086,12 +26086,12 @@ def _parse_mcp_enabled(value) -> bool:
 def _mcp_profile_home_key(value) -> str:
     if value is None:
         return ""
+    text = str(value).strip()
+    if not text:
+        return ""
     try:
-        return str(Path(value).expanduser().resolve())
+        return str(Path(text).expanduser().resolve())
     except Exception:
-        text = str(value or "").strip()
-        if not text:
-            return ""
         try:
             return str(Path(text).expanduser().resolve())
         except Exception:
@@ -26127,7 +26127,12 @@ def _mcp_runtime_status_key(entry) -> tuple[str, str] | None:
     return (_mcp_runtime_entry_owner_key(entry), server_name)
 
 
-def _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key: str):
+def _mcp_runtime_entries_for_active_profile(
+    runtime_by_name,
+    active_home_key: str,
+    *,
+    allow_ownerless: bool = False,
+):
     if not isinstance(runtime_by_name, dict):
         return
     active_home_key = _mcp_profile_home_key(active_home_key)
@@ -26150,17 +26155,29 @@ def _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key: st
         if not server_name:
             continue
         parsed_entries.append((owner_key, server_name, runtime))
+    if not has_owner_metadata and not allow_ownerless:
+        return
     for owner_key, server_name, runtime in parsed_entries:
         if has_owner_metadata and owner_key != active_home_key:
             continue
         yield server_name, runtime
 
 
-def _mcp_runtime_status_for_server(runtime_by_name, active_home_key: str, server_name: str):
+def _mcp_runtime_status_for_server(
+    runtime_by_name,
+    active_home_key: str,
+    server_name: str,
+    *,
+    allow_ownerless: bool = False,
+):
     target = str(server_name or "").strip()
     if not target:
         return None
-    for name, runtime in _mcp_runtime_entries_for_active_profile(runtime_by_name, active_home_key):
+    for name, runtime in _mcp_runtime_entries_for_active_profile(
+        runtime_by_name,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    ):
         if name == target:
             return runtime
     return None
@@ -26342,21 +26359,43 @@ def _active_profile_mcp_config_path() -> Path:
     test_override_module = getattr(_get_config_path, "__module__", "")
     if test_override_module != "api.config":
         return Path(_get_config_path()).expanduser()
-    try:
-        if _is_isolated_profile_mode() or _is_root_profile(get_active_profile_name()):
-            return Path(_get_config_path()).expanduser()
-        return Path(get_active_hermes_home()).expanduser() / "config.yaml"
-    except Exception:
+    if _is_isolated_profile_mode() or _is_root_profile(get_active_profile_name()):
         return Path(_get_config_path()).expanduser()
+    active_home = str(get_active_hermes_home() or "").strip()
+    if not active_home:
+        raise ValueError("active profile home is not available")
+    return Path(active_home).expanduser() / "config.yaml"
 
 
-def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries, active_home_key: str):
+def _active_profile_mcp_config_data() -> dict:
+    """Return the same active-profile MCP config snapshot used by MCP writes."""
+    cfg = _load_yaml_config_file_raw(_active_profile_mcp_config_path())
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _active_profile_allows_ownerless_mcp_inventory() -> bool:
+    """Ownerless Agent registry/runtime data is safe only outside TLS switching."""
+    try:
+        return bool(_is_isolated_profile_mode() or _is_root_profile(get_active_profile_name()))
+    except Exception:
+        return False
+
+
+def _mcp_tools_from_runtime_status(
+    runtime_by_name,
+    server_summaries,
+    active_home_key: str,
+    *,
+    allow_ownerless: bool = False,
+):
     """Read detailed MCP tool payloads from runtime status when available."""
     tools = []
     if not isinstance(runtime_by_name, dict):
         return tools
     for server_name, runtime in _mcp_runtime_entries_for_active_profile(
-        runtime_by_name, active_home_key
+        runtime_by_name,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
     ):
         if server_name not in server_summaries:
             continue
@@ -26419,7 +26458,12 @@ def _mcp_registry_tool_owner_key(registry, tool_name: str) -> str:
     return ""
 
 
-def _mcp_tools_from_registry(server_summaries, active_home_key: str):
+def _mcp_tools_from_registry(
+    server_summaries,
+    active_home_key: str,
+    *,
+    allow_ownerless: bool = False,
+):
     """Read already-registered MCP tool schemas without probing MCP servers."""
     try:
         from tools.registry import registry
@@ -26448,6 +26492,8 @@ def _mcp_tools_from_registry(server_summaries, active_home_key: str):
         schema = registry.get_schema(tool_name) or {}
         server_summary = server_summaries[server_name]
         candidates.append((owner_key, _mcp_tool_summary(tool_name, schema, server_summary)))
+    if not has_owner_metadata and not allow_ownerless:
+        return []
     tools = []
     for owner_key, summary in candidates:
         if has_owner_metadata and owner_key != active_home_key:
@@ -26460,23 +26506,38 @@ def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
     active_home = get_active_hermes_home()
     active_home_key = _mcp_profile_home_key(active_home)
-    cfg = get_config_for_profile_home(active_home)
+    cfg = _active_profile_mcp_config_data()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
+    allow_ownerless = _active_profile_allows_ownerless_mcp_inventory()
     server_summaries = {
         str(name): _server_summary(
             str(name),
             scfg,
-            _mcp_runtime_status_for_server(runtime, active_home_key, str(name)),
+            _mcp_runtime_status_for_server(
+                runtime,
+                active_home_key,
+                str(name),
+                allow_ownerless=allow_ownerless,
+            ),
         )
         for name, scfg in servers.items()
     }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries, active_home_key)
+    tools = _mcp_tools_from_runtime_status(
+        runtime,
+        server_summaries,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    )
     source = "mcp_runtime_status"
     if not tools:
-        tools = _mcp_tools_from_registry(server_summaries, active_home_key)
+        tools = _mcp_tools_from_registry(
+            server_summaries,
+            active_home_key,
+            allow_ownerless=allow_ownerless,
+        )
         source = "tool_registry" if tools else "none"
     tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
     unavailable_servers = [
@@ -26622,7 +26683,7 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
         by_server.setdefault(server, []).append(tool)
 
     if isinstance(server_summaries, dict):
-        for server, summary in server_summaries.items():
+        for server in server_summaries:
             server_name = str(server or "").strip()
             if not server_name or server_name in by_server:
                 continue
@@ -26665,7 +26726,7 @@ def _handle_notes_sources_list(handler):
     """List note/knowledge MCP sources for the WebUI Notes drawer."""
     active_home = get_active_hermes_home()
     active_home_key = _mcp_profile_home_key(active_home)
-    cfg = get_config_for_profile_home(active_home)
+    cfg = _active_profile_mcp_config_data()
     if not _external_notes_sources_enabled(cfg):
         return j(handler, {
             "enabled": False,
@@ -26680,18 +26741,33 @@ def _handle_notes_sources_list(handler):
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
+    allow_ownerless = _active_profile_allows_ownerless_mcp_inventory()
     server_summaries = {
         str(name): _server_summary(
             str(name),
             scfg,
-            _mcp_runtime_status_for_server(runtime, active_home_key, str(name)),
+            _mcp_runtime_status_for_server(
+                runtime,
+                active_home_key,
+                str(name),
+                allow_ownerless=allow_ownerless,
+            ),
         )
         for name, scfg in servers.items()
     }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries, active_home_key)
+    tools = _mcp_tools_from_runtime_status(
+        runtime,
+        server_summaries,
+        active_home_key,
+        allow_ownerless=allow_ownerless,
+    )
     source = "mcp_runtime_status"
     if not tools:
-        tools = _mcp_tools_from_registry(server_summaries, active_home_key)
+        tools = _mcp_tools_from_registry(
+            server_summaries,
+            active_home_key,
+            allow_ownerless=allow_ownerless,
+        )
         source = "tool_registry" if tools else "none"
     return j(handler, {
         "enabled": True,
@@ -26986,16 +27062,22 @@ def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
     active_home = get_active_hermes_home()
     active_home_key = _mcp_profile_home_key(active_home)
-    cfg = get_config_for_profile_home(active_home)
+    cfg = _active_profile_mcp_config_data()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
     runtime = _mcp_runtime_status_by_name()
+    allow_ownerless = _active_profile_allows_ownerless_mcp_inventory()
     result = [
         _server_summary(
             name,
             scfg,
-            _mcp_runtime_status_for_server(runtime, active_home_key, str(name)),
+            _mcp_runtime_status_for_server(
+                runtime,
+                active_home_key,
+                str(name),
+                allow_ownerless=allow_ownerless,
+            ),
         )
         for name, scfg in servers.items()
     ]

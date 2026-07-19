@@ -31,7 +31,7 @@ def _read(relative_path: str) -> str:
 
 class TestMcpToolInventoryApi:
     @patch("api.routes._mcp_runtime_status_by_name")
-    @patch("api.routes.get_config_for_profile_home")
+    @patch("api.routes._active_profile_mcp_config_data")
     @patch("api.routes.get_active_hermes_home")
     def test_endpoint_returns_sanitized_registered_mcp_tools(
         self, mock_home, mock_cfg, mock_runtime, tmp_path
@@ -83,17 +83,18 @@ class TestMcpToolInventoryApi:
             {"name": "url", "type": "string", "required": True, "description": "URL to fetch"},
             {"name": "limit", "type": "integer", "required": False, "description": "Maximum bytes"},
         ]
-        mock_cfg.assert_called_once_with(sentinel_home)
+        mock_cfg.assert_called_once_with()
         raw = json.dumps(payload)
         assert "secret-token" not in raw
         assert "default" not in raw
         assert "Authorization" not in raw
 
+    @patch("api.routes._active_profile_allows_ownerless_mcp_inventory", return_value=True)
     @patch("api.routes._mcp_runtime_status_by_name")
-    @patch("api.routes.get_config_for_profile_home")
+    @patch("api.routes._active_profile_mcp_config_data")
     @patch("api.routes.get_active_hermes_home")
     def test_legacy_runtime_status_without_owner_metadata_still_lists_tools(
-        self, mock_home, mock_cfg, mock_runtime, tmp_path
+        self, mock_home, mock_cfg, mock_runtime, mock_allow_ownerless, tmp_path
     ):
         mock_home.return_value = tmp_path / "profiles" / "work"
         mock_cfg.return_value = {
@@ -114,12 +115,14 @@ class TestMcpToolInventoryApi:
         assert payload["source"] == "mcp_runtime_status"
         assert [tool["name"] for tool in payload["tools"]] == ["legacy_tool"]
         assert payload["tools"][0]["active"] is True
+        mock_allow_ownerless.assert_called_once_with()
 
+    @patch("api.routes._active_profile_allows_ownerless_mcp_inventory", return_value=True)
     @patch("api.routes._mcp_runtime_status_by_name")
-    @patch("api.routes.get_config_for_profile_home")
+    @patch("api.routes._active_profile_mcp_config_data")
     @patch("api.routes.get_active_hermes_home")
     def test_legacy_registry_without_owner_metadata_still_lists_tools(
-        self, mock_home, mock_cfg, mock_runtime, monkeypatch, tmp_path
+        self, mock_home, mock_cfg, mock_runtime, mock_allow_ownerless, monkeypatch, tmp_path
     ):
         mock_home.return_value = tmp_path / "profiles" / "work"
         mock_cfg.return_value = {
@@ -148,6 +151,80 @@ class TestMcpToolInventoryApi:
 
         assert payload["source"] == "tool_registry"
         assert [tool["name"] for tool in payload["tools"]] == ["legacy_tool"]
+        mock_allow_ownerless.assert_called_once_with()
+
+    def test_ownerless_runtime_status_adapter_keeps_empty_owner_and_named_profiles_drop_it(
+        self, monkeypatch
+    ):
+        from api import routes
+
+        fake_mcp_mod = types.ModuleType("tools.mcp_tool")
+        fake_mcp_mod.get_mcp_status = lambda: [
+            {
+                "name": "legacy",
+                "profile_home": "",
+                "connected": True,
+                "tools": [{"name": "legacy_tool"}],
+            }
+        ]
+        monkeypatch.setitem(sys.modules, "tools.mcp_tool", fake_mcp_mod)
+
+        statuses = routes._mcp_runtime_status_by_name()
+
+        assert list(statuses) == [("", "legacy")]
+        assert routes._mcp_runtime_status_for_server(
+            statuses,
+            "/tmp/hermes/profiles/work",
+            "legacy",
+            allow_ownerless=True,
+        )["connected"] is True
+        assert routes._mcp_runtime_status_for_server(
+            statuses,
+            "/tmp/hermes/profiles/work",
+            "legacy",
+            allow_ownerless=False,
+        ) is None
+
+    @patch("api.routes._mcp_runtime_status_by_name", return_value={})
+    @patch("api.routes.get_active_hermes_home")
+    def test_named_profile_does_not_use_ownerless_registry_for_same_server_name(
+        self, mock_home, mock_runtime, monkeypatch, tmp_path
+    ):
+        from api import routes
+
+        work_home = tmp_path / "profiles" / "work"
+        mock_home.return_value = work_home
+        monkeypatch.setattr(
+            routes,
+            "_active_profile_mcp_config_data",
+            lambda: {"mcp_servers": {"shared": {"command": "work-shared"}}},
+        )
+        monkeypatch.setattr(routes, "get_active_profile_name", lambda: "work")
+        monkeypatch.setattr(routes, "_is_root_profile", lambda name: False)
+        monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+
+        fake_registry_mod = types.ModuleType("tools.registry")
+
+        class _Registry:
+            def get_all_tool_names(self):
+                return ["shared_tool"]
+
+            def get_toolset_for_tool(self, name):
+                return "mcp-shared"
+
+            def get_schema(self, name):
+                return {"name": name, "description": "Ownerless shared tool"}
+
+        fake_registry_mod.registry = _Registry()
+        monkeypatch.setitem(sys.modules, "tools.registry", fake_registry_mod)
+
+        h = _make_handler()
+        _handle_mcp_tools_list(h)
+        payload = _json_payload(h)
+
+        assert payload["source"] == "none"
+        assert payload["tools"] == []
+        mock_runtime.assert_called_once_with()
 
     def test_schema_summary_uses_parameter_names_types_required_and_descriptions_only(self):
         schema = {

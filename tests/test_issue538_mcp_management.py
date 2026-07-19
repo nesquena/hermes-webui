@@ -43,30 +43,31 @@ SAMPLE_MCP = {
 class TestMcpList:
     """GET /api/mcp/servers — list with masked secrets."""
 
-    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes._active_profile_mcp_config_data')
     @patch('api.routes.get_active_hermes_home')
     def test_returns_servers_list(self, mock_home, mock_cfg):
-        mock_home.return_value = sentinel_home = object()
+        mock_home.return_value = object()
         mock_cfg.return_value = {'mcp_servers': SAMPLE_MCP}
         h = _make_handler()
         _handle_mcp_servers_list(h)
         assert h.send_response.called
         status = h.send_response.call_args[0][0]
         assert status == 200
-        mock_cfg.assert_called_once_with(sentinel_home)
+        mock_cfg.assert_called_once_with()
 
-    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes._active_profile_mcp_config_data')
     @patch('api.routes.get_active_hermes_home')
     def test_reads_active_profile_home_for_servers(self, mock_home, mock_cfg):
-        mock_home.return_value = sentinel_home = object()
+        mock_home.return_value = object()
         mock_cfg.return_value = {'mcp_servers': {'active': SAMPLE_MCP['searxng']}}
         h = _make_handler()
         _handle_mcp_servers_list(h)
         payload = _json_payload(h)
         assert [srv['name'] for srv in payload['servers']] == ['active']
-        mock_cfg.assert_called_once_with(sentinel_home)
+        mock_home.assert_called_once()
+        mock_cfg.assert_called_once_with()
 
-    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes._active_profile_mcp_config_data')
     @patch('api.routes.get_active_hermes_home')
     def test_empty_config(self, mock_home, mock_cfg):
         mock_home.return_value = object()
@@ -82,7 +83,7 @@ class TestMcpList:
         assert payload['reload_required'] is True
 
     @patch('api.routes._mcp_runtime_status_by_name')
-    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes._active_profile_mcp_config_data')
     @patch('api.routes.get_active_hermes_home')
     def test_list_payload_includes_status_tool_counts_and_safe_invalid_config(self, mock_home, mock_cfg, mock_runtime, tmp_path):
         profile_home = tmp_path / "profiles" / "work"
@@ -116,6 +117,7 @@ class TestMcpList:
         assert by_name['disabled']['status'] == 'disabled'
         assert by_name['broken']['transport'] == 'invalid'
         assert by_name['broken']['status'] == 'invalid_config'
+        mock_cfg.assert_called_once_with()
 
     def test_secrets_are_masked(self):
         """_mask_secrets hides API keys in headers and env."""
@@ -209,15 +211,42 @@ class TestMcpList:
         h = _make_handler()
         _handle_mcp_servers_list(h)
         payload = _json_payload(h)
-        assert [srv['name'] for srv in payload['servers']] == ['override-srv']
+        assert [srv['name'] for srv in payload['servers']] == ['work-srv']
 
         h = _make_handler()
         h.command = 'PUT'
         _handle_mcp_server_update(h, 'new-srv', {'command': 'new-command'})
+
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert {srv['name'] for srv in payload['servers']} == {'work-srv', 'new-srv'}
+
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'work-srv', {'enabled': False})
+
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        by_name = {srv['name']: srv for srv in payload['servers']}
+        assert by_name['work-srv']['enabled'] is False
+
+        h = _make_handler()
+        h.command = 'DELETE'
+        _handle_mcp_server_delete(h, 'new-srv')
+
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert [srv['name'] for srv in payload['servers']] == ['work-srv']
+
         saved = yaml.safe_load(override_path.read_text(encoding='utf-8'))
         active_home_saved = yaml.safe_load(active_home.joinpath('config.yaml').read_text(encoding='utf-8'))
-        assert 'new-srv' not in saved['mcp_servers']
-        assert 'new-srv' in active_home_saved['mcp_servers']
+        assert saved['mcp_servers'] == {'override-srv': {'command': 'override'}}
+        assert active_home_saved['mcp_servers'] == {
+            'work-srv': {'command': 'work', 'enabled': False},
+        }
 
 
 class TestMcpSave:

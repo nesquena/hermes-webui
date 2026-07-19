@@ -139,14 +139,14 @@ def test_mcp_list_keeps_work_profile_snapshot_during_default_reload(
     harness = profile_config_harness
     routes = harness.routes
     harness.request_scope.profile = "work"
-    original_get = routes.get_config_for_profile_home
+    original_load = routes._load_yaml_config_file_raw
 
-    def get_then_reload(profile_home):
-        config_data = original_get(profile_home)
+    def load_then_reload(config_path):
+        config_data = original_load(config_path)
         _reload_default_in_other_thread(harness)
         return config_data
 
-    monkeypatch.setattr(routes, "get_config_for_profile_home", get_then_reload)
+    monkeypatch.setattr(routes, "_load_yaml_config_file_raw", load_then_reload)
     monkeypatch.setattr(routes, "_mcp_runtime_status_by_name", lambda: {})
 
     handler = _handler()
@@ -392,6 +392,31 @@ def test_named_profile_snapshot_does_not_expand_missing_env_from_process(
 
     assert snapshot["providers"]["work-provider"]["api_key"] == "${PROFILE_TOKEN}"
     assert explicit["providers"]["work-provider"]["api_key"] == "${PROFILE_TOKEN}"
+
+
+def test_profile_env_cleanup_preserves_replaced_thread_env(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    config = harness.config
+    replacement_env = {"PROFILE_TOKEN": "replacement-secret"}
+    original_expand = config._expand_env_vars
+    config._thread_ctx.__dict__.pop("env", None)
+
+    def replace_env_during_expand(obj):
+        config._thread_ctx.env = replacement_env
+        return original_expand(obj)
+
+    monkeypatch.setattr(config, "_expand_env_vars", replace_env_during_expand)
+
+    result = config._expand_env_vars_for_profile_home(
+        {"token": "${PROFILE_TOKEN}"},
+        harness.work_home,
+    )
+
+    assert result["token"] == "replacement-secret"
+    assert config._thread_ctx.env is replacement_env
+    config._thread_ctx.env = {}
 
 
 def test_model_resolution_uses_one_profile_snapshot_after_other_profile_reload(

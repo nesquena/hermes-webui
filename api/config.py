@@ -634,19 +634,16 @@ def _expand_env_vars_for_profile_home(obj, profile_home: Path | str | None):
 
     previous_thread_env = getattr(_thread_ctx, "env", None)
     previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+    scoped_thread_env = None
     try:
         _set_thread_env(**thread_env)
+        scoped_thread_env = getattr(_thread_ctx, "env", None)
         _thread_ctx.block_process_env_fallback = True
         return _expand_env_vars(obj)
     finally:
         _thread_ctx.block_process_env_fallback = previous_block
-        if previous_thread_env is None:
-            try:
-                del _thread_ctx.env
-            except AttributeError:
-                pass
-        else:
-            _thread_ctx.env = previous_thread_env
+        if getattr(_thread_ctx, "env", None) is scoped_thread_env:
+            _thread_ctx.env = previous_thread_env if previous_thread_env is not None else {}
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
@@ -721,19 +718,16 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                     # per-read elsewhere; here we pin the cache to the unscoped view.
                     _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
                     _prev_env = getattr(_thread_ctx, "env", None)
+                    _process_env_scope = None
                     try:
                         _thread_ctx.block_process_env_fallback = False
                         _thread_ctx.env = {}
+                        _process_env_scope = _thread_ctx.env
                         _cfg_cache.update(_expand_env_vars(loaded))
                     finally:
                         _thread_ctx.block_process_env_fallback = _prev_block
-                        if _prev_env is None:
-                            try:
-                                del _thread_ctx.env
-                            except AttributeError:
-                                pass
-                        else:
-                            _thread_ctx.env = _prev_env
+                        if getattr(_thread_ctx, "env", None) is _process_env_scope:
+                            _thread_ctx.env = _prev_env if _prev_env is not None else {}
                 # Stamp _cfg_mtime whenever the file parsed to a dict — INCLUDING
                 # an empty {} config. The cache-update above is skipped for {} (it's
                 # a no-op), but _cfg_mtime MUST still be set or get_config()'s
