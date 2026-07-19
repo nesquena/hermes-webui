@@ -65,3 +65,66 @@ def test_sidebar_payload_no_redaction_when_disabled(monkeypatch):
     resp = routes._session_list_payload_to_response(payload)
     assert resp["sessions"][0]["title"] == "plain title"
     assert calls["n"] <= 1, f"settings read {calls['n']}x with redaction disabled; expected <=1"
+
+
+def test_sidebar_payload_redacts_display_and_parent_titles(monkeypatch):
+    """#6056 derives a delegated subagent's display_title from raw user-message
+    content, so display_title / _state_db_title / parent_title must go through the
+    SAME redaction as title — a credential in a delegated goal must not leak to
+    the sidebar even though only `title` was redacted before."""
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    monkeypatch.setattr("api.helpers.load_settings", lambda: {"api_redact_enabled": True}, raising=False)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+
+    secret = "sk-" + ("A" * 44)
+    payload = {"sessions": [{
+        "session_id": "s1",
+        "title": "clean",
+        "display_title": f"debug {secret}",
+        "_state_db_title": f"goal {secret}",
+        "parent_title": f"parent {secret}",
+    }], "cli_count": 0}
+    resp = routes._session_list_payload_to_response(payload)
+    row = resp["sessions"][0]
+    for field in ("display_title", "_state_db_title", "parent_title"):
+        assert secret not in str(row.get(field, "")), (
+            f"credential leaked into sidebar {field}: {row.get(field)!r}"
+        )
+
+
+def test_redact_sidebar_title_fields_helper():
+    """The shared helper redacts every user-content-derived title field, honors the
+    enabled flag, and never raises on missing/non-str fields."""
+    secret = "sk-" + ("B" * 44)
+    item = {
+        "title": "kept-by-caller",
+        "display_title": f"a {secret}",
+        "_state_db_title": f"b {secret}",
+        "parent_title": f"c {secret}",
+        "session_id": "s1",
+    }
+    routes._redact_sidebar_title_fields(item, True)
+    for field in ("display_title", "_state_db_title", "parent_title"):
+        assert secret not in item[field], f"{field} not redacted"
+    # Disabled → pass through unchanged.
+    item2 = {"display_title": f"a {secret}"}
+    routes._redact_sidebar_title_fields(item2, False)
+    assert item2["display_title"] == f"a {secret}"
+    # Missing / non-str fields must not raise.
+    routes._redact_sidebar_title_fields({"display_title": None, "parent_title": 42}, True)
+
+
+def test_sessions_search_branches_redact_derived_titles():
+    """Every /api/sessions/search response branch must call the shared title-field
+    redactor so search rows can't leak a derived display_title the sidebar hides.
+    Source-guard: the #6056 class-fix is easy to regress by adding a 4th branch."""
+    import inspect
+    src = inspect.getsource(routes._handle_sessions_search)
+    # 3 response branches (empty-query list, title-match, content-match) each build
+    # an `item` and must pass it through _redact_sidebar_title_fields.
+    assert src.count("_redact_sidebar_title_fields(item") >= 3, (
+        "a /api/sessions/search branch builds a row without redacting the derived "
+        "title fields (display_title/_state_db_title/parent_title)"
+    )
+    # And it must read the setting once, not per-_redact_text call.
+    assert "_search_redact_enabled" in src

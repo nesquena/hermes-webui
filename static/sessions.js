@@ -1052,6 +1052,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
+    streamId:String(snapshot.stream_id||snapshot.streamId||''),
     messages,
     uploaded:Array.isArray(uploaded)?[...uploaded]:[],
     toolCalls,
@@ -1062,6 +1063,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     lastAssistantText,
     lastReasoningText,
     lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
+    lastRunJournalEventId:String(snapshot.last_event_id||snapshot.lastEventId||''),
     anchorActivityScene,
     currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
@@ -1069,19 +1071,58 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   };
 }
 
-function _runtimeJournalAnchorActivitySceneForSession(sid){
+function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
+  if(!serverLiveSnapshot) return localInflight||null;
+  if(!localInflight||!_inflightHasVisibleLiveState(localInflight)) return serverLiveSnapshot;
+
+  // The run journal owns the Worklog projection. A same-stream browser tail
+  // wins only when it advanced after the metadata snapshot was read.
+  const requestedActiveId=String(activeStreamId||'').trim();
+  const localId=String(localInflight.streamId||'').trim();
+  const serverId=String(serverLiveSnapshot.streamId||'').trim();
+  const activeId=requestedActiveId||serverId;
+  const selectDurableSnapshot=()=>{
+    if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
+      return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
+    }
+    return serverLiveSnapshot;
+  };
+  if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
+    return localId===requestedActiveId?localInflight:null;
+  }
+  if(activeId&&localId!==activeId) return selectDurableSnapshot();
+
+  const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
+  const serverSeq=Math.max(0,Number(serverLiveSnapshot.lastRunJournalSeq)||0);
+  return serverSeq>=localSeq?selectDurableSnapshot():localInflight;
+}
+
+function _anchorActivitySceneStreamId(scene){
+  if(!scene||typeof scene!=='object') return '';
+  const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+  return String(scene.stream_id||scene.streamId||(identity&&(identity.stream_id||identity.streamId))||'').trim();
+}
+
+function _anchorActivitySceneMatchesStream(scene, activeStreamId){
+  const activeId=String(activeStreamId||'').trim();
+  if(!activeId) return true;
+  const sceneId=_anchorActivitySceneStreamId(scene);
+  return !sceneId||sceneId===activeId;
+}
+
+function _runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId){
   const inflight=INFLIGHT&&sid?INFLIGHT[sid]:null;
-  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'){
+  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(inflight.anchorActivityScene, activeStreamId)){
     return inflight.anchorActivityScene;
   }
   const snapshot=S.session&&S.session.runtime_journal_snapshot;
   const scene=snapshot&&(snapshot.anchor_activity_scene||snapshot.anchorActivityScene);
-  return scene&&scene.version==='activity_scene_v1'?scene:null;
+  return scene&&scene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(scene, activeStreamId)?scene:null;
 }
 
 function _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid){
   if(!activeStreamId||typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneSnapshotForStream!=='function') return false;
-  const scene=_runtimeJournalAnchorActivitySceneForSession(sid);
+  const scene=_runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId);
   if(!scene) return false;
   return !!window._renderLiveAnchorActivitySceneSnapshotForStream(activeStreamId, scene, sid);
 }
@@ -1362,7 +1403,11 @@ async function newSession(flash, options={}){
       profile:S.activeProfile||'default',
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
-    if(options&&options.worktree) reqBody.worktree=true;
+    // Three-value worktree contract (#6022): explicit true/false is forwarded
+    // verbatim; an ABSENT key lets the server apply the agent's config-level
+    // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
+    // config default can never mint a worktree (+ branch) on mere page load.
+    if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
@@ -1623,9 +1668,21 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
+  // notifications so extensions always see the canonical session id, not the
+  // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+  }
+  // Extension pre-open hook — fires once per sidebar click, not on every call.
+  // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
+  // when loadSession runs the actual navigation inside it.
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
+    if(_preResult&&_preResult.cancel===true){
+      return;
+    }
   }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
@@ -1783,7 +1840,7 @@ async function loadSession(sid){
           return;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true});
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
       }
@@ -1894,8 +1951,8 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    if (_isCurrentLoad()) _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
+    _loadingSessionId=null;
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
@@ -1996,6 +2053,7 @@ async function loadSession(sid){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
       INFLIGHT[sid]={
+        streamId:String(stored.streamId||''),
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
@@ -2010,6 +2068,7 @@ async function loadSession(sid){
         lastAssistantText:String(stored.lastAssistantText||''),
         lastReasoningText:String(stored.lastReasoningText||''),
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
         anchorActivityScene:(stored.anchorActivityScene&&stored.anchorActivityScene.version==='activity_scene_v1')?stored.anchorActivityScene:null,
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
@@ -2035,8 +2094,12 @@ async function loadSession(sid){
   const serverLiveSnapshot=activeStreamId
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
-  if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
-    INFLIGHT[sid]=serverLiveSnapshot;
+  const hadLiveRecoveryInflight=!!INFLIGHT[sid];
+  const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
+  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
+  else if(hadLiveRecoveryInflight&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 
   if(INFLIGHT[sid]){
@@ -2323,6 +2386,10 @@ async function loadSession(sid){
   } else {
     _hideHandoffHint();
   }
+  // Extension post-load hook
+  if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
+  }
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────
@@ -2405,12 +2472,21 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  // Extension pre-open hook — before any side-effects (external import, profile switching).
+  // Handler returns {cancel:true} to prevent the open.
+  if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
+    if(_preResult&&_preResult.cancel===true) return;
+  }
+  // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
+  if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
   await _ensureSidebarSessionProfile(session);
-  await loadSession(session.session_id, loadOpts);
+  // Tell loadSession to skip its pre-hook — we already ran it above.
+  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
 }
 
@@ -2924,6 +3000,24 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// ============================================================================
+// COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
+// ============================================================================
+// This is a hand-mirrored copy of the backend's GET /api/session ?msg_limit=
+// ceiling. _loadOlderMessages grows its msg_limit tail window by
+// +_INITIAL_MSG_LIMIT each load; once growth would exceed this ceiling the
+// server clamps and the tail stops growing, so we switch to msg_before paging
+// (a fixed-size backward page keyed off _oldestIdx) instead. This const is the
+// static FALLBACK default only — the live ceiling is read from the /api/session
+// `_msg_limit_max` metadata into _msgLimitMax below (#6177), so the two can no
+// longer drift. Keep this fallback value roughly in sync with the backend
+// _MAX_MSG_LIMIT for the mixed-version case where the server omits the field.
+const _MSG_LIMIT_MAX = 500;
+// Live server-advertised msg_limit ceiling. Declared at module scope with the
+// static fallback so the reload-width paths (_ensureMessagesLoaded /
+// _loadOlderMessages) always read a defined value even before the first
+// /api/session response lands; refreshed from `_msg_limit_max` on each load.
+let _msgLimitMax = _MSG_LIMIT_MAX;
 let _sameSessionForceReloadHint = null;
 
 function _currentLoadedRenderableMessageCount(){
@@ -3028,11 +3122,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // A reload window above the server's msg_limit ceiling would be clamped by
+  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
+  // silently SHRINK an already-loaded transcript that had more than the ceiling
+  // of rows visible (rows 400–999 replaced by 500–999). When the requested
+  // window exceeds the ceiling, fall back to the bare full-transcript request
+  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
+  // already-loaded older rows (Codex gate #6154, silent row-loss).
+  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
+  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
@@ -3047,6 +3149,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
+  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -3527,18 +3630,34 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    // Ask the server for a larger authoritative tail window instead of a
-    // separate msg_before page. The same /api/session contract handles both —
-    // post-#2716 the backend always runs the full append-only merge, so a
-    // larger msg_limit on the same call produces the same merged transcript
-    // we'd get by stitching pages, but without client-side index bookkeeping.
-    // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
-    // newly exposed head is what we expose to the user.
+    // Two strategies, chosen by whether the growing tail window still fits under
+    // the server's msg_limit ceiling (_MSG_LIMIT_MAX, mirroring backend
+    // _MAX_MSG_LIMIT):
+    //
+    //  - Below the ceiling: ask for a larger authoritative tail window
+    //    (currentLoaded + _INITIAL_MSG_LIMIT). Post-#2716 the backend runs the
+    //    full append-only merge, so a larger msg_limit produces the same merged
+    //    transcript we'd get by stitching pages, without client-side index
+    //    bookkeeping. The newly exposed head is what we expose to the user.
+    //
+    //  - At/above the ceiling: the server clamps msg_limit, so the tail window
+    //    stops growing and this strategy would stall (the same clamped tail is
+    //    returned, olderMsgs -> 0). Switch to msg_before paging — a fixed
+    //    _INITIAL_MSG_LIMIT backward page keyed off _oldestIdx — which is
+    //    bounded and never hits the ceiling, so the head stays reachable for
+    //    arbitrarily long transcripts. (This is the same paging request the
+    //    race-fallback below uses, proven correct there.)
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
-      {timeoutMs:120000}
-    );
+    const useBeforePaging = requestedLimit >= _msgLimitMax;
+    const data = useBeforePaging
+      ? await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        )
+      : await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
+          {timeoutMs:120000}
+        );
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -3565,7 +3684,14 @@ async function _loadOlderMessages() {
     // the server appended new messages (or merge filtered something) while we
     // were awaiting, the suffix won't line up — fall back to the legacy
     // msg_before page so we never drop visible older messages on the floor.
-    let tailMatches = expandedMsgs.length >= currentLen;
+    // When useBeforePaging is true, `data` is a bounded msg_before OLDER page,
+    // not a cumulative tail. A raw-row-heavy older page whose visible text
+    // repeats the current tail could otherwise pass the suffix check below and
+    // be wholesale-replaced AS IF it were the full tail — silently discarding
+    // the current (newer) rows and marking history complete. Gate the suffix
+    // heuristic on !useBeforePaging so every msg_before page is always treated
+    // as an older page and prepended (Codex gate #6154, silent row-loss).
+    let tailMatches = !useBeforePaging && expandedMsgs.length >= currentLen;
     if (tailMatches && currentLen > 0) {
       const start = expandedMsgs.length - currentLen;
       for (let i = 0; i < currentLen; i++) {
@@ -3579,18 +3705,22 @@ async function _loadOlderMessages() {
     let olderMsgs = expandedMsgs.slice(0, olderCount);
     let nextMessages = expandedMsgs;
     if (!tailMatches) {
-      // Race fallback: keep the legacy index-page request as the
-      // correctness-preserving alternative. Same guards reapplied because
-      // we just awaited again.
-      const fallback = await api(
-        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
-        {timeoutMs:120000}
-      );
-      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
-      if (!S.session || S.session.session_id !== sid) return;
-      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-      if (_messagesGeneration !== startGeneration) return;
-      responseSession = fallback.session;
+      // Race fallback (or the over-ceiling msg_before primary path): keep the
+      // legacy index-page request as the correctness-preserving alternative.
+      // When useBeforePaging is true we already fetched a msg_before page as
+      // the primary `data`, so reuse it instead of re-fetching. Same guards
+      // reapplied because we just awaited again (skipped for the reuse case).
+      if (!useBeforePaging) {
+        const fallback = await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        );
+        if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+        if (!S.session || S.session.session_id !== sid) return;
+        if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+        if (_messagesGeneration !== startGeneration) return;
+        responseSession = fallback.session;
+      }
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
@@ -3777,6 +3907,8 @@ _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
+let _sessionActionMenuId = 0;
+let _sessionActionPreviousFocus = null;
 const _expandedChildSessionKeys = new Set();
 const _expandedLineageKeys = new Set();
 const _lineageReportCache = new Map();
@@ -4136,6 +4268,7 @@ function _renderBatchActionBar(){
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
+      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -4144,7 +4277,9 @@ function _renderBatchActionBar(){
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -4175,7 +4310,15 @@ function _showBatchProjectPicker(){
   setTimeout(()=>document.addEventListener('click',close),0);
 }
 
-function closeSessionActionMenu(){
+function _focusSessionActionMenuRestoreTarget(target){
+  if(!target||!target.isConnected||typeof target.focus!=='function') return false;
+  try{target.focus({preventScroll:true});}catch(_){target.focus();}
+  return document.activeElement===target;
+}
+
+function closeSessionActionMenu({restoreFocus=false}={}){
+  const focusTarget=restoreFocus?_sessionActionAnchor:null;
+  const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
     _sessionActionMenu = null;
@@ -4183,12 +4326,16 @@ function closeSessionActionMenu(){
   if(_sessionActionAnchor){
     if(_sessionActionAnchor.classList&&_sessionActionAnchor.classList.contains('session-actions-trigger')){
       _sessionActionAnchor.classList.remove('active');
+      _sessionActionAnchor.setAttribute('aria-expanded','false');
+      _sessionActionAnchor.removeAttribute('aria-controls');
     }
     const row=_sessionActionAnchor.closest('.session-item,.session-child-session');
     if(row) row.classList.remove('menu-open','long-pressing');
     _sessionActionAnchor = null;
   }
   _sessionActionSessionId = null;
+  _sessionActionPreviousFocus = null;
+  if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -4240,6 +4387,7 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
   const opt=document.createElement('button');
   opt.type='button';
   opt.className='ws-opt session-action-opt'+(extraClass?` ${extraClass}`:'');
+  opt.setAttribute('role','menuitem');
   // Compact context-menu shape (#3223 redesign, Nathan 2026-06-01): show only
   // icon + label, matching VS Code / browser / ChatGPT conversation menus. The
   // descriptive `meta` is preserved as a hover tooltip (title=) so the
@@ -4309,15 +4457,44 @@ async function _copySessionLink(session){
 }
 
 function _mountSessionActionMenu(menu, session, anchorEl){
+  _sessionActionPreviousFocus=document.activeElement;
   document.body.appendChild(menu);
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
-  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
+  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')){
+    anchorEl.classList.add('active');
+    anchorEl.setAttribute('aria-expanded','true');
+    anchorEl.setAttribute('aria-controls',menu.id);
+  }
   const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
+  const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
+  menu.addEventListener('keydown',e=>{
+    const items=menuItems();
+    if(e.key==='Escape'){
+      e.preventDefault();
+      e.stopPropagation();
+      closeSessionActionMenu({restoreFocus:true});
+      return;
+    }
+    if(!items.length) return;
+    const currentIndex=Math.max(0,items.indexOf(document.activeElement));
+    let nextIndex=null;
+    if(e.key==='ArrowDown') nextIndex=(currentIndex+1)%items.length;
+    else if(e.key==='ArrowUp') nextIndex=(currentIndex-1+items.length)%items.length;
+    else if(e.key==='Home') nextIndex=0;
+    else if(e.key==='End') nextIndex=items.length-1;
+    if(nextIndex===null) return;
+    e.preventDefault();
+    try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}
+  });
+  const firstAction=menuItems()[0];
+  if(firstAction){
+    try{firstAction.focus({preventScroll:true});}catch(_){firstAction.focus();}
+  }
 }
 
 function _findSessionRenameRow(sessionId){
@@ -4622,6 +4799,9 @@ function _openSessionActionMenu(session, anchorEl){
   const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
   menu.className='session-action-menu';
+  menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
+  menu.setAttribute('role','menu');
+  menu.setAttribute('aria-label', 'Conversation actions');
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
@@ -4812,7 +4992,7 @@ document.addEventListener('scroll',e=>{
   closeSessionActionMenu();
 }, true);
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu();
+  if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu({restoreFocus:true});
 });
 window.addEventListener('resize',()=>{
   if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
@@ -7769,7 +7949,7 @@ function renderSessionListFromCache(){
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -7975,8 +8155,6 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          // #5409: close mobile sidebar synchronously before navigation
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
         lineageList.appendChild(row);
@@ -7989,8 +8167,6 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
       const openChildSession=async(childSession)=>{
-        // #5409: close mobile sidebar synchronously before navigation
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -8250,6 +8426,7 @@ function renderSessionListFromCache(){
             menuBtn.className='session-actions-trigger';
             menuBtn.title='Conversation actions';
             menuBtn.setAttribute('aria-haspopup','menu');
+            menuBtn.setAttribute('aria-expanded','false');
             menuBtn.setAttribute('aria-label','Conversation actions');
             menuBtn.innerHTML=ICONS.more;
             const stopMenuPointer=(e)=>e.stopPropagation();
@@ -8348,6 +8525,7 @@ function renderSessionListFromCache(){
       menuBtn.className='session-actions-trigger';
       menuBtn.title='Conversation actions';
       menuBtn.setAttribute('aria-haspopup','menu');
+      menuBtn.setAttribute('aria-expanded','false');
       menuBtn.setAttribute('aria-label','Conversation actions');
       menuBtn.innerHTML=ICONS.more;
       const stopMenuPointer=(e)=>e.stopPropagation();
@@ -8616,11 +8794,6 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          // #5409: close mobile sidebar synchronously BEFORE awaiting _openSidebarSession
-          // so the user gets instant feedback that navigation is happening, even
-          // for large sessions where loadSession can take 3-15s (metadata fetch +
-          // message load + renderMessages DOM build on slow iOS WKWebView).
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');
@@ -8834,6 +9007,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
+  const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
@@ -8857,10 +9031,11 @@ async function deleteSession(sid, beforeDelete=null){
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     }
   }
-  showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
+  if(cleanupFailed) showToast(t('delete_failed'),0,'error');
+  else showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();
-  return true;
+  return !cleanupFailed;
 }
 
 // ── Project helpers ─────────────────────────────────────────────────────

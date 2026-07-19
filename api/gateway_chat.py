@@ -31,7 +31,7 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +314,9 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
         "preview": payload.get("label") or payload.get("preview"),
-        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "args": bound_run_journal_snapshot_args(payload.get("args"))
+        if isinstance(payload.get("args"), dict)
+        else {},
         "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
     if tid:

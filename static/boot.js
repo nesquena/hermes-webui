@@ -303,7 +303,10 @@ async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
   if(_workspacePanelMode!=='browse') return false;
   if(!S._profileDefaultWorkspace) return false;
   try{
-    await newSession(false, {awaitWorkspaceLoad: true});
+    // worktree:false is explicit and load-bearing — this auto-bind runs on
+    // page load, and a config-level worktree default must never leak a fresh
+    // worktree + branch from simply opening the UI (#6022).
+    await newSession(false, {awaitWorkspaceLoad: true, worktree: false});
     return true;
   }catch(e){
     console.warn('[hermes] failed to bind fresh default workspace session', e);
@@ -1409,6 +1412,68 @@ window._hermesTtsSynth=function(id, text, opts){
     });
 };
 
+// ── Session-open hook (for extensions) ────────────────────────────────────
+var _HERMES_SESSION_OPEN_HANDLERS=[];
+window.registerHermesSessionOpenHandler=function(fn){
+  if(typeof fn!=='function') return false;
+  if(_HERMES_SESSION_OPEN_HANDLERS.indexOf(fn)>=0) return false;
+  _HERMES_SESSION_OPEN_HANDLERS.push(fn);
+  return true;
+};
+window._hermesNotifySessionOpen=function(sid, data, opts){
+  opts=opts||{};
+  for(var i=0;i<_HERMES_SESSION_OPEN_HANDLERS.length;i++){
+    try{
+      var result=_HERMES_SESSION_OPEN_HANDLERS[i](sid, data, opts);
+      if(opts.preload===true && result&&result.cancel===true) return {cancel:true};
+    }catch(_){}
+  }
+  return {};
+};
+
+// ── Transcript renderer (for extensions) ───────────────────────────────────
+window.renderTranscript=function(container, messages, opts){
+  if(!container||!Array.isArray(messages)) return container;
+  opts=opts||{};
+  container.innerHTML='';
+  var md=window.renderMd||null;
+  for(var i=0;i<messages.length;i++){
+    var msg=messages[i];
+    if(!msg||!msg.role||msg.role==='tool') continue;
+    var content;
+    if(typeof msg.content==='string'){
+      content=msg.content;
+    }else if(msg.content==null){
+      content='';
+    }else if(Array.isArray(msg.content)){
+      // Multi-part content (OpenAI/Anthropic API style) — concatenate text parts.
+      content=msg.content.map(function(p){return (p&&typeof p.text==='string')?p.text:''}).join('');
+    }else{
+      content=String(msg.content);
+    }
+    if(!content&&opts.skipEmpty) continue;
+    var row=document.createElement('div');
+    row.className='msg-row';
+    row.setAttribute('data-role',msg.role);
+    var body=document.createElement('div');
+    body.className='msg-body';
+    try{
+      if(md){
+        var html=md(content);
+        if(html!=null){body.innerHTML=html}else{body.textContent=content}
+      }else{
+        body.textContent=content;
+      }
+    }catch(_){body.textContent=content}
+    row.appendChild(body);
+    container.appendChild(row);
+  }
+  if(typeof _rehydrateTransparentStreamDom==='function'){
+    try{_rehydrateTransparentStreamDom(container);}catch(_){}
+  }
+  return container;
+};
+
 // ── Turn-based voice mode (#1333) ────────────────────────────────────────
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
@@ -2320,6 +2385,19 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
+  // Cmd/Ctrl+/ focuses the message composer without creating a chat.
+  // Match on the '/' CHARACTER (e.key), not the physical key position: on QWERTZ
+  // layouts the physical Slash key produces Ctrl+- (browser zoom-out) and '/' is
+  // typed as Shift+7, so matching the physical code both steals zoom and misses
+  // the real '/' chord. e.key==='/' is layout-correct on every keyboard.
+  if((e.metaKey||e.ctrlKey)&&!e.altKey&&e.key==='/'){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
+    const composer=$('msg');
+    if(composer){e.preventDefault();composer.focus();}
+    return;
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
@@ -3163,6 +3241,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       ? s.chat_activity_display_mode
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
+    window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -3311,6 +3390,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
+    window._transparentEventTimestamps=true;
     window._terminalAutoExpandOnOutput=false;
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -3481,7 +3561,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   }
   if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
   // Fetch available models without blocking session restore. The static HTML
-  // options are enough for first paint; the dynamic provider list can settle
+  // options enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
   const _redirectBootModelDropdownIfUnauth=(res)=>{
     if(!res||res.status!==401) return false;

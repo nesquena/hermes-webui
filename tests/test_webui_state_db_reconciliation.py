@@ -125,6 +125,13 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     return session
 
 
+def _large_timestamped_sidecar_messages(count=500):
+    return [
+        {"role": "user", "content": f"sidecar {idx}", "timestamp": float(idx)}
+        for idx in range(count)
+    ]
+
+
 def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
     import api.models as models
 
@@ -532,7 +539,7 @@ def test_msg_limit_session_load_reads_only_recent_state_db_tail(monkeypatch, tmp
     assert messages[-1]["content"] == "external answer"
 
 
-def test_msg_limit_session_load_matches_full_read_with_null_state_db_timestamp(monkeypatch, tmp_path):
+def test_msg_limit_session_load_falls_back_with_null_state_db_timestamp(monkeypatch, tmp_path):
     import api.routes as routes
 
     sid = "webui_reconcile_limited_tail_null"
@@ -580,12 +587,255 @@ def test_msg_limit_session_load_matches_full_read_with_null_state_db_timestamp(m
     routes.handle_get(handler, urlparse(handler.path))
 
     assert handler.status == 200
-    assert captured["since_timestamp"] == 200.0
-    assert captured["row_count"] == 301
+    assert captured["since_timestamp"] is None
+    assert captured["row_count"] == 501
     session_payload = handler.response_json["session"]
     assert session_payload["messages"] == expected_window
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
+
+
+def test_limited_state_db_prefix_missing_db_skips_visible_key_normalization(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_missing_db"
+    sidecar_messages = _large_timestamped_sidecar_messages(10_000)
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    visible_key_calls = 0
+    real_visible_key = routes._session_message_visible_key
+
+    def counted_visible_key(message):
+        nonlocal visible_key_calls
+        visible_key_calls += 1
+        return real_visible_key(message)
+
+    monkeypatch.setattr(routes, "_session_message_visible_key", counted_visible_key)
+    monkeypatch.setattr(models, "_session_message_visible_key", counted_visible_key)
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor is None
+    assert returned_sidecar == sidecar_messages
+    assert visible_key_calls == 0
+
+
+def test_limited_state_db_prefix_count_mismatch_skips_visible_key_normalization(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_count_mismatch"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, sidecar_messages[:10])
+    visible_key_calls = 0
+    real_visible_key = routes._session_message_visible_key
+
+    def counted_visible_key(message):
+        nonlocal visible_key_calls
+        visible_key_calls += 1
+        return real_visible_key(message)
+
+    monkeypatch.setattr(routes, "_session_message_visible_key", counted_visible_key)
+    monkeypatch.setattr(models, "_session_message_visible_key", counted_visible_key)
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor is None
+    assert returned_sidecar == sidecar_messages
+    assert visible_key_calls == 0
+
+
+def test_limited_state_db_prefix_exact_match_runs_key_comparison(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_exact"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, sidecar_messages)
+    summary_calls = []
+    key_calls = []
+    visible_key_calls = 0
+    real_summary_reader = routes.get_state_db_session_message_prefix_summary
+    real_key_reader = routes.get_state_db_session_message_keys_before_timestamp
+    real_visible_key = routes._session_message_visible_key
+
+    def prefix_summary(*args, **kwargs):
+        summary_calls.append((args, kwargs))
+        return real_summary_reader(*args, **kwargs)
+
+    def counted_key_reader(*args, **kwargs):
+        key_calls.append((args, kwargs))
+        return real_key_reader(*args, **kwargs)
+
+    def counted_visible_key(message):
+        nonlocal visible_key_calls
+        visible_key_calls += 1
+        return real_visible_key(message)
+
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_prefix_summary",
+        prefix_summary,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_keys_before_timestamp",
+        counted_key_reader,
+    )
+    monkeypatch.setattr(routes, "_session_message_visible_key", counted_visible_key)
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor == 200.0
+    assert returned_sidecar == sidecar_messages
+    assert len(summary_calls) == 1
+    assert len(key_calls) == 1
+    assert visible_key_calls == 200
+
+
+def test_limited_state_db_prefix_equal_count_different_content_falls_back(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_content_mismatch"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    state_messages = [dict(message) for message in sidecar_messages]
+    state_messages[100]["content"] = "edited state content"
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, state_messages)
+    summary_calls = []
+    key_calls = []
+    real_summary_reader = routes.get_state_db_session_message_prefix_summary
+    real_key_reader = routes.get_state_db_session_message_keys_before_timestamp
+
+    def prefix_summary(*args, **kwargs):
+        summary_calls.append((args, kwargs))
+        return real_summary_reader(*args, **kwargs)
+
+    def counted_key_reader(*args, **kwargs):
+        key_calls.append((args, kwargs))
+        return real_key_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_prefix_summary",
+        prefix_summary,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_keys_before_timestamp",
+        counted_key_reader,
+    )
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor is None
+    assert returned_sidecar == sidecar_messages
+    assert len(summary_calls) == 1
+    assert len(key_calls) == 1
+
+
+def test_limited_state_db_prefix_equal_empty_assistant_different_tool_calls_falls_back(
+    monkeypatch,
+    tmp_path,
+):
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_tool_calls_mismatch"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    sidecar_messages[100] = {
+        "role": "assistant",
+        "content": "",
+        "timestamp": 100.0,
+        "tool_calls": [{"id": "sidecar-call", "function": {"name": "terminal"}}],
+    }
+    state_messages = [dict(message) for message in sidecar_messages]
+    state_messages[100] = {
+        "role": "assistant",
+        "content": "",
+        "timestamp": 100.0,
+        "tool_calls": json.dumps([{"id": "state-call", "function": {"name": "terminal"}}]),
+    }
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, state_messages)
+    summary_calls = []
+    key_calls = []
+    real_summary_reader = routes.get_state_db_session_message_prefix_summary
+    real_key_reader = routes.get_state_db_session_message_keys_before_timestamp
+
+    def prefix_summary(*args, **kwargs):
+        summary_calls.append((args, kwargs))
+        return real_summary_reader(*args, **kwargs)
+
+    def counted_key_reader(*args, **kwargs):
+        key_calls.append((args, kwargs))
+        return real_key_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_prefix_summary",
+        prefix_summary,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_keys_before_timestamp",
+        counted_key_reader,
+    )
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor is None
+    assert returned_sidecar == sidecar_messages
+    assert len(summary_calls) == 1
+    assert len(key_calls) == 1
+
+
+def test_limited_state_db_prefix_missing_sidecar_timestamp_preserves_full_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    import api.routes as routes
+
+    sid = "webui_reconcile_prefix_missing_sidecar_timestamp"
+    sidecar_messages = _large_timestamped_sidecar_messages()
+    sidecar_messages[100]["timestamp"] = None
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    def unexpected_prefix_summary(*args, **kwargs):
+        raise AssertionError("missing sidecar timestamps must fall back before state.db preflight")
+
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_prefix_summary",
+        unexpected_prefix_summary,
+        raising=False,
+    )
+
+    floor, returned_sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        30,
+    )
+
+    assert floor is None
+    assert returned_sidecar == sidecar_messages
 
 
 def test_msg_limit_session_load_bails_when_older_state_db_row_changes_offsets(monkeypatch, tmp_path):

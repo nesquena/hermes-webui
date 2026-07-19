@@ -166,13 +166,13 @@ def test_streaming_py_imports_has_pending(cleanup_test_sessions):
 
 
 def test_aiagent_imported_in_streaming(cleanup_test_sessions):
-    """R2b: api/streaming.py must import AIAgent.
+    """R2b: api/streaming.py must resolve AIAgent through the runtime guard.
     When missing, the streaming thread crashed immediately after being spawned.
     """
     src = (REPO_ROOT / "api/streaming.py").read_text()
-    assert "AIAgent" in src, "AIAgent not referenced in api/streaming.py"
-    assert "from run_agent import AIAgent" in src or "import AIAgent" in src, \
-        "AIAgent must be imported in api/streaming.py"
+    assert "get_ai_agent_class" in src, "guarded AIAgent resolver not referenced in api/streaming.py"
+    assert "from api.agent_runtime import" in src and "get_ai_agent_class" in src, \
+        "AIAgent must be resolved through api.agent_runtime in api/streaming.py"
 
 
 # ── R5: SSE loop did not break on cancel event (Sprint 10 bug) ───────────────
@@ -938,9 +938,13 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "live reasoning SSE events must update the active Worklog Thinking Card text"
     assert "const liveThinkingText=_liveThinkingText();" in src, \
         "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
-    assert "if(!_upsertAnchorReasoning(liveThinkingText))" in src, \
+    assert "const anchorReasoningFallback={};" in src, \
+        "live reasoning SSE events must capture the active anchor id for fallback"
+    assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in src, \
         "live reasoning SSE events must prefer the anchor renderer before falling back"
-    assert "_updateLiveThinkingCard(liveThinkingText)" in src, \
+    assert "_updateLiveThinkingCard(liveThinkingText,{" in src and "...anchorReasoningFallback" in src, \
+        "live reasoning SSE events must carry anchor identity into the fallback renderer"
+    assert "anchorRenderFallback:true" in src and "sessionId:activeSid" in src and "streamId" in src, \
         "live reasoning SSE events must keep the current segment's Worklog Thinking Card as fallback"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
         "messages.js must listen for live tool completion SSE events"

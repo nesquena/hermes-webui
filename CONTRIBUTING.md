@@ -8,6 +8,8 @@ Hermes WebUI is intentionally simple to work on: Python on the server, vanilla J
 
 - Read [`AGENTS.md`](AGENTS.md) if an AI assistant is doing or helping with the
   change.
+- Read [`docs/GUIDELINES.md`](docs/GUIDELINES.md) — the change guidelines that get a PR
+  merged in one review round instead of several (what "complete and verified" means here).
 - Read [`docs/CONTRACTS.md`](docs/CONTRACTS.md) and any linked contract/RFC for
   the subsystem you will touch.
 - For UI or UX work, read [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md)
@@ -94,6 +96,19 @@ There is currently no PR template in this repo, so include the important section
 - Verification
 - Risks / Follow-ups
 - Model Used
+
+Two things reviewers look for specifically in Verification, both detailed in
+[`docs/GUIDELINES.md`](docs/GUIDELINES.md):
+
+- When the issue pins the bug's shape — a session capture, a script, exact steps, or
+  a fenced JSON block / field-level trigger conditions — bind your test to *that* shape
+  rather than a fixture rebuilt from your reading of it, satisfying every condition it
+  names; otherwise the test can pass while the reported bug goes untouched. Reconstruct
+  the shape yourself only when the issue leaves it unpinned, and then say what you assumed.
+- For any claim the repo doesn't own (browser behavior, a provider's API, a registry,
+  an OS convention), name who owns the truth and confirm your proof is one they'd accept.
+  In-page automation proves page behavior, not browser behavior; a mock proves your
+  intent, not the provider's contract.
 
 If the change is user-visible, include screenshots or a short video.
 

@@ -8,6 +8,7 @@ the hermes-agent repo.
 from __future__ import annotations
 import json
 import logging
+from bisect import bisect_left
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
@@ -144,44 +145,201 @@ def truncate_context_for_display_keep(
             tool_calls_sig,
         )
 
-    def _first_match_from(message: Any, start_idx: int) -> tuple[int | None, int | None]:
+    # Materialize signatures once.  The matcher deliberately keeps the original
+    # rows in ``ctx``; these records are only an alignment index. A signature
+    # failure is deferred because the old matcher may return before reaching it.
+    context_records = []
+    deferred_signature_positions: list[int] = []
+    for idx, row in enumerate(ctx):
+        try:
+            row_signature = _row_signature(row)
+        except Exception:
+            row_signature = None
+            deferred_signature_positions.append(idx)
+        context_records.append((row, row_signature))
+    message_signatures = [_row_signature(message) for message in msgs]
+    id_positions: dict[Any, list[int]] = {}
+    signature_positions: dict[tuple[str, ...], list[int]] = {}
+    signature_no_id_positions: dict[tuple[str, ...], list[int]] = {}
+    signature_no_timestamp_positions: dict[tuple[str, ...], list[int]] = {}
+    signature_no_id_no_timestamp_positions: dict[tuple[str, ...], list[int]] = {}
+    signature_timestamp_positions: dict[
+        tuple[tuple[str, ...], Any], list[int]
+    ] = {}
+    signature_timestamp_no_id_positions: dict[
+        tuple[tuple[str, ...], Any], list[int]
+    ] = {}
+    unsafe_id_positions: list[int] = []
+    unsafe_timestamp_positions: dict[tuple[str, ...], list[int]] = {}
+    unsafe_timestamp_no_id_positions: dict[tuple[str, ...], list[int]] = {}
+
+    def _safe_raw_value(value: Any) -> bool:
+        # Keep dict lookup semantics aligned with the old explicit ``==`` scan:
+        # only ordinary built-in metadata values may use the raw-value indexes.
+        # In particular, custom objects and non-reflexive NaN values can make a
+        # dict find a key that the old equality check rejected.
+        if value is None:
+            return True
+        if type(value) not in (str, int, float):
+            return False
+        try:
+            hash(value)
+            return value == value
+        except Exception:
+            return False
+
+    for idx, (context_row, context_sig) in enumerate(context_records):
+        if context_sig is not None:
+            signature_positions.setdefault(context_sig, []).append(idx)
+        if not isinstance(context_row, dict):
+            continue
+        context_id = context_row.get('id')
+        context_ts = context_row.get('timestamp')
+        if context_sig is not None:
+            if context_id is None:
+                signature_no_id_positions.setdefault(context_sig, []).append(idx)
+            if context_ts is None:
+                signature_no_timestamp_positions.setdefault(context_sig, []).append(idx)
+            if context_id is None and context_ts is None:
+                signature_no_id_no_timestamp_positions.setdefault(
+                    context_sig, []
+                ).append(idx)
+        if context_id is not None and _safe_raw_value(context_id):
+            id_positions.setdefault(context_id, []).append(idx)
+        elif context_id is not None:
+            unsafe_id_positions.append(idx)
+        if (
+            context_sig is not None
+            and context_ts is not None
+            and _safe_raw_value(context_ts)
+        ):
+            timestamp_key = (context_sig, context_ts)
+            signature_timestamp_positions.setdefault(timestamp_key, []).append(idx)
+            if context_id is None:
+                signature_timestamp_no_id_positions.setdefault(
+                    timestamp_key, []
+                ).append(idx)
+        elif context_sig is not None and context_ts is not None:
+            unsafe_timestamp_positions.setdefault(context_sig, []).append(idx)
+            if context_id is None:
+                unsafe_timestamp_no_id_positions.setdefault(
+                    context_sig, []
+                ).append(idx)
+
+    def _first_at_or_after(positions: list[int] | None, start_idx: int) -> int | None:
+        if not positions:
+            return None
+        offset = bisect_left(positions, start_idx)
+        return positions[offset] if offset < len(positions) else None
+
+    def _lazy_first_match_from(
+        message: Any,
+        start_idx: int,
+    ) -> tuple[int | None, int | None]:
+        """Match exactly as the original ordered scan did."""
         msg_sig = _row_signature(message)
         if msg_sig is None:
             return None, None
-        msg_id = message.get('id')
-        msg_ts = message.get('timestamp')
         weak_matches: list[int] = []
         for idx in range(start_idx, len(ctx)):
             context_row = ctx[idx]
             context_sig = _row_signature(context_row)
-            if context_sig is None:
+            if context_sig is None or not isinstance(context_row, dict):
                 continue
-
             context_id = context_row.get('id')
+            msg_id = message.get('id')
             if context_id is not None and msg_id is not None:
                 if context_id == msg_id:
                     return idx, None
                 continue
-
             if context_sig != msg_sig:
                 continue
-
             context_ts = context_row.get('timestamp')
+            msg_ts = message.get('timestamp')
             if context_ts is not None and msg_ts is not None:
                 if context_ts == msg_ts:
                     return idx, None
                 continue
-
             weak_matches.append(idx)
             if len(weak_matches) > 1:
                 return None, weak_matches[0]
         return (weak_matches[0], None) if len(weak_matches) == 1 else (None, None)
 
+    def _first_match_from(
+        message_idx: int,
+        message: Any,
+        start_idx: int,
+    ) -> tuple[int | None, int | None]:
+        msg_sig = message_signatures[message_idx]
+        if msg_sig is None:
+            return None, None
+        msg_id = message.get('id')
+        msg_ts = message.get('timestamp')
+        deferred_reachable = _first_at_or_after(
+            deferred_signature_positions, start_idx
+        ) is not None
+        unsafe_id_reachable = (
+            msg_id is not None
+            and _first_at_or_after(unsafe_id_positions, start_idx) is not None
+        )
+        unsafe_timestamp_candidates = (
+            unsafe_timestamp_no_id_positions.get(msg_sig, [])
+            if msg_id is not None
+            else unsafe_timestamp_positions.get(msg_sig, [])
+        )
+        unsafe_timestamp_reachable = (
+            msg_ts is not None
+            and _first_at_or_after(unsafe_timestamp_candidates, start_idx) is not None
+        )
+        if not _safe_raw_value(msg_id) or not _safe_raw_value(msg_ts):
+            return _lazy_first_match_from(message, start_idx)
+        if deferred_reachable or unsafe_id_reachable or unsafe_timestamp_reachable:
+            return _lazy_first_match_from(message, start_idx)
+
+        exact_positions: list[int] = []
+        if msg_id is not None:
+            id_idx = _first_at_or_after(id_positions.get(msg_id), start_idx)
+            if id_idx is not None:
+                exact_positions.append(id_idx)
+        if msg_ts is not None:
+            timestamp_key = (msg_sig, msg_ts)
+            if msg_id is not None:
+                timestamp_positions = signature_timestamp_no_id_positions.get(
+                    timestamp_key, []
+                )
+            else:
+                timestamp_positions = signature_timestamp_positions.get(
+                    timestamp_key, []
+                )
+            timestamp_idx = _first_at_or_after(timestamp_positions, start_idx)
+            if timestamp_idx is not None:
+                exact_positions.append(timestamp_idx)
+        exact_idx = min(exact_positions, default=None)
+
+        if msg_id is not None and msg_ts is not None:
+            weak_candidates = signature_no_id_no_timestamp_positions.get(msg_sig)
+        elif msg_id is not None:
+            weak_candidates = signature_no_id_positions.get(msg_sig)
+        elif msg_ts is not None:
+            weak_candidates = signature_no_timestamp_positions.get(msg_sig)
+        else:
+            weak_candidates = signature_positions.get(msg_sig)
+        weak_start = bisect_left(weak_candidates, start_idx) if weak_candidates else 0
+        weak_positions = weak_candidates[weak_start:weak_start + 2] if weak_candidates else []
+        second_weak_idx = weak_positions[1] if len(weak_positions) > 1 else None
+        if second_weak_idx is not None and (
+            exact_idx is None or second_weak_idx < exact_idx
+        ):
+            return None, weak_positions[0]
+        if exact_idx is not None:
+            return exact_idx, None
+        return (weak_positions[0], None) if len(weak_positions) == 1 else (None, None)
+
     matches = [None] * len(msgs)
     ambiguous_matches = [None] * len(msgs)
     next_ctx_idx = 0
     for msg_idx, message in enumerate(msgs):
-        match_idx, ambiguous_idx = _first_match_from(message, next_ctx_idx)
+        match_idx, ambiguous_idx = _first_match_from(msg_idx, message, next_ctx_idx)
         matches[msg_idx] = match_idx
         ambiguous_matches[msg_idx] = ambiguous_idx
         if match_idx is not None:
