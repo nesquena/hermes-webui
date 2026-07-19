@@ -586,7 +586,17 @@ function renderSessionArtifacts(){
     if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
     return p;
   };
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  root.innerHTML = items.map(item => {
+    const dPath = displayPath(item.path);
+    const idx = dPath.lastIndexOf('/');
+    const fileName = idx >= 0 ? dPath.slice(idx + 1) : dPath;
+    const dirPath = idx >= 0 ? dPath.slice(0, idx) : '';
+    return `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)">
+      <div class="workspace-artifact-name">${esc(fileName)}</div>
+      ${dirPath ? `<div class="workspace-artifact-dir">${esc(dirPath)}</div>` : ''}
+      <div class="workspace-artifact-meta">${esc(item.source || 'session')}</div>
+    </button>`;
+  }).join('');
 }
 
 async function _workspacePathExists(path){
