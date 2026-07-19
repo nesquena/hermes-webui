@@ -113,7 +113,10 @@ def _cache_summary(
     expected_signature: tuple[int, int, int, int] | None = None,
 ) -> None:
     signature = _summary_cache_signature(path)
-    if signature is None or (expected_signature is not None and signature != expected_signature):
+    # The pre-read signature is an enforced TOCTOU precondition. In particular,
+    # a journal created after a missing-file read has ``None -> signature`` and
+    # must not cache the empty/unknown result under the new file's identity.
+    if signature is None or signature != expected_signature:
         return
     key = str(path)
     with _SUMMARY_CACHE_LOCK:
