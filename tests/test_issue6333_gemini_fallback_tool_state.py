@@ -1,4 +1,5 @@
-"""Regression coverage for #6333 Gemini fallback replay sanitization."""
+"""Regression coverage for #6333 Gemini fallback request-boundary replay repair."""
+import copy
 import pathlib
 import sys
 
@@ -7,167 +8,162 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
 
-def _unsigned_tool_history():
+GOOGLE_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+def _repair(messages, *, model, base_url):
+    from api.streaming import _repair_google_gemini_current_turn_tool_state_for_request
+
+    return _repair_google_gemini_current_turn_tool_state_for_request(
+        messages,
+        model=model,
+        base_url=base_url,
+    )
+
+
+def _prior_and_current_turn_history():
     return [
-        {"role": "user", "content": "look up the order"},
+        {"role": "user", "content": "look up the first order"},
         {
             "role": "assistant",
-            "content": "Looking that up.",
+            "content": "Found it.",
             "tool_calls": [
                 {
-                    "id": "call_glm_1",
+                    "id": "call_prior",
                     "type": "function",
-                    "function": {"name": "lookup", "arguments": '{"id":"7"}'},
+                    "function": {"name": "lookup", "arguments": '{"id":"1"}'},
                 },
             ],
         },
         {
             "role": "tool",
-            "tool_call_id": "call_glm_1",
+            "tool_call_id": "call_prior",
             "name": "lookup",
-            "content": "order 7: shipped",
+            "content": "order 1: shipped",
         },
-        {"role": "user", "content": "thanks, and the next one?"},
+        {"role": "user", "content": "now check the next one"},
+        {
+            "role": "assistant",
+            "content": "Checking the next order.",
+            "tool_calls": [
+                {
+                    "id": "call_current",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"id":"2"}'},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_current",
+            "name": "lookup",
+            "content": "order 2: pending",
+        },
     ]
 
 
-def test_google_fallback_prunes_unsigned_tool_call_and_linked_tool_row():
-    from api.streaming import _sanitize_messages_for_api
+def test_gemini3_request_repairs_only_current_turn_and_leaves_input_untouched():
+    messages = _prior_and_current_turn_history()
+    original = copy.deepcopy(messages)
 
-    result = _sanitize_messages_for_api(
-        _unsigned_tool_history(),
-        effective_provider="google",
+    result = _repair(
+        messages,
+        model="gemini-3-flash",
+        base_url=GOOGLE_OPENAI_BASE,
     )
+
+    assert messages == original, "request-boundary repair must not mutate canonical history"
+
+    prior_assistant = result[1]
+    assert prior_assistant.get("tool_calls"), "prior completed turns must stay intact"
+    assert any(
+        m.get("role") == "tool" and m.get("tool_call_id") == "call_prior"
+        for m in result
+    ), "prior completed tool rows must stay intact"
+
+    current_assistant = next(
+        m for m in result
+        if m.get("role") == "assistant" and m.get("content") == "Checking the next order."
+    )
+    assert "tool_calls" not in current_assistant, "current-turn unsigned Gemini 3 tool state must be stripped from the request copy"
     assert not any(
-        m.get("role") == "tool" and m.get("tool_call_id") == "call_glm_1"
+        m.get("role") == "tool" and m.get("tool_call_id") == "call_current"
         for m in result
-    ), "linked tool row must be pruned with an unsigned Gemini-unsafe tool call"
-    for message in result:
-        if message.get("role") != "assistant":
-            continue
-        assert not message.get("tool_calls"), (
-            "Google-targeted replay must prune unsigned historical tool calls. "
-            f"Got: {message}"
-        )
+    ), "linked current-turn tool rows must be removed with the stripped group"
 
 
-def test_configured_google_fallback_prunes_unsigned_history_before_switch():
-    from api.streaming import _sanitize_messages_for_api
-
-    result = _sanitize_messages_for_api(
-        _unsigned_tool_history(),
-        cfg={
-            "fallback_providers": [
-                {"provider": "google", "model": "gemini-2.5-flash"},
-            ],
-        },
-        effective_provider="z-ai",
-    )
-    assert not any(m.get("role") == "tool" for m in result)
-    assert all(
-        not m.get("tool_calls")
-        for m in result
-        if m.get("role") == "assistant"
-    )
-
-
-def test_gemini_alias_provider_also_prunes_unsigned_history():
-    from api.streaming import _sanitize_messages_for_api
-
-    result = _sanitize_messages_for_api(
-        _unsigned_tool_history(),
-        effective_provider="gemini",
-    )
-    assert not any(m.get("role") == "tool" for m in result)
-    assert all(
-        not m.get("tool_calls")
-        for m in result
-        if m.get("role") == "assistant"
-    )
-
-
-def test_google_fallback_keeps_signed_call_and_prunes_unsigned_sibling():
-    from api.streaming import _sanitize_messages_for_api
-
+def test_gemini3_parallel_group_keeps_unsigned_siblings_when_first_call_is_signed():
     messages = [
-        {"role": "user", "content": "first"},
+        {"role": "user", "content": "check both orders"},
         {
             "role": "assistant",
-            "content": "signed turn",
+            "content": "Checking both.",
             "tool_calls": [
                 {
                     "id": "call_signed",
                     "type": "function",
-                    "function": {"name": "safe", "arguments": "{}"},
-                    "extra_content": {"google": {"thought_signature": "sig-function"}},
+                    "function": {"name": "lookup", "arguments": '{"id":"1"}'},
+                    "extra_content": {"google": {"thought_signature": "sig-1"}},
+                },
+                {
+                    "id": "call_unsigned",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"id":"2"}'},
                 },
             ],
         },
         {
             "role": "tool",
             "tool_call_id": "call_signed",
-            "name": "safe",
-            "content": "ok",
-        },
-        {"role": "user", "content": "second"},
-        {
-            "role": "assistant",
-            "content": "unsigned turn",
-            "tool_calls": [
-                {
-                    "id": "call_unsigned",
-                    "type": "function",
-                    "function": {"name": "risky", "arguments": "{}"},
-                },
-            ],
+            "name": "lookup",
+            "content": "order 1: shipped",
         },
         {
             "role": "tool",
             "tool_call_id": "call_unsigned",
-            "name": "risky",
-            "content": "ok",
+            "name": "lookup",
+            "content": "order 2: pending",
         },
     ]
-    result = _sanitize_messages_for_api(messages, effective_provider="google")
-    kept_call_ids = {
-        tc.get("id")
-        for message in result
-        if message.get("role") == "assistant"
-        for tc in (message.get("tool_calls") or [])
-    }
-    kept_tool_ids = {
-        message.get("tool_call_id")
-        for message in result
-        if message.get("role") == "tool"
-    }
-    assert "call_signed" in kept_call_ids
-    assert "call_signed" in kept_tool_ids
-    assert "call_unsigned" not in kept_call_ids
-    assert "call_unsigned" not in kept_tool_ids
+
+    result = _repair(
+        messages,
+        model="gemini-3-flash",
+        base_url=GOOGLE_OPENAI_BASE,
+    )
+
+    assistant = next(m for m in result if m.get("role") == "assistant")
+    kept_ids = [tc.get("id") for tc in assistant.get("tool_calls") or []]
+    assert kept_ids == ["call_signed", "call_unsigned"], (
+        "a signed first Gemini call must keep the whole parallel group"
+    )
+    kept_tool_ids = [
+        m.get("tool_call_id")
+        for m in result
+        if m.get("role") == "tool"
+    ]
+    assert kept_tool_ids == ["call_signed", "call_unsigned"]
 
 
-def test_non_google_provider_preserves_unsigned_history():
-    from api.streaming import _sanitize_messages_for_api
+def test_gemini25_request_does_not_prune_unsigned_current_turn_history():
+    messages = _prior_and_current_turn_history()
 
-    for provider in (None, "openai", "anthropic", "z-ai"):
-        result = _sanitize_messages_for_api(
-            _unsigned_tool_history(),
-            effective_provider=provider,
-        )
-        kept_call_ids = {
-            tc.get("id")
-            for message in result
-            if message.get("role") == "assistant"
-            for tc in (message.get("tool_calls") or [])
-        }
-        kept_tool_ids = {
-            message.get("tool_call_id")
-            for message in result
-            if message.get("role") == "tool"
-        }
-        assert "call_glm_1" in kept_call_ids, (
-            f"provider {provider!r} must preserve current replay behavior"
-        )
-        assert "call_glm_1" in kept_tool_ids, (
-            f"provider {provider!r} must keep the linked tool row"
-        )
+    result = _repair(
+        messages,
+        model="gemini-2.5-flash",
+        base_url=GOOGLE_OPENAI_BASE,
+    )
+
+    assert result == messages, "Gemini 2.5 is out of scope for the strict current-turn repair"
+
+
+def test_non_google_route_does_not_prune_gemini_named_model_history():
+    messages = _prior_and_current_turn_history()
+
+    result = _repair(
+        messages,
+        model="gemini-3-flash",
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    assert result == messages, "only Google Gemini requests should receive the request-boundary repair"
