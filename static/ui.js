@@ -6307,6 +6307,7 @@ function _transparentEventTimestampSeconds(row, opts){
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
   opts=opts||{};
+  const showEventTimestamp=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
   const live=opts.live===true||row.getAttribute&&(
     row.getAttribute('data-live-tid')==='1'||
     row.getAttribute('data-live-thinking')==='1'||
@@ -6340,6 +6341,12 @@ function _syncTransparentEventTimestamp(row, header, opts){
     return null;
   }
   const source=explicitTs||toolTs||attrTs?'event':'live';
+  row.setAttribute('data-event-at',String(ts));
+  row.setAttribute('data-event-at-source',source);
+  if(!showEventTimestamp){
+    if(timeEl) timeEl.remove();
+    return null;
+  }
   if(!timeEl){
     timeEl=document.createElement('span');
     timeEl.className='transparent-event-time';
@@ -6352,8 +6359,6 @@ function _syncTransparentEventTimestamp(row, header, opts){
   if(fullLabel) timeEl.setAttribute('title',fullLabel); else timeEl.removeAttribute('title');
   timeEl.setAttribute('data-event-at',String(ts));
   timeEl.setAttribute('data-event-at-source',source);
-  row.setAttribute('data-event-at',String(ts));
-  row.setAttribute('data-event-at-source',source);
   const anchor=header.querySelector('.transparent-event-status,.thinking-card-btn-row,.tool-card-toggle,.thinking-card-toggle');
   if(timeEl.parentNode!==header){
     if(anchor&&anchor.parentNode===header) header.insertBefore(timeEl,anchor);
