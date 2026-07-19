@@ -618,8 +618,9 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
     assert partial_message["_partial_tool_calls"] == [{
         "name": "terminal",
         "args": {},
-        "done": False,
+        "done": True,
         "tid": "call-1",
+        "_sealed_by_terminal_error": True,
     }]
     apperrors = [item[1] for item in events if item[0] == "apperror"]
     assert apperrors[-1]["session"]["messages"][-2]["reasoning"] == "Preview reasoning"
