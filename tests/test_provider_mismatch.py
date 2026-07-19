@@ -1037,12 +1037,24 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 
+    with routes.STREAMS_LOCK:
+        previous_streams = dict(routes.STREAMS)
+    created_stream_ids = set()
     handler = FakeHandler()
-    routes._handle_chat_start(
-        handler,
-        {"session_id": session.session_id, "message": "new turn"},
-    )
-    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    try:
+        routes._handle_chat_start(
+            handler,
+            {"session_id": session.session_id, "message": "new turn"},
+        )
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    finally:
+        with routes.STREAMS_LOCK:
+            created_stream_ids = set(routes.STREAMS) - set(previous_streams)
+            routes.STREAMS.clear()
+            routes.STREAMS.update(previous_streams)
+        for stream_id in created_stream_ids:
+            routes.unregister_stream_owner(stream_id)
+            routes.STREAM_GOAL_RELATED.pop(stream_id, None)
 
     assert handler.status == 200
     assert payload["effective_model"] == "gpt-5.5"
