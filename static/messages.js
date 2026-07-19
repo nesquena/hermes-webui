@@ -6734,7 +6734,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return !!stagedKey && stagedKey===currentKey;
           })
         );
-        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&_stagedMatchesCurrentPrefix;
+        const _preserveCurrentTranscript=(preserveVisibleOnShorterTerminalSnapshot||allowUnmarkedShorterTerminalSnapshot)&&_stagedMatchesCurrentPrefix;
         const _resolvedMessages=_preserveCurrentTranscript
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;
