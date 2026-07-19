@@ -146,9 +146,23 @@ let dark=false;
 let observerCallback=null;
 let observedTarget=null;
 let observedOptions=null;
+let fitCalls=0;
+let resizeSchedules=0;
+let nextAnimationFrameId=1;
+const animationFrames=new Map();
 const writes=[];
 const createdAppearances=[];
 const surface={{textContent:''}};
+
+function pendingAnimationFrames(){{
+  return animationFrames.size;
+}}
+
+function flushAnimationFrames(){{
+  const pending=[...animationFrames.values()];
+  animationFrames.clear();
+  pending.forEach(callback=>callback());
+}}
 
 class FakeMutationObserver {{
   constructor(callback){{ observerCallback=callback; }}
@@ -184,6 +198,10 @@ class FakeTerminal {{
   dispose(){{}}
 }}
 
+class FakeFitAddon {{
+  fit(){{ fitCalls+=1; }}
+}}
+
 const root={{
   classList:{{contains(name){{ return name==='dark'&&dark; }}}},
   style:{{setProperty(name,value){{ rootInline[name]=value; }}}},
@@ -192,6 +210,7 @@ global.window={{
   addEventListener(){{}},
   MutationObserver:FakeMutationObserver,
   Terminal:FakeTerminal,
+  FitAddon:{{FitAddon:FakeFitAddon}},
 }};
 global.MutationObserver=FakeMutationObserver;
 global.document={{
@@ -202,51 +221,106 @@ global.getComputedStyle=()=>({{
   getPropertyValue(name){{ return styles[name]||rootInline[name]||''; }},
 }});
 global.$=(id)=>id==='terminalSurface'?surface:null;
-global.requestAnimationFrame=()=>0;
-global.setTimeout=()=>0;
+global.requestAnimationFrame=(callback)=>{{
+  const id=nextAnimationFrameId++;
+  animationFrames.set(id,callback);
+  return id;
+}};
+global.cancelAnimationFrame=(id)=>animationFrames.delete(id);
+global.setTimeout=(_callback,delay)=>{{
+  if(delay===120)resizeSchedules+=1;
+  return 1;
+}};
 global.clearTimeout=()=>{{}};
 
 eval(terminalSource+String.raw`
 const first=_ensureXterm();
-writes.length=0;
-syncComposerTerminalAppearance();
-const unchangedWrites=[...writes];
+TERMINAL_UI.open=true;
+TERMINAL_UI.sessionId='session-1';
+const initialFitCalls=fitCalls;
+resizeSchedules=0;
 
 writes.length=0;
+const fitsBeforeUnchanged=fitCalls;
+syncComposerTerminalAppearance();
+const unchangedWrites=[...writes];
+const unchangedFitDelta=fitCalls-fitsBeforeUnchanged;
+const unchangedPendingFrames=pendingAnimationFrames();
+
+writes.length=0;
+const fitsBeforeUnrelated=fitCalls;
 document.documentElement.style.setProperty('--unrelated-outline-offset','3px');
 observerCallback([{{attributeName:'style'}}]);
 const unrelatedStyleWrites=[...writes];
+const unrelatedFitDelta=fitCalls-fitsBeforeUnrelated;
+const unrelatedPendingFrames=pendingAnimationFrames();
 
 writes.length=0;
-styles['--font-mono']='"Extension Mono",monospace';
-observerCallback([{{attributeName:'style'}}]);
-const fontOnlyWrites=[...writes];
-const fontAfterChange=first.options.fontFamily;
-
-writes.length=0;
+const fitsBeforeTheme=fitCalls;
 styles['--code-bg']='#222222';
 observerCallback([{{attributeName:'style'}}]);
 const themeOnlyWrites=[...writes];
 const backgroundAfterChange=first.options.theme.background;
+const themeOnlyFitDelta=fitCalls-fitsBeforeTheme;
+const themeOnlyPendingFrames=pendingAnimationFrames();
 
+writes.length=0;
+resizeSchedules=0;
+const fitsBeforeFont=fitCalls;
+styles['--font-mono']='"Extension Mono",monospace';
+observerCallback([{{attributeName:'style'}}]);
+observerCallback([{{attributeName:'style'}}]);
+const fontOnlyWrites=[...writes];
+const fontAfterChange=first.options.fontFamily;
+const fontFitDeltaBeforeFrame=fitCalls-fitsBeforeFont;
+const fontPendingFramesBeforeFlush=pendingAnimationFrames();
+flushAnimationFrames();
+const fontFitDeltaAfterFrame=fitCalls-fitsBeforeFont;
+const fontResizeSchedules=resizeSchedules;
+
+styles['--font-mono']='"Disposed Mono",monospace';
+observerCallback([{{attributeName:'style'}}]);
+const pendingFitBeforeDispose=pendingAnimationFrames();
 _disposeXterm();
-const cacheReset=TERMINAL_UI.lastAppliedTheme===null&&TERMINAL_UI.lastAppliedFontFamily===null;
+const pendingFitAfterDispose=pendingAnimationFrames();
+const cacheReset=TERMINAL_UI.lastAppliedTheme===null&&TERMINAL_UI.lastAppliedFontFamily===null&&TERMINAL_UI.fontFitFrame===null;
 styles['--font-mono']='"Recreated Mono",monospace';
 styles['--code-bg']='#333333';
+const fitsBeforeRecreate=fitCalls;
 _ensureXterm();
+const recreateFitDelta=fitCalls-fitsBeforeRecreate;
+const recreatePendingFrames=pendingAnimationFrames();
+flushAnimationFrames();
+const recreateFitDeltaAfterFlush=fitCalls-fitsBeforeRecreate;
 
 process.stdout.write(JSON.stringify({{
   initial:createdAppearances[0],
+  initialFitCalls,
   unchangedWrites,
+  unchangedFitDelta,
+  unchangedPendingFrames,
   unrelatedStyleWrites,
-  fontOnlyWrites,
-  fontAfterChange,
+  unrelatedFitDelta,
+  unrelatedPendingFrames,
   themeOnlyWrites,
   backgroundAfterChange,
+  themeOnlyFitDelta,
+  themeOnlyPendingFrames,
+  fontOnlyWrites,
+  fontAfterChange,
+  fontFitDeltaBeforeFrame,
+  fontPendingFramesBeforeFlush,
+  fontFitDeltaAfterFrame,
+  fontResizeSchedules,
   observerUsesRoot:observedTarget===document.documentElement,
   observedOptions,
+  pendingFitBeforeDispose,
+  pendingFitAfterDispose,
   cacheReset,
   recreated:createdAppearances[1],
+  recreateFitDelta,
+  recreatePendingFrames,
+  recreateFitDeltaAfterFlush,
 }}));
 `);
 """
@@ -262,20 +336,36 @@ process.stdout.write(JSON.stringify({{
 
     assert observed["initial"]["fontFamily"] == '"Active Mono",monospace'
     assert observed["initial"]["theme"]["background"] == "#111111"
+    assert observed["initialFitCalls"] == 1
     assert observed["unchangedWrites"] == []
+    assert observed["unchangedFitDelta"] == 0
+    assert observed["unchangedPendingFrames"] == 0
     assert observed["unrelatedStyleWrites"] == []
-    assert observed["fontOnlyWrites"] == ["fontFamily"]
-    assert observed["fontAfterChange"] == '"Extension Mono",monospace'
+    assert observed["unrelatedFitDelta"] == 0
+    assert observed["unrelatedPendingFrames"] == 0
     assert observed["themeOnlyWrites"] == ["theme"]
     assert observed["backgroundAfterChange"] == "#222222"
+    assert observed["themeOnlyFitDelta"] == 0
+    assert observed["themeOnlyPendingFrames"] == 0
+    assert observed["fontOnlyWrites"] == ["fontFamily"]
+    assert observed["fontAfterChange"] == '"Extension Mono",monospace'
+    assert observed["fontFitDeltaBeforeFrame"] == 0
+    assert observed["fontPendingFramesBeforeFlush"] == 1
+    assert observed["fontFitDeltaAfterFrame"] == 1
+    assert observed["fontResizeSchedules"] == 1
     assert observed["observerUsesRoot"] is True
     assert observed["observedOptions"] == {
         "attributes": True,
         "attributeFilter": ["class", "data-skin", "style"],
     }
+    assert observed["pendingFitBeforeDispose"] == 1
+    assert observed["pendingFitAfterDispose"] == 0
     assert observed["cacheReset"] is True
     assert observed["recreated"]["fontFamily"] == '"Recreated Mono",monospace'
     assert observed["recreated"]["theme"]["background"] == "#333333"
+    assert observed["recreateFitDelta"] == 1
+    assert observed["recreatePendingFrames"] == 0
+    assert observed["recreateFitDeltaAfterFlush"] == 1
 
 
 def test_first_party_technical_js_uses_font_mono_contract():
