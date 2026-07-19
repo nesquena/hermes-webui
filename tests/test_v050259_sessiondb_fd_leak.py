@@ -172,6 +172,47 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
     )
 
 
+def test_error_save_paths_flush_fallback_notices():
+    """Every s.save() path that finalizes an assistant turn must flush
+    _pending_fallback_notices, including the ERROR save paths.
+
+    The greptile P1 "error saves drop notices" finding identified two error
+    save sites that append a final assistant error message and call s.save()
+    without stamping _fallbackNotice: the compression-continuation error path
+    and the main except-path error save. When a fallback warning was captured
+    during streaming and the stream later errored, the saved message had no
+    _fallbackNotice, so the notice vanished on reload/session switch.
+    """
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+
+    # The compression-continuation error path builds _error_message, stamps
+    # _compressionRecovery, then appends+saves. The _fallbackNotice flush must
+    # appear between the _compressionRecovery stamping and the append.
+    comp_err_idx = src.find("_error_message['_compressionRecovery'] = _recovery")
+    assert comp_err_idx != -1, "compression-continuation error path not found"
+    # Find the s.messages.append(_error_message) that follows this stamping.
+    append_after_comp = src.find("s.messages.append(_error_message)", comp_err_idx)
+    assert append_after_comp != -1, "append after compression error stamping not found"
+    comp_block = src[comp_err_idx:append_after_comp]
+    assert "_error_message['_fallbackNotice']" in comp_block, (
+        "The compression-continuation error save path must flush "
+        "_pending_fallback_notices onto _error_message before s.save()."
+    )
+
+    # The main error path: find the LAST occurrence of the 'Interruption details'
+    # label stamping (the main path uses _exc_type, not _err_type), then verify
+    # the flush appears before the append+save.
+    main_err_label = src.rfind("_error_message['provider_details_label'] = 'Interruption details'")
+    assert main_err_label != -1, "main error path label stamping not found"
+    append_after_main = src.find("s.messages.append(_error_message)", main_err_label)
+    assert append_after_main != -1, "append after main error label stamping not found"
+    main_block = src[main_err_label:append_after_main]
+    assert "_error_message['_fallbackNotice']" in main_block, (
+        "The main error save path must flush _pending_fallback_notices onto "
+        "_error_message before s.save() so fallback notices survive reload."
+    )
+
+
 # ── 2: source-level pin: LRU eviction path also closes _session_db ──────────
 
 
