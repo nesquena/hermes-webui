@@ -117,8 +117,9 @@ def test_legacy_loop_resets_sse_event_after_approval():
     approval_idx = loop.find('"hermes.approval.request"')
     assert approval_idx >= 0
     # Window sized to cover the approval handling block including the run_id
-    # recording added in the #4549 follow-up (reset lands ~1360 chars in).
-    block_after = loop[approval_idx:approval_idx + 1500]
+    # recording added in the #4549 follow-up and the approval_id -> run_id
+    # registration added for #6008 (reset lands ~1470 chars in).
+    block_after = loop[approval_idx:approval_idx + 1700]
     assert 'sse_event = "message"' in block_after, (
         "Must reset sse_event to 'message' after approval handling to prevent bleed"
     )
