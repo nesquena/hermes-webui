@@ -7924,6 +7924,63 @@ def _recovered_user_row_is_kept(prev_role, next_role) -> bool:
     return next_role == 'assistant' and prev_role in (None, 'assistant')
 
 
+def _tool_call_has_thought_signature(tool_call) -> bool:
+    """Return True when a replayed tool call already carries Gemini signature metadata."""
+    if not isinstance(tool_call, dict):
+        return False
+    for candidate in (
+        tool_call,
+        tool_call.get('function'),
+        tool_call.get('extra_content'),
+        (tool_call.get('extra_content') or {}).get('google'),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ('thought_signature', 'thoughtSignature'):
+            if str(candidate.get(key) or '').strip():
+                return True
+    return False
+
+
+def _replay_may_target_google(cfg, effective_provider) -> bool:
+    """Return True when the current replay may be consumed by Google/Gemini."""
+    try:
+        from api.routes import _normalize_provider_id
+    except Exception:
+        _normalize_provider_id = None
+
+    def _is_google(provider):
+        if not provider:
+            return False
+        raw = str(provider).strip()
+        if not raw:
+            return False
+        if _normalize_provider_id is not None:
+            try:
+                return _normalize_provider_id(raw) == 'google'
+            except Exception:
+                pass
+        lowered = raw.lower()
+        return lowered == 'google' or lowered == 'gemini' or lowered.startswith('google:')
+
+    if _is_google(effective_provider):
+        return True
+    if not isinstance(cfg, dict):
+        return False
+    for key in ('fallback_providers', 'fallback_model'):
+        raw_entries = cfg.get(key)
+        if isinstance(raw_entries, dict):
+            entries = [raw_entries]
+        elif isinstance(raw_entries, list):
+            entries = raw_entries
+        else:
+            entries = []
+        for entry in entries:
+            if isinstance(entry, dict) and _is_google(entry.get('provider')):
+                return True
+    return False
+
+
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -7970,6 +8027,7 @@ def _sanitize_messages_for_api(
     # pass after the merge resolves so the wire contract still matches
     # `_API_SAFE_MSG_KEYS` (#7237 review finding 2a).
     allowed_keys = allowed_keys | _MERGE_VISIBLE_DISCRIMINATORS
+    replay_google_tool_state = _replay_may_target_google(cfg, effective_provider)
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     # Late recovery can restore display rows without proving a context owner.
@@ -7983,10 +8041,14 @@ def _sanitize_messages_for_api(
             continue
         if msg.get('role') == 'assistant':
             for tc in msg.get('tool_calls') or []:
-                if isinstance(tc, dict):
-                    tid = tc.get('id') or tc.get('call_id') or ''
-                    if tid:
-                        valid_tool_call_ids.add(tid)
+                if not isinstance(tc, dict):
+                    continue
+                tid = tc.get('id') or tc.get('call_id') or ''
+                if not tid:
+                    continue
+                if replay_google_tool_state and not _tool_call_has_thought_signature(tc):
+                    continue
+                valid_tool_call_ids.add(tid)
 
     # Second pass: build the sanitized list, dropping orphaned tool messages.
     clean = []
