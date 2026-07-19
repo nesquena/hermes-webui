@@ -38,6 +38,25 @@ def test_native_raster_data_uri_bypasses_text_redactor(monkeypatch):
     assert calls == []
 
 
+def test_native_raster_data_uri_accepts_uppercase_mime(monkeypatch):
+    uri = _png_data_uri_with_sensitive_marker().replace(
+        "data:image/png",
+        "data:image/PNG",
+        1,
+    )
+    calls = []
+    monkeypatch.setattr(
+        helpers,
+        "_redact_fn_cached",
+        lambda text: calls.append(text) or "unexpected-redaction",
+    )
+
+    content_part = {"type": "image_url", "image_url": {"url": uri}}
+
+    assert helpers._redact_value(content_part, _enabled=True) == content_part
+    assert calls == []
+
+
 def test_raster_data_uri_outside_image_part_keeps_security_boundary(monkeypatch):
     uri = _png_data_uri_with_sensitive_marker()
     calls = []

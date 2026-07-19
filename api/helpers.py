@@ -601,7 +601,9 @@ def _is_native_raster_data_uri(text: str) -> bool:
     image_kind = None
     payload_start = 0
     for prefix, candidate_kind in _RASTER_IMAGE_DATA_URI_PREFIXES:
-        if text.startswith(prefix):
+        # URI schemes and MIME type tokens are case-insensitive. Only normalize
+        # this short header slice — never the multi-megabyte base64 payload.
+        if text[:len(prefix)].lower() == prefix:
             image_kind = candidate_kind
             payload_start = len(prefix)
             break
