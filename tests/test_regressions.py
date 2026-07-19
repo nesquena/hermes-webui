@@ -930,6 +930,7 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must track streamed reasoning text separately from assistant text"
     assert ("let liveReasoningText=''" in src
             or "let liveReasoningText = reasoningText" in src
+            or "let liveReasoningText = reconnecting ? '' : reasoningText" in src
             or "let liveReasoningText=_lastLiveReasoning" in src), \
         "messages.js must track the currently active reasoning segment separately from cumulative reasoning"
     assert "source.addEventListener('reasoning'" in src or 'source.addEventListener("reasoning"' in src, \

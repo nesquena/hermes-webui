@@ -41,46 +41,48 @@ def test_interim_reasoning_echo_cleans_live_and_anchor_thinking():
 def test_anchor_reasoning_echo_can_remove_a_suffix_spanning_multiple_segments():
     node = shutil.which("node")
     assert node, "node is required for the live reasoning echo behavior test"
-    script = f"""
-const src={json.dumps(MESSAGES)};
-function extractFunc(name){{
+    script = """
+const fs=require('fs');
+const src=fs.readFileSync(0,'utf8');
+function extractFunc(name){
   const start=src.indexOf('function '+name);
   if(start<0) throw new Error(name+' not found');
   const params=src.indexOf('(',start);
   let depth=0,close=-1;
-  for(let i=params;i<src.length;i+=1){{
+  for(let i=params;i<src.length;i+=1){
     if(src[i]==='(') depth+=1;
-    else if(src[i]===')'&&--depth===0){{ close=i; break; }}
-  }}
-  const brace=src.indexOf('{{',close);
+    else if(src[i]===')'&&--depth===0){ close=i; break; }
+  }
+  const brace=src.indexOf('{',close);
   depth=0;
-  for(let i=brace;i<src.length;i+=1){{
-    if(src[i]==='{{') depth+=1;
-    else if(src[i]==='}}'&&--depth===0) return src.slice(start,i+1);
-  }}
+  for(let i=brace;i<src.length;i+=1){
+    if(src[i]==='{') depth+=1;
+    else if(src[i]==='}'&&--depth===0) return src.slice(start,i+1);
+  }
   throw new Error(name+' did not close');
-}}
+}
 let events=[
-  {{source_event_type:'reasoning',local_id:'live-reasoning:run:1',payload:{{text:'first'}}}},
-  {{source_event_type:'tool_complete',local_id:'tool:1',payload:{{}}}},
-  {{source_event_type:'reasoning',local_id:'live-reasoning:run:2',payload:{{text:'second'}}}},
+  {source_event_type:'reasoning',local_id:'live-reasoning:run:1',payload:{text:'first'}},
+  {source_event_type:'tool_complete',local_id:'tool:1',payload:{}},
+  {source_event_type:'reasoning',local_id:'live-reasoning:run:2',payload:{text:'second'}},
 ];
-function _anchorActivityEvents(){{ return events; }}
-function _replaceAnchorActivityEventByLocalId(localId,sourceEventType,patch){{
+function _anchorActivityEvents(){ return events; }
+function _replaceAnchorActivityEventByLocalId(localId,sourceEventType,patch){
   const event=events.find(item=>item.local_id===localId&&item.source_event_type===sourceEventType);
   if(!event) return null;
-  event.payload={{...(event.payload||{{}}),...((patch&&patch.payload)||{{}})}};
+  event.payload={...(event.payload||{}),...((patch&&patch.payload)||{})};
   return event;
-}}
-function _renderAnchorLiveScene(){{ return true; }}
+}
+function _renderAnchorLiveScene(){ return true; }
 eval(extractFunc('_compactVisibleEchoText'));
 eval(extractFunc('_stripCompactEchoSuffix'));
 eval(extractFunc('_stripAnchorReasoningEcho'));
 const removed=_stripAnchorReasoningEcho('firstsecond');
-process.stdout.write(JSON.stringify({{removed,events}}));
+process.stdout.write(JSON.stringify({removed,events}));
 """
     result = subprocess.run(
         [node, "-e", script],
+        input=MESSAGES,
         text=True,
         capture_output=True,
         check=False,
