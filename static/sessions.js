@@ -1018,6 +1018,15 @@ function _anchorActivitySceneHasRecoveryState(scene) {
   );
 }
 
+function _anchorActivitySceneMergeIdentity(scene) {
+  if(!scene||scene.version!=='activity_scene_v1') return null;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||'').trim()||streamId;
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  return {sessionId,streamId,runId};
+}
+
 function _inflightHasVisibleLiveState(inflight) {
   if (!inflight || typeof inflight !== 'object') return false;
   if (String(inflight.lastAssistantText || '').trim()) return true;
@@ -1103,18 +1112,30 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   };
 }
 
-function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot){
+function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, activeStreamId){
   if(!inflight||typeof inflight!=='object'||!serverSnapshot||typeof serverSnapshot!=='object') return false;
   const journalScene=serverSnapshot.anchorActivityScene;
   if(!journalScene||journalScene.version!=='activity_scene_v1') return false;
   const cachedScene=(inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1')
     ? inflight.anchorActivityScene
     : null;
-  const cachedStream=String(cachedScene&&cachedScene.identity&&cachedScene.identity.stream_id||'').trim();
-  const journalStream=String(journalScene.identity&&journalScene.identity.stream_id||'').trim();
-  if(cachedStream&&journalStream&&cachedStream!==journalStream) return false;
-  const cachedRun=String(cachedScene&&cachedScene.identity&&(cachedScene.identity.run_id||cachedScene.identity.stream_id)||'').trim();
-  const journalRun=String(journalScene.identity&&(journalScene.identity.run_id||journalScene.identity.stream_id)||'').trim();
+  if(!cachedScene) return false;
+  const activeStream=String(activeStreamId||serverSnapshot.streamId||inflight.streamId||'').trim();
+  const cachedIdentity=_anchorActivitySceneMergeIdentity(cachedScene);
+  const journalIdentity=_anchorActivitySceneMergeIdentity(journalScene);
+  if(
+    !activeStream
+    ||!cachedIdentity||!journalIdentity
+    ||!cachedIdentity.sessionId||!journalIdentity.sessionId
+    ||cachedIdentity.sessionId!==journalIdentity.sessionId
+    ||!cachedIdentity.streamId||!journalIdentity.streamId
+    ||cachedIdentity.streamId!==activeStream
+    ||journalIdentity.streamId!==activeStream
+    ||!cachedIdentity.runId||!journalIdentity.runId
+    ||cachedIdentity.runId!==journalIdentity.runId
+  ) return false;
+  const cachedRun=cachedIdentity.runId;
+  const journalRun=journalIdentity.runId;
   const mergeCollection=(journalEvents,cachedEvents,expectedType)=>{
     const merged=[];
     const seen=new Set();
@@ -2182,7 +2203,7 @@ async function loadSession(sid){
   if(liveRecoveryInflight){
     INFLIGHT[sid]=liveRecoveryInflight;
     if(serverLiveSnapshot&&liveRecoveryInflight!==serverLiveSnapshot){
-      _mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot);
+      _mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot,activeStreamId);
     }
   }
   else if(hadLiveRecoveryInflight&&activeStreamId){

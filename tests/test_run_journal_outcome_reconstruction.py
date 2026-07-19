@@ -123,6 +123,25 @@ def test_snapshot_reconstructs_bounded_outcome_envelopes_without_activity_rows(m
             "event_id": f"{stream_id}:8",
             "payload": {"kind": "workspace_file", "path": "fractional-seq.md"},
         },
+        {
+            "seq": 9,
+            "event": "artifact_reference",
+            "session_id": "foreign_session",
+            "event_id": f"{stream_id}:9",
+            "payload": {"kind": "workspace_file", "path": "foreign-session.md"},
+        },
+        {
+            "seq": 10,
+            "event": "state_saved",
+            "session_id": "foreign_session",
+            "event_id": f"{stream_id}:10",
+            "payload": {
+                "session_id": session_id,
+                "kind": "skill",
+                "action": "updated",
+                "name": "foreign-envelope",
+            },
+        },
     ]
 
     monkeypatch.setattr(
@@ -131,8 +150,8 @@ def test_snapshot_reconstructs_bounded_outcome_envelopes_without_activity_rows(m
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
-            "last_seq": 8,
-            "last_event_id": f"{stream_id}:8",
+            "last_seq": 10,
+            "last_event_id": f"{stream_id}:10",
         },
     )
     monkeypatch.setattr(
@@ -189,6 +208,12 @@ def _stable_outcome_scene(monkeypatch):
     run_id = "run_stable"
     session_id = "session_stable"
     events = [
+        {
+            "seq": 1,
+            "event": "token",
+            "event_id": f"{stream_id}:1",
+            "payload": {"text": "visible progress"},
+        },
         {
             "seq": 4,
             "event": "artifact_reference",
@@ -292,6 +317,12 @@ def test_snapshot_normalizes_mixed_legacy_outcomes_to_stable_run(monkeypatch):
     session_id = "session_mixed"
     events = [
         {
+            "seq": 1,
+            "event": "token",
+            "event_id": f"{stream_id}:1",
+            "payload": {"text": "visible progress"},
+        },
+        {
             "seq": 4,
             "event": "artifact_reference",
             "event_id": f"{run_id}:4",
@@ -332,6 +363,9 @@ def test_snapshot_normalizes_mixed_legacy_outcomes_to_stable_run(monkeypatch):
 
     assert scene["identity"]["run_id"] == run_id
     assert scene["identity"]["stream_id"] == stream_id
+    assert scene["activity_rows"]
+    assert all(row["run_id"] == run_id for row in scene["activity_rows"])
+    assert all(row["identity"]["run_id"] == run_id for row in scene["activity_rows"])
     outcomes = [*scene["artifacts"], *scene["side_effects"]]
     assert [outcome["run_id"] for outcome in outcomes] == [run_id, run_id]
     assert [outcome["event_id"] for outcome in outcomes] == [
@@ -346,10 +380,12 @@ def test_outcome_only_scene_enters_inflight_and_replay_dedupes_in_real_registry(
         [
             _js_function_source(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
             _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
+            _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
             _js_function_source(SESSIONS_JS, "_inflightHasVisibleLiveState"),
             _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),
             _js_function_source(SESSIONS_JS, "_serverLiveSnapshotInflight"),
             _js_function_source(SESSIONS_JS, "_mergeServerLiveSnapshotOutcomesIntoInflight"),
+            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
             _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
         ]
     )
@@ -388,13 +424,13 @@ const visibleInflight={{
   lastRunJournalSeq:4,
   anchorActivityScene:{{
     version:'activity_scene_v1',
-    identity:{{session_id:'sid-1',stream_id:'stream-1'}},
+    identity:{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}},
     activity_rows:[{{row_id:'local-prose',role:'prose'}}],
     artifacts:[],
     side_effects:[],
   }},
 }};
-const mergedVisible=sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(visibleInflight,inflight);
+const mergedVisible=sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(visibleInflight,inflight,'stream-1');
 const registry=api.createAssistantTurnAnchorRegistry({{session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-1'}});
 const context={{session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-1'}};
 const first=sandbox._applyAnchorRegistryOutcomesFromActivityScene(api,registry,scene,context);
@@ -447,8 +483,154 @@ console.log(JSON.stringify({{
     ]
     assert data["stats"]["applied"] == 2
     assert data["stats"]["skipped_duplicate"] == 4
-    assert "run_id:_outcomeSceneRunId" in MESSAGES_JS
+    assert "run_id:_outcomeSceneIdentity.runId" in MESSAGES_JS
     assert "&&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)" in SESSIONS_JS.replace("\n", "")
+
+
+@pytest.mark.skipif(not NODE, reason="node is required for recovery identity coverage")
+def test_outcome_merge_fails_closed_on_missing_or_wrong_scene_identity():
+    functions = "\n".join(
+        [
+            _js_function_source(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
+            _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
+            _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _js_function_source(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+            _js_function_source(SESSIONS_JS, "_mergeServerLiveSnapshotOutcomesIntoInflight"),
+        ]
+    )
+    script = f"""
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'merge_identity_helpers.js'}});
+const journalScene={{
+  version:'activity_scene_v1',
+  identity:{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}},
+  activity_rows:[],
+  artifacts:[
+    {{source_event_type:'artifact_reference',event_id:'stable-run-1:99',run_id:'stable-run-1',stream_id:'stream-1',seq:99,payload:{{kind:'workspace_file',path:'owned.md'}}}},
+  ],
+  side_effects:[],
+}};
+const server=sandbox._serverLiveSnapshotInflight({{
+  stream_id:'stream-1',
+  last_seq:99,
+  anchor_activity_scene:journalScene,
+}},[]);
+const missingCached={{
+  streamId:'stream-1',
+  lastRunJournalSeq:5,
+  lastAssistantText:'local',
+  messages:[{{role:'assistant',content:'local'}}],
+  anchorActivityScene:{{
+    version:'activity_scene_v1',
+    identity:{{}},
+    activity_rows:[{{row_id:'cached-prose'}}],
+    artifacts:[],
+    side_effects:[],
+  }},
+}};
+assert.strictEqual(sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(missingCached,server,'stream-1'),false);
+assert.strictEqual(missingCached.lastRunJournalSeq,5);
+assert.deepStrictEqual(missingCached.anchorActivityScene.artifacts,[]);
+const compatible={{
+  ...missingCached,
+  lastRunJournalSeq:6,
+  anchorActivityScene:{{
+    version:'activity_scene_v1',
+    identity:{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}},
+    activity_rows:[{{row_id:'cached-prose'}}],
+    artifacts:[],
+    side_effects:[],
+  }},
+}};
+assert.strictEqual(sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(compatible,server,'stream-2'),false);
+assert.strictEqual(compatible.lastRunJournalSeq,6);
+const foreignSession={{
+  ...compatible,
+  anchorActivityScene:{{
+    ...compatible.anchorActivityScene,
+    identity:{{session_id:'sid-foreign',stream_id:'stream-1',run_id:'stable-run-1'}},
+  }},
+}};
+assert.strictEqual(sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(foreignSession,server,'stream-1'),false);
+assert.strictEqual(foreignSession.lastRunJournalSeq,6);
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not NODE, reason="node is required for Anchor registry coverage")
+def test_stable_recovered_scene_replaces_transport_registry_before_outcomes():
+    functions = "\n".join(
+        [
+            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
+            _js_function_source(MESSAGES_JS, "_liveAnchorRegistryIdentity"),
+            _js_function_source(MESSAGES_JS, "_liveAnchorRegistryForActivityScene"),
+            _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
+        ]
+    )
+    script = f"""
+const fs=require('fs');
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8'),sandbox,{{filename:'assistant_turn_anchors.js'}});
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'stable_registry_helpers.js'}});
+const api=sandbox.window.HermesAssistantTurnAnchors;
+const registryMap=new Map();
+const transportRegistry=api.createAssistantTurnAnchorRegistry({{session_id:'sid-1',stream_id:'stream-1',run_id:'stream-1'}});
+api.applyAssistantTurnAnchorSourceEvent(
+  transportRegistry,
+  {{source_event_type:'tool',local_id:'legacy-tool',name:'terminal',run_id:'stream-1',stream_id:'stream-1'}},
+  {{session_id:'sid-1',stream_id:'stream-1',run_id:'stream-1'}}
+);
+registryMap.set('stream-1',transportRegistry);
+const scene={{
+  version:'activity_scene_v1',
+  identity:{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}},
+  activity_rows:[{{row_id:'tool:legacy',role:'tool',run_id:'stream-1',stream_id:'stream-1'}}],
+  artifacts:[
+    {{source_event_type:'artifact_reference',event_id:'stable-run-1:7',run_id:'stable-run-1',stream_id:'stream-1',seq:7,payload:{{kind:'workspace_file',path:'reports/final.md'}}}},
+  ],
+  side_effects:[],
+}};
+const registry=sandbox._liveAnchorRegistryForActivityScene(
+  api,
+  registryMap,
+  'stream-1',
+  'sid-1',
+  scene,
+  registryMap.get('stream-1')
+);
+assert.notStrictEqual(registry,transportRegistry);
+assert.strictEqual(registryMap.get('stream-1'),registry);
+const registryIdentity=sandbox._liveAnchorRegistryIdentity(registry);
+assert.strictEqual(registryIdentity.sessionId,'sid-1');
+assert.strictEqual(registryIdentity.runId,'stable-run-1');
+assert.strictEqual(registryIdentity.streamId,'stream-1');
+assert.strictEqual(
+  sandbox._applyAnchorRegistryOutcomesFromActivityScene(api,registry,scene,{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}}),
+  true
+);
+assert.strictEqual(registry.stats.skipped_mismatched,0);
+assert.strictEqual(registry.anchor.artifacts.length,1);
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_session_recovery_paths_wire_reconstructed_outcomes_into_anchor_state():
@@ -458,7 +640,7 @@ def test_session_recovery_paths_wire_reconstructed_outcomes_into_anchor_state():
     compact_attach = "".join(attach_live_stream.split())
 
     snapshot = "_serverLiveSnapshotInflight(S.session.runtime_journal_snapshot,S.session.pending_attachments||[])"
-    merge = "_mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot)"
+    merge = "_mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot,activeStreamId)"
     assert snapshot in compact_load
     assert merge in compact_load
     assert compact_load.index(snapshot) < compact_load.index(merge)
@@ -468,4 +650,4 @@ def test_session_recovery_paths_wire_reconstructed_outcomes_into_anchor_state():
     assert hydrate_rows in compact_attach
     assert hydrate_outcomes in compact_attach
     assert compact_attach.index(hydrate_rows) < compact_attach.index(hydrate_outcomes)
-    assert "{session_id:activeSid,stream_id:_outcomeSceneStreamId,run_id:_outcomeSceneRunId}" in compact_attach
+    assert "{session_id:activeSid,stream_id:_outcomeSceneIdentity.streamId,run_id:_outcomeSceneIdentity.runId}" in compact_attach

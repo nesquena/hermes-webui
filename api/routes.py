@@ -3172,6 +3172,16 @@ def _run_journal_outcome_event(
     if not isinstance(payload, dict):
         return None
 
+    raw_event_session_id_value = event.get("session_id")
+    raw_event_session_id = _bounded_journal_outcome_string(
+        raw_event_session_id_value,
+        limit=512,
+    )
+    if raw_event_session_id_value not in (None, "") and raw_event_session_id is None:
+        return None
+    if raw_event_session_id and raw_event_session_id != session_id:
+        return None
+
     raw_event_id_value = event.get("event_id")
     raw_event_id = _bounded_journal_outcome_string(raw_event_id_value, limit=512)
     if raw_event_id_value not in (None, "") and raw_event_id is None:
@@ -3889,6 +3899,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             collection[:] = kept
     if scene_run_id:
         snapshot["anchor_activity_scene"]["identity"]["run_id"] = scene_run_id
+        if scene_run_id != stream_id:
+            for row in snapshot["anchor_activity_scene"]["activity_rows"]:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("run_id") or "").strip() in {"", stream_id}:
+                    row["run_id"] = scene_run_id
+                identity = row.get("identity")
+                if isinstance(identity, dict) and str(identity.get("run_id") or "").strip() in {
+                    "",
+                    stream_id,
+                }:
+                    identity["run_id"] = scene_run_id
     return snapshot
 
 
