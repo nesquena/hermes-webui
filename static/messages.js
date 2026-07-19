@@ -2623,7 +2623,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _anchorRegistryMap=(typeof window!=='undefined')
     ? (window._liveAnchorRegistries=window._liveAnchorRegistries||new Map())
     : null;
-  const _existingAnchorRegistry=_anchorRegistryMap?_anchorRegistryMap.get(streamId):null;
+  // #6303: Preserve Worklog identity across reattach. When _liveAnchorRegistries
+  // is cleared (e.g. by sidebar cancelSessionStream() or an explicit cleanup
+  // during session switch), INFLIGHT[activeSid]._liveAnchorRegistry survives as
+  // a durable fallback so the same Anchor registry instance and its local
+  // identities are reused rather than recreated.
+  const _inflightCachedAnchor=INFLIGHT[activeSid]&&INFLIGHT[activeSid]._liveAnchorRegistry||null;
+  const _existingAnchorRegistry=(_anchorRegistryMap?_anchorRegistryMap.get(streamId):null)
+    || (_inflightCachedAnchor&&_inflightCachedAnchor._stream_id===streamId?_inflightCachedAnchor:null);
   const _anchorRegistry=_existingAnchorRegistry||(_anchorApi&&typeof _anchorApi.createAssistantTurnAnchorRegistry==='function'
     ? _anchorApi.createAssistantTurnAnchorRegistry({
       session_id:activeSid,
@@ -2634,11 +2641,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorShadowWarned=false;
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
-  if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  if(_anchorRegistryMap&&_anchorRegistry){
+    _anchorRegistryMap.set(streamId,_anchorRegistry);
+    if(!_anchorRegistry._stream_id) _anchorRegistry._stream_id=streamId;
+  }
+  // #6303: Persist the live Anchor registry reference in INFLIGHT so it survives
+  // cleanup of window._liveAnchorRegistries during session switch/reattach.
+  if(_anchorRegistry&&INFLIGHT[activeSid]) INFLIGHT[activeSid]._liveAnchorRegistry=_anchorRegistry;
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
       if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      // #6303: Also remove from INFLIGHT when the Anchor registry is expired
+      // from the window-level Map so we don't hold a stale reference.
+      if(INFLIGHT[activeSid]&&INFLIGHT[activeSid]._liveAnchorRegistry===_anchorRegistry) delete INFLIGHT[activeSid]._liveAnchorRegistry;
     },delayMs);
   }
   // Backstop: schedule an identity-guarded cleanup at creation so this shadow
