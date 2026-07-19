@@ -1,6 +1,10 @@
 """Regression coverage for notify_on_complete across a WebUI restart."""
 
+import threading
+import time
 from types import SimpleNamespace
+
+import pytest
 
 from api import background_process as bp
 
@@ -63,6 +67,7 @@ def test_recovery_runs_once_and_rebuilds_session_mapping(monkeypatch):
             return _FakeProcessSession("webui-session")
 
     fake_registry = FakeRegistry()
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
     monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
     monkeypatch.setattr(
         bp,
@@ -81,6 +86,65 @@ def test_recovery_runs_once_and_rebuilds_session_mapping(monkeypatch):
     }
 
 
+def test_partial_recovery_retry_does_not_repeat_checkpoint_adoption(monkeypatch):
+    calls = {"recover": 0, "list": 0}
+
+    class FlakyRegistry:
+        def recover_from_checkpoint(self):
+            calls["recover"] += 1
+            return 1
+
+        def list_sessions(self):
+            calls["list"] += 1
+            if calls["list"] == 1:
+                raise OSError("transient list failure")
+            return []
+
+    registry = FlakyRegistry()
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+
+    with pytest.raises(OSError, match="transient list failure"):
+        bp.recover_processes_for_webui(registry, lambda *_args, **_kwargs: None)
+
+    assert bp.recover_processes_for_webui(registry, lambda *_args, **_kwargs: None) == 0
+    assert calls == {"recover": 1, "list": 2}
+
+
+def test_concurrent_direct_recovery_runs_once(monkeypatch):
+    calls = {"recover": 0}
+
+    class FakeRegistry:
+        def recover_from_checkpoint(self):
+            time.sleep(0.02)
+            calls["recover"] += 1
+            return 1
+
+        def list_sessions(self):
+            return []
+
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+    registry = FakeRegistry()
+    barrier = threading.Barrier(8)
+    results = []
+
+    def recover():
+        barrier.wait()
+        results.append(
+            bp.recover_processes_for_webui(registry, lambda *_args, **_kwargs: None)
+        )
+
+    workers = [threading.Thread(target=recover) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert calls["recover"] == 1
+    assert sorted(results) == [0] * 7 + [1]
+
+
 def test_recovery_is_fail_soft_without_agent(monkeypatch):
     real_import = __import__
 
@@ -89,6 +153,7 @@ def test_recovery_is_fail_soft_without_agent(monkeypatch):
             raise ImportError("Hermes Agent not installed")
         return real_import(name, *args, **kwargs)
 
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
     monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
     monkeypatch.setattr("builtins.__import__", fake_import)
 

@@ -63,6 +63,8 @@ logger = logging.getLogger(__name__)
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
 _PROCESS_RECOVERY_DONE = False
+_PROCESS_CHECKPOINT_RECOVERED = False
+_PROCESS_RECOVERY_LOCK = threading.Lock()
 
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
@@ -1625,10 +1627,7 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
     previously started only the queue drain. That left checkpointed processes
     invisible after a WebUI restart.
     """
-    global _PROCESS_RECOVERY_DONE
-
-    if _PROCESS_RECOVERY_DONE:
-        return 0
+    global _PROCESS_CHECKPOINT_RECOVERED, _PROCESS_RECOVERY_DONE
     if process_registry is None:
         try:
             from tools.process_registry import process_registry
@@ -1641,28 +1640,36 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
     if get_session_fn is None:
         from api.models import get_session as get_session_fn
 
-    recovered = process_registry.recover_from_checkpoint()
-    for row in process_registry.list_sessions():
-        process_id = str(row.get("session_id") or "")
-        if not process_id:
-            continue
-        try:
-            proc_session = process_registry.get(process_id)
-            session_key = str(getattr(proc_session, "session_key", "") or "")
-            if not session_key or get_session_fn(session_key, metadata_only=True) is None:
+    with _PROCESS_RECOVERY_LOCK:
+        if _PROCESS_RECOVERY_DONE:
+            return 0
+
+        recovered = 0
+        if not _PROCESS_CHECKPOINT_RECOVERED:
+            recovered = process_registry.recover_from_checkpoint()
+            _PROCESS_CHECKPOINT_RECOVERED = True
+
+        for row in process_registry.list_sessions():
+            process_id = str(row.get("session_id") or "")
+            if not process_id:
                 continue
-        except Exception:
-            logger.debug(
-                "Could not resolve recovered WebUI process %r",
-                process_id,
-                exc_info=True,
-            )
-            continue
-        register_process_session(session_key, session_key)
-    _PROCESS_RECOVERY_DONE = True
-    if recovered:
-        logger.info("Recovered %d background process(es) for WebUI", recovered)
-    return recovered
+            try:
+                proc_session = process_registry.get(process_id)
+                session_key = str(getattr(proc_session, "session_key", "") or "")
+                if not session_key or get_session_fn(session_key, metadata_only=True) is None:
+                    continue
+            except Exception:
+                logger.warning(
+                    "Could not resolve recovered WebUI process %r",
+                    process_id,
+                    exc_info=True,
+                )
+                continue
+            register_process_session(session_key, session_key)
+        _PROCESS_RECOVERY_DONE = True
+        if recovered:
+            logger.info("Recovered %d background process(es) for WebUI", recovered)
+        return recovered
 
 
 def register_process_session(session_key: str, session_id: str) -> None:
