@@ -175,6 +175,28 @@ def _safe_replace(src: Path, dst: Path) -> None:
             delay *= 2  # 50 -> 100 -> 200 -> 400 -> 800 ms
 
 
+# ── Composer-draft sidecar directory name ─────────────────────────────────
+# Draft sidecars live under this subdirectory so they never appear in the
+# top-level ``*.json`` session scan (mirrors the _turn_journal convention).
+_DRAFT_SIDECAR_DIRNAME = '_drafts'
+
+
+def delete_composer_draft_sidecar(sid) -> None:
+    """Remove the draft sidecar for *sid*.
+
+    Raises OSError when the unlink fails so callers that must know whether
+    authoritative cleanup succeeded (e.g. the clear route) can fail closed.
+    """
+    if not is_safe_session_id(str(sid or '')):
+        return
+    p = (SESSION_DIR / _DRAFT_SIDECAR_DIRNAME / f'{sid}.json').resolve()
+    try:
+        p.relative_to(SESSION_DIR.resolve())
+    except ValueError:
+        return
+    p.unlink(missing_ok=True)
+
+
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
