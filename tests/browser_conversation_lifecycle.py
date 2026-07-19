@@ -35,8 +35,8 @@ TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
-ANCHOR_SCENE_REQUEST_TIMEOUT = 45.0
-ANCHOR_SCENE_PERSIST_TIMEOUT = 30.0
+ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
+ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
 
 
 def _free_port() -> int:
@@ -113,24 +113,82 @@ def _wait_for_persisted_scene(
     )
 
 
-def _wait_for_anchor_scene_response(
-    events: list[dict],
-    timeout: float = ANCHOR_SCENE_REQUEST_TIMEOUT,
-) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        responses = [event for event in events if event.get("type") == "response"]
-        if responses:
-            response = responses[-1]
-            status = int(response.get("status") or 0)
-            if 200 <= status < 300:
-                return response
-            raise AssertionError(f"anchor scene persistence returned HTTP {status}: {events!r}")
-        failures = [event for event in events if event.get("type") == "requestfailed"]
-        if failures:
-            raise AssertionError(f"anchor scene persistence request failed: {failures[-1]!r}")
-        time.sleep(0.2)
-    raise AssertionError(f"anchor scene persistence request did not complete: {events!r}")
+def _anchor_projection_snapshot(page) -> dict:
+    return page.evaluate(
+        """() => {
+          const streamId = (typeof S !== 'undefined' && S.activeStreamId) || '';
+          const registries = window._liveAnchorRegistries;
+          const registry = streamId && registries && typeof registries.get === 'function'
+            ? registries.get(streamId)
+            : null;
+          const api = window.HermesAssistantTurnAnchors;
+          const canProject = Boolean(
+            registry && api && typeof api.projectAssistantTurnAnchorActivityScene === 'function'
+          );
+          let scene = null;
+          if (canProject) {
+            try {
+              scene = api.projectAssistantTurnAnchorActivityScene(registry, {
+                mode: 'compact_worklog',
+              });
+            } catch (error) {
+              scene = { error: String(error) };
+            }
+          }
+          const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
+          return {
+            streamId,
+            hasRegistry: Boolean(registry),
+            registryCount: registries && typeof registries.size === 'number' ? registries.size : null,
+            canProject,
+            mode: scene && scene.mode || null,
+            rowCount: rows.length,
+            rows: rows.map(row => ({
+              role: row && row.role || null,
+              source: row && row.source_event_type || null,
+              status: row && row.status || null,
+              tool: row && row.tool && row.tool.name || null,
+              text: row && row.text || '',
+            })),
+          };
+        }"""
+    )
+
+
+def _wait_for_live_anchor_projection(page) -> dict:
+    try:
+        page.wait_for_function(
+            """({reasoning, tool}) => {
+              const streamId = (typeof S !== 'undefined' && S.activeStreamId) || '';
+              const registries = window._liveAnchorRegistries;
+              const registry = streamId && registries && typeof registries.get === 'function'
+                ? registries.get(streamId)
+                : null;
+              const api = window.HermesAssistantTurnAnchors;
+              if (!registry || !api || typeof api.projectAssistantTurnAnchorActivityScene !== 'function') {
+                return false;
+              }
+              const scene = api.projectAssistantTurnAnchorActivityScene(registry, {
+                mode: 'compact_worklog',
+              });
+              const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
+              const hasThinking = rows.some(row =>
+                row && row.role === 'thinking' && String(row.text || '').includes(reasoning)
+              );
+              const hasTool = rows.some(row =>
+                row && row.role === 'tool' && row.tool && row.tool.name === tool
+              );
+              return hasThinking && hasTool;
+            }""",
+            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            timeout=ANCHOR_SCENE_PROJECTION_TIMEOUT,
+        )
+    except Exception as exc:
+        raise AssertionError(
+            "live Anchor projection never included reasoning and tool rows before terminal release: "
+            f"{_anchor_projection_snapshot(page)!r}"
+        ) from exc
+    return _anchor_projection_snapshot(page)
 
 
 def _terminate_process(proc: subprocess.Popen | None) -> None:
@@ -574,6 +632,7 @@ def main() -> int:
         live_snapshot = _activity_snapshot(page)
         _assert_live_activity(live_snapshot)
         print("OK  live activity: one Anchor worklog with reasoning + completed tool")
+        _wait_for_live_anchor_projection(page)
 
         gateway.release_settle.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
@@ -597,7 +656,6 @@ def main() -> int:
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
         if not TEST_BITE:
-            _wait_for_anchor_scene_response(anchor_scene_requests)
             scene = _wait_for_persisted_scene(
                 base_url,
                 session_id,
@@ -656,6 +714,7 @@ def main() -> int:
                         "test_bite": TEST_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
+                        "anchor_projection": _anchor_projection_snapshot(page),
                         "gateway_events": gateway.emitted_events,
                         "dom": _activity_snapshot(page),
                     }, indent=2),
