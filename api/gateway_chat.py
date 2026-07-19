@@ -1181,7 +1181,7 @@ def _run_gateway_chat_streaming(
                 from api.route_approvals import force_clean_pending_approvals
                 force_clean_pending_approvals(session_id)
             except Exception:
-                pass
+                logger.debug("Failed to force-clean pending approvals at teardown")
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_GOAL_RELATED.pop(stream_id, None)

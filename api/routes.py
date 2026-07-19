@@ -9544,6 +9544,9 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     submit_gateway_pending_mirror,
     submit_pending,
     force_clean_pending_approvals,
+    mark_approval_tombstone,
+    clear_approval_tombstone,
+    _approval_tombstones,
 )
 
 # Clarify prompts (optional -- graceful fallback if agent not available)

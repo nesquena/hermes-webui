@@ -10154,22 +10154,26 @@ def _run_agent_streaming(
                     _unreg_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
+                try:
+                    from api.route_approvals import mark_approval_tombstone
+                    mark_approval_tombstone(session_id)
+                except Exception:
+                    logger.debug("Failed to mark approval tombstone")
             if _cleanup_gateway_pending_mirror is not None:
                 try:
                     _cleanup_gateway_pending_mirror()
                 except Exception:
                     logger.debug("Failed to reconcile gateway approval mirror")
-            # Force-clean any orphaned pending-approval entries left by sub-agent
-            # threads that used the parent session key (#6100). After the parent
-            # agent thread finishes, any remaining approvals for this session are
-            # necessarily orphaned — contextvars weren't propagated to
-            # DaemonThreadPoolExecutor workers, so sub-agents fell back to the
-            # parent's session key from os.environ.
+            # Reconcile the approval mirror at stream teardown.
+            # Purges stale gateway mirrors while preserving live ones and
+            # non-gateway local entries.  The session-wide wipe that was
+            # here before (force_clean_pending_approvals) was too aggressive
+            # — it deleted approvals it did not own (#6100 / #6208).
             try:
                 from api.route_approvals import force_clean_pending_approvals
                 force_clean_pending_approvals(session_id)
             except Exception:
-                pass
+                logger.debug("Failed to force-clean pending approvals at teardown")
             if _clarify_registered and _unreg_clarify_notify is not None:
                 try:
                     _unreg_clarify_notify(session_id)
