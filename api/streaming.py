@@ -536,18 +536,31 @@ def _runtime_preferred_base_url(
 
 
 def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
-    """Return True if an agent lifecycle status should surface as a fallback warning."""
+    """Return True if an agent lifecycle status is a CONFIRMED fallback switch.
+
+    The Agent has two distinct fallback emission paths:
+
+    1. **Transient (pre-switch):** ``_buffer_status("... switching to fallback: ...")``
+       — buffered during retries, only flushed via ``_flush_status_buffer()`` on
+       terminal FAILURE.  These messages carry the OLD model and may fire even
+       when the fallback never succeeds.
+
+    2. **Confirmed (post-switch):** ``_emit_pending_fallback_notice()`` →
+       ``_emit_status("Switched to fallback model: m1 via p1 → m2 via p2")``
+       — emitted ONLY on the SUCCESS path, AFTER ``agent.model`` / ``agent.provider``
+       have already been updated to the new fallback model (see
+       ``_try_activate_fallback`` in chat_completion_helpers.py).
+
+    Only the confirmed post-switch notice should produce a persistent fallback
+    notice.  Matching the transient pre-switch strings would persist false
+    notices for turns that never completed the switch, and would capture the
+    OLD model/provider before the change — inverting the PR's contract.
+    """
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
     return (
         k == 'lifecycle'
-        and (
-            'rate limited' in m
-            or 'switching to fallback' in m
-            or 'falling back' in m
-            or 'fallback activated' in m
-            or 'trying fallback' in m
-        )
+        and 'switched to fallback' in m
     )
 
 
@@ -678,6 +691,15 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
+
+# Stream-scoped fallback notices: the latest CONFIRMED fallback notice for each
+# active stream_id.  The _agent_status_callback in _run_agent_streaming writes
+# here so cancel_stream() — which runs outside that function's closure — can
+# stamp the notice before its own s.save().  Without this, a user who clicks
+# Stop after a real fallback sees the live SSE warning but loses the persistent
+# _fallbackNotice after reload (gate-certifier blocking finding #2).
+# Cleared in the _run_agent_streaming finally block alongside STREAMS/CANCEL_FLAGS.
+_STREAM_FALLBACK_NOTICES: dict = {}
 
 
 _WEBUI_PROGRESS_PROMPT = """
@@ -7409,6 +7431,10 @@ def _run_agent_streaming(
                 'to_model': _fallback_data.get('to_model', ''),
                 'to_provider': _fallback_data.get('to_provider', ''),
             })
+            # Also mirror to the stream-scoped dict so cancel_stream() — which
+            # runs outside this closure — can stamp the notice before its own
+            # s.save() (gate-certifier blocking finding #2).
+            _STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]
             put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
@@ -10861,6 +10887,7 @@ def _run_agent_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)  # Clean up fallback notice (gate #2)
             unregister_active_run(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
@@ -11371,6 +11398,17 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+                # Stamp any confirmed fallback notice onto the last real
+                # assistant message before save, so it survives reload even
+                # when the user cancels mid-stream (gate-certifier finding #2).
+                # Skip the _error cancel marker itself — stamp the partial or
+                # prior assistant turn that carried actual content.
+                _cancel_fb_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                if _cancel_fb_notice:
+                    for _dm in reversed(_cs.messages):
+                        if isinstance(_dm, dict) and _dm.get('role') == 'assistant' and not _dm.get('_error'):
+                            _dm['_fallbackNotice'] = _cancel_fb_notice
+                            break
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
