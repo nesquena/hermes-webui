@@ -365,6 +365,10 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     assert tool["snippet"] == "passed"
     assert tool["duration"] == 1.25
     assert tool["args"]["extra"] == "x" * 200
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    assert [row["role"] for row in rows] == ["prose", "tool", "thinking", "prose"]
+    assert rows[2]["local_id"] == "live-reasoning:run_1:2"
+    assert rows[2]["group"]["activity_segment_seq"] == 2
 
 
 def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):

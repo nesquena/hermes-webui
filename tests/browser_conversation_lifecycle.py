@@ -4,7 +4,8 @@
 This test boots the real WebUI server with isolated state, drives the real chat
 composer in Chromium, and supplies deterministic runtime events through the
 existing Hermes Gateway Runs API. It proves that one assistant turn keeps the
-same semantic activity across live streaming, settlement, and a hard reload.
+same semantic activity across live streaming, session reattachment, settlement,
+and a hard reload.
 """
 
 from __future__ import annotations
@@ -22,21 +23,31 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 PROMPT = "Exercise the public conversation lifecycle gate."
+SEED_PROMPT = "Create an idle session for the lifecycle switch gate."
 REASONING_TEXT = "Checking the persistent assistant turn."
+SECOND_REASONING_TEXT = "Verifying the tool result before continuing."
+THIRD_REASONING_TEXT = "Confirming the no-prose tool boundary."
+CONTINUATION_REASONING_TEXT = "Continuing after the session reattach boundary."
+PROCESS_TEXT = "Inspecting the fixture before the tool call. "
 FINAL_TEXT = "Lifecycle gate final answer."
 FINAL_PREFIX = "Lifecycle gate "
 FINAL_SUFFIX = "final answer."
 FINAL_ACK_TEXT = "Lifecycle"
+SEED_FINAL_TEXT = "Idle session ready."
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
+SECOND_TOOL_NAME = "terminal"
+SECOND_TOOL_ID = "lifecycle-tool-2"
+SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+BROKEN_REASONING_LOCAL_ID = "broken-runtime-reasoning-id"
 
 
 def _free_port() -> int:
@@ -191,6 +202,36 @@ def _wait_for_live_anchor_projection(page) -> dict:
     return _anchor_projection_snapshot(page)
 
 
+def _wait_for_runtime_scene(
+    base_url: str,
+    session_id: str,
+    expected_reasoning_ids: list[str],
+    timeout: float = 10.0,
+) -> dict:
+    deadline = time.time() + timeout
+    url = f"{base_url}/api/session?session_id={session_id}&messages=0&resolve_model=0"
+    last_scene = None
+    while time.time() < deadline:
+        try:
+            payload = _get_json(url)
+        except (json.JSONDecodeError, TimeoutError, urllib.error.URLError, OSError):
+            time.sleep(0.2)
+            continue
+        session = payload.get("session") if isinstance(payload, dict) else None
+        snapshot = session.get("runtime_journal_snapshot") if isinstance(session, dict) else None
+        scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+        last_scene = scene
+        rows = scene.get("activity_rows", []) if isinstance(scene, dict) else []
+        reasoning_ids = [row.get("local_id") for row in rows if row.get("role") == "thinking"]
+        if reasoning_ids == expected_reasoning_ids:
+            return scene
+        time.sleep(0.2)
+    raise AssertionError(
+        "runtime journal scene did not expose the expected reasoning identities; "
+        f"expected={expected_reasoning_ids!r}, scene={last_scene!r}"
+    )
+
+
 def _terminate_process(proc: subprocess.Popen | None) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -241,9 +282,12 @@ class DeterministicGateway:
     def __init__(self) -> None:
         self.activity_ready = threading.Event()
         self.release_settle = threading.Event()
+        self.continuation_ready = threading.Event()
+        self.release_final_prefix = threading.Event()
         self.final_prefix_ready = threading.Event()
         self.release_terminal = threading.Event()
         self.request_body = None
+        self.request_bodies = []
         self.emitted_events = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -289,6 +333,23 @@ class DeterministicGateway:
                         }
                     })
                     return
+                if request_path == "/v1/runs/lifecycle-seed-run/events":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self._event("message.delta", {
+                        "event": "message.delta",
+                        "delta": SEED_FINAL_TEXT,
+                    })
+                    self._event("run.completed", {
+                        "event": "run.completed",
+                        "usage": {"input_tokens": 8, "output_tokens": 4},
+                    })
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
                 if request_path != "/v1/runs/lifecycle-run-1/events":
                     self._json({"error": "not found"}, status=404)
                     return
@@ -301,6 +362,10 @@ class DeterministicGateway:
                     self._event("reasoning.available", {
                         "event": "reasoning.available",
                         "text": REASONING_TEXT,
+                    })
+                    self._event("message.delta", {
+                        "event": "message.delta",
+                        "delta": PROCESS_TEXT,
                     })
                     self._event("tool.started", {
                         "event": "tool.started",
@@ -316,8 +381,38 @@ class DeterministicGateway:
                         "status": "completed",
                         "preview": "README fixture read",
                     })
+                    self._event("reasoning.available", {
+                        "event": "reasoning.available",
+                        "text": SECOND_REASONING_TEXT,
+                    })
+                    self._event("tool.started", {
+                        "event": "tool.started",
+                        "tool": SECOND_TOOL_NAME,
+                        "tool_call_id": SECOND_TOOL_ID,
+                        "status": "running",
+                        "args": {"command": "git status --short"},
+                    })
+                    self._event("tool.completed", {
+                        "event": "tool.completed",
+                        "tool": SECOND_TOOL_NAME,
+                        "tool_call_id": SECOND_TOOL_ID,
+                        "status": "completed",
+                        "preview": "clean fixture",
+                    })
+                    self._event("reasoning.available", {
+                        "event": "reasoning.available",
+                        "text": THIRD_REASONING_TEXT,
+                    })
                     owner.activity_ready.set()
                     if not owner.release_settle.wait(timeout=30):
+                        return
+                    if SCENARIO == "session-reattach":
+                        self._event("reasoning.available", {
+                            "event": "reasoning.available",
+                            "text": CONTINUATION_REASONING_TEXT,
+                        })
+                        owner.continuation_ready.set()
+                    if not owner.release_final_prefix.wait(timeout=30):
                         return
                     self._event("message.delta", {
                         "event": "message.delta",
@@ -344,8 +439,16 @@ class DeterministicGateway:
                     self._json({"error": "not found"}, status=404)
                     return
                 length = int(self.headers.get("Content-Length", "0"))
-                owner.request_body = json.loads(self.rfile.read(length) or b"{}")
-                self._json({"run_id": "lifecycle-run-1"})
+                request_body = json.loads(self.rfile.read(length) or b"{}")
+                owner.request_body = request_body
+                owner.request_bodies.append(request_body)
+                prompt = request_body.get("input")
+                if prompt == SEED_PROMPT:
+                    self._json({"run_id": "lifecycle-seed-run"})
+                elif prompt == PROMPT:
+                    self._json({"run_id": "lifecycle-run-1"})
+                else:
+                    self._json({"error": "unexpected deterministic prompt"}, status=400)
 
         return Handler
 
@@ -354,6 +457,7 @@ class DeterministicGateway:
 
     def close(self) -> None:
         self.release_settle.set()
+        self.release_final_prefix.set()
         self.release_terminal.set()
         self._server.shutdown()
         self._server.server_close()
@@ -431,6 +535,9 @@ def _activity_snapshot(page) -> dict:
             .map(el => el.innerText.trim()).filter(Boolean) : [];
           return {
             live: Boolean(document.querySelector('#liveAssistantTurn')),
+            turnIdentity: {
+              streamId: turn ? turn.getAttribute('data-anchor-stream-id') || '' : '',
+            },
             clientState: {
               busy: Boolean(typeof S !== 'undefined' && S.busy),
               activeStreamId: (typeof S !== 'undefined' && S.activeStreamId) || null,
@@ -444,12 +551,18 @@ def _activity_snapshot(page) -> dict:
               settled: group.getAttribute('data-anchor-settled-scene-owner'),
               classes: group.className,
               deferred: group.getAttribute('data-worklog-rows-deferred'),
+              activityKey: group.getAttribute('data-tool-worklog-key') || '',
+              streamId: group.getAttribute('data-anchor-stream-id') || '',
+              turnStartedAt: group.getAttribute('data-turn-started-at') || '',
               expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
             rows: rows.map(row => ({
               role: row.getAttribute('data-anchor-row-role'),
               source: row.getAttribute('data-anchor-source-event-type'),
+              rowId: row.getAttribute('data-anchor-row-id') || '',
+              localId: row.getAttribute('data-anchor-local-id') || '',
+              streamId: row.getAttribute('data-anchor-stream-id') || '',
               tool: row.getAttribute('data-tool-name'),
               text: row.innerText.trim(),
               classes: row.className,
@@ -485,35 +598,51 @@ def _expand_settled_worklog(page) -> None:
     )
 
 
-def _assert_live_activity(snapshot: dict) -> None:
+def _assert_live_activity(snapshot: dict, *, reasoning_count: int = 3) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
     roles = [row["role"] for row in snapshot["rows"]]
-    assert roles.count("thinking") == 1, snapshot
-    assert roles.count("tool") == 1, snapshot
+    assert roles.count("thinking") == reasoning_count, snapshot
+    assert roles.count("tool") == 2, snapshot
     tool_rows = [row for row in snapshot["rows"] if row["role"] == "tool"]
-    assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
-    assert "tool-card-running" not in tool_rows[0]["classes"], snapshot
+    assert [row["tool"] for row in tool_rows] == [TOOL_NAME, SECOND_TOOL_NAME], snapshot
+    assert all("tool-card-running" not in row["classes"] for row in tool_rows), snapshot
     assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    assert any(SECOND_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    assert any(THIRD_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    expected_order = [
+        "thinking",
+        "tool",
+        "thinking",
+        "tool",
+        "thinking",
+    ]
+    if reasoning_count == 4:
+        assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+        expected_order.append("thinking")
+    assert [row["role"] for row in snapshot["rows"] if row["role"] in {"thinking", "tool"}] == expected_order, snapshot
     assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
     assert any(character.isdigit() for character in snapshot["summary"][0]["label"]), snapshot
 
 
-def _assert_settled(snapshot: dict) -> None:
+def _assert_settled(snapshot: dict, *, reasoning_count: int) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
     roles = [row["role"] for row in snapshot["rows"]]
-    assert "thinking" in roles and "tool" in roles, snapshot
+    assert roles.count("thinking") == reasoning_count and roles.count("tool") == 2, snapshot
     tool_rows = [row for row in snapshot["rows"] if row["role"] == "tool"]
-    assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
-    assert "tool-card-running" not in tool_rows[0]["classes"], snapshot
+    assert [row["tool"] for row in tool_rows] == [TOOL_NAME, SECOND_TOOL_NAME], snapshot
+    assert all("tool-card-running" not in row["classes"] for row in tool_rows), snapshot
     assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    assert any(THIRD_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    if reasoning_count == 4:
+        assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
     assert sum(FINAL_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
     assert snapshot["transcript"].count(FINAL_TEXT) == 1, snapshot
 
 
 def _semantic_activity(snapshot: dict) -> list[dict]:
-    """Canonical user-visible activity, independent of renderer row ordering."""
+    """Canonical user-visible activity in renderer order."""
     semantic = []
     for row in snapshot["rows"]:
         if row["role"] == "thinking":
@@ -523,10 +652,88 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
             semantic.append({"role": "thinking", "text": text})
         elif row["role"] == "tool":
             semantic.append({"role": "tool", "tool": row["tool"]})
-    return sorted(semantic, key=lambda item: json.dumps(item, sort_keys=True))
+    return semantic
+
+
+def _assert_same_live_turn(before: dict, after: dict) -> None:
+    _assert_live_activity(after)
+    assert _semantic_activity(after) == _semantic_activity(before), {
+        "before": _semantic_activity(before),
+        "after": _semantic_activity(after),
+    }
+    assert after["clientState"]["activeStreamId"] == before["clientState"]["activeStreamId"], {
+        "before": before["clientState"],
+        "after": after["clientState"],
+    }
+    assert after["turnIdentity"]["streamId"] == before["turnIdentity"]["streamId"], {
+        "before": before["turnIdentity"],
+        "after": after["turnIdentity"],
+    }
+    before_group = before["summary"][0]
+    after_group = after["summary"][0]
+    for key in ("activityKey", "streamId", "turnStartedAt"):
+        assert after_group[key] == before_group[key], {"key": key, "before": before_group, "after": after_group}
+    # ``rowId`` includes the row's current projection index. Reattachment may
+    # legitimately rebuild that projection, while ``localId`` is the durable
+    # source-event identity that must survive the rebuild.
+    before_rows = [(row["role"], row["localId"]) for row in before["rows"]]
+    after_rows = [(row["role"], row["localId"]) for row in after["rows"]]
+    assert after_rows == before_rows, {"before": before_rows, "after": after_rows}
+
+
+def _assert_live_continuation(before: dict, after: dict) -> None:
+    _assert_live_activity(after, reasoning_count=4)
+    before_semantic = _semantic_activity(before)
+    after_semantic = _semantic_activity(after)
+    assert after_semantic[:-1] == before_semantic, {
+        "before": before_semantic,
+        "after": after_semantic,
+    }
+    assert after_semantic[-1] == {
+        "role": "thinking",
+        "text": CONTINUATION_REASONING_TEXT,
+    }, after_semantic
+    stream_id = before["clientState"]["activeStreamId"]
+    assert after["rows"][-1]["localId"] == f"live-reasoning:{stream_id}:4", after
+
+
+def _replace_runtime_reasoning_identity(route, session_id: str, bite_hits: list[str]) -> None:
+    parsed = urlsplit(route.request.url)
+    query = parse_qs(parsed.query)
+    is_target = (
+        route.request.method == "GET"
+        and parsed.path == "/api/session"
+        and query.get("session_id") == [session_id]
+        and query.get("messages") == ["0"]
+        and query.get("resolve_model") == ["0"]
+    )
+    if not is_target:
+        route.continue_()
+        return
+    response = route.fetch()
+    payload = response.json()
+    session = payload.get("session") if isinstance(payload, dict) else None
+    snapshot = session.get("runtime_journal_snapshot") if isinstance(session, dict) else None
+    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+    rows = scene.get("activity_rows", []) if isinstance(scene, dict) else []
+    reasoning = next((row for row in rows if row.get("role") == "thinking"), None)
+    if isinstance(reasoning, dict):
+        reasoning["local_id"] = BROKEN_REASONING_LOCAL_ID
+        reasoning["row_id"] = BROKEN_REASONING_LOCAL_ID
+        identity = reasoning.get("identity")
+        if isinstance(identity, dict):
+            identity["local_id"] = BROKEN_REASONING_LOCAL_ID
+        bite_hits.append(route.request.url)
+    route.fulfill(status=response.status, content_type="application/json", body=json.dumps(payload))
 
 
 def main() -> int:
+    if SCENARIO not in {"normal", "session-reattach"}:
+        print(f"SETUP FAIL: unsupported LIFECYCLE_SCENARIO={SCENARIO!r}", file=sys.stderr)
+        return 2
+    if TEST_BITE == "replace-runtime-reasoning-id" and SCENARIO != "session-reattach":
+        print("SETUP FAIL: replace-runtime-reasoning-id requires session-reattach", file=sys.stderr)
+        return 2
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -598,6 +805,7 @@ def main() -> int:
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
         anchor_scene_requests = _capture_anchor_scene_requests(page)
+        bite_hits = []
         if TEST_BITE == "drop-anchor-persistence":
             page.route(
                 "**/api/session/anchor-scene",
@@ -610,6 +818,29 @@ def main() -> int:
         errors = _capture_page_errors(page)
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
+        seed_session_id = None
+        if SCENARIO == "session-reattach":
+            page.locator("#msg").fill(SEED_PROMPT)
+            page.locator("#btnSend").click()
+            page.wait_for_function(
+                "text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId && "
+                "(document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg=SEED_FINAL_TEXT,
+                timeout=15000,
+            )
+            seed_session_id = page.evaluate("S.session && S.session.session_id")
+            assert seed_session_id, "seed session id missing after settlement"
+            page.wait_for_selector(
+                f'.session-item[data-sid="{seed_session_id}"]',
+                state="visible",
+                timeout=10000,
+            )
+            page.locator("#btnNewChat").click()
+            page.wait_for_function(
+                "sid => S.session && S.session.session_id && S.session.session_id !== sid && !S.busy",
+                arg=seed_session_id,
+                timeout=15000,
+            )
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
@@ -619,22 +850,118 @@ def main() -> int:
                 f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}"
             )
         page.wait_for_function(
-            """({reasoning, tool}) => {
+            """({reasoning, secondReasoning, thirdReasoning, tool, secondTool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
               const text = turn.innerText || '';
-              return text.includes(reasoning) &&
-                Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));
+              const thinkingRows = turn.querySelectorAll('[data-anchor-row-role="thinking"]');
+              return text.includes(reasoning) && text.includes(secondReasoning) &&
+                text.includes(thirdReasoning) && thinkingRows.length === 3 &&
+                Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`)) &&
+                Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${secondTool}"]`));
             }""",
-            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            arg={
+                "reasoning": REASONING_TEXT,
+                "secondReasoning": SECOND_REASONING_TEXT,
+                "thirdReasoning": THIRD_REASONING_TEXT,
+                "tool": TOOL_NAME,
+                "secondTool": SECOND_TOOL_NAME,
+            },
             timeout=10000,
         )
         live_snapshot = _activity_snapshot(page)
         _assert_live_activity(live_snapshot)
-        print("OK  live activity: one Anchor worklog with reasoning + completed tool")
+        print("OK  live activity: one Anchor worklog with reasoning + completed tool activity")
         _wait_for_live_anchor_projection(page)
 
+        if SCENARIO == "session-reattach":
+            active_session_id = live_snapshot["clientState"]["sessionId"]
+            active_stream_id = live_snapshot["clientState"]["activeStreamId"]
+            assert active_session_id and active_stream_id, live_snapshot
+            expected_reasoning_ids = [
+                f"live-reasoning:{active_stream_id}:1",
+                f"live-reasoning:{active_stream_id}:2",
+                f"live-reasoning:{active_stream_id}:3",
+            ]
+            _wait_for_runtime_scene(base_url, active_session_id, expected_reasoning_ids)
+            page.wait_for_selector(
+                f'.session-item[data-sid="{active_session_id}"].streaming',
+                state="visible",
+                timeout=10000,
+            )
+            page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
+            page.wait_for_function(
+                "({sid, text}) => S.session && S.session.session_id === sid && !S.busy && "
+                "!S.activeStreamId && !document.querySelector('#liveAssistantTurn') && "
+                "(document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg={"sid": seed_session_id, "text": SEED_FINAL_TEXT},
+                timeout=15000,
+            )
+            print("OK  session switch: idle session replaces the active live turn")
+            page.evaluate(
+                """({sid, stream}) => {
+                  if (typeof INFLIGHT === 'object' && INFLIGHT) delete INFLIGHT[sid];
+                  if (typeof clearInflightState === 'function') clearInflightState(sid);
+                  if (window._liveAnchorRegistries) window._liveAnchorRegistries.delete(stream);
+                }""",
+                {"sid": active_session_id, "stream": active_stream_id},
+            )
+            if TEST_BITE == "replace-runtime-reasoning-id":
+                page.route(
+                    "**/api/session*",
+                    lambda route: _replace_runtime_reasoning_identity(route, active_session_id, bite_hits),
+                )
+            page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
+            page.wait_for_function(
+                "({sid, stream, reasoning, secondReasoning, thirdReasoning, tool, secondTool}) => {"
+                "  const turn = document.querySelector('#liveAssistantTurn');"
+                "  return S.session && S.session.session_id === sid && S.busy === true && "
+                "    S.activeStreamId === stream && turn && "
+                "    turn.getAttribute('data-anchor-stream-id') === stream && "
+                "    (turn.innerText || '').includes(reasoning) && "
+                "    (turn.innerText || '').includes(secondReasoning) && "
+                "    (turn.innerText || '').includes(thirdReasoning) && "
+                "    turn.querySelectorAll('[data-anchor-row-role=\"thinking\"]').length === 3 && "
+                "    Boolean(turn.querySelector(`[data-anchor-row-role=\"tool\"][data-tool-name=\"${tool}\"]`)) && "
+                "    Boolean(turn.querySelector(`[data-anchor-row-role=\"tool\"][data-tool-name=\"${secondTool}\"]`));"
+                "}",
+                arg={
+                    "sid": active_session_id,
+                    "stream": active_stream_id,
+                    "reasoning": REASONING_TEXT,
+                    "secondReasoning": SECOND_REASONING_TEXT,
+                    "thirdReasoning": THIRD_REASONING_TEXT,
+                    "tool": TOOL_NAME,
+                    "secondTool": SECOND_TOOL_NAME,
+                },
+                timeout=15000,
+            )
+            if TEST_BITE == "replace-runtime-reasoning-id":
+                page.unroute("**/api/session*")
+                assert len(bite_hits) == 1, bite_hits
+            reattached_snapshot = _activity_snapshot(page)
+            _assert_same_live_turn(live_snapshot, reattached_snapshot)
+            live_snapshot = reattached_snapshot
+            print("OK  session reattach: same stream and Anchor activity resume without duplication")
+
         gateway.release_settle.set()
+        if SCENARIO == "session-reattach":
+            if not gateway.continuation_ready.wait(timeout=10):
+                raise AssertionError("mock Gateway did not emit the post-reattach reasoning continuation")
+            page.wait_for_function(
+                """text => {
+                  const turn = document.querySelector('#liveAssistantTurn');
+                  return turn && (turn.innerText || '').includes(text) &&
+                    turn.querySelectorAll('[data-anchor-row-role="thinking"]').length === 4;
+                }""",
+                arg=CONTINUATION_REASONING_TEXT,
+                timeout=10000,
+            )
+            continued_snapshot = _activity_snapshot(page)
+            _assert_live_continuation(live_snapshot, continued_snapshot)
+            live_snapshot = continued_snapshot
+            print("OK  live continuation: post-reattach reasoning appends with a new Anchor identity")
+        gateway.release_final_prefix.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
         page.wait_for_function(
@@ -668,7 +995,8 @@ def main() -> int:
             timeout=10000,
         )
         settled_snapshot = _activity_snapshot(page)
-        _assert_settled(settled_snapshot)
+        settled_reasoning_count = 4 if SCENARIO == "session-reattach" else 3
+        _assert_settled(settled_snapshot, reasoning_count=settled_reasoning_count)
         assert _semantic_activity(settled_snapshot) == _semantic_activity(live_snapshot), {
             "live": _semantic_activity(live_snapshot),
             "settled": _semantic_activity(settled_snapshot),
@@ -687,14 +1015,16 @@ def main() -> int:
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)
-        _assert_settled(reloaded_snapshot)
+        _assert_settled(reloaded_snapshot, reasoning_count=settled_reasoning_count)
         assert _semantic_activity(reloaded_snapshot) == _semantic_activity(settled_snapshot), {
             "settled": _semantic_activity(settled_snapshot),
             "reloaded": _semantic_activity(reloaded_snapshot),
         }
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
-        assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
+        expected_inputs = [PROMPT] if SCENARIO == "normal" else [SEED_PROMPT, PROMPT]
+        actual_inputs = [request.get("input") for request in gateway.request_bodies]
+        assert actual_inputs == expected_inputs, actual_inputs
         if errors:
             raise AssertionError(f"unexpected browser errors: {errors!r}")
         context.close()
@@ -710,7 +1040,7 @@ def main() -> int:
                 page.screenshot(path=str(artifact_dir / "failure.png"), full_page=True)
                 (artifact_dir / "snapshot.json").write_text(
                     json.dumps({
-                        "scenario": "normal-live-to-final",
+                        "scenario": SCENARIO,
                         "test_bite": TEST_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,

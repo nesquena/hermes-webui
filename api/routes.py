@@ -3161,25 +3161,66 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     current_activity_burst_id = 0
     fresh_segment = True
     last_ts = None
-    reasoning_first_tool_count: int | None = None
+    reasoning_segments: list[dict] = []
+    active_reasoning_segment: dict | None = None
+    live_segment_seq_high_water = 0
+    active_live_segment_seq: int | None = None
+    active_prose_started_order: int | None = None
+    current_event_order = 0
 
-    def mark_boundary() -> int:
+    def ensure_live_segment() -> int:
+        nonlocal active_live_segment_seq, live_segment_seq_high_water
+        if active_live_segment_seq is None:
+            live_segment_seq_high_water += 1
+            active_live_segment_seq = live_segment_seq_high_water
+        return active_live_segment_seq
+
+    def mark_boundary() -> tuple[int, int]:
         nonlocal current_activity_burst_id
+        nonlocal active_live_segment_seq, active_prose_started_order
+        # A tool arriving immediately after prose was sealed still belongs to
+        # that browser-visible segment. Reuse the consumed high-water without
+        # allocating a new segment; the next reasoning/prose event advances it.
+        segment_seq = int(active_live_segment_seq or live_segment_seq_high_water or 0)
         text_end = len(assistant_text)
-        if text_end <= 0:
-            return current_activity_burst_id
         last_end = max(
             [int(anchor.get("textEnd") or 0) for anchor in activity_burst_anchors]
             or [0]
         )
         if text_end > last_end:
+            if not segment_seq:
+                segment_seq = ensure_live_segment()
             current_activity_burst_id += 1
             activity_burst_anchors.append(
-                {"id": current_activity_burst_id, "textEnd": text_end}
+                {
+                    "id": current_activity_burst_id,
+                    "textEnd": text_end,
+                    "segment_seq": segment_seq,
+                    "journal_order": active_prose_started_order or current_event_order,
+                }
             )
-        return current_activity_burst_id
+        active_live_segment_seq = None
+        active_prose_started_order = None
+        return current_activity_burst_id, segment_seq
 
-    def update_completed_tool(payload: dict) -> None:
+    def append_reasoning_segment(text: str) -> None:
+        nonlocal active_reasoning_segment
+        if active_reasoning_segment is None:
+            segment_seq = ensure_live_segment()
+            active_reasoning_segment = {
+                "segment_seq": segment_seq,
+                "text": "",
+                "first_tool_count": len(tool_calls),
+                "text_offset": len(assistant_text),
+                "created_at": last_ts,
+                "journal_order": current_event_order,
+            }
+            reasoning_segments.append(active_reasoning_segment)
+        active_reasoning_segment["text"] += text
+        if active_reasoning_segment.get("created_at") is None and last_ts is not None:
+            active_reasoning_segment["created_at"] = last_ts
+
+    def update_completed_tool(payload: dict) -> bool:
         tool_id = _run_journal_snapshot_tool_id(payload)
         name = str(payload.get("name") or "").strip()
         for call in reversed(tool_calls):
@@ -3201,10 +3242,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     call["duration"] = payload.get("duration")
                 if payload.get("is_error") is not None:
                     call["is_error"] = bool(payload.get("is_error"))
-                return
+                return False
 
         if not name or name == "clarify":
-            return
+            return False
+        boundary_id, segment_seq = mark_boundary()
         call = {
             "name": name,
             "preview": str(payload.get("preview") or ""),
@@ -3214,6 +3256,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "_live": True,
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
+            "_journal_order": current_event_order,
         }
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
@@ -3221,10 +3264,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         for key in _RUN_JOURNAL_TOOL_ID_KEYS:
             if payload.get(key):
                 call[key] = str(payload.get(key))
-        if current_activity_burst_id:
-            call["activityBurstId"] = current_activity_burst_id
-            call["activitySegmentSeq"] = current_activity_burst_id
+        if boundary_id:
+            call["activityBurstId"] = boundary_id
+        if segment_seq:
+            call["activitySegmentSeq"] = segment_seq
         tool_calls.append(call)
+        return True
 
     def reasoning_echo_tail_matches(text: str) -> bool:
         candidate = _compact_for_echo_compare(text)
@@ -3233,29 +3278,47 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         return _compact_for_echo_compare(reasoning_text).endswith(candidate)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
+        nonlocal reasoning_text, active_reasoning_segment
         next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
         if did_remove:
             reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
+            scene_reasoning = "".join(str(segment.get("text") or "") for segment in reasoning_segments)
+            next_scene_reasoning, scene_removed = _strip_compact_echo_suffix(scene_reasoning, text)
+            if scene_removed:
+                remaining = len(next_scene_reasoning)
+                kept_segments = []
+                for segment in reasoning_segments:
+                    raw = str(segment.get("text") or "")
+                    if remaining <= 0:
+                        break
+                    keep = raw[:remaining]
+                    remaining -= len(raw)
+                    if not _compact_for_echo_compare(keep):
+                        continue
+                    segment["text"] = keep
+                    kept_segments.append(segment)
+                reasoning_segments[:] = kept_segments
+                active_reasoning_segment = kept_segments[-1] if kept_segments else None
         return did_remove
 
-    for event in events:
+    for current_event_order, event in enumerate(events, start=1):
         event_name = str(event.get("event") or event.get("type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
             text = str(payload.get("text") or "")
             if text:
+                ensure_live_segment()
+                if active_prose_started_order is None:
+                    active_prose_started_order = current_event_order
                 assistant_text += text
                 fresh_segment = False
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-            reasoning_text += text
+            if text:
+                reasoning_text += text
+                append_reasoning_segment(text)
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
@@ -3264,17 +3327,24 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     strip_reasoning_echo_tail(visible)
                 if payload.get("already_streamed"):
                     if not assistant_text:
+                        ensure_live_segment()
+                        if active_prose_started_order is None:
+                            active_prose_started_order = current_event_order
                         assistant_text = visible
                 else:
+                    ensure_live_segment()
+                    if active_prose_started_order is None:
+                        active_prose_started_order = current_event_order
                     assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
                 mark_boundary()
                 fresh_segment = True
+                active_reasoning_segment = None
             continue
         if event_name == "tool":
             name = str(payload.get("name") or "").strip()
             if not name or name == "clarify":
                 continue
-            boundary_id = mark_boundary()
+            boundary_id, segment_seq = mark_boundary()
             tool_id = _run_journal_snapshot_tool_id(payload)
             call = {
                 "name": name,
@@ -3284,6 +3354,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "_live": True,
                 "_journal_snapshot": True,
                 "_journal_stream_id": stream_id,
+                "_journal_order": current_event_order,
             }
             if tool_id:
                 call["tid"] = tool_id
@@ -3292,13 +3363,16 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     call[key] = str(payload.get(key))
             if boundary_id:
                 call["activityBurstId"] = boundary_id
-                call["activitySegmentSeq"] = boundary_id
+            if segment_seq:
+                call["activitySegmentSeq"] = segment_seq
             tool_calls.append(call)
             fresh_segment = True
+            active_reasoning_segment = None
             continue
         if event_name == "tool_complete":
-            update_completed_tool(payload)
-            fresh_segment = True
+            if update_completed_tool(payload):
+                fresh_segment = True
+                active_reasoning_segment = None
 
     if assistant_text or reasoning_text:
         message = {
@@ -3328,7 +3402,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             group["activity_burst_id"] = burst_id
         return group
 
-    def scene_prose_row(text: str, *, burst_id: int | None, segment_seq: int, status: str) -> dict | None:
+    def scene_prose_row(
+        text: str,
+        *,
+        burst_id: int | None,
+        segment_seq: int,
+        journal_order: int | None,
+        status: str,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
@@ -3368,14 +3449,22 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "activitySegmentSeq": segment_seq,
                 "activityBurstId": burst_id or 0,
             },
+            "_journal_order": journal_order,
         }
 
-    def scene_thinking_row(text: str, *, status: str) -> dict | None:
+    def scene_thinking_row(
+        text: str,
+        *,
+        segment_seq: int,
+        created_at,
+        journal_order: int | None,
+        status: str,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
         preview = " ".join(clean.split())
-        local_id = f"live-thinking:{stream_id}:1"
+        local_id = f"live-reasoning:{stream_id}:{segment_seq}"
         return {
             "row_id": local_id,
             "order_index": len(anchor_activity_rows),
@@ -3393,7 +3482,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "stream_id": stream_id,
             "seq": None,
             "status": status,
-            "created_at": last_ts,
+            "created_at": created_at,
             "identity": {
                 "event_id": None,
                 "local_id": local_id,
@@ -3401,7 +3490,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "stream_id": stream_id,
                 "seq": None,
             },
-            "group": scene_group(),
+            "group": scene_group(segment_seq),
             "text": clean,
             "thinking": {
                 "text": clean,
@@ -3412,7 +3501,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "tool": None,
             "payload": {
                 "text": clean,
+                "activitySegmentSeq": segment_seq,
             },
+            "_journal_order": journal_order,
         }
 
     def scene_tool_row(call: dict, *, fallback_order: int) -> dict | None:
@@ -3484,24 +3575,43 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "tool_call_id": tool_id,
             "tool": tool,
             "payload": payload,
+            "_journal_order": int(call.get("_journal_order") or 0) or None,
         }
 
     anchor_activity_rows: list[dict] = []
-    thinking_row_inserted = False
+    thinking_rows_inserted: set[int] = set()
     tool_rows_rendered = 0
 
-    def append_thinking_row(*, force: bool = False) -> None:
-        nonlocal thinking_row_inserted
-        if thinking_row_inserted:
-            return
-        if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
-            return
-        row = scene_thinking_row(reasoning_text, status="running")
-        if not row:
-            return
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        thinking_row_inserted = True
+    def append_thinking_rows(
+        *,
+        max_segment_seq: int | None = None,
+        max_text_offset: int | None = None,
+        force: bool = False,
+    ) -> None:
+        for index, segment in enumerate(reasoning_segments):
+            if index in thinking_rows_inserted:
+                continue
+            segment_seq = max(1, int(segment.get("segment_seq") or 1))
+            first_tool_count = max(0, int(segment.get("first_tool_count") or 0))
+            if not force and tool_rows_rendered < first_tool_count:
+                continue
+            if not force and max_segment_seq is not None and segment_seq > max_segment_seq:
+                continue
+            text_offset = max(0, int(segment.get("text_offset") or 0))
+            if not force and max_text_offset is not None and text_offset > max_text_offset:
+                continue
+            row = scene_thinking_row(
+                str(segment.get("text") or ""),
+                segment_seq=segment_seq,
+                created_at=segment.get("created_at"),
+                journal_order=int(segment.get("journal_order") or 0) or None,
+                status="running",
+            )
+            if not row:
+                continue
+            row["order_index"] = len(anchor_activity_rows)
+            anchor_activity_rows.append(row)
+            thinking_rows_inserted.add(index)
 
     tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
     ungrouped_tool_rows: list[tuple[int, dict]] = []
@@ -3528,38 +3638,57 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     for anchor in sorted_anchors:
         burst_id = int(anchor.get("id") or 0) or None
         text_end = min(len(assistant_text), int(anchor.get("textEnd") or 0))
-        segment_seq = burst_id or (len(anchor_activity_rows) + 1)
+        segment_seq = max(1, int(anchor.get("segment_seq") or burst_id or 1))
         prose = scene_prose_row(
             assistant_text[text_start:text_end],
             burst_id=burst_id,
             segment_seq=segment_seq,
+            journal_order=int(anchor.get("journal_order") or 0) or None,
             status="completed",
         )
         if prose:
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=text_start,
+            )
             anchor_activity_rows.append(prose)
-            append_thinking_row()
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=text_end,
+            )
         for order, row in tool_rows_by_burst.get(burst_id or 0, []):
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             consumed_tools.add(order)
             tool_rows_rendered += 1
-            append_thinking_row()
+            append_thinking_rows(
+                max_segment_seq=segment_seq + 1,
+                max_text_offset=text_end,
+            )
         text_start = max(text_start, text_end)
 
     if text_start < len(assistant_text):
-        segment_seq = max(len(sorted_anchors) + 1, 1)
+        segment_seq = max(1, int(active_live_segment_seq or live_segment_seq_high_water or 1))
         tail = scene_prose_row(
             assistant_text[text_start:],
             burst_id=None,
             segment_seq=segment_seq,
+            journal_order=active_prose_started_order,
             status="running",
         )
         if tail:
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=text_start,
+            )
             anchor_activity_rows.append(tail)
-            append_thinking_row()
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=len(assistant_text),
+            )
 
     if not assistant_text:
-        append_thinking_row()
+        append_thinking_rows(max_segment_seq=1, max_text_offset=0)
 
     for order, row in sorted(ungrouped_tool_rows, key=lambda item: item[0]):
         if order in consumed_tools:
@@ -3567,9 +3696,22 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         row["order_index"] = len(anchor_activity_rows)
         anchor_activity_rows.append(row)
         tool_rows_rendered += 1
-        append_thinking_row()
+        append_thinking_rows()
 
-    append_thinking_row(force=True)
+    append_thinking_rows(force=True)
+
+    for projection_order, row in enumerate(anchor_activity_rows):
+        row["_projection_order"] = projection_order
+    anchor_activity_rows.sort(
+        key=lambda row: (
+            int(row.get("_journal_order") or 0) or len(events) + 1,
+            int(row.get("_projection_order") or 0),
+        )
+    )
+    for order_index, row in enumerate(anchor_activity_rows):
+        row["order_index"] = order_index
+        row.pop("_journal_order", None)
+        row.pop("_projection_order", None)
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
@@ -3615,7 +3757,24 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if int(anchor.get("textEnd") or 0) < len(assistant_text)
     ]
     segment_count = len(visible_anchors) + (1 if assistant_text else 0)
-    current_live_segment_seq = max(segment_count, len(activity_burst_anchors), 0)
+    reasoning_segment_seq = max(
+        live_segment_seq_high_water,
+        max(
+            [int(segment.get("segment_seq") or 0) for segment in reasoning_segments]
+            or [0]
+        ),
+    )
+    tool_segment_seq = max(
+        [int(call.get("activitySegmentSeq") or 0) for call in tool_calls]
+        or [0]
+    )
+    current_live_segment_seq = max(
+        segment_count,
+        len(activity_burst_anchors),
+        reasoning_segment_seq,
+        tool_segment_seq,
+        0,
+    )
     try:
         summary_last_seq = max(0, int(summary.get("last_seq") or 0))
     except (TypeError, ValueError):
@@ -3636,6 +3795,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     # Keep returning a live snapshot even when the journal has events but no
     # projected message/tool rows yet. The frontend treats the empty activity
     # scene as "nothing renderable yet" while preserving the live cursor.
+    public_activity_burst_anchors = [
+        {"id": anchor.get("id"), "textEnd": anchor.get("textEnd")}
+        for anchor in activity_burst_anchors
+    ]
+    for call in tool_calls:
+        call.pop("_journal_order", None)
     return {
         "session_id": session_id,
         "stream_id": stream_id,
@@ -3647,7 +3812,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "tool_calls": tool_calls,
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
-        "activity_burst_anchors": activity_burst_anchors,
+        "activity_burst_anchors": public_activity_burst_anchors,
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
         "anchor_activity_scene": {
@@ -4518,18 +4683,19 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     return any(str(value or "").startswith("live-") for value in values)
 
 
-def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
+def _anchor_scene_settle_live_running_row(row, *, drop_live_thinking: bool = False):
     if not isinstance(row, dict):
         return row
     role = row.get("role")
     if role not in ("thinking", "prose", "tool"):
         return row
+    has_live_identity = _anchor_scene_row_has_live_identity(row)
+    if role == "thinking" and drop_live_thinking and has_live_identity:
+        return None
     if str(row.get("status") or "").lower() != "running":
         return row
-    if not _anchor_scene_row_has_live_identity(row):
+    if not has_live_identity:
         return row
-    if role == "thinking" and has_settled_thinking:
-        return None
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
     return next_row
@@ -4556,6 +4722,34 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
+    scene_thinking_rows = [
+        row
+        for row in scene.get("activity_rows") or []
+        if isinstance(row, dict)
+        and row.get("role") == "thinking"
+        and _anchor_scene_clean_text(row.get("text"))
+    ]
+    scene_reasoning_key = _anchor_scene_text_key(
+        "".join(str(row.get("text") or "") for row in scene_thinking_rows)
+    )
+    transcript_reasoning_key = _anchor_scene_text_key(
+        "".join(
+            (
+                "".join(
+                    _anchor_scene_content_text(part)
+                    for part in (message.get("content") or [])
+                    if isinstance(part, dict) and part.get("type") in ("thinking", "reasoning")
+                )
+                or _anchor_scene_message_reasoning_text(message)
+            )
+            for message in messages[turn_start + 1 : local_final_idx + 1]
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        )
+    )
+    scene_has_authoritative_thinking = bool(scene_thinking_rows) and (
+        not transcript_reasoning_key or scene_reasoning_key == transcript_reasoning_key
+    )
+    drop_live_thinking = bool(transcript_reasoning_key) and not scene_has_authoritative_thinking
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -4624,7 +4818,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             return
         row = _anchor_scene_settle_live_running_row(
             row,
-            has_settled_thinking=any(existing.get("role") == "thinking" for existing in rows),
+            drop_live_thinking=drop_live_thinking,
         )
         if row is None or not isinstance(row, dict):
             return
@@ -4657,6 +4851,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         next_row["seq"] = len(rows)
         rows.append(next_row)
 
+    if scene_has_authoritative_thinking:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
+
     order = 0
     content_tool_indexes_by_idx = {}
     used_content_tool_indexes_by_idx = {}
@@ -4679,6 +4878,8 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         id_flexible_content_tool_indexes = set()
         if content_rows:
             for row in content_rows:
+                if scene_has_authoritative_thinking and row.get("role") == "thinking":
+                    continue
                 previous_len = len(rows)
                 push(row)
                 if row.get("role") == "tool" and len(rows) > previous_len:
@@ -4692,7 +4893,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
-        if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
+        if (
+            not scene_has_authoritative_thinking
+            and _anchor_scene_clean_text(reasoning)
+            and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
+        ):
             push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
@@ -4772,9 +4977,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             continue
         push(row, prefer_incoming_tool_body=True)
         order += 1
-    for row in scene.get("activity_rows") or []:
-        if isinstance(row, dict) and row.get("role") != "terminal":
-            push(row)
+    if not scene_has_authoritative_thinking:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
             push(row)

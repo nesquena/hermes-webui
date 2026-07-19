@@ -50,9 +50,15 @@ jobs:
           pip install -r requirements.txt playwright
           python -m playwright install --with-deps chromium
 
-      - name: Run conversation lifecycle gate
+      - name: Run normal conversation lifecycle gate
         env:
-          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/normal
+        run: python tests/browser_conversation_lifecycle.py
+
+      - name: Run active session reattach lifecycle gate
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/session-reattach
+          LIFECYCLE_SCENARIO: session-reattach
         run: python tests/browser_conversation_lifecycle.py
 
       - name: Upload failure artifacts

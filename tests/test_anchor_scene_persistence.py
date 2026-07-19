@@ -2,6 +2,8 @@ import json
 from collections import OrderedDict
 from types import SimpleNamespace
 
+import pytest
+
 
 def _client_anchor_scene_message_ref(message):
     content = message.get("content") if isinstance(message, dict) else ""
@@ -1983,7 +1985,10 @@ def test_anchor_scene_hydration_dedupes_compression_lifecycle_rows():
     assert compression_rows[0]["order_index"] == compression_rows[0]["seq"]
 
 
-def test_anchor_scene_hydration_drops_stale_live_running_thinking_when_settled_thinking_exists():
+@pytest.mark.parametrize("stale_status", ["running", "completed"])
+def test_anchor_scene_hydration_drops_stale_live_thinking_when_settled_thinking_exists(
+    stale_status,
+):
     from api import routes
 
     messages = [
@@ -2011,7 +2016,7 @@ def test_anchor_scene_hydration_drops_stale_live_running_thinking_when_settled_t
                         "role": "thinking",
                         "kind": "reasoning",
                         "source_event_type": "reasoning",
-                        "status": "running",
+                        "status": stale_status,
                         "text": "stale live reasoning text",
                     },
                     {"row_id": "done", "role": "terminal", "kind": "terminal_status", "source_event_type": "done"},
@@ -2281,11 +2286,395 @@ def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatc
     assert snapshot["last_reasoning_text"] == "thinking through plan"
     assert [row["role"] for row in rows] == ["prose", "thinking", "tool", "prose"]
     assert rows[0]["local_id"] == f"live-prose:{stream_id}:1"
-    assert rows[1]["local_id"] == f"live-thinking:{stream_id}:1"
+    assert rows[1]["local_id"] == f"live-reasoning:{stream_id}:1"
     assert rows[1]["thinking"]["text"] == "thinking through plan"
     assert rows[2]["tool_call_id"] == "call-1"
     assert rows[2]["tool"]["done"] is True
     assert rows[3]["status"] == "running"
+
+
+def test_runtime_journal_snapshot_preserves_reasoning_segment_identities(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-segmented-reasoning"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "created_at": 1.0,
+            "payload": {"text": "plan first"},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "created_at": 2.0,
+            "payload": {"text": "first progress"},
+        },
+        {
+            "event": "tool",
+            "seq": 3,
+            "created_at": 3.0,
+            "payload": {"name": "read_file", "tid": "call-1"},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 4,
+            "created_at": 4.0,
+            "payload": {"name": "read_file", "tid": "call-1", "preview": "done"},
+        },
+        {
+            "event": "reasoning",
+            "seq": 5,
+            "created_at": 5.0,
+            "payload": {"text": "check result"},
+        },
+        {
+            "event": "token",
+            "seq": 6,
+            "created_at": 6.0,
+            "payload": {"text": " second progress"},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-segmented-reasoning",
+            "last_seq": 6,
+            "last_event_id": f"{stream_id}:6",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    thinking_rows = [row for row in rows if row["role"] == "thinking"]
+
+    assert [row["role"] for row in rows] == ["thinking", "prose", "tool", "thinking", "prose"]
+    assert [row["local_id"] for row in thinking_rows] == [
+        f"live-reasoning:{stream_id}:1",
+        f"live-reasoning:{stream_id}:2",
+    ]
+    assert [row["text"] for row in thinking_rows] == ["plan first", "check result"]
+    assert [row["group"]["activity_segment_seq"] for row in thinking_rows] == [1, 2]
+
+
+def test_runtime_journal_completion_only_tool_starts_a_new_reasoning_segment(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-completion-only-tool"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "created_at": 1.0,
+            "payload": {"text": "plan first"},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 2,
+            "created_at": 2.0,
+            "payload": {"name": "read_file", "tid": "call-1", "preview": "done"},
+        },
+        {
+            "event": "reasoning",
+            "seq": 3,
+            "created_at": 3.0,
+            "payload": {"text": "check result"},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-completion-only-tool",
+            "last_seq": 3,
+            "last_event_id": f"{stream_id}:3",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    thinking_rows = [row for row in rows if row["role"] == "thinking"]
+
+    assert [row["role"] for row in rows] == ["thinking", "tool", "thinking"]
+    assert [row["local_id"] for row in thinking_rows] == [
+        f"live-reasoning:{stream_id}:1",
+        f"live-reasoning:{stream_id}:2",
+    ]
+    assert [row["text"] for row in thinking_rows] == ["plan first", "check result"]
+    assert rows[1]["tool"]["done"] is True
+    assert snapshot["current_live_segment_seq"] == 2
+
+
+def test_runtime_journal_no_prose_tool_preserves_global_segment_order(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-no-prose-tool-global-order"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "created_at": 1.0,
+            "payload": {"text": "plan first"},
+        },
+        {
+            "event": "tool",
+            "seq": 2,
+            "created_at": 2.0,
+            "payload": {"name": "read_file", "tid": "call-1"},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 3,
+            "created_at": 3.0,
+            "payload": {"name": "read_file", "tid": "call-1", "preview": "done"},
+        },
+        {
+            "event": "interim_assistant",
+            "seq": 4,
+            "created_at": 4.0,
+            "payload": {"text": "progress after tool"},
+        },
+        {
+            "event": "tool",
+            "seq": 5,
+            "created_at": 5.0,
+            "payload": {"name": "search", "tid": "call-2"},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 6,
+            "created_at": 6.0,
+            "payload": {"name": "search", "tid": "call-2", "preview": "done"},
+        },
+        {
+            "event": "reasoning",
+            "seq": 7,
+            "created_at": 7.0,
+            "payload": {"text": "check result"},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-no-prose-tool-global-order",
+            "last_seq": 7,
+            "last_event_id": f"{stream_id}:7",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+
+    assert [row["role"] for row in rows] == [
+        "thinking",
+        "tool",
+        "prose",
+        "tool",
+        "thinking",
+    ]
+    assert [row["local_id"] for row in rows] == [
+        f"live-reasoning:{stream_id}:1",
+        "call-1",
+        f"live-prose:{stream_id}:2",
+        "call-2",
+        f"live-reasoning:{stream_id}:3",
+    ]
+    assert [row["group"].get("activity_segment_seq") for row in rows] == [1, 1, 2, 2, 3]
+    assert snapshot["current_live_segment_seq"] == 3
+
+
+def test_runtime_journal_reasoning_segment_keeps_its_first_timestamp(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-reasoning-timestamp"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "created_at": 10.0,
+            "payload": {"text": "first "},
+        },
+        {
+            "event": "reasoning",
+            "seq": 2,
+            "created_at": 20.0,
+            "payload": {"text": "second"},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-reasoning-timestamp",
+            "last_seq": 2,
+            "last_event_id": f"{stream_id}:2",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    thinking_rows = [
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row["role"] == "thinking"
+    ]
+
+    assert len(thinking_rows) == 1
+    assert thinking_rows[0]["text"] == "first second"
+    assert thinking_rows[0]["created_at"] == 10.0
+
+
+def test_hydration_prefers_persisted_reasoning_segments_over_transcript_aggregate():
+    from api import routes
+
+    stream_id = "stream-settled-segments"
+    messages = [
+        {"role": "user", "content": "prompt"},
+        {
+            "role": "assistant",
+            "content": "final answer",
+            "reasoning": "first thoughtsecond thought",
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [
+            {
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "status": "running",
+                "row_id": f"live-reasoning:{stream_id}:1",
+                "local_id": f"live-reasoning:{stream_id}:1",
+                "text": "first thought",
+            },
+            {
+                "role": "tool",
+                "kind": "tool_completed",
+                "source_event_type": "tool_complete",
+                "status": "completed",
+                "row_id": "tool-1",
+                "local_id": "tool-1",
+                "tool_call_id": "tool-1",
+                "tool": {"id": "tool-1", "name": "read_file", "done": True},
+            },
+            {
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "status": "running",
+                "row_id": f"live-reasoning:{stream_id}:2",
+                "local_id": f"live-reasoning:{stream_id}:2",
+                "text": "second thought",
+            },
+        ],
+    }
+
+    hydrated = routes._complete_hydrated_anchor_scene(
+        messages,
+        scene,
+        1,
+        stream_id=stream_id,
+    )
+    rows = hydrated["activity_rows"]
+    thinking_rows = [row for row in rows if row["role"] == "thinking"]
+
+    assert [row["role"] for row in rows] == ["thinking", "tool", "thinking"]
+    assert [row["local_id"] for row in thinking_rows] == [
+        f"live-reasoning:{stream_id}:1",
+        f"live-reasoning:{stream_id}:2",
+    ]
+    assert [row["text"] for row in thinking_rows] == ["first thought", "second thought"]
+    assert all(row["status"] == "completed" for row in thinking_rows)
+
+
+def test_hydration_prefers_persisted_segments_over_structured_content_reasoning():
+    from api import routes
+
+    stream_id = "stream-structured-settled-segments"
+    messages = [
+        {"role": "user", "content": "prompt"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "text": "first thoughtsecond thought"},
+                {"type": "tool_use", "id": "tool-1", "name": "read_file"},
+                {"type": "text", "text": "final answer"},
+            ],
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [
+            {
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "status": "running",
+                "row_id": f"live-reasoning:{stream_id}:1",
+                "local_id": f"live-reasoning:{stream_id}:1",
+                "text": "first thought",
+            },
+            {
+                "role": "tool",
+                "kind": "tool_completed",
+                "source_event_type": "tool_complete",
+                "status": "completed",
+                "row_id": "tool-1",
+                "local_id": "tool-1",
+                "tool_call_id": "tool-1",
+                "tool": {"id": "tool-1", "name": "read_file", "done": True},
+            },
+            {
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "status": "running",
+                "row_id": f"live-reasoning:{stream_id}:2",
+                "local_id": f"live-reasoning:{stream_id}:2",
+                "text": "second thought",
+            },
+        ],
+    }
+
+    hydrated = routes._complete_hydrated_anchor_scene(
+        messages,
+        scene,
+        1,
+        stream_id=stream_id,
+    )
+    rows = hydrated["activity_rows"]
+    thinking_rows = [row for row in rows if row["role"] == "thinking"]
+
+    assert [row["role"] for row in rows] == ["thinking", "tool", "thinking"]
+    assert [row["local_id"] for row in thinking_rows] == [
+        f"live-reasoning:{stream_id}:1",
+        f"live-reasoning:{stream_id}:2",
+    ]
+    assert [row["text"] for row in thinking_rows] == ["first thought", "second thought"]
 
 
 def test_runtime_journal_snapshot_dedupes_reasoning_interim_progress_echo(monkeypatch):
@@ -2331,6 +2720,145 @@ def test_runtime_journal_snapshot_dedupes_reasoning_interim_progress_echo(monkey
     assert snapshot["last_reasoning_text"] == ""
     assert [row["role"] for row in rows] == ["prose"]
     assert rows[0]["text"] == progress
+
+
+def test_runtime_journal_snapshot_dedupes_echo_spanning_reasoning_segments(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-cross-segment-reasoning-echo"
+    first = "先检查仓库。"
+    second = "再确认测试。"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "created_at": 1.0,
+            "payload": {"text": first},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "created_at": 2.0,
+            "payload": {"text": "正在处理。"},
+        },
+        {
+            "event": "tool",
+            "seq": 3,
+            "created_at": 3.0,
+            "payload": {"name": "read_file", "tid": "call-1"},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 4,
+            "created_at": 4.0,
+            "payload": {"name": "read_file", "tid": "call-1", "preview": "done"},
+        },
+        {
+            "event": "reasoning",
+            "seq": 5,
+            "created_at": 5.0,
+            "payload": {"text": second},
+        },
+        {
+            "event": "interim_assistant",
+            "seq": 6,
+            "created_at": 6.0,
+            "payload": {"text": first + second, "reasoning_echo": True},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-cross-segment-reasoning-echo",
+            "last_seq": 6,
+            "last_event_id": f"{stream_id}:6",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+
+    assert snapshot["last_reasoning_text"] == ""
+    assert not any(row["role"] == "thinking" for row in rows)
+    assert [row["role"] for row in rows] == ["prose", "tool", "prose"]
+
+
+def test_runtime_journal_reasoning_echo_preserves_consumed_segment_high_water(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-reasoning-echo-high-water"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "created_at": 1.0,
+            "payload": {"text": "first"},
+        },
+        {
+            "event": "tool",
+            "seq": 2,
+            "created_at": 2.0,
+            "payload": {"name": "read_file", "tid": "call-1"},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 3,
+            "created_at": 3.0,
+            "payload": {"name": "read_file", "tid": "call-1", "preview": "done"},
+        },
+        {
+            "event": "reasoning",
+            "seq": 4,
+            "created_at": 4.0,
+            "payload": {"text": "second"},
+        },
+        {
+            "event": "interim_assistant",
+            "seq": 5,
+            "created_at": 5.0,
+            "payload": {"text": "second", "reasoning_echo": True},
+        },
+        {
+            "event": "reasoning",
+            "seq": 6,
+            "created_at": 6.0,
+            "payload": {"text": "third"},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-reasoning-echo-high-water",
+            "last_seq": 6,
+            "last_event_id": f"{stream_id}:6",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    thinking_rows = [
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row["role"] == "thinking"
+    ]
+
+    assert [row["local_id"] for row in thinking_rows] == [
+        f"live-reasoning:{stream_id}:1",
+        f"live-reasoning:{stream_id}:3",
+    ]
+    assert [row["text"] for row in thinking_rows] == ["first", "third"]
+    assert snapshot["current_live_segment_seq"] == 3
 
 
 def test_runtime_journal_snapshot_has_running_anchor_row_before_first_token(monkeypatch):

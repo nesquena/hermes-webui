@@ -99,12 +99,21 @@ while a localhost-only fixture supplies reasoning, tool, and final-answer events
 through the existing Hermes Gateway Runs API. The gate asserts semantic activity
 during live streaming, after settlement, and after a hard reload, including
 transcript-backed `activity_scene_v1` persistence and zero unexpected browser
-errors. It uses isolated temporary state and no provider credentials.
+errors. A second scenario leaves an active session through the real sidebar and
+returns to prove that the same stream ID, timer origin, and ordered multi-segment
+Anchor rows reattach without duplication or loss. It waits for the durable server
+snapshot, then clears browser recovery caches before returning so the assertion
+cannot pass from local `INFLIGHT` state alone. The fixture includes a tool boundary
+without preceding process prose and, after reattachment, emits another reasoning
+event that must append with a new Anchor identity before settlement. Both scenarios
+use isolated temporary state and no provider credentials.
 
 ```bash
 pip install -r requirements.txt playwright
 python -m playwright install --with-deps chromium
 python tests/browser_conversation_lifecycle.py
+LIFECYCLE_SCENARIO=session-reattach \
+  python tests/browser_conversation_lifecycle.py
 ```
 
 To certify that the gate catches its target failure, the test owns an opt-in
@@ -116,10 +125,19 @@ LIFECYCLE_TEST_BITE=drop-anchor-persistence \
   python tests/browser_conversation_lifecycle.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs this test
-without blocking merges while the public matrix is being established. The
-maintainer's private QA harness remains broader; later public slices will add
-session switching, reconnect/replay, cancellation, compression, and recovery.
+The reattach scenario has a separate mutation that changes the first reasoning
+identity in the server runtime snapshot. It must fail at the reattach boundary:
+
+```bash
+LIFECYCLE_SCENARIO=session-reattach \
+LIFECYCLE_TEST_BITE=replace-runtime-reasoning-id \
+  python tests/browser_conversation_lifecycle.py
+```
+
+The dedicated `Conversation lifecycle (informational)` workflow runs both
+scenarios without blocking merges while the public matrix is being established.
+The maintainer's private QA harness remains broader; later public slices will add
+terminal errors, cancellation, compression, and broader reconnect/replay recovery.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present

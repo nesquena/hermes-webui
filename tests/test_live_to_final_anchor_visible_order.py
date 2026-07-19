@@ -922,6 +922,52 @@ def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     assert "_anchorSceneToolRowFromCall(tool,0,idx)" in rows_by_message
 
 
+def test_structured_reasoning_is_not_duplicated_by_top_level_mirror():
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))},'utf8');
+{_EXTRACT_FUNC_JS}
+const activeSid='session';
+const streamId='stream';
+global.S={{toolCalls:[]}};
+function _anchorSceneMessageText(){{ return ''; }}
+function _anchorSceneMessageReasoningText(message){{ return String(message.reasoning||''); }}
+function _anchorSceneThinkingRow(text){{ return {{row_id:'top-level',role:'thinking',text}}; }}
+function _anchorSceneProseRow(text){{ return {{row_id:'prose',role:'prose',text}}; }}
+function _anchorSceneToolRowFromCall(tool){{
+  return {{row_id:'tool',role:'tool',tool_call_id:tool.id,tool:{{id:tool.id}}}};
+}}
+function _anchorSceneMatchingContentToolRow(){{ return null; }}
+function _anchorSceneToolRowsHaveDifferentExplicitIds(){{ return false; }}
+function _enrichSettledToolRowBodyFromLive(){{ return false; }}
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneContentText'));
+eval(extractFunc('_anchorSceneContentVisibleText'));
+eval(extractFunc('_anchorSceneMessageHasContentToolUse'));
+eval(extractFunc('_anchorSceneContentTool'));
+eval(extractFunc('_anchorSceneRowsFromContentParts'));
+eval(extractFunc('_anchorSceneRowsByMessageIndex'));
+const messages=[
+  {{role:'user',content:'prompt'}},
+  {{
+    role:'assistant',
+    content:[
+      {{type:'thinking',text:'same reasoning'}},
+      {{type:'tool_use',id:'tool-1',name:'read_file'}},
+      {{type:'text',text:'final answer'}},
+    ],
+    reasoning:'same reasoning',
+  }},
+];
+const rows=_anchorSceneRowsByMessageIndex(messages,0,1,{{includeFinal:true}}).get(1)||[];
+process.stdout.write(JSON.stringify(rows.filter(row=>row.role==='thinking').map(row=>row.text)));
+"""
+    rows = _run_node_script(script)
+
+    assert rows == ["same reasoning"]
+
+
 def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     overlap = _function_body(MESSAGES_JS, "_anchorSceneRowTextOverlapsExisting")
@@ -945,11 +991,18 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     live_identity = _function_body(MESSAGES_JS, "_anchorSceneRowHasLiveIdentity")
     settle_live = _function_body(MESSAGES_JS, "_anchorSceneSettleLiveRunningRow")
 
-    assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
-    assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
+    assert "const projectedReasoningKey=_anchorSceneTextKey(projectedRows" in complete
+    assert "const settledReasoningKey=_anchorSceneTextKey(settledReasoningParts.join(''));" in complete
+    assert "projectedReasoningKey===settledReasoningKey" in complete
+    assert "if(preferProjectedThinking&&row&&row.role==='thinking') continue;" in complete
+    assert "row=_anchorSceneSettleLiveRunningRow(row,dropProjectedThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
     assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
-    assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
+    drop_idx = settle_live.index(
+        "if(row.role==='thinking'&&dropLiveThinking&&hasLiveIdentity) return null;"
+    )
+    status_idx = settle_live.index("if(String(row.status||'').toLowerCase()!=='running') return row;")
+    assert drop_idx < status_idx
     assert "return {...row,status:'completed'};" in settle_live
 
 
