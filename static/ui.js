@@ -19095,22 +19095,125 @@ function _visibleWorkspaceEntries(entries){
   const list=Array.isArray(entries)?entries:[];
   return S.showHiddenWorkspaceFiles?list:list.filter(item=>!_workspaceShouldHideEntry(item));
 }
+const WORKSPACE_SORT_KEYS=['name-asc','name-desc','created-desc','modified-desc'];
+const WORKSPACE_SORT_DEFAULT='name-asc';
+function _normalizeWorkspaceSortKey(value){
+  return WORKSPACE_SORT_KEYS.includes(value)?value:WORKSPACE_SORT_DEFAULT;
+}
+function _workspaceEntryRank(item){
+  const type=item&&item.type;
+  if(type==='symlink') return 0;
+  if(type==='dir') return 1;
+  return 2;
+}
+function _workspaceEntryTimestampKey(item,field){
+  const raw=item&&item[field];
+  if(typeof raw==='string'){
+    const value=raw.trim();
+    if(!/^[+-]?\d+$/.test(value))return null;
+    const negative=value[0]==='-';
+    const digits=value.replace(/^[+-]/,'').replace(/^0+(?=\d)/,'');
+    if(digits==='0')return '0';
+    return negative?'-'+digits:digits;
+  }
+  if(typeof raw==='number') return Number.isInteger(raw)?String(raw):null;
+  if(typeof raw==='bigint') return String(raw);
+  return null;
+}
+function _compareWorkspaceTimestampDesc(a,b,field){
+  const av=_workspaceEntryTimestampKey(a,field),bv=_workspaceEntryTimestampKey(b,field);
+  if(av==null&&bv==null)return 0;
+  if(av==null)return 1;
+  if(bv==null)return -1;
+  const an=av[0]==='-',bn=bv[0]==='-';
+  if(an!==bn)return an?1:-1;
+  const aa=an?av.slice(1):av,bb=bn?bv.slice(1):bv;
+  if(aa.length!==bb.length)return an?aa.length-bb.length:bb.length-aa.length;
+  return aa===bb?0:(an?(aa<bb?-1:1):(aa<bb?1:-1));
+}
+function _workspaceSortComparator(key){
+  if(key==='name-desc') return (a,b)=>String(b.name||'').toLowerCase().localeCompare(String(a.name||'').toLowerCase());
+  const field=key==='created-desc'?'birthtime_ns':'mtime_ns';
+  return (a,b)=>_compareWorkspaceTimestampDesc(a,b,field);
+}
+function _workspaceCreatedSortAvailable(){return !!S._workspaceBirthtimeSeen;}
+function _effectiveWorkspaceSortKey(){
+  const key=_normalizeWorkspaceSortKey(S.workspaceSortKey);
+  return key==='created-desc'&&!_workspaceCreatedSortAvailable()?WORKSPACE_SORT_DEFAULT:key;
+}
+function _workspaceEntriesForRender(entries){
+  const list=_visibleWorkspaceEntries(entries);
+  const key=_effectiveWorkspaceSortKey();
+  if(key===WORKSPACE_SORT_DEFAULT)return list;
+  const cmp=_workspaceSortComparator(key);
+  return list.slice().sort((a,b)=>{
+    const rank=_workspaceEntryRank(a)-_workspaceEntryRank(b);
+    return rank!==0?rank:cmp(a,b);
+  });
+}
+function _resetWorkspaceBirthtimeSupport(scope=''){
+  S._workspaceBirthtimeSeen=false;
+  S._workspaceBirthtimeWorkspace=String(scope||'');
+  _syncWorkspacePrefsIndicators();
+  _syncWorkspaceSortMenuState();
+}
+function _syncWorkspaceBirthtimeSupportScope(scope=''){
+  const next=String(scope||'');
+  if(S._workspaceBirthtimeWorkspace!==next) _resetWorkspaceBirthtimeSupport(next);
+}
+function _noteWorkspaceBirthtimeSupport(entries){
+  if(S._workspaceBirthtimeSeen)return;
+  if((Array.isArray(entries)?entries:[]).some(e=>_workspaceEntryTimestampKey(e,'birthtime_ns')!==null)){
+    S._workspaceBirthtimeSeen=true;
+    S._workspaceBirthtimeWorkspace=String((S.session&&S.session.workspace)||S._workspaceBirthtimeWorkspace||'');
+    _syncWorkspacePrefsIndicators();
+    _syncWorkspaceSortMenuState();
+  }
+}
+function _syncWorkspacePrefsIndicators(ind=$('workspaceHiddenIndicator'),dot=$('workspacePrefsDot')){
+  if(ind){
+    if(S.showHiddenWorkspaceFiles){ind.hidden=false;ind.removeAttribute('hidden');}
+    else{ind.hidden=true;ind.setAttribute('hidden','');}
+  }
+  if(dot){
+    const active=S.showHiddenWorkspaceFiles||_effectiveWorkspaceSortKey()!==WORKSPACE_SORT_DEFAULT;
+    if(active){dot.hidden=false;dot.removeAttribute('hidden');}
+    else{dot.hidden=true;dot.setAttribute('hidden','');}
+  }
+}
+function _syncWorkspaceSortMenuState(menu=_workspacePrefsMenu){
+  if(!menu||!menu.querySelectorAll)return;
+  const active=_effectiveWorkspaceSortKey();
+  const createdOk=_workspaceCreatedSortAvailable();
+  menu.querySelectorAll('.workspace-prefs-item--radio').forEach(row=>{
+    const input=row&&row.querySelector?row.querySelector('input[name="workspaceSortKey"]'):null;
+    if(!input)return;
+    const checked=input.value===active;
+    const disabled=input.value==='created-desc'&&!createdOk;
+    input.checked=checked;
+    input.disabled=disabled;
+    row.setAttribute('aria-checked',checked?'true':'false');
+    row.setAttribute('aria-disabled',disabled?'true':'false');
+    if(row.classList&&row.classList.toggle) row.classList.toggle('is-disabled',disabled);
+    if(input.value==='created-desc'){
+      const copy=row.querySelector('.workspace-prefs-copy');
+      let meta=row.querySelector('.workspace-prefs-meta');
+      if(disabled){
+        if(!meta&&copy&&typeof document!=='undefined'){
+          meta=document.createElement('span');
+          meta.className='workspace-prefs-meta';
+          copy.appendChild(meta);
+        }
+        if(meta)meta.textContent=typeof t==='function'?t('workspace_sort_created_unavailable'):'Creation time is not reported by this server or platform.';
+      }else if(meta)meta.remove();
+    }
+  });
+  if(menu===_workspacePrefsMenu&&typeof _workspacePrefsAnchor!=='undefined'&&_workspacePrefsAnchor&&typeof _positionWorkspacePrefsMenu==='function') _positionWorkspacePrefsMenu(_workspacePrefsAnchor);
+}
 function _syncWorkspaceHiddenToggle(){
   const el=$('workspaceShowHiddenFiles');
   if(el)el.checked=!!S.showHiddenWorkspaceFiles;
-  // Reflect "hidden files are visible" state on the panel heading + kebab dot,
-  // so users can see they've flipped a non-default workspace pref without
-  // having to open the menu. The menu itself stays out of the way otherwise.
-  const ind=$('workspaceHiddenIndicator');
-  if(ind){
-    if(S.showHiddenWorkspaceFiles){ ind.hidden=false; ind.removeAttribute('hidden'); }
-    else { ind.hidden=true; ind.setAttribute('hidden',''); }
-  }
-  const dot=$('workspacePrefsDot');
-  if(dot){
-    if(S.showHiddenWorkspaceFiles){ dot.hidden=false; dot.removeAttribute('hidden'); }
-    else { dot.hidden=true; dot.setAttribute('hidden',''); }
-  }
+  _syncWorkspacePrefsIndicators($('workspaceHiddenIndicator'),$('workspacePrefsDot'));
 }
 function toggleWorkspaceHiddenFiles(value){
   S.showHiddenWorkspaceFiles=!!value;
@@ -19119,6 +19222,14 @@ function toggleWorkspaceHiddenFiles(value){
   renderFileTree();
 }
 try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
+try{S.workspaceSortKey=_normalizeWorkspaceSortKey(localStorage.getItem('hermes-workspace-sort-key'));}catch(_){S.workspaceSortKey=WORKSPACE_SORT_DEFAULT;}
+function setWorkspaceSortKey(value){
+  S.workspaceSortKey=_normalizeWorkspaceSortKey(value);
+  try{localStorage.setItem('hermes-workspace-sort-key',S.workspaceSortKey);}catch(_){ }
+  _syncWorkspacePrefsIndicators();
+  _syncWorkspaceSortMenuState();
+  renderFileTree();
+}
 
 // ── Workspace preferences kebab menu (#1793 UX refinement) ───────────────
 // The "Show hidden files" toggle used to live as a permanent inline row
@@ -19156,6 +19267,35 @@ function _buildWorkspacePrefsMenu(){
   const menu=document.createElement('div');
   menu.className='workspace-prefs-menu open';
   menu.setAttribute('role','menu');
+  const group=document.createElement('div');
+  group.className='workspace-prefs-group';
+  group.setAttribute('role','group');
+  const groupLabel=(typeof t==='function'?t('workspace_sort_by'):'Sort by');
+  group.setAttribute('aria-label',groupLabel);
+  const head=document.createElement('div');
+  head.className='workspace-prefs-grouplabel';
+  head.textContent=groupLabel;
+  group.appendChild(head);
+  const createdOk=_workspaceCreatedSortAvailable();
+  const active=_effectiveWorkspaceSortKey();
+  [['name-asc','workspace_sort_name_asc'],['name-desc','workspace_sort_name_desc'],['created-desc','workspace_sort_created_desc'],['modified-desc','workspace_sort_modified_desc']].forEach(([key,i18nKey])=>{
+    const disabled=key==='created-desc'&&!createdOk;
+    const row=document.createElement('label');
+    row.className='workspace-prefs-item workspace-prefs-item--radio'+(disabled?' is-disabled':'');
+    row.setAttribute('role','menuitemradio');
+    row.setAttribute('aria-checked',active===key?'true':'false');
+    row.setAttribute('aria-disabled',disabled?'true':'false');
+    row.innerHTML='<input type="radio" name="workspaceSortKey" value="'+esc(key)+'" id="workspaceSort_'+esc(key)+'"'+(disabled?' disabled':'')+' onchange="setWorkspaceSortKey(this.value)">'+
+      '<span class="workspace-prefs-copy"><span class="workspace-prefs-name">'+esc(typeof t==='function'?t(i18nKey):key)+'</span>'+
+      (disabled?'<span class="workspace-prefs-meta">'+esc(typeof t==='function'?t('workspace_sort_created_unavailable'):'Creation time is not reported by this server or platform.')+'</span>':'')+'</span>';
+    const input=row.querySelector('input');
+    if(input)input.checked=active===key;
+    group.appendChild(row);
+  });
+  menu.appendChild(group);
+  const sep=document.createElement('div');
+  sep.className='workspace-prefs-sep';
+  menu.appendChild(sep);
   // The checkbox keeps id="workspaceShowHiddenFiles" so existing call
   // sites (and the existing test_issue1793_file_tree_cruft_filter test)
   // can find it the same way as before. Only the parent container moves.
@@ -19371,6 +19511,7 @@ function renderFileTree(){
   box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
+  _noteWorkspaceBirthtimeSupport(S.entries);
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
   const hasWorkspace=!!(S.session&&S.session.workspace);
@@ -19381,7 +19522,7 @@ function renderFileTree(){
   }
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  const visibleEntries=_workspaceEntriesForRender(S.entries);
   if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
@@ -19769,7 +19910,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Render children if directory is expanded
     if(isDirLike&&S._expandedDirs.has(item.path)){
-      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
+      const children=_workspaceEntriesForRender(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
       }else{
