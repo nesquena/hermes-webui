@@ -13,7 +13,7 @@ import stat
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
 try:  # pragma: no cover - platform-specific imports.
@@ -1233,21 +1233,36 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
 # with regular session saves.
 
 _DRAFT_SIDECAR_DIRNAME = '_drafts'
-_DRAFT_SIDECAR_CACHE: dict = {}
+# Drafts are small, but a server can see arbitrarily many session ids. Keep the
+# cache bounded just like the other sidecar caches in this module; the sidecar
+# stat signature remains the freshness authority on a cache miss.
+_DRAFT_SIDECAR_CACHE: "collections.OrderedDict[str, tuple]" = collections.OrderedDict()
+_DRAFT_SIDECAR_CACHE_MAX = 256
 _DRAFT_SIDECAR_LOCK = threading.Lock()
-_COMPOSER_DRAFT_LOCKS: dict = {}
+# Use fixed lock stripes instead of retaining one lock per historical session.
+# A stripe collision merely serializes two unrelated draft writes; it cannot
+# merge drafts because each operation still addresses its own sidecar path.
+# RLock keeps a same-stripe old/new pair safe during draft migration.
+_COMPOSER_DRAFT_LOCK_STRIPES = tuple(threading.RLock() for _ in range(64))
 
 
-def get_composer_draft_lock(sid) -> threading.Lock:
-    """Per-session lock for draft read-merge-write; deliberately decoupled
-    from the session/agent locks so drafts never queue behind turn machinery."""
+def _composer_draft_lock_stripe_index(sid) -> int:
+    return hash(str(sid)) % len(_COMPOSER_DRAFT_LOCK_STRIPES)
+
+
+def get_composer_draft_lock(sid):
+    """Return a bounded lock stripe for draft read-merge-write operations."""
+    return _COMPOSER_DRAFT_LOCK_STRIPES[_composer_draft_lock_stripe_index(sid)]
+
+
+def _cache_composer_draft_sidecar(sid, stat_key, draft) -> None:
+    """Store a draft cache entry and evict least-recently-used stale entries."""
     key = str(sid)
     with _DRAFT_SIDECAR_LOCK:
-        lock = _COMPOSER_DRAFT_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _COMPOSER_DRAFT_LOCKS[key] = lock
-        return lock
+        _DRAFT_SIDECAR_CACHE[key] = (stat_key, copy.deepcopy(draft))
+        _DRAFT_SIDECAR_CACHE.move_to_end(key)
+        while len(_DRAFT_SIDECAR_CACHE) > _DRAFT_SIDECAR_CACHE_MAX:
+            _DRAFT_SIDECAR_CACHE.popitem(last=False)
 
 
 def composer_draft_sidecar_path(sid):
@@ -1275,6 +1290,7 @@ def read_composer_draft_sidecar(sid):
     with _DRAFT_SIDECAR_LOCK:
         cached = _DRAFT_SIDECAR_CACHE.get(key)
         if cached is not None and cached[0] == stat_key:
+            _DRAFT_SIDECAR_CACHE.move_to_end(key)
             return copy.deepcopy(cached[1])
     try:
         data = _json_loads_session(p.read_text(encoding='utf-8'))
@@ -1283,8 +1299,7 @@ def read_composer_draft_sidecar(sid):
     draft = data.get('draft') if isinstance(data, dict) else None
     if not isinstance(draft, dict):
         return None
-    with _DRAFT_SIDECAR_LOCK:
-        _DRAFT_SIDECAR_CACHE[key] = (stat_key, copy.deepcopy(draft))
+    _cache_composer_draft_sidecar(sid, stat_key, draft)
     return draft
 
 
@@ -1311,8 +1326,7 @@ def write_composer_draft_sidecar(sid, draft) -> dict:
         raise
     try:
         st = p.stat()
-        with _DRAFT_SIDECAR_LOCK:
-            _DRAFT_SIDECAR_CACHE[str(sid)] = ((st.st_mtime_ns, st.st_size), copy.deepcopy(draft))
+        _cache_composer_draft_sidecar(sid, (st.st_mtime_ns, st.st_size), draft)
     except OSError:
         pass
     return draft
@@ -1344,19 +1358,23 @@ def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
     new_sid = str(new_sid or '')
     if old_sid == new_sid or not is_safe_session_id(old_sid) or not is_safe_session_id(new_sid):
         return
-    locks = sorted(
-        ((old_sid, get_composer_draft_lock(old_sid)), (new_sid, get_composer_draft_lock(new_sid))),
-        key=lambda item: item[0],
-    )
-    with locks[0][1]:
-        with locks[1][1]:
-            old_draft = read_composer_draft_sidecar(old_sid)
-            if old_draft is None:
-                return
-            if read_composer_draft_sidecar(new_sid) is None:
-                write_composer_draft_sidecar(new_sid, old_draft)
-                update_cached_composer_draft(new_sid, old_draft)
-            delete_composer_draft_sidecar(old_sid)
+    # Acquire unique fixed stripes by stripe index, not by session id. Two
+    # unrelated migrations can map their old/new ids to the same pair of
+    # stripes in inverse SID order; a global stripe order prevents deadlock.
+    stripe_indexes = sorted({
+        _composer_draft_lock_stripe_index(old_sid),
+        _composer_draft_lock_stripe_index(new_sid),
+    })
+    with ExitStack() as lock_stack:
+        for stripe_index in stripe_indexes:
+            lock_stack.enter_context(_COMPOSER_DRAFT_LOCK_STRIPES[stripe_index])
+        old_draft = read_composer_draft_sidecar(old_sid)
+        if old_draft is None:
+            return
+        if read_composer_draft_sidecar(new_sid) is None:
+            write_composer_draft_sidecar(new_sid, old_draft)
+            update_cached_composer_draft(new_sid, old_draft)
+        delete_composer_draft_sidecar(old_sid)
 
 
 def resolve_composer_draft(sid, legacy=None) -> dict:

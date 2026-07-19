@@ -31,10 +31,8 @@ def session_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_evict_session_agent", lambda _sid: None, raising=False)
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     models._DRAFT_SIDECAR_CACHE.clear()
-    models._COMPOSER_DRAFT_LOCKS.clear()
     yield session_dir, sessions
     models._DRAFT_SIDECAR_CACHE.clear()
-    models._COMPOSER_DRAFT_LOCKS.clear()
 
 
 def _post_draft(monkeypatch, payload):
@@ -110,6 +108,55 @@ def test_compression_rotation_moves_draft_to_continuation_owner(session_env):
         "text": "continue after compression",
         "files": [{"name": "notes.txt"}],
     }
+
+
+
+def test_draft_migration_handles_old_and_new_ids_on_same_lock_stripe(session_env, monkeypatch):
+    from api import models
+
+    old_sid = "draft-same-stripe-old"
+    new_sid = "draft-same-stripe-new"
+    models.write_composer_draft_sidecar(old_sid, {"text": "move me", "files": []})
+    # Force the pair onto one lock. RLock makes the existing ordered nested
+    # migration protocol safe even when two ids share a stripe.
+    monkeypatch.setattr(models, "_COMPOSER_DRAFT_LOCK_STRIPES", (models.threading.RLock(),))
+
+    models.migrate_composer_draft_sidecar(old_sid, new_sid)
+
+    assert models.read_composer_draft_sidecar(old_sid) is None
+    assert models.read_composer_draft_sidecar(new_sid) == {"text": "move me", "files": []}
+
+
+
+def test_draft_migration_orders_distinct_stripes_independent_of_sid_order(session_env, monkeypatch):
+    from api import models
+
+    acquired = []
+
+    class RecordingLock:
+        def __init__(self, stripe_index):
+            self.stripe_index = stripe_index
+
+        def __enter__(self):
+            acquired.append(self.stripe_index)
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    # Invert the session-id order relative to stripe order. Both migrations must
+    # still acquire 0 then 1, preventing cross-migration lock-order inversion.
+    monkeypatch.setattr(models, "_COMPOSER_DRAFT_LOCK_STRIPES", (RecordingLock(0), RecordingLock(1)))
+    monkeypatch.setattr(
+        models,
+        "_composer_draft_lock_stripe_index",
+        lambda sid: {"draft-a": 1, "draft-b": 0}[sid],
+    )
+
+    models.migrate_composer_draft_sidecar("draft-a", "draft-b")
+    models.migrate_composer_draft_sidecar("draft-b", "draft-a")
+
+    assert acquired == [0, 1, 0, 1]
 
 
 def test_delete_race_cannot_leave_orphan_drafts(session_env, monkeypatch):
@@ -360,6 +407,24 @@ def test_delete_draft_sidecar_reports_unlink_failure(session_env, monkeypatch):
 
     assert models.delete_composer_draft_sidecar(sid) is False
     assert sidecar_path.exists()
+
+
+
+def test_cleanup_does_not_count_failed_orphan_sidecar_delete(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, sessions = session_env
+    sid = "cleanup-orphan-unlink-failure"
+    models.write_composer_draft_sidecar(sid, {"text": "orphan", "files": []})
+    sessions.pop(sid, None)
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=False) is True
+
+    assert captured == {"ok": True, "cleaned": 0}
+    assert (session_dir / "_drafts" / f"{sid}.json").exists()
 
 
 def test_clear_canonicalizes_legacy_draft_without_files(session_env, monkeypatch):

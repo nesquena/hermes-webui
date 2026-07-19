@@ -446,6 +446,26 @@ def test_draft_sidecar_roundtrip_and_precedence(session_store):
     assert resolve_composer_draft(sid, s.composer_draft)["text"] == "legacy draft"
 
 
+
+def test_draft_locks_are_fixed_stripes_and_cache_is_lru_bounded(session_store, monkeypatch):
+    # New session ids must reuse a fixed number of lock objects rather than
+    # retaining one lock for every historical draft owner.
+    locks = {_models.get_composer_draft_lock(f"draft-lock-{index}") for index in range(4096)}
+    assert len(locks) <= len(_models._COMPOSER_DRAFT_LOCK_STRIPES)
+
+    monkeypatch.setattr(_models, "_DRAFT_SIDECAR_CACHE_MAX", 2)
+    for sid in ("draft-cache-a", "draft-cache-b", "draft-cache-c"):
+        write_composer_draft_sidecar(sid, {"text": sid, "files": []})
+
+    assert list(_models._DRAFT_SIDECAR_CACHE) == ["draft-cache-b", "draft-cache-c"]
+    # A cache hit refreshes recency, so the next insertion evicts b, not c.
+    cached = read_composer_draft_sidecar("draft-cache-b")
+    assert cached is not None
+    assert cached["text"] == "draft-cache-b"
+    write_composer_draft_sidecar("draft-cache-d", {"text": "d", "files": []})
+    assert list(_models._DRAFT_SIDECAR_CACHE) == ["draft-cache-b", "draft-cache-d"]
+
+
 def test_draft_sidecar_uses_safe_replace(session_store, monkeypatch):
     calls = []
     original = _models._safe_replace

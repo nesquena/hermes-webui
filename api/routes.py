@@ -20795,8 +20795,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 with LOCK:
                     in_memory_owner = sid in SESSIONS
                 if not owner_exists and not in_memory_owner:
-                    delete_composer_draft_sidecar(sid)
-                    cleaned += 1
+                    if delete_composer_draft_sidecar(sid):
+                        cleaned += 1
     except Exception:
         logger.debug("Failed to clean up draft-sidecar orphans", exc_info=True)
 
