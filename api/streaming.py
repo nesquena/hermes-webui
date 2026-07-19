@@ -9713,6 +9713,13 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Interruption details'
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
+                        # Persist fallback notices on the error assistant message
+                        # so they survive session switches / page reloads
+                        # (greptile P1: error saves drop notices). Every s.save()
+                        # path that finalizes an assistant turn must flush
+                        # _pending_fallback_notices.
+                        if _pending_fallback_notices:
+                            _error_message['_fallbackNotice'] = _pending_fallback_notices[-1]
                         s.messages.append(_error_message)
                         try:
                             s.save()
@@ -10962,6 +10969,12 @@ def _run_agent_streaming(
                     _error_message['provider_details_label'] = 'Cancellation details'
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
+                # Persist fallback notices on the error assistant message so
+                # they survive session switches / page reloads (greptile P1:
+                # error saves drop notices). Every s.save() path that finalizes
+                # an assistant turn must flush _pending_fallback_notices.
+                if _pending_fallback_notices:
+                    _error_message['_fallbackNotice'] = _pending_fallback_notices[-1]
                 s.messages.append(_error_message)
                 try:
                     s.save()
