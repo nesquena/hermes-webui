@@ -108,6 +108,11 @@ Use semantic tokens for typography. Keep prose on `--font-conversation` by
 default so it tracks `--font-ui` whenever a skin intentionally retunes UI type.
 Override `--font-conversation` only for a skin that intentionally wants a
 distinct prose face.
+Conversation prose must remain the system sans by default. Do not introduce a
+global conversation serif through the `--font-conversation` token or
+selector-level overrides without explicit design approval plus code and test
+evidence; keep distinct editorial prose typography explicitly opt-in or
+skin-scoped.
 Avoid hard-coding selector-level font stacks when a token already carries the
 intent.
 
