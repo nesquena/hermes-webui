@@ -5,6 +5,10 @@ import shutil
 import subprocess
 
 import pytest
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:  # pragma: no cover - dependency optional
+    sync_playwright = None
 
 
 REPO = Path(__file__).parent.parent
@@ -13,6 +17,7 @@ TERMINAL_JS = (REPO / "static" / "terminal.js").read_text(encoding="utf-8")
 PANEL_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -113,6 +118,97 @@ def test_no_stale_var_mono_usage_or_literal_monospace_font_family_stacks():
     assert 'var(--mono' not in CSS
     offending_lines = _font_stack_offenders(CSS)
     assert not offending_lines, f"Unexpected literal monospace font stacks: {offending_lines[:4]}"
+
+
+def test_edit_surfaces_use_font_contract_tokens_structurally():
+    assert re.search(
+        r"\.msg-edit-area\{[^}]*font-family:var\(--font-conversation\)",
+        CSS,
+        re.S,
+    ), ".msg-edit-area must use var(--font-conversation)"
+    assert re.search(
+        r'<textarea id="previewEditArea"[^>]*style="[^"]*font-family:var\(--font-mono\)',
+        INDEX_HTML,
+    ), "#previewEditArea must use var(--font-mono)"
+
+
+def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surfaces():
+    preview_style_match = re.search(
+        r'<textarea id="previewEditArea"[^>]*style="([^"]*)"',
+        INDEX_HTML,
+    )
+    assert preview_style_match, "Could not locate #previewEditArea inline style in index.html"
+
+    fixture_html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>{CSS}</style>
+  <style>
+    :root{{
+      --font-ui:"UiFontSentinel";
+      --font-conversation:"ConvoFontSentinel";
+      --font-mono:"MonoFontSentinel";
+    }}
+  </style>
+  <style>
+    code[class*="language-"],pre[class*="language-"]{{font-family: "PrismIntruder", sans-serif;}}
+  </style>
+</head>
+<body>
+  <div class="msg-body">
+    <p>inline <code id="inlineCode" class="language-js">token</code> sample.</p>
+    <pre id="fencedPre" class="language-js"><code id="fencedCode" class="language-js">fenced token</code></pre>
+  </div>
+  <textarea class="msg-edit-area" id="msgEditArea"></textarea>
+  <textarea id="previewEditArea" style="{preview_style_match.group(1)}"></textarea>
+</body>
+</html>
+"""
+
+    if sync_playwright is None:
+        pytest.skip("playwright is unavailable; run `playwright install chromium`")
+
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            page = browser.new_page(viewport={"width": 1024, "height": 768})
+            page.set_content(fixture_html)
+
+            inline_code_font = page.eval_on_selector(
+                "#inlineCode",
+                "el => getComputedStyle(el).fontFamily",
+            )
+            fenced_pre_font = page.eval_on_selector(
+                "#fencedPre",
+                "el => getComputedStyle(el).fontFamily",
+            )
+            fenced_code_font = page.eval_on_selector(
+                "#fencedCode",
+                "el => getComputedStyle(el).fontFamily",
+            )
+            message_edit_font = page.eval_on_selector(
+                "#msgEditArea",
+                "el => getComputedStyle(el).fontFamily",
+            )
+            preview_edit_font = page.eval_on_selector(
+                "#previewEditArea",
+                "el => getComputedStyle(el).fontFamily",
+            )
+        finally:
+            if browser is not None:
+                browser.close()
+
+    assert "MonoFontSentinel" in inline_code_font
+    assert "MonoFontSentinel" in fenced_pre_font
+    assert "MonoFontSentinel" in fenced_code_font
+    assert "ConvoFontSentinel" in message_edit_font
+    assert "MonoFontSentinel" in preview_edit_font
 
 
 def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attributes():

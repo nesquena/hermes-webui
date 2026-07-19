@@ -3411,7 +3411,7 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 @keyframes tts-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
 /* ── Edit message inline ── */
-.msg-edit-area{width:100%;background:rgba(255,255,255,.05);border:1px solid var(--accent-bg);border-radius:8px;color:var(--text);padding:10px 12px;font-size:14px;font-family:inherit;line-height:1.6;resize:none;outline:none;min-height:60px;box-sizing:border-box;box-shadow:0 0 0 3px var(--accent-bg);margin-top:4px;}
+.msg-edit-area{width:100%;background:rgba(255,255,255,.05);border:1px solid var(--accent-bg);border-radius:8px;color:var(--text);padding:10px 12px;font-size:14px;font-family:var(--font-conversation);line-height:1.6;resize:none;outline:none;min-height:60px;box-sizing:border-box;box-shadow:0 0 0 3px var(--accent-bg);margin-top:4px;}
 .msg-edit-bar{display:flex;gap:8px;margin-top:8px;margin-bottom:4px;}
 .msg-edit-send{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s;}
 .msg-edit-send:hover{opacity:.85;}
@@ -5910,6 +5910,7 @@ main.main > #mainPlugin{display:none;}
 .msg-body code,
 .msg-body pre,
 .msg-body table { font-family:var(--font-mono); }
+body code[class*="language-"],body pre[class*="language-"],body pre code[class*="language-"]{font-family:var(--font-mono);}
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
