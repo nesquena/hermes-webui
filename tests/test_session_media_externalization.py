@@ -1,6 +1,9 @@
 """Regression tests for file-backed large native image session media."""
 import base64
+import hashlib
 import json
+import os
+import threading
 
 from api import models, session_media
 from api.models import Session
@@ -82,6 +85,10 @@ def test_small_or_noncanonical_data_urls_stay_in_json(tmp_path, monkeypatch):
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/svg+xml;base64,PHN2Zy8+"}}]},
     ]
 
+    def _unexpected_decode(*_args, **_kwargs):
+        raise AssertionError("small data URL should not be decoded")
+
+    monkeypatch.setattr(session_media.base64, "b64decode", _unexpected_decode)
     assert session_media.externalize_large_session_media(messages, "media-small") == 0
     assert messages[0]["content"][1]["image_url"]["url"] == small
     assert "literal data:image" in messages[1]["content"]
@@ -96,3 +103,20 @@ def test_uses_the_configured_attachment_root(tmp_path, monkeypatch):
 
     assert session_media.externalize_large_session_media(messages, "media-custom") == 1
     assert list((custom_root / "media-custom" / "session-media").iterdir())
+
+
+def test_stale_tmp_file_is_rewritten_before_returning_reference(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    raw, data_url = _large_png_data_url()
+    session_id = "media-stale-tmp"
+    media_dir = session_media._session_media_dir(session_id)
+    media_dir.mkdir(parents=True)
+    digest = hashlib.sha256(raw).hexdigest()
+    filename = f"{digest}.png"
+    stale_tmp = media_dir / f".{filename}.{os.getpid()}.{threading.get_ident()}.tmp"
+    stale_tmp.write_bytes(b"interrupted prior write")
+    messages = [_image_message(data_url)]
+
+    assert session_media.externalize_large_session_media(messages, session_id) == 1
+    assert (media_dir / filename).read_bytes() == raw
+    assert not stale_tmp.exists()

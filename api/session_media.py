@@ -61,7 +61,7 @@ def _is_expected_raster_bytes(mime: str, raw: bytes) -> bool:
     return False
 
 
-def _decode_raster_data_uri(url):
+def _decode_raster_data_uri(url, *, min_bytes: int = 0):
     """Return ``(mime, bytes)`` for a valid raster base64 data URI, else None."""
     if not isinstance(url, str) or not url[:5].lower() == "data:":
         return None
@@ -74,6 +74,10 @@ def _decode_raster_data_uri(url):
         return None
     mime = tokens[0].strip().lower()
     if mime not in _MIME_EXTENSIONS:
+        return None
+    # Standard base64 is four characters per three input bytes. Avoid decoding
+    # a small image only to discover that it stays inline below the threshold.
+    if min_bytes and len(encoded) < 4 * ((min_bytes + 2) // 3):
         return None
     try:
         raw = base64.b64decode(encoded, validate=True)
@@ -94,15 +98,13 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
     if not target.exists():
         tmp = root / f".{filename}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
-            with open(tmp, "xb") as handle:
+            with open(tmp, "wb") as handle:
                 handle.write(raw)
                 handle.flush()
                 os.fsync(handle.fileno())
             # Same digest means same bytes, so replacing a concurrent writer is
             # safe and avoids a partially written stable filename.
             os.replace(tmp, target)
-        except FileExistsError:
-            pass
         finally:
             try:
                 tmp.unlink(missing_ok=True)
@@ -130,7 +132,7 @@ def externalize_large_session_media(value, session_id: str, *, min_bytes: int = 
             return
         image = node.get("image_url")
         if node.get("type") == "image_url" and isinstance(image, dict):
-            decoded = _decode_raster_data_uri(image.get("url"))
+            decoded = _decode_raster_data_uri(image.get("url"), min_bytes=min_bytes)
             if decoded is not None:
                 mime, raw = decoded
                 if len(raw) >= min_bytes:
