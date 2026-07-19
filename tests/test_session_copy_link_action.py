@@ -192,4 +192,4 @@ def test_conversation_filter_keeps_content_search_results_when_query_is_session_
     assert "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);" in SESSIONS_JS
     assert "const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));" in SESSIONS_JS
     assert "!directOrTitleIds.has(s.session_id)" in SESSIONS_JS
-    assert "api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`)" in SESSIONS_JS
+    assert "api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=0`)" in SESSIONS_JS

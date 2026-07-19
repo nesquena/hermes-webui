@@ -6466,7 +6466,7 @@ function filterSessions(){
   _searchDebounceTimer = setTimeout(async () => {
     const requestedQ = q;
     try {
-      const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`);
+      const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=0`);
       const currentQ = ($('sessionSearch').value || '').trim();
       if(currentQ!==requestedQ) return;
       const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
