@@ -255,8 +255,9 @@ def test_streaming_tool_limit_with_final_answer_persists_clean_done_state(tmp_pa
     assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
 
 
-def test_streaming_tool_limit_without_final_answer_emits_no_final_apperror(tmp_path, monkeypatch):
+def test_streaming_tool_limit_partial_without_final_answer_emits_no_final_apperror(tmp_path, monkeypatch):
     result = {
+        "status": "partial",
         "turn_exit_reason": "max_iterations_reached(30/30)",
         "messages": [
             {"role": "user", "content": "Do the long task."},
@@ -406,7 +407,10 @@ def test_maybe_inject_max_iteration_summary_fallback_skips_when_no_fallback():
     assert out == messages
 
 
-def test_streaming_tool_limit_terminal_failure_does_not_mark_final_answer(tmp_path, monkeypatch):
+def test_streaming_tool_limit_partial_with_final_answer_suppresses_false_no_response(
+    tmp_path,
+    monkeypatch,
+):
     result = {
         "status": "partial",
         "turn_exit_reason": "max_iterations_reached(30/30)",
@@ -418,19 +422,21 @@ def test_streaming_tool_limit_terminal_failure_does_not_mark_final_answer(tmp_pa
 
     events, payload = _run_streaming_with_fake_agent(tmp_path, monkeypatch, result)
 
-    apperror_payloads = [payload for event, payload in events if event == "apperror"]
-    assert apperror_payloads, "expected terminal-failure apperror"
-    assert apperror_payloads[-1]["type"] == "tool_limit_reached"
-    assert not [payload for event, payload in events if event == "done"]
+    assert not [event_payload for event, event_payload in events if event == "apperror"]
+    done_payloads = [event_payload for event, event_payload in events if event == "done"]
+    assert done_payloads, "expected done SSE payload"
+    assert done_payloads[-1]["terminal_state"] == "tool_limit_reached"
+    assert done_payloads[-1]["terminal_reason"] == "max_iterations"
     assistant = next(
         message
         for message in payload["messages"]
         if message.get("role") == "assistant"
         and message.get("content") == "I reached the limit; here is the summary."
     )
-    assert "_terminal_state" not in assistant
-    assert "_statusCard" not in assistant
-    assert payload["messages"][-1]["_error"] is True
+    assert assistant["_terminal_state"] == "tool_limit_reached"
+    assert assistant["_terminal_reason"] == "max_iterations"
+    assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
+    assert payload["messages"][-1] is assistant
 
 
 def test_streaming_historical_synthetic_prompt_normal_result_does_not_emit_tool_limit(tmp_path, monkeypatch):

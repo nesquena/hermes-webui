@@ -605,6 +605,42 @@ def test_msg_limit_large_cumulative_compression_child_falls_back_when_ambiguous(
     assert base_offset == 0
 
 
+@pytest.mark.parametrize(
+    ("tool_payload_size", "expected_since_timestamp"),
+    [
+        (32, None),
+        (510_000, 1.0),
+    ],
+)
+def test_msg_limit_byte_threshold_preserves_base_offset_contract(
+    monkeypatch,
+    tmp_path,
+    tool_payload_size,
+    expected_since_timestamp,
+):
+    """Both byte-gate branches must keep the compression offset return shape."""
+    import api.routes as routes
+
+    sid = f"byte_sidecar_contract_{tool_payload_size}"
+    sidecar_messages = [
+        {"role": "user", "content": "start", "timestamp": 1.0},
+        {"role": "tool", "content": "x" * tool_payload_size, "timestamp": 2.0},
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, sidecar_messages)
+
+    since_timestamp, selected_sidecar, base_offset = (
+        routes._state_db_since_timestamp_for_limited_display(
+            session,
+            msg_limit=30,
+        )
+    )
+
+    assert since_timestamp == expected_since_timestamp
+    assert selected_sidecar == sidecar_messages
+    assert base_offset == 0
+
+
 def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     monkeypatch,
     tmp_path,

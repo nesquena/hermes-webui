@@ -35,6 +35,11 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from api.agent_runtime import (
+    AgentRuntimeChangedError,
+    ensure_agent_runtime_current,
+    require_ai_agent_class,
+)
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -3086,6 +3091,48 @@ def _truncate_journal_snapshot_value(value, *, limit: int = 120):
     return value
 
 
+def _run_journal_snapshot_recovery_args(payload: dict | None):
+    if not isinstance(payload, dict):
+        return {}
+    args = payload.get("args")
+    return bound_run_journal_snapshot_args(args)
+
+
+def _run_journal_snapshot_arg_detail_score(value) -> int:
+    if value in (None, "", [], {}):
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(
+            len(str(key)) + _run_journal_snapshot_arg_detail_score(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return sum(_run_journal_snapshot_arg_detail_score(item) for item in value)
+    return 1
+
+
+def _run_journal_snapshot_merge_args(existing, incoming):
+    if not incoming:
+        return existing, False
+    if not isinstance(existing, dict) or not existing:
+        return incoming, True
+    if not isinstance(incoming, dict):
+        return existing, False
+    merged = copy.deepcopy(existing)
+    changed = False
+    for key, value in incoming.items():
+        current = merged.get(key)
+        if key not in merged or (
+            _run_journal_snapshot_arg_detail_score(value)
+            > _run_journal_snapshot_arg_detail_score(current)
+        ):
+            merged[key] = value
+            changed = True
+    return merged, changed
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3142,6 +3189,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call_id = _run_journal_snapshot_tool_id(call)
             if (tool_id and call_id == tool_id) or (not tool_id and name and call.get("name") == name):
                 call["done"] = True
+                merged_args, args_changed = _run_journal_snapshot_merge_args(
+                    call.get("args"),
+                    _run_journal_snapshot_recovery_args(payload),
+                )
+                if args_changed:
+                    call["args"] = merged_args
                 if payload.get("preview") is not None:
                     call["snippet"] = str(payload.get("preview") or "")
                     call["preview"] = call.get("preview") or call["snippet"]
@@ -3157,7 +3210,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "name": name,
             "preview": str(payload.get("preview") or ""),
             "snippet": str(payload.get("preview") or ""),
-            "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+            "args": _run_journal_snapshot_recovery_args(payload),
             "done": True,
             "_live": True,
             "_journal_snapshot": True,
@@ -3227,7 +3280,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call = {
                 "name": name,
                 "preview": str(payload.get("preview") or ""),
-                "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+                "args": _run_journal_snapshot_recovery_args(payload),
                 "done": False,
                 "_live": True,
                 "_journal_snapshot": True,
@@ -8442,6 +8495,74 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
 
 
 _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
+# Server-side ceiling on the ?msg_limit= tail-window size. A client could
+# otherwise request msg_limit=1000000 and force the server to assemble and
+# serialize an unbounded message payload (the frontend's own pagination grows
+# by ~30 at a time, with one outline-jump path asking for 9999). The ceiling is
+# generous — far above any legitimate visible-row window — so real pagination is
+# unaffected; it only caps the pathological/oversized request. When the request
+# exceeds the ceiling the response is silently clamped and _messages_truncated
+# is set (the existing truncation signal already covers "more rows exist").
+_MAX_MSG_LIMIT = 500
+
+
+def _parse_msg_limit(raw):
+    """Parse and clamp the ``?msg_limit=`` query value.
+
+    Returns a positive int clamped to ``[1, _MAX_MSG_LIMIT]``, or ``None`` when
+    the value is absent/empty/malformed (the bare no-``msg_limit`` path, which
+    intentionally returns the full transcript for callers that need it).
+    Extracted from the handler so the clamp expression has direct test coverage.
+    """
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(value, _MAX_MSG_LIMIT))
+
+
+# If a sidecar JSON file exceeds this threshold, the display-path tail
+# optimization fires regardless of message count.  Sessions with few messages
+# but large tool outputs (multi-MB JSON) should not force a full-scan merge.
+_SIDECAR_BYTE_TAIL_THRESHOLD = 500_000  # 500 KB
+# Defensive row backstop for the GET /api/session display path's state.db read.
+# This is NOT a semantic window (the display window counts visible rows
+# post-reconciliation via _message_window_for_display); it is a safety net so a
+# pathological/huge state.db cannot materialize unbounded rows into memory on the
+# display path. Legitimate sessions stay far below this; the compressed-session
+# case where _state_db_since_timestamp_for_limited_display bails (and would
+# otherwise full-scan) is the main beneficiary. Generous on purpose: no real
+# conversation approaches it, and the existing since_timestamp optimization
+# already handles the common tail-load case. The full-history model-context
+# callers (reconciliation, new-turn context) do NOT use this cap.
+_STATE_DB_DISPLAY_ROW_BACKSTOP = 50000
+
+
+def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
+    """Return the row backstop to apply to the display path's state.db read, or
+    ``None`` for an uncapped (full-history) read.
+
+    The backstop is a defensive net against a pathological/huge state.db, NOT a
+    semantic window. It is applied ONLY on provably-safe reads where no
+    ``truncation_boundary`` prefix is required for the merge:
+    ``merge_session_messages_append_only`` needs the rows at/around the session's
+    ``truncation_boundary`` to reconcile correctly, and a newest-N-only SQL cap
+    would drop those boundary rows for a >N-row session and corrupt the merge
+    (silently losing the preserved prefix). So this mirrors the same conditions
+    ``_state_db_since_timestamp_for_limited_display`` uses to decide a read is
+    boundary-free: not ``msg_before`` paging, and no ``truncation_watermark`` /
+    ``truncation_boundary``. Extracted for direct test coverage.
+    """
+    has_boundary_prefix = (
+        msg_before is not None
+        or getattr(session, "truncation_watermark", None) not in (None, "")
+        or getattr(session, "truncation_boundary", None) not in (None, "")
+    )
+    return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
+
+
 _LIMITED_TOOL_CONTENT_NOTICE = (
     "\n\n[Tool output truncated in paginated session response; "
     "load the full transcript to inspect the complete result.]"
@@ -8700,6 +8821,15 @@ def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages
         return None
     return _compression_parent_lineage_metadata_count(session)
 
+def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
+    """Check if the sidecar JSON file for ``session_id`` exceeds ``threshold_bytes``."""
+    from api.config import SESSION_DIR
+    try:
+        p = SESSION_DIR / f"{session_id}.json"
+        return os.path.isfile(p) and os.path.getsize(p) > threshold_bytes
+    except Exception:
+        return False
+
 
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
     """Return (timestamp floor, sidecar messages, base offset) for bounded tail reads.
@@ -8759,7 +8889,9 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages, 0
 
     if len(sidecar_messages) <= raw_budget:
-        return None, sidecar_messages, 0
+        _sid = getattr(session, "session_id", "") or ""
+        if not _sid or not _sidecar_file_exceeds_threshold(_sid, _SIDECAR_BYTE_TAIL_THRESHOLD):
+            return None, sidecar_messages, 0
 
     floor = min(sidecar_timestamps[-raw_budget:])
     sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
@@ -9655,6 +9787,7 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    bound_run_journal_snapshot_args,
     find_run_summary,
     read_run_events,
     read_session_run_events,
@@ -9734,6 +9867,7 @@ def _session_attention_summary(session_id: str) -> dict | None:
     """Return sidebar attention metadata for pending approval/clarify work."""
     approval_count = 0
     with _lock:
+        reconcile_gateway_pending_mirror_locked(session_id)
         queue_list = _pending.get(session_id)
         if isinstance(queue_list, list):
             approval_count = len(queue_list)
@@ -9838,8 +9972,28 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
     }
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
+    _redact_sidebar_title_fields(item, redact_enabled)
     item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
     return item
+
+
+def _redact_sidebar_title_fields(item: dict, redact_enabled: bool | None = None) -> None:
+    """Redact every user-content-derived title field on a sidebar/search row in place.
+
+    `title` is redacted by the callers directly (they special-case it), but
+    `display_title`, `_state_db_title`, and `parent_title` can ALSO carry raw
+    user-message-derived text — e.g. #6056 derives a delegated subagent's
+    `display_title` from its first user message, and `parent_title` copies a
+    parent session's (possibly derived) title. Without this a credential-shaped
+    value in a delegated goal would surface in the sidebar / search results even
+    with `api_redact_enabled=True`. Shared by `_sidebar_session_response_item`
+    (`/api/sessions`) and every `/api/sessions/search` response branch so the two
+    endpoints can never drift on which fields get redacted.
+    """
+    for field in ("display_title", "_state_db_title", "parent_title"):
+        value = item.get(field)
+        if isinstance(value, str):
+            item[field] = _redact_text(value, _enabled=redact_enabled)
 
 
 # ── Login page locale strings ─────────────────────────────────────────────────
@@ -12544,11 +12698,13 @@ def handle_get(handler, parsed) -> bool:
         # transcript rows. Hidden tool-result rows do not consume the budget;
         # they are included only when they sit inside the selected window and
         # are bounded before serialization. Older rows load on-demand.
-        _msg_limit = query.get("msg_limit", [None])[0]
-        try:
-            msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
-        except (ValueError, TypeError):
-            msg_limit = None
+        # Clamp to _MAX_MSG_LIMIT so an oversized request (e.g. msg_limit=9999
+        # from an outline jump, or a hostile value) can't force an unbounded
+        # payload; the existing _messages_truncated signal covers the clamped
+        # case (the client sees there are more rows than returned). Parsing +
+        # clamping live in _parse_msg_limit so the expression has direct test
+        # coverage; None means the bare no-msg_limit path (full transcript).
+        msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
         # ?msg_before=N — 0-based index into the full message array.
         # Returns messages before this index (for scroll-to-top lazy loading).
         # Combined with msg_limit for paging.
@@ -12611,6 +12767,14 @@ def handle_get(handler, parsed) -> bool:
                 _state_db_reader_kwargs = {"profile": _session_profile}
                 if state_db_since_timestamp is not None:
                     _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
+                # Apply the display-path row backstop ONLY on provably-safe
+                # reads where no truncation_boundary prefix is required for the
+                # merge — see _state_db_backstop_limit_for_display. Compressed
+                # sessions and msg_before paging need their full prefix rows for
+                # correct reconciliation, so those stay uncapped.
+                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                if _backstop is not None:
+                    _state_db_reader_kwargs["limit"] = _backstop
                 state_db_messages = get_state_db_session_messages(
                     sid,
                     **_state_db_reader_kwargs,
@@ -12933,6 +13097,7 @@ def handle_get(handler, parsed) -> bool:
             _truncated = load_messages and msg_limit is not None and _messages_offset > 0
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset
+            raw["_msg_limit_max"] = _MAX_MSG_LIMIT
             _t4 = _time.monotonic()
             if _diag: _diag.stage("t4_after_compact_and_merge")
             if effective_model:
@@ -14016,7 +14181,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/updates/check":
         settings = load_settings()
         if not settings.get("check_for_updates", True):
-            return j(handler, {"disabled": True})
+            force = bool(body.get("force", False)) if isinstance(body, dict) else False
+            if force:
+                # Manual force-check bypasses auto-check toggle (#6082)
+                pass
+            else:
+                return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         force = bool(body.get("force", False))
         # Allow the client to pass the channel explicitly in the POST body. This
@@ -16320,6 +16490,7 @@ def handle_post(handler, parsed) -> bool:
                     "api_key": _main_api_key,
                 }
 
+                ensure_agent_runtime_current()
                 try:
                     from agent.auxiliary_client import get_text_auxiliary_client
 
@@ -16340,7 +16511,7 @@ def handle_post(handler, parsed) -> bool:
                 except Exception as _e:
                     logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
 
-                from run_agent import AIAgent
+                AIAgent = require_ai_agent_class()
 
                 agent = AIAgent(
                     model=_main_model,
@@ -16856,12 +17027,21 @@ def _handle_sessions_search(handler, parsed):
         depth = max(0, int(qs.get("depth", ["5"])[0]))
     except (ValueError, TypeError):
         depth = 5
+    # Read the redaction setting ONCE for the whole response (mirrors the
+    # /api/sessions read-once optimization, #4662) and thread it through every
+    # branch + the shared title-field redactor so search rows redact the same
+    # fields as the sidebar list.
+    try:
+        _search_redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    except Exception:
+        _search_redact_enabled = True  # fail safe: redact when settings unreadable
     if not q:
         safe_sessions = []
         for s in sessions:
             item = dict(s)
             if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
+                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+            _redact_sidebar_title_fields(item, _search_redact_enabled)
             safe_sessions.append(item)
         return j(handler, {
             "sessions": safe_sessions,
@@ -16874,7 +17054,8 @@ def _handle_sessions_search(handler, parsed):
         if title_match:
             item = dict(s, match_type="title")
             if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
+                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+            _redact_sidebar_title_fields(item, _search_redact_enabled)
             results.append(item)
             continue
         if content_search:
@@ -16887,9 +17068,10 @@ def _handle_sessions_search(handler, parsed):
                         item = dict(s, match_type="content")
                         preview = _session_search_preview(c, q)
                         if preview:
-                            item["match_preview"] = _redact_text(preview)
+                            item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
                         if isinstance(item.get("title"), str):
-                            item["title"] = _redact_text(item["title"])
+                            item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+                        _redact_sidebar_title_fields(item, _search_redact_enabled)
                         results.append(item)
                         break
             except (KeyError, Exception):
@@ -20682,6 +20864,9 @@ def _handle_btw(handler, body):
         require(body, "question")
     except ValueError as e:
         return bad(handler, str(e))
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
+    if stale_response is not None:
+        return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be used for /btw from WebUI", 400)
     try:
@@ -20741,6 +20926,9 @@ def _handle_background(handler, body):
         require(body, "prompt")
     except ValueError as e:
         return bad(handler, str(e))
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
+    if stale_response is not None:
+        return j(handler, stale_response, status=409)
     try:
         s = get_session(body["session_id"])
     except KeyError:
@@ -21027,6 +21215,31 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     return None
 
 
+def _agent_runtime_barrier_response(
+    *,
+    runner_local_owned: bool = False,
+    external_runtime_owned: bool | None = None,
+) -> dict | None:
+    """Return the typed stale-runtime response for local in-process turns."""
+    if external_runtime_owned is True:
+        return None
+    if runner_local_owned and webui_gateway_chat_enabled(get_config()):
+        return None
+    from api.runtime_adapter import runtime_adapter_runner_enabled
+
+    if runner_local_owned and runtime_adapter_runner_enabled():
+        return None
+    try:
+        ensure_agent_runtime_current()
+    except AgentRuntimeChangedError as exc:
+        return {
+            "error": str(exc),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }
+    return None
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -21040,8 +21253,18 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    external_runtime_owned: bool | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
+    if external_runtime_owned is None:
+        external_runtime_owned = webui_gateway_chat_enabled(get_config())
+    backend_is_gateway = bool(external_runtime_owned)
+    stale_response = _agent_runtime_barrier_response(
+        external_runtime_owned=backend_is_gateway,
+    )
+    if stale_response is not None:
+        stale_response["_status"] = 409
+        return stale_response
     attachments = attachments or []
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
@@ -21160,7 +21383,6 @@ def _start_chat_stream_for_session(
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
@@ -21331,6 +21553,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        external_runtime_owned=webui_gateway_chat_enabled(get_config()),
     )
 
 
@@ -21424,6 +21647,10 @@ def start_session_turn(
     msg = str(message or "").strip()
     if not msg:
         return {"error": "message is required", "_status": 400}
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
+    if stale_response is not None:
+        stale_response["_status"] = 409
+        return stale_response
     turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
     try:
         s = get_session(session_id)
@@ -21900,6 +22127,7 @@ def _handle_goal_command(handler, body):
             model_provider=model_provider,
             normalized_model=normalized_model,
             goal_related=True,
+            external_runtime_owned=webui_gateway_chat_enabled(get_config()),
         )
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
@@ -21918,6 +22146,12 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        # Reject a stale local Agent runtime before materialising, claiming, or
+        # mutating any session state. Gateway-backed turns run in the gateway's
+        # process and do not depend on this WebUI process's imported checkout.
+        stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
+        if stale_response is not None:
+            return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
         try:
             s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
@@ -22213,6 +22447,9 @@ def _normalize_chat_attachments(raw_attachments):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
+    if stale_response is not None:
+        return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
     s = get_session(body["session_id"])
@@ -22248,7 +22485,7 @@ def _handle_chat_sync(handler, body):
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = s.session_id
     try:
-        from run_agent import AIAgent
+        AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
             from api.config import (
@@ -22879,6 +23116,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             "base_url": _main_base_url,
             "api_key": _main_api_key,
         }
+        ensure_agent_runtime_current()
         try:
             from agent.auxiliary_client import get_text_auxiliary_client
 
@@ -22895,7 +23133,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         except Exception as _e:
             logger.debug("git commit message auxiliary model failed; falling back to main model: %s", _e)
 
-        from run_agent import AIAgent
+        AIAgent = require_ai_agent_class()
 
         agent = AIAgent(
             model=_main_model,
@@ -22941,6 +23179,12 @@ def _handle_git_commit_message(handler, body):
         return bad(handler, str(e))
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.exception("git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -22972,6 +23216,12 @@ def _handle_git_commit_message_selected(handler, body):
         return bad(handler, str(e))
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.exception("selected git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -23996,6 +24246,10 @@ def _manual_compression_status_payload(job):
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression failed"
         payload["error_status"] = int(job.get("error_status") or 400)
+        if job.get("error_type"):
+            payload["type"] = job["error_type"]
+        if job.get("retryable") is not None:
+            payload["retryable"] = bool(job["retryable"])
     elif status == "cancelled":
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression cancelled"
@@ -24030,6 +24284,8 @@ def _run_manual_compression_job(sid, body):
                         "status": "error",
                         "error": str((payload or {}).get("error") or "Compression failed"),
                         "error_status": status,
+                        "error_type": (payload or {}).get("type"),
+                        "retryable": (payload or {}).get("retryable"),
                         "updated_at": now,
                     }
                 )
@@ -24039,6 +24295,21 @@ def _run_manual_compression_job(sid, body):
                         "status": "done",
                         "result": payload,
                         "updated_at": now,
+                    }
+                )
+    except AgentRuntimeChangedError as exc:
+        logger.warning("Manual compression worker found stale Agent runtime for session %s", sid)
+        with _MANUAL_COMPRESSION_JOBS_LOCK:
+            job = _MANUAL_COMPRESSION_JOBS.get(sid)
+            if job:
+                job.update(
+                    {
+                        "status": "error",
+                        "error": str(exc),
+                        "error_status": 409,
+                        "error_type": "agent_runtime_stale",
+                        "retryable": True,
+                        "updated_at": time.time(),
                     }
                 )
     except Exception as exc:
@@ -24077,6 +24348,34 @@ def _handle_session_compress_start(handler, body):
     if focus_topic:
         job_body["focus_topic"] = focus_topic
 
+    # Repeated start requests observe an existing running job and do not admit
+    # new Agent work, so preserve that idempotent read even if the checkout has
+    # since changed. Do not hold the job lock while running Git subprocesses.
+    now = time.time()
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        _manual_compression_cleanup_locked(now)
+        existing = _MANUAL_COMPRESSION_JOBS.get(sid)
+        if existing:
+            existing_payload = _manual_compression_status_payload(existing)
+            if existing_payload.get("status") == "running":
+                return j(handler, existing_payload)
+
+    # Reject a stale local Agent runtime before creating the asynchronous job.
+    try:
+        ensure_agent_runtime_current()
+    except AgentRuntimeChangedError as exc:
+        return j(
+            handler,
+            {
+                "error": str(exc),
+                "type": "agent_runtime_stale",
+                "retryable": True,
+            },
+            status=409,
+        )
+
+    # Another start request may have admitted a job while the runtime check ran.
+    # Re-check under the lock so only one worker is created.
     now = time.time()
     with _MANUAL_COMPRESSION_JOBS_LOCK:
         _manual_compression_cleanup_locked(now)
@@ -24292,10 +24591,11 @@ def _handle_session_compress(handler, body):
                     focus_topic,
                 )
 
+        ensure_agent_runtime_current()
         import api.config as _cfg
         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
         import hermes_cli.runtime_provider as _runtime_provider
-        import run_agent as _run_agent
+        AIAgent = require_ai_agent_class()
 
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
             _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None))
@@ -24338,7 +24638,7 @@ def _handle_session_compress(handler, body):
         )
         approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
-        agent = _run_agent.AIAgent(
+        agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
             base_url=resolved_base_url,
@@ -24433,6 +24733,12 @@ def _handle_session_compress(handler, body):
                 "focus_topic": focus_topic,
             },
         )
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.warning("Manual session compression failed: %s", e)
         return bad(handler, f"Compression failed: {_sanitize_error(e)}")
@@ -24890,7 +25196,17 @@ def _handle_handoff_summary(handler, body):
             if getattr(agent, "api_mode", "") == "codex_responses":
                 codex_kwargs = agent._build_api_kwargs(api_messages)
                 codex_kwargs.pop("tools", None)
-                codex_kwargs["max_output_tokens"] = max_tokens
+                codex_provider = str(getattr(agent, "provider", "") or "").strip().lower()
+                codex_base_url = str(getattr(agent, "base_url", "") or "").strip().lower()
+                is_chatgpt_codex = (
+                    codex_provider == "openai-codex"
+                    or (
+                        urlsplit(codex_base_url).hostname == "chatgpt.com"
+                        and "/backend-api/codex" in codex_base_url
+                    )
+                )
+                if not is_chatgpt_codex:
+                    codex_kwargs["max_output_tokens"] = max_tokens
                 resp = agent._run_codex_stream(codex_kwargs)
                 assistant_message, _ = agent._normalize_codex_response(resp)
                 result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
@@ -24942,10 +25258,11 @@ def _handle_handoff_summary(handler, body):
 
         # Call LLM for summary.
     try:
+        ensure_agent_runtime_current()
         import api.config as _cfg
         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
         import hermes_cli.runtime_provider as _runtime_provider
-        import run_agent as _run_agent
+        AIAgent = require_ai_agent_class()
 
         # Try to resolve model from an existing session, fall back to default.
         resolved_model = None
@@ -25001,7 +25318,7 @@ def _handle_handoff_summary(handler, body):
                 "fallback": True,
             })
 
-        agent = _run_agent.AIAgent(
+        agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
             base_url=resolved_base_url,
@@ -25081,6 +25398,12 @@ def _handle_handoff_summary(handler, body):
             "rounds": rounds,
             "fallback": fallback,
         })
+    except AgentRuntimeChangedError as e:
+        return j(handler, {
+            "error": str(e),
+            "type": "agent_runtime_stale",
+            "retryable": True,
+        }, status=409)
     except Exception as e:
         logger.warning("Handoff summary generation failed: %s", e)
         summary_text = _fallback_handoff_summary(msgs)

@@ -1489,7 +1489,9 @@
   .agent-activity-thinking[data-live-thinking="1"],
   .agent-activity-thinking[data-live-thinking="1"] *,
   .live-worklog[data-live-worklog-shell="1"],
-  .live-worklog[data-live-worklog-shell="1"] *{transition-property:none!important;transition-duration:0s!important;transition-delay:0s!important;}
+  .live-worklog[data-live-worklog-shell="1"] *,
+  .msg-row,
+  .msg-row *{transition-property:none!important;transition-duration:0s!important;transition-delay:0s!important;}
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
@@ -1565,7 +1567,12 @@
   .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;overflow-anchor:none;}
   .sidebar-search{position:relative;padding:8px 12px;flex-shrink:0;}
   .session-search-field{position:relative;display:flex;align-items:center;width:100%;}
-  .sidebar-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px 7px 32px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s;box-sizing:border-box;}
+  .sidebar-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px 7px 32px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s;box-sizing:border-box;-webkit-appearance:none;appearance:none;}
+  /* The search inputs are type="search" so password managers don't mistake them
+     for username fields. Suppress WebKit's native clear affordance: these fields
+     ship their own clear button (e.g. #sessionSearchClear). */
+  .sidebar-search input::-webkit-search-cancel-button,
+  .sidebar-search input::-webkit-search-decoration{-webkit-appearance:none;appearance:none;display:none;}
   .session-search input{padding-right:34px;}
   .sidebar-search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .sidebar-search input::placeholder{color:var(--muted);opacity:.7;}
@@ -3200,7 +3207,7 @@
     .send-btn.visible{animation:none;opacity:1;transform:none;}
     /* Approval card */
     .approval-card{padding-left:10px;padding-right:10px;bottom:8px;overflow:visible;}
-    .approval-inner{max-height:min(52vh,360px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 12px 14px;border-radius:12px;box-shadow:0 -10px 30px rgba(0,0,0,.24);}
+    .approval-inner{max-height:min(52vh,360px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 12px 14px;border-radius:12px;box-shadow:0 -10px 30px rgba(0,0,0,.24);min-width:min(100%,280px);}
     @supports (height:100dvh){.approval-inner{max-height:min(60dvh,420px);}}
     .approval-header{margin-bottom:8px;}
     .approval-collapse,.approval-dismiss{width:44px;height:44px;line-height:1;overflow:hidden;}
@@ -3210,10 +3217,10 @@
     .approval-btn.yolo{grid-column:1 / -1;}
     .approval-kbd{display:none;}
     /* Clarify card */
-    .clarify-card{padding-left:10px;padding-right:10px;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
+    .clarify-card{padding-left:10px;padding-right:10px;overflow:visible;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
     .clarify-card .clarify-inner{max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
     @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(62dvh,calc(100dvh - 180px)),360px);}}
-    .clarify-inner{padding:12px 12px 13px;}
+    .clarify-inner{padding:12px 12px 13px;min-width:min(100%,280px);}
     .clarify-response{flex-direction:column;align-items:stretch;}
     .clarify-input,.clarify-submit{width:100%;min-height:44px;}
     .clarify-choice{min-height:44px;}
@@ -3242,6 +3249,21 @@
 .ws-dropdown-footer{left:0;right:auto;bottom:calc(100% + 4px);min-width:280px;max-width:min(420px,calc(100vw - 32px));}
 .model-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:280px;max-width:min(420px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:min(70vh,640px);overflow-y:auto;}
 .model-dropdown.open{display:block;}
+/* Phone path (#6080): the model picker is reparented to <body> and switched to
+   position:fixed by _positionModelDropdown() so it escapes the .composer-footer
+   containing block (container-type:inline-size, plus a backdrop-filter under the
+   Geist Contrast skin — both establish a fixed containing block that would
+   otherwise resolve `fixed` against the FOOTER, dropping the menu below the
+   fold). Same idiom as #profileDropdown. JS owns left/top/width/maxHeight; this
+   rule only flips positioning and relaxes the desktop width clamps.
+   z-index:190 is deliberate: ABOVE the .composer-mobile-config-panel (z-180) it
+   can be opened from, but BELOW the full-screen mobile sidebar drawer and
+   workspace panel (both z-200) — so whenever one of those surfaces opens (by
+   swipe, breakpoint resize, profile-switch, or any future path) it covers the
+   picker, exactly as it did on master when the picker lived inside the composer's
+   lower stacking context. This single stacking rule closes the whole "drawer
+   opened behind the floating picker" class without per-open-site guards. */
+.model-dropdown.model-dropdown--floating{position:fixed;left:0;bottom:auto;min-width:0;z-index:190;}
 .model-scope-note{position:sticky;top:0;z-index:2;padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text);font-size:11px;font-weight:650;line-height:1.4;background:color-mix(in srgb,var(--surface) 82%,var(--accent-bg));box-shadow:0 1px 0 rgba(0,0,0,.12);}
 .model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}.model-group.collapsible{cursor:pointer;user-select:none}.model-group.collapsible:before{content:'\25b6';display:inline-block;font-size:8px;margin-right:5px;transition:transform .15s ease}.model-group.collapsible.open:before{transform:rotate(90deg)}.model-group-body:empty{display:none}
 .model-group.sub{padding:4px 14px 2px 22px;font-size:9px;border-top:none;margin-top:0;letter-spacing:.03em;color:var(--muted);background:transparent;}.model-group.sub.collapsible:before{content:'\25b6';display:inline-block;font-size:7px;margin-right:4px;transition:transform .15s ease}.model-group.sub.collapsible.open:before{transform:rotate(90deg)}.model-group-body.sub{padding-left:8px;border-left:1px solid var(--border);}
@@ -4084,8 +4106,10 @@ body.resizing .sidebar{transition:none!important;}
   padding:1px 4px 1px 7px;
   margin-left:0;
   border-radius:0;
+  overflow:hidden;
   color:var(--muted);
   transition:background .18s ease,color .18s ease;
+  overflow:hidden;
 }
 .transparent-event-row .tool-card-header:hover,
 .transparent-event-row .thinking-card-header:hover{background:var(--hover-bg);color:var(--text);}
@@ -6407,7 +6431,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .workspace-artifact-empty{padding:16px 8px;color:var(--muted);font-size:12px;line-height:1.5;text-align:center;}
 .workspace-artifact-item{display:block;width:100%;text-align:left;background:var(--surface-subtle);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;}
 .workspace-artifact-item:hover{border-color:var(--accent);}
-.workspace-artifact-path{font-family:'SF Mono',ui-monospace,monospace;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.workspace-artifact-name{font-family:'SF Mono',ui-monospace,monospace;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text);}
+.workspace-artifact-dir{font-family:'SF Mono',ui-monospace,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);margin-top:1px;}
 .workspace-artifact-meta{margin-top:3px;color:var(--muted);font-size:11px;}
 .workspace-artifacts-count{opacity:.65;font-size:11px;}
 .rightpanel[data-active-tab="artifacts"] .breadcrumb-bar,.rightpanel[data-active-tab="artifacts"] .file-tree,.rightpanel[data-active-tab="artifacts"] #wsEmptyState{display:none!important;}

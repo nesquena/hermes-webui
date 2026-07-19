@@ -218,6 +218,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _invalidate_provider_state_caches(provider: str) -> None:
+    """Invalidate caches derived from provider credential state."""
+    try:
+        from api.config import invalidate_credential_pool_cache
+
+        invalidate_credential_pool_cache(provider)
+    except Exception:
+        logger.debug("Failed to invalidate %s credential cache", provider, exc_info=True)
+
+    try:
+        from api.providers import invalidate_providers_cache
+
+        invalidate_providers_cache()
+    except Exception:
+        logger.debug("Failed to invalidate providers cache after %s credential change", provider, exc_info=True)
+
+
 def _persist_codex_credentials(hermes_home: Path, token_data: dict[str, Any]) -> Path:
     """Persist Codex OAuth credentials to active-profile auth.json."""
     access_token = str(token_data.get("access_token") or "").strip()
@@ -277,12 +294,7 @@ def _persist_codex_credentials(hermes_home: Path, token_data: dict[str, Any]) ->
     auth["updated_at"] = now
     path = _write_auth_json(auth, auth_path)
 
-    try:
-        from api.config import invalidate_credential_pool_cache
-
-        invalidate_credential_pool_cache("openai-codex")
-    except Exception:
-        logger.debug("Failed to invalidate openai-codex credential cache", exc_info=True)
+    _invalidate_provider_state_caches("openai-codex")
 
     return path
 
@@ -389,12 +401,7 @@ def _link_anthropic_credentials(hermes_home: Path) -> None:
     })
     auth["updated_at"] = now
     _write_auth_json(auth, auth_path)
-
-    try:
-        from api.config import invalidate_credential_pool_cache
-        invalidate_credential_pool_cache("anthropic")
-    except Exception:
-        logger.debug("Failed to invalidate anthropic credential cache", exc_info=True)
+    _invalidate_provider_state_caches("anthropic")
 
 
 def _anthropic_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
@@ -515,11 +522,7 @@ def _remove_anthropic_link_marker(hermes_home: Path) -> None:
         pool.pop("anthropic", None)
     auth["updated_at"] = _now_iso()
     _write_auth_json(auth, auth_path)
-    try:
-        from api.config import invalidate_credential_pool_cache
-        invalidate_credential_pool_cache("anthropic")
-    except Exception:
-        logger.debug("Failed to invalidate anthropic credential cache", exc_info=True)
+    _invalidate_provider_state_caches("anthropic")
 
 
 # ── Codex protocol ──────────────────────────────────────────────────────────
