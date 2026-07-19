@@ -832,7 +832,12 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
 # registry, pre-Option-1 spawns) it is a PURE PASS-THROUGH — it never
 # suppresses a legitimate Option Z wakeup on uncertainty (Option Z must keep
 # working).
-_ENV_IMMUNE_OWNER_ATTRS = ("spawn_session_id", "owner_session_id", "turn_session_id")
+_ENV_IMMUNE_OWNER_ATTRS = (
+    "origin_ui_session_id",  # modern hermes-agent exact browser-tab return address
+    "spawn_session_id",
+    "owner_session_id",
+    "turn_session_id",
+)
 
 
 def _env_immune_spawn_owner(proc_session) -> str:
@@ -1061,6 +1066,32 @@ def _process_async_delegation_event(
         )
 
 
+def _resolve_completion_target(
+    *,
+    session_key_resolved_sid: str,
+    origin_ui_session_id: str,
+) -> str:
+    """Return the WebUI session that owns a detached completion event.
+
+    Modern Hermes Agent events carry ``origin_ui_session_id`` as an exact,
+    immutable return address captured from the commissioning browser turn.
+    It is authoritative over the mutable/legacy session-key index. Older
+    Agent events omit it and retain the existing session-key fallback.
+    """
+    resolved = str(session_key_resolved_sid or "")
+    owner = str(origin_ui_session_id or "")
+    if not owner:
+        return resolved
+    if resolved and resolved != owner:
+        logger.error(
+            "cross-session completion route BLOCKED: session_key resolved to %r "
+            "but exact origin_ui_session_id is %r; routing to the exact owner",
+            resolved,
+            owner,
+        )
+    return owner
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -1078,40 +1109,45 @@ def _process_one(evt: dict) -> None:
 
     process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
+    origin_ui_session_id = str(evt.get("origin_ui_session_id") or "")
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
-    # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
-    # field — only the watch_match enqueue includes one. Without it the old
-    # `evt.get("session_key") or process_id` fell back to the process id
-    # ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key (only
-    # webui_session_id -> webui_session_id is registered at chat-start), so
-    # every wakeup was silently dropped here and the frontend never POSTed an
-    # ack. Recover the spawn-time session_key from the process registry's
-    # ProcessSession: the terminal tool captured it synchronously at spawn
-    # (while the turn's env was active), so it survives the turn-end env
-    # restore and is the WebUI session_id for WebUI-spawned processes.
-    if not session_key and process_id:
+    # enqueued by ProcessRegistry._move_to_finished() historically carried NO
+    # "session_key" field — only the watch_match enqueue included one. Without
+    # it the old `evt.get("session_key") or process_id` fell back to the
+    # process id ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key.
+    # Recover spawn-time routing metadata from the process registry.
+    if process_id and (not session_key or not origin_ui_session_id):
         try:
             if _process_registry is not None:
                 _ps = _process_registry.get(process_id)
-                if _ps is not None and getattr(_ps, "session_key", ""):
-                    session_key = str(_ps.session_key)
+                if _ps is not None:
+                    if not session_key and getattr(_ps, "session_key", ""):
+                        session_key = str(_ps.session_key)
+                    if not origin_ui_session_id:
+                        origin_ui_session_id = (
+                            str(getattr(_ps, "origin_ui_session_id", "") or "")
+                            or str(getattr(_ps, "spawn_session_id", "") or "")
+                        )
         except Exception:
             logger.debug(
-                "session_key recovery from process registry failed for %r",
+                "session ownership recovery from process registry failed for %r",
                 process_id,
                 exc_info=True,
             )
-    if not session_key:
+    if not session_key and not origin_ui_session_id:
         logger.debug(
-            "process_complete drop: no recoverable session_key for process_id=%r",
+            "process_complete drop: no recoverable session_key or exact UI owner "
+            "for process_id=%r",
             process_id,
         )
         if evt.get("type") == "async_delegation":
             _retry_unmapped_async_delegation_event(_process_registry, evt)
         return
-    with _cfg.PROCESS_SESSION_INDEX_LOCK:
-        session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
-    if not session_id:
+    session_id = ""
+    if session_key:
+        with _cfg.PROCESS_SESSION_INDEX_LOCK:
+            session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key) or ""
+    if not session_id and not origin_ui_session_id:
         # No mapping — could be a cron/gateway process that uses the same
         # registry but a non-WebUI session_key. Durable delegation events stay
         # pending and are retried because their WebUI ownership mapping can be
@@ -1121,16 +1157,9 @@ def _process_one(evt: dict) -> None:
             _retry_unmapped_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
-    # session_id above came from PROCESS_SESSION_INDEX.get(session_key), and
-    # session_key was captured by the terminal tool from the (historically
-    # racy) process-global env at spawn. Option 1 binds the per-turn identity
-    # to a contextvar so that capture is no longer racy — but as an INDEPENDENT
-    # safety net, cross-check the resolved target against the env-immune
-    # spawn owner (when the core ProcessSession exposes one). On a positive
-    # mismatch this re-routes the wakeup (and the live-view emit + dedupe
-    # markers below) to the TRUE owner instead of waking the wrong session.
-    # Pure pass-through when no env-immune owner is available (today's core,
-    # cron/CLI procs, pre-Option-1 spawns) — never suppresses a valid wakeup.
+    # First retain the process-registry spawn-owner cross-check for legacy
+    # terminal events. Then apply origin_ui_session_id as the final authority;
+    # that exact owner is shared by process and async-delegation completions.
     try:
         _ps_xs = _process_registry.get(process_id) if (_process_registry is not None and process_id) else None
     except Exception:
@@ -1140,6 +1169,27 @@ def _process_one(evt: dict) -> None:
         session_key_resolved_sid=session_id,
         proc_session=_ps_xs,
     )
+    # origin_ui_session_id is the exact, immutable return address; it is the
+    # FINAL routing authority over the (mutable) session-key/Option-3 result.
+    session_id = _resolve_completion_target(
+        session_key_resolved_sid=session_id,
+        origin_ui_session_id=origin_ui_session_id,
+    )
+    if not session_id:
+        logger.debug("process_complete drop: completion target resolved empty")
+        # An async delegation event that resolves empty here must NOT silently
+        # return: no durable claim was taken, so the core row stays pending and
+        # the restart-restore sweep would re-deliver it forever. Route it into
+        # the bounded retry instead (arms a durable retry / one best-effort
+        # legacy requeue), so it stays retryable without a spurious ACK.
+        if evt.get("type") == "async_delegation":
+            _retry_unmapped_async_delegation_event(_process_registry, evt)
+        return
+    # ── THE SEAM: async delegations take the durable-claim delivery path,
+    # routed to the origin-resolved session. The claim/complete/release
+    # lifecycle (keyed on the immutable delegation_id) is the sole dedupe +
+    # restart-safety authority for async events, so they early-return before
+    # the terminal-process idempotency/emit/Option-Z machinery below. ──
     if evt.get("type") == "async_delegation":
         _process_async_delegation_event(
             evt,
