@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- **Kanban board columns are now scrollable on mobile.** On a phone, a touch-drag inside a Kanban column was trapped in the column's nested scroller, so you couldn't scroll the board. The mobile layout now lets the column overscroll chain to the page/section, restoring natural scrolling; desktop and the pull-to-refresh behavior are unchanged. Thanks @jpalazz2. (#6306)
+
 - **Live Stream: Assistant Turn Anchors now carry a stable run identity through the settled scene.** The activity-scene projection now threads a stable `run_id` (independent of the transport `stream_id`) through Anchor scenes and client hydration, so a settled/reloaded Worklog keeps a consistent identity and can't mis-own or duplicate rows if a producer ever emits `run_id != stream_id`. Behavior-preserving for current writers (which still emit `run_id == stream_id`) — verified byte-identical live/settle/reload render, with malformed/conflicting identities falling back to the transport identity. Thanks @franksong2702. (#6201, #3400)
 
 - **Content search no longer evicts your open sessions from the cache.** A content search scans many sessions, and each scan used to promote/cold-load sessions into the in-memory LRU — evicting the sessions you actually have open. Search now reads through a scan-only accessor that keeps the same disk-freshness, journal-recovery, and state.db reconciliation (so recent content stays searchable) but doesn't disturb the working-set cache. Thanks @ai-ag2026. (#6084, #6083)
