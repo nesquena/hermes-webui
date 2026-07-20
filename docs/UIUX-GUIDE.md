@@ -96,16 +96,25 @@ unless the code and tests prove it is implemented.
 
 ## Typography and content
 
-Use split typography intentionally:
+Use three explicit font tokens:
 
-- assistant prose uses the same system sans stack as the rest of the UI by
-  default (`--font-ui` in `static/style.css`),
-- editorial serif assistant prose is historical/proposal or skin-scoped only;
-  do not reintroduce a global assistant serif without explicit design approval
-  plus code and test evidence,
-- user bubbles and functional UI also use the system sans stack unless a scoped
-  skin intentionally overrides typography,
-- monospace is for code, file paths, commands, tool names, and compact metadata.
+- `--font-ui`: shell chrome, controls, composer, labels, and ordinary UI text
+- `--font-conversation`: user/assistant message prose; by default this is
+  `var(--font-ui)` in `static/style.css`
+- `--font-mono`: code, file paths, command lines, tool payloads, technical logs,
+  and terminal output
+
+Use semantic tokens for typography. Keep prose on `--font-conversation` by
+default so it tracks `--font-ui` whenever a skin intentionally retunes UI type.
+Override `--font-conversation` only for a skin that intentionally wants a
+distinct prose face.
+Conversation prose must remain the system sans by default. Do not introduce a
+global conversation serif through the `--font-conversation` token or
+selector-level overrides without explicit design approval plus code and test
+evidence; keep distinct editorial prose typography explicitly opt-in or
+skin-scoped.
+Avoid hard-coding selector-level font stacks when a token already carries the
+intent.
 
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
