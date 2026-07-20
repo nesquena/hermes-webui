@@ -44,6 +44,7 @@ let _sessionSwitchLayoutLoadGeneration=null;
 let _sessionSwitchLayoutStabilizationToken=0;
 let _sessionSwitchLayoutStabilizationTimer=0;
 let _sessionSwitchLayoutStabilizationObserver=null;
+let _sessionSwitchLayoutWatchdogTimer=0;
 let _sessionSwitchLayoutPostProcessPending=0;
 let _sessionSwitchLayoutSettleRequested=false;
 let _messageUserUnpinned=false;
@@ -72,14 +73,16 @@ function clearTimeout(){{}}
 _beginSessionSwitchLayoutStabilization('incoming',1);
 assert(classes.has('session-switch-layout-stabilizing'));
 _settleSessionSwitchLayoutStabilization('incoming',1);
-timers.at(-1)();
+// settle schedules the quiet-check THEN arms the watchdog, so the quiet-check
+// is the second-to-last timer. Fire it (not the watchdog) to settle normally.
+timers.at(-2)();
 while(raf.length) raf.shift()();
 assert(!classes.has('session-switch-layout-stabilizing'));
 assert.strictEqual(bottomCalls,1);
 _beginSessionSwitchLayoutStabilization('incoming-2',2);
 _messageUserUnpinned=true;
 _settleSessionSwitchLayoutStabilization('incoming-2',2);
-timers.at(-1)();
+timers.at(-2)();
 while(raf.length) raf.shift()();
 assert.strictEqual(bottomCalls,1);
 console.log(JSON.stringify({{bottomCalls,hasClass:classes.has('session-switch-layout-stabilizing')}}));
@@ -184,6 +187,103 @@ def test_same_session_force_reload_force_retires_prior_stabilization():
     # The else-branch of the _begin gate handles same-session force reload.
     assert "} else if (sameSessionForceReload && typeof window !== 'undefined' && typeof window._endSessionSwitchLayoutStabilization === 'function') {" in load
     assert "window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, true);" in load
+
+
+def test_authoritative_same_sid_load_force_retires_armed_stabilization():
+    """Rapid A→B→A→B: a same-SID non-force load re-selecting the already-open
+    session (the early-return no-op) is still the authoritative current load. If
+    an abandoned switch left stabilization armed (a B load that never became
+    current and whose stale return was gated out by a newer generation), this
+    path must force-retire it — otherwise `session-switch-layout-stabilizing`
+    stays armed forever and silently disables mobile user-row virtualization.
+    """
+    load = _function_body(SESSIONS_JS, "loadSession")
+    early = load[load.index("if(currentSid===sid && !forceReload"):load.index("return;\n  }\n")]
+    assert "window._endSessionSwitchLayoutStabilization(undefined, undefined, true);" in early, \
+        "authoritative same-SID re-select must force-retire any armed stabilization"
+
+
+def test_settle_arms_bounded_watchdog_that_force_retires_stuck_processor():
+    """The quiet-check waits on the pending-work count, so a single async
+    processor that never resolves keeps pending>0 and leaves stabilization armed
+    for the whole tab. _settle must arm an INDEPENDENT absolute-cap watchdog that
+    force-retires the owning token after a bound even when a waiter never
+    releases. It's cleared on _end so a normal settle doesn't fire it late.
+    """
+    settle = _function_body(UI_JS, "_settleSessionSwitchLayoutStabilization")
+    end = _function_body(UI_JS, "_endSessionSwitchLayoutStabilization")
+    assert "_sessionSwitchLayoutWatchdogTimer=setTimeout(" in settle
+    # Watchdog force-retires (force=true) the exact token/generation it armed for.
+    assert "_endSessionSwitchLayoutStabilization(loadGeneration,token,true);" in settle
+    assert ",15000);" in settle
+    # Token guard so a stale watchdog can't clear a newer stabilization.
+    assert "if(token!==_sessionSwitchLayoutStabilizationToken) return;" in settle
+    # Cleared by _end so a completed settle never fires the watchdog afterward.
+    assert "clearTimeout(_sessionSwitchLayoutWatchdogTimer);" in end
+    assert UI_JS.count("let _sessionSwitchLayoutWatchdogTimer=0;") == 1
+
+
+def test_watchdog_retires_stabilization_when_processor_never_resolves():
+    """Behavioral: drive the real begin/settle/postprocess/end helpers with a
+    pending marker that NEVER releases, advance a fake clock past the cap, and
+    assert the stabilizing class is removed anyway (the silent-leak the
+    maintainer flagged). Uses node with a controllable timer queue.
+    """
+    fns = "\n".join(_function_body(UI_JS, n) for n in (
+        "_endSessionSwitchLayoutStabilization",
+        "_beginSessionSwitchLayoutStabilization",
+        "_finishSessionSwitchLayoutStabilization",
+        "_scheduleSessionSwitchLayoutQuietCheck",
+        "_beginSessionSwitchLayoutPostProcess",
+        "_endSessionSwitchLayoutPostProcess",
+        "_settleSessionSwitchLayoutStabilization",
+    ))
+    script = f"""
+const assert=require('assert');
+// Controllable clock: collect timers, fire by advancing a virtual now.
+let _now=0; const _timers=[];
+global.setTimeout=(fn,ms)=>{{const id={{fn,at:_now+(ms||0),cancelled:false}};_timers.push(id);return id;}};
+global.clearTimeout=(id)=>{{if(id&&typeof id==='object')id.cancelled=true;}};
+global.requestAnimationFrame=(fn)=>{{_timers.push({{fn,at:_now,cancelled:false}});return 0;}};
+global.cancelAnimationFrame=()=>{{}};
+function advance(ms){{_now+=ms;let ran=true;while(ran){{ran=false;_timers.slice().sort((a,b)=>a.at-b.at).forEach(t=>{{if(!t.cancelled&&t.at<=_now){{t.cancelled=true;ran=true;t.fn();}}}});}}}}
+// Minimal DOM: a messages element whose classList tracks the stabilizing class.
+let _classes=new Set();
+const messagesEl={{classList:{{add:c=>_classes.add(c),remove:c=>_classes.delete(c),contains:c=>_classes.has(c)}}}};
+function $(id){{return id==='messages'?messagesEl:null;}}
+function document_getElementById(){{return null;}}
+const document={{getElementById:()=>null}};
+let _scrollPinned=false,_messageUserUnpinned=true;
+function scrollToBottom(){{}}
+// Stabilization state globals.
+let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutLoadGeneration=null;
+let _sessionSwitchLayoutStabilizationToken=0;
+let _sessionSwitchLayoutStabilizationTimer=0;
+let _sessionSwitchLayoutStabilizationObserver=null;
+let _sessionSwitchLayoutWatchdogTimer=0;
+let _sessionSwitchLayoutPostProcessPending=0;
+let _sessionSwitchLayoutSettleRequested=false;
+let _bottomSettleToken=0,_settleRO=null,_settleTimer=0,_settleFinalTimer=0,_settleRAF=0,_programmaticScroll=false;
+// No ResizeObserver in this harness -> settle takes the non-observer path.
+{fns}
+// Switch INTO a session (idle path, observer would arm but is absent here).
+_beginSessionSwitchLayoutStabilization('sidA', 1);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true, 'armed on begin');
+_settleSessionSwitchLayoutStabilization('sidA', 1, false);
+// Register a post-process waiter that NEVER releases (hung fetch).
+const marker=_beginSessionSwitchLayoutPostProcess();
+assert.ok(marker, 'pending marker registered');
+assert.strictEqual(_sessionSwitchLayoutPostProcessPending, 1);
+// Advance past the quiet window: pending>0 so the quiet-check must NOT settle.
+advance(1000);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true, 'still armed while pending>0');
+// Advance past the watchdog cap: it must force-retire despite the stuck waiter.
+advance(15000);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), false, 'watchdog force-retired the stuck stabilization');
+assert.strictEqual(_sessionSwitchLayoutStabilizationSid, '', 'state cleared');
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 def test_session_switch_has_no_fixed_load_expiry_and_postprocess_is_event_driven():

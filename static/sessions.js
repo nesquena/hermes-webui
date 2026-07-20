@@ -1483,6 +1483,14 @@ async function loadSession(sid){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
     // background completion left on the open, unfocused pane) before returning.
+    // It is ALSO an authoritative same-SID load: if a just-abandoned switch left
+    // stabilization armed (rapid A→B→A where the B load never became current and
+    // its stale return was gated out by a newer generation), force-retire it now
+    // so `session-switch-layout-stabilizing` can't stay permanently armed and
+    // silently disable mobile user-row virtualization for the rest of the tab.
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function'){
+      try { window._endSessionSwitchLayoutStabilization(undefined, undefined, true); } catch (_) {}
+    }
     if(_sessionVisitHasUnreadState(sid)){
       _acknowledgeSessionVisit(
         sid,

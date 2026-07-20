@@ -5132,6 +5132,11 @@ let _sessionSwitchLayoutLoadGeneration=null;
 let _sessionSwitchLayoutStabilizationToken=0;
 let _sessionSwitchLayoutStabilizationTimer=0;
 let _sessionSwitchLayoutStabilizationObserver=null;
+// Absolute-cap watchdog: force-retires stabilization even if a post-process
+// waiter (a never-settling fetch/preview) never releases its pending marker, so
+// the `session-switch-layout-stabilizing` class can't stay armed forever and
+// silently disable mobile user-row virtualization.
+let _sessionSwitchLayoutWatchdogTimer=0;
 let _sessionSwitchLayoutPostProcessPending=0;
 let _sessionSwitchLayoutSettleRequested=false;
 let _liveAnchorScrollRebuildGeneration=0;
@@ -5148,6 +5153,8 @@ function _endSessionSwitchLayoutStabilization(loadGeneration,token,force){
   if(token!==undefined&&token!==_sessionSwitchLayoutStabilizationToken) return;
   clearTimeout(_sessionSwitchLayoutStabilizationTimer);
   _sessionSwitchLayoutStabilizationTimer=0;
+  clearTimeout(_sessionSwitchLayoutWatchdogTimer);
+  _sessionSwitchLayoutWatchdogTimer=0;
   if(_sessionSwitchLayoutStabilizationObserver){
     _sessionSwitchLayoutStabilizationObserver.disconnect();
     _sessionSwitchLayoutStabilizationObserver=null;
@@ -5227,6 +5234,20 @@ function _settleSessionSwitchLayoutStabilization(sid,loadGeneration,streaming){
     _sessionSwitchLayoutStabilizationObserver.observe(observed);
   }
   _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration);
+  // Independent absolute-cap watchdog. The quiet-check is event-driven and waits
+  // on _sessionSwitchLayoutPostProcessPending, so a single async processor that
+  // never resolves (a hung fetch / preview that neither renders nor errors)
+  // would keep pending>0 and leave stabilization armed for the whole tab. Arm a
+  // bounded fallback that force-retires this exact token after the cap even if a
+  // waiter never releases. Re-armed on each settle; cleared by _end.
+  clearTimeout(_sessionSwitchLayoutWatchdogTimer);
+  _sessionSwitchLayoutWatchdogTimer=setTimeout(()=>{
+    if(token!==_sessionSwitchLayoutStabilizationToken) return;
+    // Force-retire regardless of pending count; a still-pending waiter here is a
+    // stuck processor, not live geometry. token match guarantees we only clear
+    // the stabilization this settle owns.
+    _endSessionSwitchLayoutStabilization(loadGeneration,token,true);
+  },15000);
 }
 if(typeof window!=='undefined'){
   window._beginSessionSwitchLayoutStabilization=_beginSessionSwitchLayoutStabilization;
