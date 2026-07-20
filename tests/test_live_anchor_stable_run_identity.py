@@ -302,3 +302,60 @@ console.log(JSON.stringify({{
     assert data["legacy"]["context"]["run_id"] == "stream-transport-1"
     assert data["fallbackHydrated"] is True
     assert data["fallback"]["event"]["local_id"] == "snapshot:stream-scene-scoped:0"
+
+
+@pytest.mark.skipif(
+    NODE is None, reason="node is required for browser hydration regression coverage"
+)
+def test_anchor_source_event_preserves_explicit_snapshot_local_id_with_stable_run_context():
+    anchors_path = ROOT / "static" / "assistant_turn_anchors.js"
+    script = f"""
+const fs=require('fs');
+const vm=require('vm');
+const src=fs.readFileSync({json.dumps(str(anchors_path))},'utf8');
+const sandbox={{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src,sandbox,{{filename:'assistant_turn_anchors.js'}});
+const api=sandbox.window.HermesAssistantTurnAnchors;
+const registry=api.createAssistantTurnAnchorRegistry({{
+  session_id:'session-stable-run',
+}});
+api.applyAssistantTurnAnchorSourceEvents(registry, [
+  {{
+    source_event_type:'token',
+    local_id:'live-prose:stream-transport-1:1',
+    run_id:'run-stable-1',
+    stream_id:'stream-transport-1',
+    payload:{{text:'progress', activitySegmentSeq:1}},
+  }},
+  {{
+    source_event_type:'reasoning',
+    local_id:'live-reasoning:stream-transport-1:1',
+    run_id:'run-stable-1',
+    stream_id:'stream-transport-1',
+    payload:{{text:'thinking one', activitySegmentSeq:1}},
+  }},
+  {{
+    source_event_type:'reasoning',
+    local_id:'live-reasoning:stream-transport-1:2',
+    run_id:'run-stable-1',
+    stream_id:'stream-transport-1',
+    payload:{{text:'thinking two', activitySegmentSeq:2}},
+  }},
+], {{run_id:'run-stable-1', stream_id:'stream-transport-1'}});
+const scene=api.projectAssistantTurnAnchorActivityScene(registry, {{mode:'compact_worklog'}});
+console.log(JSON.stringify(scene.activity_rows.map(row => [row.role, row.local_id])));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        ["prose", "live-prose:stream-transport-1:1"],
+        ["thinking", "live-reasoning:stream-transport-1:1"],
+        ["thinking", "live-reasoning:stream-transport-1:2"],
+    ]
