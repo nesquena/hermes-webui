@@ -278,27 +278,30 @@ class TestIssue765FollowupHardening:
     """
 
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
-        """Two concurrent saves of the same session must not collide on one tmp path.
+        """Same-session saves serialize and retain distinct tmp identities.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        Save and delete now share one publication authority, so two save calls
+        must not enter replacement together. They must still use distinct temp
+        paths so the historical `<sid>.tmp` collision cannot regress if the
+        critical section changes later.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        first_replace_entered = threading.Event()
+        release_first_replace = threading.Event()
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
+        def _replace_with_gate(src, dst):
             replace_sources.append(str(src))
-            barrier.wait(timeout=5)
+            if len(replace_sources) == 1:
+                first_replace_entered.set()
+                assert release_first_replace.wait(timeout=5)
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _replace_with_gate)
 
         def _save_worker():
             try:
@@ -309,7 +312,11 @@ class TestIssue765FollowupHardening:
         t1 = threading.Thread(target=_save_worker)
         t2 = threading.Thread(target=_save_worker)
         t1.start()
+        assert first_replace_entered.wait(timeout=5)
         t2.start()
+        time.sleep(0.05)
+        assert len(replace_sources) == 1, "Same-session publication must serialize"
+        release_first_replace.set()
         t1.join(timeout=5)
         t2.join(timeout=5)
 
