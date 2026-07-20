@@ -54,6 +54,13 @@ when that slice landed; they do not override the current coverage summary above.
   `_anchor_activity_scene` snapshot so the folded activity summary can appear
   above the final answer. This handoff does not claim Transparent Stream wiring
   or durable hard-reload scene persistence.
+- The first RFC Phase 6 ownership slice routes the production `state_saved` SSE
+  into the active Assistant Turn Anchor and carries `artifacts` and
+  `side_effects` through `activity_scene_v1` settlement persistence and reload
+  hydration. These owned outcomes remain off the readable Worklog by default;
+  memory/skill saves still surface through their existing toast and natural UI.
+  Production artifact-reference derivation and run-journal reconstruction of
+  side effects remain follow-up work.
 
 ## State Layers
 
