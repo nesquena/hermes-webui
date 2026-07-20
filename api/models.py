@@ -4404,17 +4404,33 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     return evicted
 
 
-def get_session(sid, metadata_only=False):
-    """Load a session, optionally with metadata only (skipping the messages array).
+def get_session_for_scan(sid):
+    """Read a session for a one-pass scan without disturbing the LRU.
 
-    Metadata-only loads intentionally do not populate the full-session cache.
-    Otherwise a later full load could return a compact object with an empty
-    messages list. Use this when you only need compact() metadata and not the
-    actual message history (e.g., for fast sidebar switching).
+    The scan uses the full canonical resolver so stale sidecars, pending journal
+    recovery, and newer state.db transcript rows remain searchable. It only
+    differs from ``get_session`` in cache policy: no hit promotion, no cold-load
+    insertion, and therefore no scan-triggered eviction.
+    """
+    try:
+        return _resolve_session(sid, promote_cache=False, cache_on_miss=False)
+    except Exception:
+        logger.debug("scan load failed for session %s", sid, exc_info=True)
+        return None
+
+
+def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
+    """Resolve a session through the canonical freshness/recovery path.
+
+    ``get_session_for_scan`` shares this resolver with normal reads so that
+    content search sees the same disk freshness, journal-retry, and state.db
+    recovery behavior. Its policy merely suppresses LRU promotion and cold-load
+    caching; reconciliation still updates an already-resident entry when normal
+    resolution replaces stale contents.
     """
     with LOCK:
         cached = SESSIONS.get(sid)
-        if cached is not None:
+        if cached is not None and promote_cache:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
     if cached is not None:
         # Defensive cache ownership check: compression/continuation and recovery
@@ -4438,12 +4454,12 @@ def get_session(sid, metadata_only=False):
                 disk_session = Session.load(sid)
                 with LOCK:
                     SESSIONS[sid] = disk_session
-                    SESSIONS.move_to_end(sid)
+                    if promote_cache:
+                        SESSIONS.move_to_end(sid)
                 cached = disk_session
             except Exception:
                 logger.debug(
-                    "cached session disk-freshness check failed for session %s",
-                    sid, exc_info=True,
+                    "cached session disk-freshness check failed for session %s", sid, exc_info=True,
                 )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
@@ -4451,28 +4467,26 @@ def get_session(sid, metadata_only=False):
                 if _cache_has_stale_unsaved_user_tail(cached, disk_session):
                     with LOCK:
                         SESSIONS[sid] = disk_session
-                        SESSIONS.move_to_end(sid)
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
                     cached = disk_session
             except Exception:
                 logger.debug(
-                    "stale cached user-tail check failed for session %s",
-                    sid, exc_info=True,
+                    "stale cached user-tail check failed for session %s", sid, exc_info=True,
                 )
         if not metadata_only and _session_has_pending_journal_retry(cached):
             try:
                 _try_retry_journal_recovery_in_place(cached)
             except Exception:
                 logger.debug(
-                    "lazy journal-retry failed on cache hit for session %s",
-                    sid, exc_info=True,
+                    "lazy journal-retry failed on cache hit for session %s", sid, exc_info=True,
                 )
         if not metadata_only:
             try:
                 _sync_sidecar_from_state_db_if_newer(cached)
             except Exception:
                 logger.debug(
-                    "state.db newer-sidecar sync failed on cache hit for session %s",
-                    sid, exc_info=True,
+                    "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
         return cached
     if metadata_only:
@@ -4482,10 +4496,12 @@ def get_session(sid, metadata_only=False):
     else:
         s = Session.load(sid)
     if s:
-        with LOCK:
-            SESSIONS[sid] = s
-            SESSIONS.move_to_end(sid)
-            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        if cache_on_miss:
+            with LOCK:
+                SESSIONS[sid] = s
+                if promote_cache:
+                    SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         if not metadata_only:
             try:
                 synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
@@ -4499,14 +4515,13 @@ def get_session(sid, metadata_only=False):
                         _try_retry_journal_recovery_in_place(s)
                     except Exception:
                         logger.debug(
-                            "lazy journal-retry failed on cold load for session %s",
-                            sid, exc_info=True,
+                            "lazy journal-retry failed on cold load for session %s", sid, exc_info=True,
                         )
                 # If repair had to bail because the per-session lock was held,
                 # do not pin the still-stale sidecar in the LRU cache forever.
                 # Leaving it cached would prevent future get_session() calls from
                 # re-entering the cache-miss repair path after the lock holder exits.
-                if not repaired and (len(s.messages) == 0
+                if cache_on_miss and not repaired and (len(s.messages) == 0
                         and s.pending_user_message
                         and s.active_stream_id
                         and s.active_stream_id not in _active_stream_ids()):
@@ -4517,6 +4532,11 @@ def get_session(sid, metadata_only=False):
                 pass  # repair is best-effort
         return s
     raise KeyError(sid)
+
+
+def get_session(sid, metadata_only=False):
+    """Load a session, optionally with metadata only (skipping messages)."""
+    return _resolve_session(sid, metadata_only=metadata_only)
 
 
 _COMPRESSION_RECOVERY_PROFILE_UNSET = object()
