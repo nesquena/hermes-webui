@@ -4261,7 +4261,14 @@ def _compact_image_parts_for_persistence(messages) -> int:
                 # the structured result during durable-session compaction.
                 compacted_content.append(part)
                 continue
-            if part.get('type') in {'image', 'image_url', 'input_image'}:
+            part_type = part.get('type')
+            # Guard the set-membership with an isinstance check: a JSON-valid
+            # part can carry an unhashable ``type`` (e.g. a list), and
+            # ``unhashable in {...}`` raises TypeError — which would turn an
+            # otherwise-complete streaming send into the error path before the
+            # session is saved. Only the three string image types are compacted;
+            # every other part (including non-string ``type`` values) is preserved.
+            if isinstance(part_type, str) and part_type in {'image', 'image_url', 'input_image'}:
                 compacted_content.append({'type': 'text', 'text': '[screenshot]'})
                 image_parts += 1
             else:

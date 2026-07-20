@@ -112,6 +112,38 @@ def test_compact_image_parts_for_persistence_preserves_interleaved_non_image_par
     assert _compact_image_parts_for_persistence(messages) == 0
 
 
+def test_compact_image_parts_for_persistence_survives_unhashable_part_type():
+    # A JSON-valid part can carry a non-string (unhashable) ``type`` such as a
+    # list or dict. ``part.get("type") in {...}`` would raise TypeError on an
+    # unhashable value, turning an otherwise-complete streaming send into the
+    # error path before the session is saved. Such parts must be preserved
+    # unchanged, and real image parts alongside them must still compact.
+    list_type = {"type": ["provider-extension"], "data": "x"}
+    dict_type = {"type": {"nested": "kind"}, "data": "y"}
+    messages = [
+        {
+            "role": "tool",
+            "content": [
+                list_type,
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                dict_type,
+            ],
+        }
+    ]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 1
+    assert messages[0]["content"] == [
+        list_type,
+        {"type": "text", "text": "[screenshot]"},
+        dict_type,
+    ]
+    assert "data:image" not in json.dumps(messages)
+    # Idempotent: a second pass changes nothing and still does not raise.
+    assert _compact_image_parts_for_persistence(messages) == 0
+
+
 def test_compact_session_image_parts_for_persistence_compacts_both_histories():
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + ("A" * 4096)}}
     session = SimpleNamespace(
