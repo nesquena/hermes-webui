@@ -3306,6 +3306,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
     if len(event_run_ids) > 1:
         return None
     terminal_settlement_snapshot = settled or terminal_event is not None
+    # Malformed envelopes cannot own terminal settlement. For a non-terminal
+    # live snapshot, the transport cursor remains a recoverable observation path.
     if malformed_envelope_run_id:
         if terminal_settlement_snapshot:
             return None
@@ -3313,6 +3315,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
     summary_run_id = str(summary.get("run_id") or stream_id).strip()
     if len(event_run_ids) == 1:
         run_id = next(iter(event_run_ids))
+        # Older summaries can still be keyed by the transport stream id while
+        # the event envelope carries the stable run id. Any third identity is
+        # ambiguous and must not be trusted.
         if summary_run_id and summary_run_id not in {run_id, stream_id}:
             return None
     else:
