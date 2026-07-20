@@ -235,6 +235,27 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### 4.2.1 Private Session Media
+
+Large native raster data URLs are externalized from `messages` and
+`context_messages` into the state-owned `STATE_DIR/session-media/<session_id>`
+store. Session JSON retains content-addressed `webui-media://<sha256>.<ext>`
+references. This namespace is separate from ordinary uploads and archive
+extraction under `attachments/`; changing `HERMES_WEBUI_ATTACHMENT_DIR` does not
+move or change private-media authority. A deployment that moves WebUI state must
+move the complete `STATE_DIR` together.
+
+Private-media reads and writes are anchored to opened directory handles, reject
+symlink components, verify extension/MIME, raster magic, and SHA-256, and publish
+only fully synced files. New-session lineage operations clone all referenced
+blobs transactionally before publishing the new session id. Model requests and
+portable exports must hydrate every reference through the strict reader and
+must reject any private URI that remains; plain JSON imports containing private
+URIs are rejected. Legacy files under
+`attachments/<session_id>/session-media` are verified and migrated into the
+state-owned store on first read. Session deletion removes both upload and
+private-media namespaces.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
