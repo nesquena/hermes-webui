@@ -31,6 +31,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [normal, terminal-error, session-reattach, detached-terminal]
     steps:
       - uses: actions/checkout@v4
 
@@ -50,29 +54,16 @@ jobs:
           pip install -r requirements.txt playwright
           python -m playwright install --with-deps chromium
 
-      - name: Run normal conversation lifecycle gate
+      - name: Run conversation lifecycle gate
         env:
-          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/normal
-        run: python tests/browser_conversation_lifecycle.py
-
-      - name: Run active session reattach lifecycle gate
-        if: ${{ always() }}
-        env:
-          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/session-reattach
-          LIFECYCLE_SCENARIO: session-reattach
-        run: python tests/browser_conversation_lifecycle.py
-
-      - name: Run detached terminal lifecycle gate
-        if: ${{ always() }}
-        env:
-          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/detached-terminal
-          LIFECYCLE_SCENARIO: detached-terminal
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/${{ matrix.scenario }}
+          LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
         run: python tests/browser_conversation_lifecycle.py
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: conversation-lifecycle-failure
+          name: conversation-lifecycle-failure-${{ matrix.scenario }}
           path: lifecycle-artifacts
           if-no-files-found: ignore

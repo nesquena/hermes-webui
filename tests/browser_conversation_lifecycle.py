@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Public browser gate for the normal conversation lifecycle.
+"""Public browser gate for the conversation lifecycle proof matrix.
 
 This test boots the real WebUI server with isolated state, drives the real chat
 composer in Chromium, and supplies deterministic runtime events through the
 existing Hermes Gateway Runs API. It proves that one assistant turn keeps the
-same semantic activity across live streaming, session reattachment, settlement,
-and a hard reload.
+same semantic activity across live streaming, terminal errors, session
+reattachment, settlement, detached completion, and a hard reload.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ FINAL_PREFIX = "Lifecycle gate "
 FINAL_SUFFIX = "final answer."
 FINAL_ACK_TEXT = "Lifecycle"
 SEED_FINAL_TEXT = "Idle session ready."
+TERMINAL_PROCESS_TEXT = "Lifecycle terminal process check"
+TERMINAL_ERROR_TEXT = "Lifecycle gate encountered a terminal-side error."
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 SECOND_TOOL_NAME = "terminal"
@@ -48,6 +50,52 @@ GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
 BROKEN_REASONING_LOCAL_ID = "broken-runtime-reasoning-id"
+
+
+def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
+    session_file_candidates = [
+        state_root / "webui-state" / "sessions" / f"{session_id}.json",
+        state_root / "sessions" / f"{session_id}.json",
+    ]
+    for session_file in session_file_candidates:
+        if not session_file.exists():
+            continue
+        try:
+            raw = json.loads(session_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        records = raw.get("anchor_activity_scenes")
+        if not isinstance(records, dict):
+            continue
+        candidates = []
+        for record in records.values():
+            if not isinstance(record, dict):
+                continue
+            scene = record.get("scene")
+            if not isinstance(scene, dict):
+                continue
+            idx = record.get("message_index")
+            try:
+                message_index = int(idx)
+            except (TypeError, ValueError):
+                message_index = -1
+            candidates.append((message_index, scene))
+        if not candidates:
+            continue
+        _, latest = max(candidates, key=lambda item: item[0])
+        return latest
+    return None
+
+
+def _safe_request_post_data(request_or_route_request) -> str:
+    raw = getattr(request_or_route_request, "post_data", None)
+    if callable(raw):
+        raw = raw()
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8")
+    return str(raw)
 
 
 def _free_port() -> int:
@@ -424,6 +472,11 @@ class DeterministicGateway:
                         "event": "reasoning.available",
                         "text": REASONING_TEXT,
                     })
+                    if SCENARIO == "terminal-error":
+                        self._event("message.delta", {
+                            "event": "message.delta",
+                            "delta": TERMINAL_PROCESS_TEXT,
+                        })
                     self._event("message.delta", {
                         "event": "message.delta",
                         "delta": PROCESS_TEXT,
@@ -474,6 +527,17 @@ class DeterministicGateway:
                         })
                         owner.continuation_ready.set()
                     if not owner.release_final_prefix.wait(timeout=30):
+                        return
+                    if SCENARIO == "terminal-error":
+                        owner.final_prefix_ready.set()
+                        if not owner.release_terminal.wait(timeout=30):
+                            return
+                        self._event("run.failed", {
+                            "event": "run.failed",
+                            "error": TERMINAL_ERROR_TEXT,
+                        })
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
                         return
                     self._event("message.delta", {
                         "event": "message.delta",
@@ -587,6 +651,9 @@ def _capture_anchor_scene_requests(page):
 def _activity_snapshot(page) -> dict:
     return page.evaluate(
         """() => {
+          const messages = (typeof S !== 'undefined' && Array.isArray(S.messages)) ? S.messages : [];
+          const assistants = messages.filter((message) => message && message.role === 'assistant');
+          const lastAssistant = assistants.length ? assistants[assistants.length - 1] : null;
           const turn = document.querySelector('#liveAssistantTurn') ||
             Array.from(document.querySelectorAll('.assistant-turn')).pop() || null;
           const groups = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-owner="1"]')) : [];
@@ -594,7 +661,9 @@ def _activity_snapshot(page) -> dict:
           const visibleFinal = turn ? Array.from(turn.querySelectorAll('.assistant-segment .msg-body'))
             .filter(el => {
               const segment = el.closest('.assistant-segment');
+              const role = segment && segment.getAttribute('data-anchor-row-role');
               return segment && !segment.hidden &&
+                role !== 'prose' &&
                 !segment.classList.contains('assistant-segment-worklog-source') &&
                 getComputedStyle(segment).display !== 'none';
             })
@@ -626,6 +695,7 @@ def _activity_snapshot(page) -> dict:
             rows: rows.map(row => ({
               role: row.getAttribute('data-anchor-row-role'),
               source: row.getAttribute('data-anchor-source-event-type'),
+              status: row.getAttribute('data-anchor-row-status'),
               rowId: row.getAttribute('data-anchor-row-id') || '',
               localId: row.getAttribute('data-anchor-local-id') || '',
               streamId: row.getAttribute('data-anchor-stream-id') || '',
@@ -634,6 +704,14 @@ def _activity_snapshot(page) -> dict:
               classes: row.className,
             })),
             visibleFinal,
+            assistantMessage: lastAssistant ? {
+              turnDuration: lastAssistant._turnDuration,
+              hasError: Boolean(lastAssistant._error),
+              anchorTerminalState: lastAssistant._anchor_activity_scene
+                && (lastAssistant._anchor_activity_scene.terminal_state
+                  || (lastAssistant._anchor_activity_scene.lifecycle
+                    && lastAssistant._anchor_activity_scene.lifecycle.terminal_state)) || null,
+            } : null,
             transcript: (document.querySelector('#msgInner') || {}).innerText || '',
           };
         }"""
@@ -664,6 +742,50 @@ def _expand_settled_worklog(page) -> None:
     )
 
 
+def _terminal_rows(snapshot: dict) -> list[dict]:
+    return [row for row in snapshot["rows"] if row["role"] == "terminal"]
+
+
+def _process_rows(snapshot: dict) -> list[dict]:
+    return [
+        row for row in snapshot["rows"]
+        if row["role"] == "prose" and _is_terminal_process_row_text(row.get("text") or "")
+    ]
+
+
+def _is_terminal_process_row_text(text: str) -> bool:
+    text = " ".join(text.split())
+    if not text:
+        return False
+    return (
+        TERMINAL_PROCESS_TEXT.startswith(text)
+        or text.startswith(TERMINAL_PROCESS_TEXT)
+    )
+
+
+def _is_terminal_row_error(row: dict) -> bool:
+    status = (row.get("status") or "").strip()
+    if status in {"error", "failed"}:
+        return True
+    if status and status not in {"", "done"}:
+        return False
+    row_text = (row.get("text") or "").lower()
+    row_classes = row.get("classes") or ""
+    return (
+        "error" in row_text
+        or "warning" in row_classes
+        or "agent-activity-status-error" in row_classes
+    )
+
+
+def _assert_process_row_present(snapshot: dict) -> list[dict]:
+    rows = _process_rows(snapshot)
+    assert len(rows) == 1, snapshot
+    assert all(_is_terminal_process_row_text(row["text"]) for row in rows), snapshot
+    assert all(TERMINAL_PROCESS_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
+    return rows
+
+
 def _assert_live_activity(snapshot: dict, *, reasoning_count: int = 3) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
@@ -691,7 +813,7 @@ def _assert_live_activity(snapshot: dict, *, reasoning_count: int = 3) -> None:
     assert any(character.isdigit() for character in snapshot["summary"][0]["label"]), snapshot
 
 
-def _assert_settled(snapshot: dict, *, reasoning_count: int) -> None:
+def _assert_settled(snapshot: dict, *, reasoning_count: int, scenario: str) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
     roles = [row["role"] for row in snapshot["rows"]]
@@ -703,8 +825,22 @@ def _assert_settled(snapshot: dict, *, reasoning_count: int) -> None:
     assert any(THIRD_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
     if reasoning_count == 4:
         assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
-    assert sum(FINAL_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
-    assert snapshot["transcript"].count(FINAL_TEXT) == 1, snapshot
+    if scenario == "terminal-error":
+        assert "terminal" in roles, snapshot
+        terminal_rows = _terminal_rows(snapshot)
+        assert terminal_rows, snapshot
+        assert all(_is_terminal_row_error(row) for row in terminal_rows), snapshot
+        assert snapshot["assistantMessage"] is not None, snapshot
+        turn_duration = snapshot["assistantMessage"].get("turnDuration")
+        assert isinstance(turn_duration, (int, float)) and turn_duration > 0, snapshot
+        assert snapshot["assistantMessage"]["hasError"] is True, snapshot
+        assert snapshot["assistantMessage"]["anchorTerminalState"] in {"error", "failed"}, snapshot
+        assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
+        assert sum(TERMINAL_ERROR_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
+        assert TERMINAL_ERROR_TEXT in snapshot["transcript"], snapshot
+    else:
+        assert sum(FINAL_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
+        assert snapshot["transcript"].count(FINAL_TEXT) == 1, snapshot
 
 
 def _semantic_activity(snapshot: dict) -> list[dict]:
@@ -719,6 +855,22 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
         elif row["role"] == "tool":
             semantic.append({"role": "tool", "tool": row["tool"]})
     return semantic
+
+
+def _parse_json_payload(raw: str | bytes | None) -> dict:
+    if raw is None:
+        return {}
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
 
 
 def _assert_same_live_turn(before: dict, after: dict) -> None:
@@ -794,8 +946,14 @@ def _replace_runtime_reasoning_identity(route, session_id: str, bite_hits: list[
 
 
 def main() -> int:
-    if SCENARIO not in {"normal", "session-reattach", "detached-terminal"}:
+    if SCENARIO not in {"normal", "terminal-error", "session-reattach", "detached-terminal"}:
         print(f"SETUP FAIL: unsupported LIFECYCLE_SCENARIO={SCENARIO!r}", file=sys.stderr)
+        return 2
+    if TEST_BITE not in {"", "drop-anchor-persistence", "drop-terminal-anchor-row", "replace-runtime-reasoning-id"}:
+        print(f"SETUP FAIL: unsupported LIFECYCLE_TEST_BITE={TEST_BITE!r}", file=sys.stderr)
+        return 2
+    if TEST_BITE == "drop-terminal-anchor-row" and SCENARIO != "terminal-error":
+        print("SETUP FAIL: drop-terminal-anchor-row requires terminal-error", file=sys.stderr)
         return 2
     if TEST_BITE == "replace-runtime-reasoning-id" and SCENARIO != "session-reattach":
         print("SETUP FAIL: replace-runtime-reasoning-id requires session-reattach", file=sys.stderr)
@@ -882,6 +1040,29 @@ def main() -> int:
                     body='{"ok":true}',
                 ),
             )
+        elif TEST_BITE == "drop-terminal-anchor-row":
+            def _route_anchor_scene(route):
+                raw_payload = _safe_request_post_data(route.request)
+                payload = _parse_json_payload(raw_payload)
+                scene = payload.get("scene") if isinstance(payload, dict) else None
+                rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+                if isinstance(rows, list):
+                    kept = [
+                        row for row in rows
+                        if not (isinstance(row, dict) and row.get("role") == "terminal")
+                    ]
+                    if len(kept) != len(rows):
+                        mutated = dict(payload)
+                        updated_scene = dict(scene)
+                        updated_scene["activity_rows"] = kept
+                        mutated["scene"] = updated_scene
+                        response = route.fetch(post_data=json.dumps(mutated))
+                        route.fulfill(response=response)
+                        return
+                response = route.fetch()
+                route.fulfill(response=response)
+
+            page.route("**/api/session/anchor-scene", _route_anchor_scene)
         errors = _capture_page_errors(page)
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
@@ -938,7 +1119,11 @@ def main() -> int:
         )
         live_snapshot = _activity_snapshot(page)
         _assert_live_activity(live_snapshot)
-        print("OK  live activity: one Anchor worklog with reasoning + completed tool activity")
+        if SCENARIO == "terminal-error":
+            _assert_process_row_present(live_snapshot)
+            print("OK  live activity: terminal-error run keeps process + reasoning + completed tool activity")
+        else:
+            print("OK  live activity: one Anchor worklog with reasoning + completed tool activity")
         _wait_for_live_anchor_projection(page)
         active_session_id = live_snapshot["clientState"]["sessionId"]
         active_stream_id = live_snapshot["clientState"]["activeStreamId"]
@@ -1031,7 +1216,7 @@ def main() -> int:
         gateway.release_final_prefix.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
-        if SCENARIO != "detached-terminal":
+        if SCENARIO in {"normal", "session-reattach"}:
             page.wait_for_function(
                 """text => {
                   const turn = document.querySelector('#liveAssistantTurn');
@@ -1107,22 +1292,80 @@ def main() -> int:
         else:
             pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
             gateway.release_terminal.set()
+        terminal_text = TERMINAL_ERROR_TEXT if SCENARIO == "terminal-error" else FINAL_TEXT
         page.wait_for_function(
             """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
               !document.querySelector('#liveAssistantTurn') &&
               (document.querySelector('#msgInner') || {}).innerText?.includes(text)""",
-            arg=FINAL_TEXT,
+            arg=terminal_text,
             timeout=15000,
         )
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
-        if not TEST_BITE:
+        if TEST_BITE == "drop-terminal-anchor-row":
             scene = _wait_for_persisted_scene(
                 base_url,
                 session_id,
                 anchor_scene_requests=anchor_scene_requests,
             )
             assert scene.get("version") == "activity_scene_v1", scene
+            scene_rows = scene.get("activity_rows") or []
+            scene_roles = [
+                row.get("role") for row in scene_rows
+                if isinstance(row, dict)
+            ]
+            assert any(isinstance(row, dict) and row.get("role") == "prose" for row in scene_rows), scene
+            assert any(isinstance(row, dict) and row.get("role") == "thinking" for row in scene_rows), scene
+            assert any(isinstance(row, dict) and row.get("role") == "tool" for row in scene_rows), scene
+            assert all(
+                not (isinstance(row, dict) and row.get("role") == "terminal")
+                for row in scene_rows
+            ), scene
+            print(
+                "OK  persisted scene via API: roles=%s terminal_present=%s"
+                % (sorted(set(scene_roles)), any(role == "terminal" for role in scene_roles))
+            )
+            persisted_scene = _latest_anchor_scene_from_disk(state_dir, session_id)
+            assert persisted_scene is not None, {
+                "session_id": session_id,
+                "state_dir": str(state_dir / "webui-state"),
+            }
+            persisted_rows = persisted_scene.get("activity_rows") or []
+            persisted_roles = [
+                row.get("role") for row in persisted_rows
+                if isinstance(row, dict)
+            ]
+            assert any(isinstance(row, dict) and row.get("role") == "thinking" for row in persisted_rows), {
+                "persisted_rows": persisted_rows,
+            }
+            assert any(isinstance(row, dict) and row.get("role") == "prose" for row in persisted_rows), {
+                "persisted_rows": persisted_rows,
+            }
+            assert any(isinstance(row, dict) and row.get("role") == "tool" for row in persisted_rows), {
+                "persisted_rows": persisted_rows,
+            }
+            assert all(
+                not (isinstance(row, dict) and row.get("role") == "terminal")
+                for row in persisted_rows
+            ), {
+                "persisted_rows": persisted_rows,
+            }
+            print(
+                "OK  persisted scene on disk: roles=%s terminal_present=%s"
+                % (sorted(set(persisted_roles)), "terminal" in persisted_roles)
+            )
+        elif not TEST_BITE:
+            scene = _wait_for_persisted_scene(
+                base_url,
+                session_id,
+                anchor_scene_requests=anchor_scene_requests,
+            )
+            assert scene.get("version") == "activity_scene_v1", scene
+            if SCENARIO == "terminal-error":
+                scene_rows = scene.get("activity_rows") or []
+                assert any(
+                    isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
+                ), scene
         _expand_settled_worklog(page)
         page.wait_for_selector(
             '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
@@ -1130,17 +1373,22 @@ def main() -> int:
         )
         settled_snapshot = _activity_snapshot(page)
         settled_reasoning_count = 4 if SCENARIO == "session-reattach" else 3
-        _assert_settled(settled_snapshot, reasoning_count=settled_reasoning_count)
+        _assert_settled(settled_snapshot, reasoning_count=settled_reasoning_count, scenario=SCENARIO)
+        if SCENARIO == "terminal-error":
+            _assert_process_row_present(settled_snapshot)
         assert _semantic_activity(settled_snapshot) == _semantic_activity(live_snapshot), {
             "live": _semantic_activity(live_snapshot),
             "settled": _semantic_activity(settled_snapshot),
         }
-        print("OK  settled: final prose and the same semantic activity coexist without duplication")
+        if SCENARIO == "terminal-error":
+            print("OK  settled: terminal row and same activity survived terminal settlement")
+        else:
+            print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
         page.wait_for_function(
             "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-            arg=FINAL_TEXT,
+            arg=terminal_text,
             timeout=15000,
         )
         _expand_settled_worklog(page)
@@ -1149,14 +1397,41 @@ def main() -> int:
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)
-        _assert_settled(reloaded_snapshot, reasoning_count=settled_reasoning_count)
+        _assert_settled(reloaded_snapshot, reasoning_count=settled_reasoning_count, scenario=SCENARIO)
+        if SCENARIO == "terminal-error":
+            _assert_process_row_present(reloaded_snapshot)
         assert _semantic_activity(reloaded_snapshot) == _semantic_activity(settled_snapshot), {
             "settled": _semantic_activity(settled_snapshot),
             "reloaded": _semantic_activity(reloaded_snapshot),
         }
+        if SCENARIO == "terminal-error":
+            settled_terminal = _terminal_rows(settled_snapshot)
+            reloaded_terminal = _terminal_rows(reloaded_snapshot)
+            settled_process = _process_rows(settled_snapshot)
+            reloaded_process = _process_rows(reloaded_snapshot)
+            assert len(settled_process) == len(reloaded_process) == 1, {
+                "settled_process": settled_process,
+                "reloaded_process": reloaded_process,
+            }
+            assert settled_process[0]["text"] == reloaded_process[0]["text"], {
+                "settled_process": settled_process,
+                "reloaded_process": reloaded_process,
+            }
+            assert len(settled_terminal) == len(reloaded_terminal) == 1, {
+                "settled_terminal": settled_terminal,
+                "reloaded_terminal": reloaded_terminal,
+            }
+            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
+                "settled_terminal": settled_terminal[0],
+                "reloaded_terminal": reloaded_terminal[0],
+            }
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
-        expected_inputs = [PROMPT] if SCENARIO == "normal" else [SEED_PROMPT, PROMPT]
+        expected_inputs = (
+            [SEED_PROMPT, PROMPT]
+            if SCENARIO in {"session-reattach", "detached-terminal"}
+            else [PROMPT]
+        )
         actual_inputs = [request.get("input") for request in gateway.request_bodies]
         assert actual_inputs == expected_inputs, actual_inputs
         if errors:
