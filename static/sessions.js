@@ -5319,6 +5319,9 @@ function _sessionListRenderSignature(){
       _allSessions,
       _sidebarReferenceSessions,
       _allProjects,
+      (typeof _activeRunSessionIds !== 'undefined' && _activeRunSessionIds)
+        ? Array.from(_activeRunSessionIds).sort()
+        : [],
       _activeSessionIdForSidebar(),
       search,
       _sessionSourceFilter,

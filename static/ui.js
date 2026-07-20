@@ -10579,7 +10579,99 @@ function _activeRunDuration(seconds) {
 function _activeRunSessionLabel(sid) {
   const known = (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions))
     ? _allSessions.find(s => s && s.session_id === sid) : null;
-  return (known && (known.title || known.display_title)) || (S.session && S.session.session_id === sid && S.session.title) || 'Active conversation';
+  return (known && (known.title || known.display_title)) || (S.session && S.session.session_id === sid && S.session.title) || t('active_run_conversation_fallback');
+}
+
+function _activeRunKnownSession(sid) {
+  if (!sid) return null;
+  const known = (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions))
+    ? _allSessions.find(s => s && s.session_id === sid)
+    : null;
+  if (known) return known;
+  return S.session && S.session.session_id === sid ? S.session : null;
+}
+
+function _activeRunScopeQuery() {
+  const qs = new URLSearchParams();
+  const source = typeof _requestedSessionSidebarSource === 'function' ? _requestedSessionSidebarSource() : 'webui';
+  qs.set('sidebar_source', source || 'webui');
+  if (typeof _activeProject !== 'undefined' && _activeProject) qs.set('project_id', _activeProject);
+  if (typeof _showAllProfiles !== 'undefined' && _showAllProfiles) qs.set('all_profiles', '1');
+  if (typeof _sessionListExcludeHiddenEnabled === 'function' && _sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden', '1');
+  return `?${qs.toString()}`;
+}
+
+function _activeRunSessionIdsChanged(runs) {
+  const nextIds = new Set((runs || []).map(run => run && run.session_id).filter(Boolean));
+  if (nextIds.size !== _activeRunSessionIds.size) return true;
+  for (const sid of nextIds) {
+    if (!_activeRunSessionIds.has(sid)) return true;
+  }
+  return false;
+}
+
+function _syncActiveRunSessionIds(runs) {
+  _activeRunSessionIds.clear();
+  (runs || []).forEach(run => {
+    if (run && run.session_id) _activeRunSessionIds.add(run.session_id);
+  });
+}
+
+function _hideActiveRunTray(opts={}) {
+  const pill = $('activeRunPill');
+  const tray = $('activeRunTray');
+  if (!pill || !tray) return;
+  tray.hidden = true;
+  pill.setAttribute('aria-expanded', 'false');
+  if (opts && opts.restoreFocus && typeof pill.focus === 'function') {
+    try { pill.focus(); } catch (_e) {}
+  }
+}
+
+function _syncActiveRunTray(runs) {
+  const tray = $('activeRunTray');
+  if (!tray) return;
+  const existing = new Map();
+  Array.from(tray.children || []).forEach(node => {
+    const sid = node && node.dataset ? node.dataset.sessionId : '';
+    if (sid) existing.set(sid, node);
+  });
+  const keep = new Set();
+  for (const run of runs || []) {
+    if (!run || !run.session_id) continue;
+    let row = existing.get(run.session_id);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'active-run-row';
+      row.dataset.sessionId = run.session_id;
+      row.setAttribute('role', 'listitem');
+      const button = document.createElement('button');
+      button.type = 'button';
+      const age = document.createElement('span');
+      age.className = 'active-run-age';
+      row._button = button;
+      row._age = age;
+      row.append(button, age);
+    }
+    const button = row._button;
+    const age = row._age;
+    button.textContent = _activeRunSessionLabel(run.session_id);
+    button.title = t('active_run_open_conversation');
+    button.onclick = async () => {
+      _hideActiveRunTray();
+      const knownSession = _activeRunKnownSession(run.session_id);
+      if (knownSession && typeof _openSidebarSession === 'function') {
+        await _openSidebarSession(knownSession);
+      }
+    };
+    age.textContent = _activeRunDuration(run.age_seconds);
+    tray.appendChild(row);
+    keep.add(run.session_id);
+  }
+  Array.from(tray.children || []).forEach(node => {
+    const sid = node && node.dataset ? node.dataset.sessionId : '';
+    if (sid && !keep.has(sid)) node.remove();
+  });
 }
 
 function _renderActiveRunVisibility() {
@@ -10588,20 +10680,17 @@ function _renderActiveRunVisibility() {
   const tray = $('activeRunTray');
   if (!host || !pill || !tray) return;
   const runs = Array.isArray(_activeRunSnapshot.runs) ? _activeRunSnapshot.runs : [];
-  _activeRunSessionIds.clear();
-  runs.forEach(run => _activeRunSessionIds.add(run.session_id));
+  const membershipChanged = _activeRunSessionIdsChanged(runs);
+  _syncActiveRunSessionIds(runs);
   host.hidden = !runs.length;
-  if (!runs.length) { tray.hidden = true; pill.setAttribute('aria-expanded', 'false'); }
-  if (!runs.length) { if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache(); return; }
-  pill.textContent = `${runs.length} active · ${_activeRunDuration(_activeRunSnapshot.oldest_run_age_seconds)}`;
-  tray.replaceChildren(...runs.map(run => {
-    const row = document.createElement('div'); row.className = 'active-run-row'; row.setAttribute('role', 'menuitem');
-    const button = document.createElement('button'); button.type = 'button'; button.textContent = _activeRunSessionLabel(run.session_id); button.title = 'Open conversation';
-    button.onclick = async () => { tray.hidden = true; pill.setAttribute('aria-expanded', 'false'); if (typeof loadSession === 'function') await loadSession(run.session_id); };
-    const age = document.createElement('span'); age.className = 'active-run-age'; age.textContent = _activeRunDuration(run.age_seconds);
-    row.append(button, age); return row;
-  }));
-  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if (!runs.length) _hideActiveRunTray();
+  if (!runs.length) {
+    if (membershipChanged && typeof refreshSessionList === 'function') void refreshSessionList('active-run-visibility');
+    return;
+  }
+  pill.textContent = t('active_run_visibility_label', runs.length, _activeRunDuration(_activeRunSnapshot.oldest_run_age_seconds));
+  _syncActiveRunTray(runs);
+  if (membershipChanged && typeof refreshSessionList === 'function') void refreshSessionList('active-run-visibility');
 }
 
 async function refreshActiveRunVisibility() {
@@ -10611,10 +10700,8 @@ async function refreshActiveRunVisibility() {
   }
   const requestSeq = ++_activeRunSnapshotRequestSeq;
   _activeRunSnapshotInflight = (async () => {
-    const source = typeof _requestedSessionSidebarSource === 'function' ? _requestedSessionSidebarSource() : 'webui';
-    const project = typeof _activeProject !== 'undefined' && _activeProject ? `&project_id=${encodeURIComponent(_activeProject)}` : '';
     try {
-      const result = await api(`/api/activity/active-runs?sidebar_source=${encodeURIComponent(source)}${project}`, {timeoutMs: 10000, timeoutToast: false});
+      const result = await api(`/api/activity/active-runs${_activeRunScopeQuery()}`, {timeoutMs: 10000, timeoutToast: false});
       if (requestSeq !== _activeRunSnapshotRequestSeq) return;
       _activeRunSnapshot = result && Array.isArray(result.runs) ? result : {runs: []};
       _activeRunSnapshotFreshAt = Date.now();
@@ -10646,6 +10733,15 @@ document.addEventListener('DOMContentLoaded', () => {
   const pill = $('activeRunPill');
   if (!pill) return;
   pill.addEventListener('click', _toggleActiveRunTray);
+  document.addEventListener('click', (event) => {
+    const host = $('activeRunVisibility');
+    if (!host || host.hidden) return;
+    if (host.contains(event.target)) return;
+    _hideActiveRunTray();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') _hideActiveRunTray({restoreFocus:true});
+  });
   refreshActiveRunVisibility();
   _activeRunSnapshotTimer = setInterval(refreshActiveRunVisibility, 5000);
 });

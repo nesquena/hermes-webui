@@ -11444,40 +11444,28 @@ def _run_lifecycle_health() -> dict:
     return payload
 
 
-def _active_run_visibility_snapshot(handler=None, *, sidebar_source=None, project_id=None) -> dict:
+def _active_run_visibility_snapshot(
+    handler=None,
+    *,
+    sidebar_source=None,
+    project_id=None,
+    all_profiles=False,
+    exclude_hidden=False,
+) -> dict:
     """Return bounded active parent runs visible to the current sidebar."""
-    active_profile = _get_active_profile_name() or "default"
     source = str(sidebar_source or "webui").strip().lower() or "webui"
     if source not in {"webui", "cli"}:
         source = "webui"
-    sessions = {}
-    for session in all_sessions():
-        if not isinstance(session, dict):
-            continue
-        sid = str(session.get("session_id") or "").strip()
-        if not sid or not _profiles_match(session.get("profile"), active_profile):
-            continue
-        normalized = _normalize_sidebar_source_flags(session)
-        is_cli = _is_cli_session_for_settings(normalized)
-        if source == "webui" and is_cli or source == "cli" and not is_cli:
-            continue
-        if project_id is not None:
-            if project_id == "__none__":
-                if normalized.get("project_id"):
-                    continue
-            elif normalized.get("project_id") != project_id:
-                continue
-        sessions[sid] = normalized
-
+    active_profile = _get_active_profile_name() or "default"
     now = time.time()
-    visible = {}
+    visible: dict[str, dict] = {}
     from api import config as _live_config
     with _live_config.ACTIVE_RUNS_LOCK:
         for raw in (_live_config.ACTIVE_RUNS or {}).values():
             if not isinstance(raw, dict):
                 continue
             sid = str(raw.get("session_id") or "").strip()
-            if sid not in sessions:
+            if not sid:
                 continue
             try:
                 started_at = float(raw.get("started_at"))
@@ -11493,7 +11481,83 @@ def _active_run_visibility_snapshot(handler=None, *, sidebar_source=None, projec
             previous = visible.get(sid)
             if previous is None or item["started_at"] < previous["started_at"]:
                 visible[sid] = item
-    runs = sorted(visible.values(), key=lambda item: (item["started_at"], item["session_id"]))[:100]
+    if not visible:
+        return {
+            "active_runs": 0,
+            "runs": [],
+            "oldest_run_age_seconds": None,
+        }
+
+    settings = load_settings()
+    show_cli_sessions = bool(settings.get("show_cli_sessions"))
+    show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+    show_previous_messaging_sessions = bool(settings.get("show_previous_messaging_sessions"))
+    show_cron_sessions = bool(settings.get("show_cron_sessions"))
+    show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
+    agent_session_source_filter = settings.get("agent_session_source_filter")
+    scoped_session_ids = None
+    key = _session_list_cache_key(
+        active_profile=active_profile,
+        all_profiles=all_profiles,
+        show_cli_sessions=show_cli_sessions,
+        show_claude_code_sessions=show_claude_code_sessions,
+        show_previous_messaging_sessions=show_previous_messaging_sessions,
+        show_cron_sessions=show_cron_sessions,
+        include_archived=False,
+        exclude_hidden=exclude_hidden,
+        visible_only=True,
+        show_webhook_sessions=show_webhook_sessions,
+        source_filter=agent_session_source_filter,
+        sidebar_source=source,
+    )
+    cached_payload, _is_fresh = _session_list_cache_get(key, allow_stale=True)
+    if isinstance(cached_payload, dict):
+        scoped_session_ids = set()
+        for session in (cached_payload.get("sessions") or []):
+            if not isinstance(session, dict):
+                continue
+            sid = str(session.get("session_id") or "").strip()
+            if not sid:
+                continue
+            if project_id is not None:
+                if project_id == "__none__":
+                    if session.get("project_id"):
+                        continue
+                elif session.get("project_id") != project_id:
+                    continue
+            scoped_session_ids.add(sid)
+
+    runs = []
+    for sid, item in sorted(visible.items(), key=lambda pair: (pair[1]["started_at"], pair[0])):
+        if scoped_session_ids is not None:
+            if sid not in scoped_session_ids:
+                continue
+            runs.append(item)
+            if len(runs) >= 100:
+                break
+            continue
+        session = get_session(sid, metadata_only=True)
+        if session is None:
+            continue
+        try:
+            normalized = _normalize_sidebar_source_flags(session.compact())
+        except Exception:
+            continue
+        if not all_profiles and not _profiles_match(normalized.get("profile"), active_profile):
+            continue
+        is_cli = _is_cli_session_for_settings(normalized)
+        if source == "webui" and is_cli or source == "cli" and not is_cli:
+            continue
+        if project_id is not None:
+            if project_id == "__none__":
+                if normalized.get("project_id"):
+                    continue
+            elif normalized.get("project_id") != project_id:
+                continue
+        runs.append(item)
+        if len(runs) >= 100:
+            break
+
     return {
         "active_runs": len(runs),
         "runs": runs,
@@ -12356,6 +12420,8 @@ def handle_get(handler, parsed) -> bool:
         query = parse_qs(parsed.query or "")
         sidebar_source = query.get("sidebar_source", [None])[0]
         project_id = query.get("project_id", [None])[0]
+        all_profiles = _all_profiles_enabled(parsed)
+        exclude_hidden = _query_flag(parsed, "exclude_hidden")
         if project_id == "":
             project_id = None
         return j(
@@ -12364,6 +12430,8 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 sidebar_source=sidebar_source,
                 project_id=project_id,
+                all_profiles=all_profiles,
+                exclude_hidden=exclude_hidden,
             ),
             pretty=False,
         )
