@@ -182,9 +182,12 @@ def _hostname_looks_like_browser_ipv4_literal(hostname: str) -> bool:
 
 
 def _browser_normalized_hostname(hostname: str) -> str:
-    decoded = unquote(str(hostname or ""), errors="strict")
-    normalized = unicodedata.normalize("NFKC", decoded)
-    return normalized.encode("idna").decode("ascii").strip(".").lower()
+    try:
+        decoded = unquote(str(hostname or ""), errors="strict")
+        normalized = unicodedata.normalize("NFKC", decoded)
+        return normalized.encode("idna").decode("ascii").strip(".").lower()
+    except UnicodeError as exc:
+        raise ValueError("invalid hostname") from exc
 
 
 def _media_url_path_for_boundary_check(path: str) -> str:
