@@ -114,13 +114,33 @@ def _strip_media_references(text: str) -> str:
         return text
     placeholder = "[Local attachment omitted from public share]"
 
-    # Stash fenced code blocks (```...```) so file:// inside them is preserved.
+    # Stash fenced code blocks, matching the renderer's line-anchored
+    # variable-length fence grammar (#6285). Opening fence:
+    # ``^[ ]{0,3}(`{3,})([^`]*)$`` — closing fence:
+    # ``^[ ]{0,3}(`{3,})[ \t]*$`` with length >= opening length.
     _fenced: list[str] = []
-    text = re.sub(
-        r"```[\s\S]*?```",
-        lambda m: _fenced.append(m.group(0)) or f"\x00F{len(_fenced) - 1}\x00",
-        text,
-    )
+    _lines = text.split("\n")
+    _fence_parts: list[str] = []
+    _i = 0
+    while _i < len(_lines):
+        _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _lines[_i])
+        if _om:
+            _open_len = len(_om.group(1))
+            _start = _i
+            _i += 1
+            while _i < len(_lines):
+                _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_i])
+                if _cm and len(_cm.group(1)) >= _open_len:
+                    _i += 1
+                    break
+                _i += 1
+            _block = "\n".join(_lines[_start:_i])
+            _fenced.append(_block)
+            _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+        else:
+            _fence_parts.append(_lines[_i])
+            _i += 1
+    text = "\n".join(_fence_parts)
     # Stash inline code spans (`...`) so file:// inside them is preserved.
     _inline: list[str] = []
     text = re.sub(
