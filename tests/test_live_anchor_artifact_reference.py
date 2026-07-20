@@ -634,6 +634,79 @@ def test_terminal_reconciliation_rejects_explicit_foreign_artifact_owner(tmp_pat
     assert not session.anchor_activity_scenes
 
 
+def test_terminal_reconciliation_accepts_stable_run_rotated_stream_once(tmp_path):
+    from api import streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session = Session(
+        session_id="artifact-stable-run",
+        messages=[
+            {"role": "user", "content": "write"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "timestamp": 2,
+                "_anchor_stream_id": "transport-new",
+            },
+        ],
+    )
+    old_transport_artifact = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/rotated-stream.md",
+            "source_tool": "write_file",
+        },
+        session_id=session.session_id,
+        run_id="run-stable",
+        stream_id="transport-old",
+        event_id="run-stable:3",
+        seq=3,
+    )
+
+    assert streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "transport-new",
+        [old_transport_artifact, old_transport_artifact],
+        terminal_state="completed",
+        message_index=1,
+        run_id="run-stable",
+    )
+    record = next(iter(session.anchor_activity_scenes.values()))
+    scene = record["scene"]
+    assert session.messages[1]["_anchor_run_id"] == "run-stable"
+    assert record["run_id"] == "run-stable"
+    assert record["stream_id"] == "transport-new"
+    assert scene["identity"]["run_id"] == "run-stable"
+    assert scene["identity"]["stream_id"] == "transport-new"
+    assert len(scene["artifacts"]) == 1
+    assert scene["artifacts"][0]["stream_id"] == "transport-old"
+    assert scene["artifacts"][0]["payload"]["path"] == "reports/rotated-stream.md"
+
+    foreign_run_artifact = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/foreign-run.md",
+            "source_tool": "write_file",
+        },
+        session_id=session.session_id,
+        run_id="run-foreign",
+        stream_id="transport-old",
+        event_id="run-foreign:1",
+        seq=1,
+    )
+
+    assert not streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "transport-new",
+        [foreign_run_artifact],
+        terminal_state="completed",
+        message_index=1,
+        run_id="run-stable",
+    )
+    assert len(next(iter(session.anchor_activity_scenes.values()))["scene"]["artifacts"]) == 1
+
+
 def test_returned_apperror_settles_tool_artifact_before_terminal_save(tmp_path, monkeypatch):
     import queue
     from collections import OrderedDict

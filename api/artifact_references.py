@@ -348,12 +348,12 @@ def _artifact_dedupe_key(event: dict) -> tuple:
     )
 
 
-def _anchor_owner_value(raw: dict, identity: dict, key: str) -> str | None:
+def _anchor_owner_claim(raw: dict, identity: dict, key: str) -> tuple[str | None, str | None]:
     limit = _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS.get(key, 512)
-    raw_value = _bounded_clean_string(raw.get(key), limit)
-    if raw_value:
-        return raw_value
-    return _bounded_clean_string(identity.get(key), limit)
+    return (
+        _bounded_clean_string(raw.get(key), limit),
+        _bounded_clean_string(identity.get(key), limit),
+    )
 
 
 def anchor_artifact_owner_mismatch(
@@ -362,6 +362,7 @@ def anchor_artifact_owner_mismatch(
     session_id=None,
     run_id=None,
     stream_id=None,
+    require_owner_authority: bool = False,
 ) -> str | None:
     """Return the first explicit owner field that conflicts with the expected owner."""
     if not isinstance(raw, dict):
@@ -379,13 +380,26 @@ def anchor_artifact_owner_mismatch(
         stream_id,
         _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['stream_id'],
     )
-    explicit_session_id = _anchor_owner_value(raw, identity, 'session_id')
+    raw_session_id, identity_session_id = _anchor_owner_claim(raw, identity, 'session_id')
+    if raw_session_id and identity_session_id and raw_session_id != identity_session_id:
+        return 'session_id'
+    explicit_session_id = raw_session_id or identity_session_id
     if explicit_session_id and expected_session_id and explicit_session_id != expected_session_id:
         return 'session_id'
-    explicit_run_id = _anchor_owner_value(raw, identity, 'run_id')
+    raw_run_id, identity_run_id = _anchor_owner_claim(raw, identity, 'run_id')
+    if raw_run_id and identity_run_id and raw_run_id != identity_run_id:
+        return 'run_id'
+    explicit_run_id = raw_run_id or identity_run_id
+    if explicit_run_id and require_owner_authority and not expected_run_id:
+        return 'run_id'
     if explicit_run_id and expected_run_id and explicit_run_id != expected_run_id:
         return 'run_id'
-    explicit_stream_id = _anchor_owner_value(raw, identity, 'stream_id')
+    raw_stream_id, identity_stream_id = _anchor_owner_claim(raw, identity, 'stream_id')
+    if raw_stream_id and identity_stream_id and raw_stream_id != identity_stream_id:
+        return 'stream_id'
+    explicit_stream_id = raw_stream_id or identity_stream_id
+    if explicit_stream_id and require_owner_authority and not expected_stream_id:
+        return 'stream_id'
     if explicit_stream_id and expected_stream_id and explicit_stream_id != expected_stream_id:
         # Durable run ids can outlive a transport stream rotation. Only allow a
         # stream mismatch when the caller supplied a distinct durable run owner
@@ -408,6 +422,7 @@ def anchor_activity_scene_owner_mismatch(
     session_id=None,
     run_id=None,
     stream_id=None,
+    require_artifact_owner_authority: bool = False,
 ) -> str | None:
     """Return the first explicit scene/artifact owner mismatch, if any."""
     if not isinstance(scene, dict):
@@ -428,6 +443,7 @@ def anchor_activity_scene_owner_mismatch(
             session_id=session_id,
             run_id=run_id,
             stream_id=stream_id,
+            require_owner_authority=require_artifact_owner_authority,
         )
         if mismatch:
             return f'artifact.{mismatch}'
@@ -443,6 +459,7 @@ def bound_anchor_artifact_events(
     max_count: int = MAX_ANCHOR_ARTIFACT_REFERENCES,
     max_bytes: int = MAX_ANCHOR_ARTIFACT_BYTES,
     reject_owner_mismatch: bool = False,
+    require_owner_authority: bool = False,
 ) -> list[dict]:
     """Return a deterministic bounded prefix of valid Anchor artifact events."""
     out: list[dict] = []
@@ -455,6 +472,7 @@ def bound_anchor_artifact_events(
                 session_id=session_id,
                 run_id=run_id,
                 stream_id=stream_id,
+                require_owner_authority=require_owner_authority,
             )
             if mismatch:
                 raise ValueError(f'artifact owner mismatch: {mismatch}')
@@ -490,6 +508,7 @@ def bound_anchor_activity_scene_artifacts(
     run_id=None,
     stream_id=None,
     reject_owner_mismatch: bool = False,
+    require_owner_authority: bool = False,
 ):
     """Defensively cap scene artifacts without rejecting the whole Anchor scene."""
     if not isinstance(scene, dict):
@@ -501,6 +520,7 @@ def bound_anchor_activity_scene_artifacts(
         run_id=run_id,
         stream_id=stream_id,
         reject_owner_mismatch=reject_owner_mismatch,
+        require_owner_authority=require_owner_authority,
     )
     return next_scene
 
@@ -527,17 +547,25 @@ def merge_anchor_activity_scene(
     final_message_ref=None,
     turn_duration=None,
     reject_owner_mismatch: bool = False,
+    owner_session_id=None,
+    owner_run_id=None,
+    owner_stream_id=None,
+    require_owner_authority: bool = False,
 ) -> dict:
     """Merge browser and worker Anchor scenes with shared artifact ownership rules."""
     existing = copy.deepcopy(existing_scene) if isinstance(existing_scene, dict) else {}
     incoming = copy.deepcopy(incoming_scene) if isinstance(incoming_scene, dict) else {}
+    validation_session_id = owner_session_id if owner_session_id is not None else session_id
+    validation_run_id = owner_run_id if owner_run_id is not None else run_id
+    validation_stream_id = owner_stream_id if owner_stream_id is not None else stream_id
     if reject_owner_mismatch:
         for scene in (existing, incoming):
             mismatch = anchor_activity_scene_owner_mismatch(
                 scene,
-                session_id=session_id,
-                run_id=run_id,
-                stream_id=stream_id,
+                session_id=validation_session_id,
+                run_id=validation_run_id,
+                stream_id=validation_stream_id,
+                require_artifact_owner_authority=require_owner_authority,
             )
             if mismatch:
                 raise ValueError(f'anchor scene owner mismatch: {mismatch}')
@@ -615,9 +643,10 @@ def merge_anchor_activity_scene(
     )
     merged['artifacts'] = bound_anchor_artifact_events(
         [*_scene_list(existing, 'artifacts'), *_scene_list(incoming, 'artifacts')],
-        session_id=clean_session_id,
-        run_id=clean_run_id or clean_stream_id,
-        stream_id=clean_stream_id,
+        session_id=validation_session_id if reject_owner_mismatch else clean_session_id,
+        run_id=validation_run_id if reject_owner_mismatch else (clean_run_id or clean_stream_id),
+        stream_id=validation_stream_id if reject_owner_mismatch else clean_stream_id,
         reject_owner_mismatch=reject_owner_mismatch,
+        require_owner_authority=require_owner_authority,
     )
     return merged

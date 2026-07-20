@@ -4944,6 +4944,8 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
             continue
         next_message = dict(message)
         stream_id = record.get("stream_id")
+        scene_identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+        run_id = record.get("run_id") or scene_identity.get("run_id")
         next_message["_anchor_activity_scene"] = _complete_hydrated_anchor_scene(
             messages,
             scene,
@@ -4954,6 +4956,8 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
         )
         if stream_id:
             next_message["_anchor_stream_id"] = str(stream_id)
+        if run_id:
+            next_message["_anchor_run_id"] = str(run_id)
         out[local_idx] = next_message
     return out
 
@@ -4968,8 +4972,9 @@ def _handle_session_anchor_scene(handler, body):
         return bad(handler, "session_id is required", 400)
     message_index = _anchor_scene_message_index_from_request(body)
     message_ref = str(body.get("message_ref") or "")
+    raw_scene = body.get("scene")
     try:
-        scene = _sanitize_anchor_activity_scene(body.get("scene"))
+        scene = _sanitize_anchor_activity_scene(raw_scene)
     except ValueError as exc:
         return bad(handler, str(exc), 400)
     try:
@@ -4999,21 +5004,36 @@ def _handle_session_anchor_scene(handler, body):
             if duration is not None:
                 scene["turn_duration"] = duration
         ref = _assistant_anchor_scene_message_ref(message)
-        request_stream_id = str(body.get("stream_id") or "").strip()
-        message_stream_id = str(message.get("_anchor_stream_id") or "").strip() if isinstance(message, dict) else ""
-        stream_id = message_stream_id or request_stream_id
-        if message_stream_id and request_stream_id and message_stream_id != request_stream_id:
-            return bad(handler, "scene.stream_id does not match assistant message", 400)
         records = dict(_anchor_scene_records(s))
         key = ref or f"index:{idx}"
         existing_record = records.get(key) if isinstance(records.get(key), dict) else {}
+        existing_scene = existing_record.get("scene") if isinstance(existing_record.get("scene"), dict) else {}
+        existing_identity = existing_scene.get("identity") if isinstance(existing_scene.get("identity"), dict) else {}
+        request_stream_id = str(body.get("stream_id") or "").strip()
+        message_stream_id = str(message.get("_anchor_stream_id") or "").strip() if isinstance(message, dict) else ""
+        message_run_id = str(message.get("_anchor_run_id") or "").strip() if isinstance(message, dict) else ""
+        existing_stream_id = str(
+            existing_identity.get("stream_id") or existing_record.get("stream_id") or ""
+        ).strip()
+        existing_run_id = str(existing_identity.get("run_id") or existing_record.get("run_id") or "").strip()
+        trusted_stream_id = message_stream_id or existing_stream_id
+        trusted_run_id = message_run_id or existing_run_id or (trusted_stream_id if trusted_stream_id else "")
+        stream_id = trusted_stream_id or request_stream_id
+        run_id = trusted_run_id or (stream_id if stream_id else "")
+        if trusted_stream_id and request_stream_id and trusted_stream_id != request_stream_id:
+            return bad(handler, "scene.stream_id does not match assistant message", 400)
+        incoming_scene = copy.deepcopy(raw_scene) if isinstance(raw_scene, dict) else scene
         try:
             scene = merge_anchor_activity_scene(
-                existing_record.get("scene") if isinstance(existing_record.get("scene"), dict) else {},
-                scene,
+                existing_scene,
+                incoming_scene,
                 session_id=sid,
-                run_id=stream_id,
+                run_id=run_id,
                 stream_id=stream_id,
+                owner_session_id=sid,
+                owner_run_id=trusted_run_id,
+                owner_stream_id=trusted_stream_id,
+                require_owner_authority=True,
                 final_message_ref=ref,
                 turn_duration=_anchor_scene_message_turn_duration(message),
                 reject_owner_mismatch=True,
@@ -5025,6 +5045,7 @@ def _handle_session_anchor_scene(handler, body):
             "version": "anchor_activity_scene_record_v1",
             "message_index": idx,
             "message_ref": ref,
+            "run_id": run_id,
             "stream_id": stream_id,
             "scene": scene,
             "updated_at": time.time(),
