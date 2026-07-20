@@ -160,6 +160,7 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
 _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
+_GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK = threading.Lock()
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -381,12 +382,39 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
         if isinstance(msg, dict) and msg.get('role') == 'user':
             last_user_index = idx
             break
-    if last_user_index is None or last_user_index >= len(messages) - 1:
+    if last_user_index is None:
+        return messages
+
+    replay_turn_user_index = last_user_index
+    if last_user_index == len(messages) - 1:
+        prior_msg = messages[last_user_index - 1] if last_user_index > 0 else None
+        prior_turn_incomplete = (
+            isinstance(prior_msg, dict)
+            and (
+                prior_msg.get('role') == 'tool'
+                or (
+                    prior_msg.get('role') == 'assistant'
+                    and isinstance(prior_msg.get('tool_calls'), list)
+                    and bool(prior_msg.get('tool_calls'))
+                )
+            )
+        )
+        if not prior_turn_incomplete:
+            return messages
+        replay_turn_user_index = None
+        for idx in range(last_user_index - 1, -1, -1):
+            msg = messages[idx]
+            if isinstance(msg, dict) and msg.get('role') == 'user':
+                replay_turn_user_index = idx
+                break
+        if replay_turn_user_index is None:
+            return messages
+    elif last_user_index >= len(messages) - 1:
         return messages
 
     drop_assistant_indexes = set()
     dropped_tool_call_ids: set[str] = set()
-    for idx in range(last_user_index + 1, len(messages)):
+    for idx in range(replay_turn_user_index + 1, len(messages)):
         msg = messages[idx]
         if not isinstance(msg, dict) or msg.get('role') != 'assistant':
             continue
@@ -408,7 +436,7 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
 
     repaired = []
     for idx, msg in enumerate(messages):
-        if idx <= last_user_index or not isinstance(msg, dict):
+        if idx <= replay_turn_user_index or not isinstance(msg, dict):
             repaired.append(msg)
             continue
         if msg.get('role') == 'tool':
@@ -431,32 +459,31 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
 def _install_gemini_request_boundary_wrapper() -> None:
     """Patch the agent chat-completions transport with a request-boundary repair."""
     global _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
-    if _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED:
-        return
     try:
         from agent.transports.chat_completions import ChatCompletionsTransport
     except Exception:
         logger.debug("gemini request-boundary wrapper: transport unavailable", exc_info=True)
         return
 
-    original_build_kwargs = ChatCompletionsTransport.build_kwargs
-    if getattr(original_build_kwargs, "_webui_gemini_request_boundary_wrapper", False):
+    with _GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK:
+        current_build_kwargs = ChatCompletionsTransport.build_kwargs
+        if getattr(current_build_kwargs, "_webui_gemini_request_boundary_wrapper", False):
+            _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
+            return
+
+        def _wrapped_build_kwargs(self, model, messages, tools=None, **params):
+            repaired_messages = _repair_google_gemini_current_turn_tool_state_for_request(
+                messages,
+                model=model,
+                base_url=params.get('base_url'),
+                provider_profile=params.get('provider_profile'),
+            )
+            return current_build_kwargs(self, model, repaired_messages, tools, **params)
+
+        _wrapped_build_kwargs.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+        _wrapped_build_kwargs.__dict__["_webui_original_build_kwargs"] = current_build_kwargs
+        ChatCompletionsTransport.build_kwargs = _wrapped_build_kwargs
         _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
-        return
-
-    def _wrapped_build_kwargs(self, model, messages, tools=None, **params):
-        repaired_messages = _repair_google_gemini_current_turn_tool_state_for_request(
-            messages,
-            model=model,
-            base_url=params.get('base_url'),
-            provider_profile=params.get('provider_profile'),
-        )
-        return original_build_kwargs(self, model, repaired_messages, tools, **params)
-
-    _wrapped_build_kwargs.__dict__["_webui_gemini_request_boundary_wrapper"] = True
-    _wrapped_build_kwargs.__dict__["_webui_original_build_kwargs"] = original_build_kwargs
-    ChatCompletionsTransport.build_kwargs = _wrapped_build_kwargs
-    _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
 
 
 _PERSISTENT_MEMORY_FILES = (
