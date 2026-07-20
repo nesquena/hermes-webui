@@ -9,6 +9,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from api import models, session_media, streaming
 from api.models import Session
 from api.streaming import (
@@ -21,6 +23,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(relpath: str) -> str:
     return (ROOT / relpath).read_text(encoding="utf-8")
+
+
+def test_compression_media_clone_failure_keeps_source_identity(monkeypatch):
+    session = Session(
+        session_id="old-media-session",
+        messages=[{"role": "user", "content": "history"}],
+        context_messages=[{"role": "user", "content": "history"}],
+    )
+
+    def fail_clone(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(session_media, "clone_session_media_references", fail_clone)
+
+    with pytest.raises(RuntimeError, match="compression continuation"):
+        streaming._clone_session_media_for_compression_rotation(
+            session,
+            "old-media-session",
+            "new-media-session",
+        )
+
+    assert session.session_id == "old-media-session"
 
 
 def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_errors_on_continuation(

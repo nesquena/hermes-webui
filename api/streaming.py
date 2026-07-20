@@ -3988,6 +3988,26 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
 
 
+def _clone_session_media_for_compression_rotation(s, old_sid: str, new_sid: str) -> None:
+    """Clone compact media before any compression identity state advances."""
+    try:
+        from api.session_media import clone_session_media_references
+
+        clone_session_media_references(
+            [s.messages, s.context_messages],
+            old_sid,
+            new_sid,
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Could not clone session media during compression from %s to %s",
+            old_sid,
+            new_sid,
+            exc_info=True,
+        )
+        raise RuntimeError("Could not copy session media for compression continuation") from exc
+
+
 def _maybe_schedule_title_refresh(session, put_event, agent):
     """Check if the session is due for an adaptive title refresh and schedule it."""
     refresh_interval = _get_title_refresh_interval()
@@ -9084,18 +9104,13 @@ def _run_agent_streaming(
                 if _agent_sid and _agent_sid != session_id:
                     old_sid = session_id
                     new_sid = _agent_sid
-                    _compression_origin_session_id = old_sid
-                    _compression_continuation_session_id = new_sid
                     # Compact media references are session-relative. Give the
                     # continuation verified ownership before changing the
-                    # authoritative id or committing any continuation JSON.
-                    from api.session_media import clone_session_media_references
-
-                    clone_session_media_references(
-                        [s.messages, s.context_messages],
-                        old_sid,
-                        new_sid,
-                    )
+                    # authoritative id, compression state, or committing any
+                    # continuation JSON. A failure leaves all three on old_sid.
+                    _clone_session_media_for_compression_rotation(s, old_sid, new_sid)
+                    _compression_origin_session_id = old_sid
+                    _compression_continuation_session_id = new_sid
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
