@@ -1030,6 +1030,8 @@
         final_message_ref:null,
         terminal_state:null,
         activity_rows:Object.freeze([]),
+        artifacts:Object.freeze([]),
+        side_effects:Object.freeze([]),
       });
     }
     const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
@@ -1045,6 +1047,14 @@
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
       terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
       activity_rows:Object.freeze(rows),
+      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(event=>Object.freeze({
+        ..._copyObject(event),
+        payload:Object.freeze(_copyObject(_own(event,'payload'))),
+      }))),
+      side_effects:Object.freeze((Array.isArray(anchor.side_effects)?anchor.side_effects:[]).map(event=>Object.freeze({
+        ..._copyObject(event),
+        payload:Object.freeze(_copyObject(_own(event,'payload'))),
+      }))),
     });
   }
 
