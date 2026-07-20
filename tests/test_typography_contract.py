@@ -6,8 +6,9 @@ import subprocess
 
 import pytest
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error as PlaywrightError, sync_playwright
 except Exception:  # pragma: no cover - dependency optional
+    PlaywrightError = None
     sync_playwright = None
 
 
@@ -173,10 +174,15 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
     with sync_playwright() as playwright:
         browser = None
         try:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
+            try:
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+            except PlaywrightError as exc:
+                if "Executable doesn't exist at" in str(exc):
+                    pytest.skip("playwright chromium executable is unavailable; run `playwright install chromium`")
+                raise
             page = browser.new_page(viewport={"width": 1024, "height": 768})
             page.set_content(fixture_html)
 
