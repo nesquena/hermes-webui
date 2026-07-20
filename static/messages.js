@@ -3512,6 +3512,47 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
+  function _anchorSceneFinalAnswerHintFromScene(scene){
+    if(!scene||typeof scene!=='object') return '';
+    const explicit=typeof scene.final_answer==='string'?scene.final_answer:'';
+    if(_anchorSceneCleanText(explicit)) return explicit;
+    return '';
+  }
+  function _anchorSceneFinalAnswerHintFromTranscript(messageText, scene){
+    const raw=String(messageText||'').trim();
+    if(!raw||!scene||typeof scene!=='object') return '';
+    const rows=Array.isArray(scene.activity_rows)?scene.activity_rows:[];
+    let lastToolIndex=-1;
+    rows.forEach((row,idx)=>{ if(row&&row.role==='tool') lastToolIndex=idx; });
+    if(lastToolIndex<0) return '';
+    const prefixes=[];
+    rows.forEach((row,idx)=>{
+      if(idx>lastToolIndex||!row||row.role!=='prose'||row.kind!=='process_prose') return;
+      if(String(row.source_event_type||'')!=='token') return;
+      if(!String(row.local_id||'').startsWith('live-prose:')) return;
+      const text=String(row.text||'').trim();
+      if(text) prefixes.push(text);
+    });
+    if(!prefixes.length) return '';
+    let tail=raw;
+    let consumed=false;
+    prefixes.forEach((prefix)=>{
+      if(tail.startsWith(prefix)){
+        tail=tail.slice(prefix.length).trim();
+        consumed=true;
+      }
+    });
+    if(consumed&&_anchorSceneCleanText(tail)) return tail;
+    prefixes.slice().sort((a,b)=>b.length-a.length).some((prefix)=>{
+      if(!raw.startsWith(prefix)) return false;
+      const candidate=raw.slice(prefix.length).trim();
+      if(!_anchorSceneCleanText(candidate)) return false;
+      tail=candidate;
+      consumed=true;
+      return true;
+    });
+    return consumed?_anchorSceneCleanText(tail)&&tail||'':'';
+  }
   function _anchorSceneTurnDurationForSettlement(lastAsst, base){
     if(lastAsst&&lastAsst._turnDuration!==undefined&&lastAsst._turnDuration!==null) return lastAsst._turnDuration;
     if(base&&base.turn_duration!==undefined&&base.turn_duration!==null) return base.turn_duration;
@@ -3553,13 +3594,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
     const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
-    const finalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
+    const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
+    const sceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromScene(base);
+    const finalAnswerHint=_anchorSceneFinalAnswerHintFromTranscript(sceneFinalAnswerHint,base)||sceneFinalAnswerHint;
+    const optionFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint;
+    const transcriptFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer;
+    const baseFinalAnswer=typeof base.final_answer==='string'
+      ? (_anchorSceneFinalAnswerHintFromTranscript(base.final_answer,base)||base.final_answer)
+      : '';
     const finalAnswer=_anchorSceneCleanText(finalAnswerHint)
       ? finalAnswerHint
-      : (_anchorSceneCleanText(messageFinalAnswer)
-        ? messageFinalAnswer
-        : (typeof base.final_answer==='string'?base.final_answer:''));
+      : (_anchorSceneCleanText(optionFinalAnswer)
+        ? optionFinalAnswer
+        : (_anchorSceneCleanText(transcriptFinalAnswer)
+          ? transcriptFinalAnswer
+          : baseFinalAnswer));
     const finalKey=_anchorSceneTextKey(finalAnswer);
     const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true});
     const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);
@@ -3567,6 +3617,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
+    const sceneHasActivityRows=projectedRows.some(row=>row&&row.role&&row.role!=='terminal');
     const projectedReasoningKey=_anchorSceneTextKey(projectedRows
       .filter(row=>row&&row.role==='thinking'&&_anchorSceneCleanText(row.text))
       .map(row=>row.text).join(''));
@@ -3593,6 +3644,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Anchor already owns ordered reasoning segments, that aggregate is a
         // fallback rather than a replacement for those segment identities.
         if(preferProjectedThinking&&row&&row.role==='thinking') continue;
+        if(idx===lastAsstIndex&&sceneHasActivityRows&&_anchorSceneCleanText(finalAnswer)&&row&&row.role==='prose'&&String(row.source_event_type||'')==='settled_message') continue;
         orderedRows.push(row);
       }
     }

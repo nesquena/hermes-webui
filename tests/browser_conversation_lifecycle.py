@@ -794,7 +794,7 @@ def _replace_runtime_reasoning_identity(route, session_id: str, bite_hits: list[
 
 
 def main() -> int:
-    if SCENARIO not in {"normal", "session-reattach"}:
+    if SCENARIO not in {"normal", "session-reattach", "detached-terminal"}:
         print(f"SETUP FAIL: unsupported LIFECYCLE_SCENARIO={SCENARIO!r}", file=sys.stderr)
         return 2
     if TEST_BITE == "replace-runtime-reasoning-id" and SCENARIO != "session-reattach":
@@ -886,7 +886,7 @@ def main() -> int:
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         seed_session_id = None
-        if SCENARIO == "session-reattach":
+        if SCENARIO in {"session-reattach", "detached-terminal"}:
             page.locator("#msg").fill(SEED_PROMPT)
             page.locator("#btnSend").click()
             page.wait_for_function(
@@ -940,11 +940,11 @@ def main() -> int:
         _assert_live_activity(live_snapshot)
         print("OK  live activity: one Anchor worklog with reasoning + completed tool activity")
         _wait_for_live_anchor_projection(page)
+        active_session_id = live_snapshot["clientState"]["sessionId"]
+        active_stream_id = live_snapshot["clientState"]["activeStreamId"]
+        assert active_session_id and active_stream_id, live_snapshot
 
         if SCENARIO == "session-reattach":
-            active_session_id = live_snapshot["clientState"]["sessionId"]
-            active_stream_id = live_snapshot["clientState"]["activeStreamId"]
-            assert active_session_id and active_stream_id, live_snapshot
             expected_reasoning_ids = [
                 f"live-reasoning:{active_stream_id}:1",
                 f"live-reasoning:{active_stream_id}:2",
@@ -1031,14 +1031,15 @@ def main() -> int:
         gateway.release_final_prefix.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
-        page.wait_for_function(
-            """text => {
-              const turn = document.querySelector('#liveAssistantTurn');
-              return turn && (turn.innerText || '').includes(text);
-            }""",
-            arg=FINAL_ACK_TEXT,
-            timeout=10000,
-        )
+        if SCENARIO != "detached-terminal":
+            page.wait_for_function(
+                """text => {
+                  const turn = document.querySelector('#liveAssistantTurn');
+                  return turn && (turn.innerText || '').includes(text);
+                }""",
+                arg=FINAL_ACK_TEXT,
+                timeout=10000,
+            )
         if SCENARIO == "session-reattach":
             page.evaluate(
                 """() => {
@@ -1071,6 +1072,36 @@ def main() -> int:
                 "sid => S.session && S.session.session_id === sid && !S.busy && !S.activeStreamId",
                 arg=seed_session_id,
                 timeout=15000,
+            )
+            page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
+        elif SCENARIO == "detached-terminal":
+            assert seed_session_id, "seed session id missing for detached-terminal scenario"
+            page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
+            page.wait_for_function(
+                "({seedSid, activeSid}) => {"
+                "  const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS : {};"
+                "  return S.session && S.session.session_id === seedSid && !S.busy && !S.activeStreamId && "
+                "    !document.querySelector('#liveAssistantTurn') && !live[activeSid] && "
+                "    typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[activeSid] && "
+                "    INFLIGHT[activeSid].reattach === true;"
+                "}",
+                arg={"seedSid": seed_session_id, "activeSid": active_session_id},
+                timeout=15000,
+            )
+            print("OK  session switch: old chat EventSource detached after ordinary switch")
+            pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
+            gateway.release_terminal.set()
+            scene = _wait_for_persisted_scene(
+                base_url,
+                active_session_id,
+                anchor_scene_requests=anchor_scene_requests,
+            )
+            assert scene.get("version") == "activity_scene_v1", scene
+            assert page.evaluate(
+                "({seedSid, finalText}) => S.session && S.session.session_id === seedSid && "
+                "!S.busy && !S.activeStreamId && "
+                "!((document.querySelector('#msgInner') || {}).innerText || '').includes(finalText)",
+                {"seedSid": seed_session_id, "finalText": FINAL_TEXT},
             )
             page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
         else:

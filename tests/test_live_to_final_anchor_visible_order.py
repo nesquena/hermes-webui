@@ -118,6 +118,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 if(src.indexOf('function _anchorSceneActiveMode') !== -1){{
   eval(extractFunc('_anchorSceneActiveMode'));
@@ -918,7 +920,8 @@ def test_done_persists_owned_anchor_scene_during_session_switch_window():
     assert "S.session=completedSession" not in done[background_idx:active_idx]
 
     complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
-    assert "const finalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';" in complete
+    assert "const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';" in complete
+    assert "_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint" in complete
     assert "const finalAnswer=_anchorSceneCleanText(finalAnswerHint)" in complete
 
 
@@ -1020,6 +1023,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
 function _anchorSceneActiveMode(){{ return 'compact_worklog'; }}
@@ -1058,6 +1063,81 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
 
     assert all(row["text"] != suffix_text for row in rows)
     assert [row["role"] for row in rows] == ["thinking", "tool"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settled_anchor_scene_splits_final_suffix_from_owned_process_prefix():
+    final_answer = "Inspecting the fixture before the tool call. Lifecycle gate final answer."
+    prefix_text = "Inspecting the fixture before the tool call."
+    suffix_text = "Lifecycle gate final answer."
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))},'utf8');
+{_EXTRACT_FUNC_JS}
+global.window = {{ chatActivityMode(){{ return 'compact_worklog'; }} }};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+function _anchorSceneActiveMode(){{ return 'compact_worklog'; }}
+function _anchorSceneFinalAnswerText(message){{ return message && (message.content || ''); }}
+function _anchorSceneRowsByMessageIndex(){{
+  return new Map([[1,[{{
+    role:'prose',
+    kind:'process_prose',
+    source_event_type:'settled_message',
+    text:{json.dumps(final_answer)},
+    status:'completed',
+  }}]]]);
+}}
+function _anchorSceneMessageRef(message){{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement(){{ return 0; }}
+function _anchorSceneRowDisplayHintForMode(row){{ return row && row.display_hint || 'activity_row'; }}
+const scene = _completeSettledAnchorSceneForTurn([
+  {{role:'user', content:'Prompt', id:'user-1'}},
+  {{role:'assistant', content:{json.dumps(final_answer)}, id:'assistant-1'}},
+], 1, {{
+  mode:'compact_worklog',
+  final_answer:'',
+  activity_rows:[
+    {{role:'thinking', text:'Checking the fixture', status:'running', local_id:'live-thinking:stream:1'}},
+    {{
+      role:'prose',
+      kind:'process_prose',
+      source_event_type:'token',
+      local_id:'live-prose:stream:1',
+      text:{json.dumps(prefix_text)},
+      status:'completed',
+    }},
+    {{role:'tool', text:'tool output', status:'running', local_id:'live-tool:stream:1', tool_call_id:'call-1'}},
+  ],
+}}, {{finalAnswer:{json.dumps(final_answer)}}});
+process.stdout.write(JSON.stringify({{
+  final_answer: scene.final_answer,
+  rows: scene.activity_rows.map(row => ({{
+    role: row.role,
+    source: row.source_event_type || '',
+    text: row.text || '',
+  }})),
+}}));
+"""
+    result = _run_node_script(script)
+
+    assert result["final_answer"] == suffix_text
+    assert all(row["source"] != "settled_message" for row in result["rows"])
+    assert result["rows"] == [
+        {"role": "thinking", "source": "", "text": "Checking the fixture"},
+        {"role": "prose", "source": "token", "text": prefix_text},
+        {"role": "tool", "source": "", "text": "tool output"},
+    ]
 
 
 def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
@@ -1518,7 +1598,8 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
 
     assert "const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);" in complete
     assert "const finalAnswer=_anchorSceneCleanText(finalAnswerHint)" in complete
-    assert "_anchorSceneCleanText(messageFinalAnswer)" in complete
+    assert "_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer" in complete
+    assert "idx===lastAsstIndex&&sceneHasActivityRows" in complete
     assert "_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true})" in complete
     assert "for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)" in complete
     assert "options=(options&&typeof options==='object')?options:{};" in rows_by_message

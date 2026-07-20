@@ -62,6 +62,13 @@ jobs:
           LIFECYCLE_SCENARIO: session-reattach
         run: python tests/browser_conversation_lifecycle.py
 
+      - name: Run detached terminal lifecycle gate
+        if: ${{ always() }}
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/detached-terminal
+          LIFECYCLE_SCENARIO: detached-terminal
+        run: python tests/browser_conversation_lifecycle.py
+
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4

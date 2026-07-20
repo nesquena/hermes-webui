@@ -561,6 +561,41 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     return None
 
 
+def latest_terminal_run_summary_for_session(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+) -> dict | None:
+    """Return the newest terminal run journal summary for one session."""
+    try:
+        sid = _validate_id(session_id, "session_id")
+    except ValueError:
+        return None
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_root.exists():
+        return None
+    latest: tuple[float, str, dict] | None = None
+    for path in session_root.glob("*.jsonl"):
+        try:
+            run_id = _validate_id(path.stem, "run_id")
+        except ValueError:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        summary = latest_run_summary(sid, run_id, session_dir=root)
+        if not summary.get("terminal"):
+            continue
+        summary = dict(summary)
+        summary["path"] = str(path)
+        candidate = (mtime, run_id, summary)
+        if latest is None or candidate[:2] > latest[:2]:
+            latest = candidate
+    return latest[2] if latest else None
+
+
 def read_session_run_events(
     session_id: str,
     *,

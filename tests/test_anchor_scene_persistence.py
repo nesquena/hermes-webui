@@ -2293,6 +2293,238 @@ def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatc
     assert rows[3]["status"] == "running"
 
 
+def test_terminal_journal_snapshot_can_settle_anchor_activity_scene(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-terminal-scene"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "plan"},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {"text": "progress"},
+        },
+        {
+            "event": "done",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "terminal": True,
+            "payload": {"session": {"message_count": 2}},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-terminal-scene",
+            "run_id": stream_id,
+            "last_seq": 3,
+            "last_event_id": f"{stream_id}:3",
+            "terminal": True,
+            "terminal_state": "completed",
+        },
+    )
+    monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
+
+    snapshot = routes._run_journal_live_snapshot(stream_id, settled=True)
+    scene = snapshot["anchor_activity_scene"]
+
+    assert snapshot["terminal_state"] == "completed"
+    assert snapshot["terminal_message_index"] == 1
+    assert scene["lifecycle"]["status"] == "completed"
+    assert scene["terminal_state"] == "completed"
+    assert scene["final_answer"] == "progress"
+    assert [row["status"] for row in scene["activity_rows"]] == ["completed", "completed"]
+
+
+def test_terminal_journal_materializes_missing_settled_anchor_scene(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    stream_id = "stream-detached-terminal"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "checking identity"},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {"text": "working"},
+        },
+        {
+            "event": "tool",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "payload": {"name": "terminal", "tid": "call-detached", "args": {"command": "pytest"}},
+        },
+        {
+            "event": "tool_complete",
+            "seq": 4,
+            "event_id": f"{stream_id}:4",
+            "created_at": 4.0,
+            "payload": {"name": "terminal", "tid": "call-detached", "preview": "ok"},
+        },
+        {
+            "event": "token",
+            "seq": 5,
+            "event_id": f"{stream_id}:5",
+            "created_at": 5.0,
+            "payload": {"text": " final answer"},
+        },
+        {
+            "event": "done",
+            "seq": 6,
+            "event_id": f"{stream_id}:6",
+            "created_at": 6.0,
+            "terminal": True,
+            "payload": {"session": {"message_count": 2}},
+        },
+    ]
+    summary = {
+        "session_id": "session-detached-terminal",
+        "run_id": stream_id,
+        "last_seq": 6,
+        "last_event_id": f"{stream_id}:6",
+        "terminal": True,
+        "terminal_state": "completed",
+    }
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "working final answer", "_ts": 6.0},
+        {"role": "user", "content": "newer prompt"},
+        {"role": "assistant", "content": "newer answer", "_ts": 6.0},
+    ]
+    session = SessionStub(
+        session_id="session-detached-terminal",
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "latest_terminal_run_summary_for_session", lambda sid: summary)
+    monkeypatch.setattr(routes, "find_run_summary", lambda sid: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert session.save_calls == 1
+    assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
+    records = session.anchor_activity_scenes
+    assert len(records) == 1
+    record = next(iter(records.values()))
+    assert record["message_index"] == 1
+    assert record["stream_id"] == stream_id
+    scene = record["scene"]
+    assert scene["final_answer"] == "final answer"
+    assert _anchor_scene_visible_semantics(scene) == [
+        {"role": "thinking", "kind": "reasoning", "text": "checking identity"},
+        {"role": "prose", "kind": "process_prose", "text": "working"},
+        {
+            "role": "tool",
+            "kind": "tool_completed",
+            "status": "completed",
+            "tool_call_id": "call-detached",
+            "name": "terminal",
+            "args": {"command": "pytest"},
+            "done": True,
+        },
+    ]
+
+
+def test_anchor_scene_hydration_splits_final_suffix_from_owned_process_prefix():
+    from api import routes
+
+    stream_id = "stream-prefix-suffix"
+    messages = [
+        {"role": "user", "content": "do work"},
+        {
+            "role": "assistant",
+            "content": "Inspecting the fixture before the tool call. Lifecycle gate final answer.",
+            "_ts": 10.0,
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "",
+        "activity_rows": [
+            {
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "local_id": f"live-reasoning:{stream_id}:1",
+                "text": "Checking the persistent assistant turn.",
+                "status": "completed",
+            },
+            {
+                "role": "prose",
+                "kind": "process_prose",
+                "source_event_type": "token",
+                "local_id": f"live-prose:{stream_id}:1",
+                "text": "Inspecting the fixture before the tool call.",
+                "status": "completed",
+            },
+            {
+                "role": "tool",
+                "kind": "tool_completed",
+                "source_event_type": "tool_complete",
+                "local_id": "lifecycle-tool-1",
+                "tool_call_id": "lifecycle-tool-1",
+                "text": "README fixture read",
+                "status": "completed",
+                "tool": {"id": "lifecycle-tool-1", "name": "read_file", "args": {}, "done": True},
+                "payload": {"tid": "lifecycle-tool-1", "name": "read_file"},
+            },
+        ],
+    }
+
+    hydrated = routes._complete_hydrated_anchor_scene(messages, scene, 1, stream_id=stream_id)
+
+    assert hydrated["final_answer"] == "Lifecycle gate final answer."
+    assert all(row.get("source_event_type") != "settled_message" for row in hydrated["activity_rows"])
+    assert _anchor_scene_visible_semantics(hydrated) == [
+        {
+            "role": "thinking",
+            "kind": "reasoning",
+            "text": "Checking the persistent assistant turn.",
+        },
+        {
+            "role": "prose",
+            "kind": "process_prose",
+            "text": "Inspecting the fixture before the tool call.",
+        },
+        {
+            "role": "tool",
+            "kind": "tool_completed",
+            "status": "completed",
+            "tool_call_id": "lifecycle-tool-1",
+            "name": "read_file",
+            "args": {},
+            "done": True,
+        },
+    ]
+
+
 def test_runtime_journal_snapshot_preserves_reasoning_segment_identities(monkeypatch):
     from api import routes
 

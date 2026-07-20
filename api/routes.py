@@ -3164,7 +3164,7 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
-def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
+def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: bool = False) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
         return None
@@ -3200,6 +3200,31 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if not malformed_envelope_run_id and len(event_run_ids) == 1
         else str(summary.get("run_id") or stream_id).strip()
     )
+    terminal_event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("terminal") and str(event.get("event") or event.get("type") or "") != "stream_end"
+        ),
+        next((event for event in reversed(events) if event.get("terminal")), None),
+    )
+    terminal_payload = (
+        terminal_event.get("payload")
+        if isinstance(terminal_event, dict) and isinstance(terminal_event.get("payload"), dict)
+        else {}
+    )
+    terminal_state = str(summary.get("terminal_state") or "").strip() if summary.get("terminal") else ""
+    terminal_message_index = None
+    terminal_session = terminal_payload.get("session") if isinstance(terminal_payload.get("session"), dict) else {}
+    terminal_messages = terminal_session.get("messages") if isinstance(terminal_session.get("messages"), list) else []
+    terminal_message_count = terminal_session.get("message_count")
+    try:
+        terminal_message_count = int(terminal_message_count)
+    except (TypeError, ValueError):
+        terminal_message_count = len(terminal_messages) if terminal_messages else None
+    if terminal_message_count is not None and terminal_message_count > 0:
+        terminal_message_index = terminal_message_count - 1
+    snapshot_row_status = "completed" if settled else "running"
 
     assistant_text = ""
     reasoning_text = ""
@@ -3653,7 +3678,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 segment_seq=segment_seq,
                 created_at=segment.get("created_at"),
                 journal_order=int(segment.get("journal_order") or 0) or None,
-                status="running",
+                status=snapshot_row_status,
             )
             if not row:
                 continue
@@ -3722,7 +3747,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             burst_id=None,
             segment_seq=segment_seq,
             journal_order=active_prose_started_order,
-            status="running",
+            status=snapshot_row_status,
         )
         if tail:
             append_thinking_rows(
@@ -3781,7 +3806,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "run_id": run_id,
                 "stream_id": stream_id,
                 "seq": None,
-                "status": "running",
+                "status": snapshot_row_status,
                 "created_at": last_ts,
                 "identity": {
                     "event_id": None,
@@ -3849,6 +3874,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         {"id": anchor.get("id"), "textEnd": anchor.get("textEnd")}
         for anchor in activity_burst_anchors
     ]
+    settled_final_answer = ""
+    if settled and terminal_state == "completed" and assistant_text:
+        last_activity_end = max(
+            [int(anchor.get("textEnd") or 0) for anchor in activity_burst_anchors]
+            or [0]
+        )
+        settled_final_answer = assistant_text[last_activity_end:].strip() or assistant_text.strip()
     for call in tool_calls:
         call.pop("_journal_order", None)
     return {
@@ -3856,6 +3888,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "stream_id": stream_id,
         "last_seq": last_seq,
         "last_event_id": last_event_id,
+        "terminal_state": terminal_state or None,
+        "terminal_message_index": terminal_message_index,
         "event_count": len(events),
         "fresh_segment": fresh_segment,
         "messages": messages,
@@ -3875,12 +3909,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "source_message_refs": [],
             },
             "lifecycle": {
-                "status": "running",
-                "terminal_state": None,
+                "status": terminal_state or snapshot_row_status,
+                "terminal_state": terminal_state or None,
             },
-            "final_answer": "",
+            "final_answer": settled_final_answer,
             "final_message_ref": None,
-            "terminal_state": None,
+            "terminal_state": terminal_state or None,
             "activity_rows": anchor_activity_rows,
         },
     }
@@ -4268,6 +4302,57 @@ def _anchor_scene_message_turn_duration(message):
         if isinstance(value, (int, float)) and value >= 0:
             return value
     return None
+
+
+def _anchor_scene_final_answer_hint_from_scene(scene) -> str:
+    if not isinstance(scene, dict):
+        return ""
+    explicit = scene.get("final_answer") if isinstance(scene.get("final_answer"), str) else ""
+    if _anchor_scene_clean_text(explicit):
+        return explicit
+    return ""
+
+
+def _anchor_scene_final_answer_hint_from_transcript(message_text, scene) -> str:
+    raw = str(message_text or "").strip()
+    if not raw or not isinstance(scene, dict):
+        return ""
+    rows = scene.get("activity_rows") if isinstance(scene.get("activity_rows"), list) else []
+    last_tool_index = -1
+    for idx, row in enumerate(rows):
+        if isinstance(row, dict) and row.get("role") == "tool":
+            last_tool_index = idx
+    if last_tool_index < 0:
+        return ""
+    prefixes = []
+    for idx, row in enumerate(rows):
+        if idx > last_tool_index or not isinstance(row, dict):
+            continue
+        if row.get("role") != "prose" or row.get("kind") != "process_prose":
+            continue
+        if str(row.get("source_event_type") or "") != "token":
+            continue
+        if not str(row.get("local_id") or "").startswith("live-prose:"):
+            continue
+        text = str(row.get("text") or "").strip()
+        if text:
+            prefixes.append(text)
+    if not prefixes:
+        return ""
+    tail = raw
+    consumed = False
+    for prefix in prefixes:
+        if tail.startswith(prefix):
+            tail = tail[len(prefix) :].strip()
+            consumed = True
+    if consumed and _anchor_scene_clean_text(tail):
+        return tail
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if raw.startswith(prefix):
+            tail = raw[len(prefix) :].strip()
+            if _anchor_scene_clean_text(tail):
+                return tail
+    return ""
 
 
 def _anchor_scene_tool_id(tool) -> str:
@@ -4767,8 +4852,14 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             turn_start = idx
             break
     message_final_answer = _anchor_scene_final_answer_text(final_message)
-    scene_final_answer = scene.get("final_answer") if isinstance(scene.get("final_answer"), str) else ""
-    final_answer = message_final_answer if _anchor_scene_clean_text(message_final_answer) else scene_final_answer
+    scene_final_answer = _anchor_scene_final_answer_hint_from_scene(scene)
+    scene_final_answer = (
+        _anchor_scene_final_answer_hint_from_transcript(scene_final_answer, scene)
+        or scene_final_answer
+    )
+    if not _anchor_scene_clean_text(scene_final_answer):
+        scene_final_answer = _anchor_scene_final_answer_hint_from_transcript(message_final_answer, scene)
+    final_answer = scene_final_answer if _anchor_scene_clean_text(scene_final_answer) else message_final_answer
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
@@ -4779,6 +4870,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         and row.get("role") == "thinking"
         and _anchor_scene_clean_text(row.get("text"))
     ]
+    scene_has_activity_rows = any(
+        isinstance(row, dict) and row.get("role") != "terminal"
+        for row in scene.get("activity_rows") or []
+    )
     scene_reasoning_key = _anchor_scene_text_key(
         "".join(str(row.get("text") or "") for row in scene_thinking_rows)
     )
@@ -4930,6 +5025,13 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             for row in content_rows:
                 if scene_has_authoritative_thinking and row.get("role") == "thinking":
                     continue
+                if (
+                    local_idx == local_final_idx
+                    and scene_has_activity_rows
+                    and _anchor_scene_clean_text(scene_final_answer)
+                    and row.get("role") == "prose"
+                ):
+                    continue
                 previous_len = len(rows)
                 push(row)
                 if row.get("role") == "tool" and len(rows) > previous_len:
@@ -4940,8 +5042,14 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                 used_content_tool_indexes_by_idx[absolute_idx] = used_content_tool_indexes
                 id_flexible_content_tool_indexes_by_idx[absolute_idx] = id_flexible_content_tool_indexes
         elif _anchor_scene_clean_text(text):
-            push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
-            order += 1
+            skip_transcript_final_prose = (
+                local_idx == local_final_idx
+                and scene_has_activity_rows
+                and _anchor_scene_clean_text(scene_final_answer)
+            )
+            if not skip_transcript_final_prose:
+                push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
+                order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
         if (
             not scene_has_authoritative_thinking
@@ -5118,6 +5226,105 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
             next_message["_anchor_stream_id"] = str(stream_id)
         out[local_idx] = next_message
     return out
+
+
+def _anchor_scene_record_exists_for_message(records, message, message_index) -> bool:
+    if not isinstance(records, dict) or not isinstance(message, dict):
+        return False
+    ref = _assistant_anchor_scene_message_ref(message)
+    for key, record in records.items():
+        if not isinstance(record, dict):
+            continue
+        if ref and (str(key or "") == ref or str(record.get("message_ref") or "") == ref):
+            return True
+        try:
+            record_index = int(record.get("message_index"))
+        except (TypeError, ValueError):
+            record_index = None
+        if record_index == message_index:
+            return True
+    return False
+
+
+def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
+    if not isinstance(messages, list):
+        return None
+    terminal_index = None
+    if isinstance(snapshot, dict):
+        try:
+            terminal_index = int(snapshot.get("terminal_message_index"))
+        except (TypeError, ValueError):
+            terminal_index = None
+    if terminal_index is not None:
+        terminal_index = max(0, min(terminal_index, len(messages) - 1))
+        for idx in range(terminal_index, -1, -1):
+            message = messages[idx]
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                return idx
+        return None
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return idx
+    return None
+
+
+def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, handler=None) -> bool:
+    """Persist a settled Anchor scene when the browser stream owner detached before terminal."""
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not sid or not isinstance(messages, list) or not messages:
+        return False
+    summary = latest_terminal_run_summary_for_session(sid)
+    if not summary:
+        return False
+    stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
+    if not stream_id or stream_id in _active_stream_ids():
+        return False
+    snapshot = _run_journal_live_snapshot(stream_id, handler=handler, settled=True)
+    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+    rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return False
+    message_index = _terminal_anchor_scene_message_index(messages, snapshot)
+    if message_index is None or not (0 <= message_index < len(messages)):
+        return False
+    message = messages[message_index]
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    if _anchor_scene_record_exists_for_message(_anchor_scene_records(session), message, message_index):
+        return False
+    completed_scene = _complete_hydrated_anchor_scene(
+        messages,
+        scene,
+        message_index,
+        message_offset=0,
+        tool_calls=getattr(session, "tool_calls", None),
+        stream_id=stream_id,
+    )
+    if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
+        return False
+    with _get_session_agent_lock(sid):
+        records = dict(_anchor_scene_records(session))
+        if _anchor_scene_record_exists_for_message(records, message, message_index):
+            return False
+        ref = _assistant_anchor_scene_message_ref(message)
+        records[ref or f"index:{message_index}"] = {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": message_index,
+            "message_ref": ref,
+            "stream_id": stream_id,
+            "scene": completed_scene,
+            "updated_at": time.time(),
+        }
+        if len(records) > 256:
+            ordered = sorted(
+                records.items(),
+                key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+            )
+            records = dict(ordered[-256:])
+        session.anchor_activity_scenes = records
+        session.save(touch_updated_at=False, skip_index=True)
+    return True
 
 
 def _handle_session_anchor_scene(handler, body):
@@ -9841,6 +10048,7 @@ from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
     find_run_summary,
+    latest_terminal_run_summary_for_session,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
@@ -12910,6 +13118,7 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                _materialize_terminal_anchor_scene_from_run_journal(s, _all_msgs, handler=handler)
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
