@@ -8037,12 +8037,36 @@ def _session_message_merge_key(msg: dict):
     )
 
 
+def _compression_child_message_semantic_key(msg):
+    """Return the canonical fields that can change a child's display identity."""
+    if not isinstance(msg, dict):
+        return {"non_dict": repr(msg)}
+    return {
+        "id": msg.get("id"),
+        "message_id": msg.get("message_id"),
+        "role": msg.get("role"),
+        "content": msg.get("content"),
+        # Keep the exact persisted timestamp. The display merge can reorder a
+        # same-id row after even a sub-second rewrite.
+        "timestamp": msg.get("timestamp"),
+        "tool_call_id": msg.get("tool_call_id"),
+        "tool_name": msg.get("tool_name"),
+        "name": msg.get("name"),
+        "tool_calls": msg.get("tool_calls"),
+        "function_call": msg.get("function_call"),
+    }
+
+
 def _compression_child_messages_digest(messages) -> str:
-    """Return a stable digest binding a disjoint-parent proof to one child array."""
-    merge_keys = [_session_message_merge_key(msg) for msg in list(messages or [])]
+    """Return a semantic digest binding a disjoint-parent proof to one child array."""
+    semantic_messages = [
+        _compression_child_message_semantic_key(msg)
+        for msg in list(messages or [])
+    ]
     encoded = json.dumps(
-        merge_keys,
+        semantic_messages,
         ensure_ascii=False,
+        sort_keys=True,
         separators=(',', ':'),
         default=str,
     ).encode('utf-8')

@@ -806,6 +806,84 @@ def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagin
     ]
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["content", "tool_calls", "timestamp"],
+)
+def test_msg_limit_same_id_child_rewrite_invalidates_disjoint_boundary(
+    monkeypatch,
+    tmp_path,
+    mutation,
+):
+    """A stable message id must not hide semantic child mutations from the proof."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = f"parent_compression_snapshot_same_id_{mutation}"
+    child_sid = f"continuation_child_same_id_{mutation}"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    original_child_messages = [
+        {
+            "id": f"child-message-{idx}",
+            "role": "assistant",
+            "content": f"child {idx}",
+            "timestamp": 300.0 + idx,
+        }
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=original_child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(
+            parent,
+            original_child_messages,
+        ),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+
+    mutated_child_messages = [dict(msg) for msg in original_child_messages]
+    if mutation == "content":
+        mutated_child_messages[0]["content"] = "rewritten child content"
+    elif mutation == "tool_calls":
+        mutated_child_messages[0]["tool_calls"] = [
+            {
+                "id": "call-rewritten",
+                "type": "function",
+                "function": {"name": "rewritten_tool", "arguments": "{}"},
+            }
+        ]
+    else:
+        mutated_child_messages[0]["timestamp"] = 300.25
+    child.messages = mutated_child_messages
+    child.save(touch_updated_at=False)
+
+    since_timestamp, selected_sidecar, base_offset = (
+        routes._state_db_since_timestamp_for_limited_display(
+            child,
+            msg_limit=30,
+        )
+    )
+    full_lineage = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert since_timestamp is None
+    assert base_offset == 0
+    assert selected_sidecar == full_lineage
+    assert full_lineage == parent_messages + mutated_child_messages
+
+
 def test_msg_limit_canonicalized_parent_falls_back_with_contiguous_pagination(
     monkeypatch,
     tmp_path,
