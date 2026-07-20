@@ -1710,7 +1710,11 @@ class Session:
                 return (list(cached_msgs[:limit]) if limit else list(cached_msgs)), (
                     len(cached_msgs)
                 )
+            # cls.load may return None if the sidecar disappeared during the
+            # scan (TOCTOU); return an empty head rather than dereferencing None.
             full = cls.load(sid)
+            if full is None:
+                return ([], total_count)
             msgs = full.messages or []
             return (list(msgs[:limit]) if limit else list(msgs)), (
                 total_count if total_count is not None else len(msgs)
@@ -1892,9 +1896,12 @@ class Session:
             logger.debug(
                 "load_messages_head fell back to full load for %s", sid, exc_info=True
             )
-            full = cls.load(sid)
-            msgs = full.messages or []
-            return (list(msgs[:limit]) if limit else list(msgs)), len(msgs)
+            # Route through _full_load_head so this path ALSO preserves SESSIONS
+            # authority: an active/messageful session may become cached while the
+            # scan is in progress, and a metadata/read/parse exception taking
+            # this branch must not return stale sidecar state in place of the
+            # now-authoritative cached messages. (#6138 re-gate round 3)
+            return _full_load_head()
 
     @staticmethod
     def _compute_user_message_count(messages) -> int:

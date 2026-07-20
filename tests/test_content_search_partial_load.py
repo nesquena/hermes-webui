@@ -421,7 +421,12 @@ def test_load_messages_head_collapses_duplicate_partials(tmp_path, monkeypatch):
 def test_load_messages_head_streaming_still_used_for_clean_uncached(tmp_path, monkeypatch):
     """Regression guard: the optimization must still apply for the common case
     (clean, uncached, fully persisted sessions) — i.e. we don't accidentally
-    route everything through the full loader and defeat the PR's purpose."""
+    route everything through the full loader and defeat the PR's purpose.
+
+    Spies on Session.load: if the streaming scanner is bypassed for a clean
+    uncached session (e.g. by an over-eager fallback or exception), the spy
+    records the call and this test fails. This locks in the performance
+    contract, not just the correctness contract."""
     import api.models as models
 
     session_dir = tmp_path / "sessions"
@@ -438,11 +443,134 @@ def test_load_messages_head_streaming_still_used_for_clean_uncached(tmp_path, mo
     from api.models import Session, LOCK
     with LOCK:
         models.SESSIONS.pop(sid, None)
+    # Spy on Session.load — it must NOT be called for a clean uncached session,
+    # because that's the whole point of the streaming optimization. If a future
+    # change routes everything through the full loader, this assertion fires.
+    load_calls = []
+    original_load = Session.load
+
+    def _spy_load(cls_arg, sid_arg):
+        load_calls.append(sid_arg)
+        return original_load(sid_arg)
+
+    monkeypatch.setattr(Session, "load", classmethod(_spy_load))
     head, total = Session.load_messages_head(sid, 5)
     assert total == 50, f"expected total=50 from metadata prefix, got {total}"
     assert len(head) == 5, (
         f"clean uncached session should return 5 messages via streaming, got {len(head)}"
     )
+    assert load_calls == [], (
+        f"Session.load must NOT be called for a clean uncached session (the "
+        f"streaming scanner should handle it); got calls: {load_calls}"
+    )
+
+
+# ── Re-gate #6138 round-3 regression (2026-07-19) ────────────────────────────
+# Barrier regression: the broad-exception fallback path must preserve SESSIONS
+# authority. Initial cache miss → session becomes cached mid-scan → scanner
+# raises → fallback must return the now-authoritative cached head, not stale
+# disk state. Uses bounded thread joins to prove no deadlock.
+
+
+def test_broad_exception_fallback_preserves_cache_authority(tmp_path, monkeypatch):
+    """Round-3 #6138: a session that becomes cached DURING the scan must be
+    returned by the broad-exception fallback, not the stale disk state.
+
+    Mirrors the maintainer's sandbox barrier: initial SESSIONS lookup misses,
+    an active cache entry is inserted mid-scan, and the scanner read is forced
+    to raise. Pre-fix the broad except clause called cls.load(sid) directly,
+    returning STALE_DISK; post-fix it routes through _full_load_head, which
+    re-checks SESSIONS authority and returns CACHE_AUTHORITY.
+    """
+    import api.models as models
+    import json as _json
+    import threading
+
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.SESSION_DIR = session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    sid = "gate-broad-except-cache"
+
+    # Sidecar with stale disk content (one message, no UNSAVEDNEEDLE).
+    stale_payload = {
+        "session_id": sid,
+        "title": "stale-disk",
+        "message_count": 1,
+        "messages": [{"id": "d0", "role": "user", "content": "STALE_DISK"}],
+        "anchor_activity_scenes": [],
+    }
+    (session_dir / f"{sid}.json").write_text(
+        _json.dumps(stale_payload), encoding="utf-8"
+    )
+
+    # The authoritative cached session has the unsaved needle.
+    from api.models import Session, LOCK
+    cached = Session(
+        session_id=sid,
+        title="authoritative-cache",
+        messages=[
+            {"id": "c0", "role": "user", "content": "STALE_DISK"},
+            {"id": "c1", "role": "assistant", "content": "CACHE_AUTHORITY"},
+        ],
+    )
+
+    # Barrier: simulate the race window by inserting the cache entry FROM WITHIN
+    # the scanner's _scan_to_messages_array call (which runs AFTER the initial
+    # SESSIONS miss and the metadata-prefix read), then raising. The broad-
+    # exception fallback must then re-check SESSIONS and return the now-cached
+    # authoritative head rather than the stale disk state.
+    #
+    # Inserting from within the scanner thread (rather than racing with a second
+    # thread) makes the test deterministic without coupling to internal scanner
+    # timing — the cache is guaranteed to be present when the exception fires.
+    original_scan = Session._scan_to_messages_array
+    cache_inserted_by_scan = []
+
+    def _forcing_scan(*args, **kwargs):
+        # Insert the cache entry at the moment of the scan call (after the
+        # initial SESSIONS miss), then raise to force the broad-exception path.
+        if not cache_inserted_by_scan:
+            with LOCK:
+                models.SESSIONS[sid] = cached
+            cache_inserted_by_scan.append(True)
+        raise OSError("forced scanner exception for barrier test")
+
+    monkeypatch.setattr(Session, "_scan_to_messages_array", _forcing_scan)
+
+    result = {}
+    scanner_exc = []
+
+    def _scanner():
+        try:
+            head, total = Session.load_messages_head(sid, 5)
+            result["head"] = head
+            result["total"] = total
+        except Exception as e:  # noqa: BLE001 - barrier test captures any error
+            scanner_exc.append(e)
+
+    t = threading.Thread(target=_scanner, daemon=True)
+    t.start()
+    # Bounded join — proves no deadlock (the helper must not hold LOCK while
+    # calling get_session, which reacquires it).
+    t.join(timeout=10.0)
+    assert not t.is_alive(), (
+        "scanner thread deadlocked: _full_load_head likely held LOCK while "
+        "calling get_session (which reacquires it)"
+    )
+    assert not scanner_exc, (
+        f"scanner raised instead of taking the broad-exception fallback: "
+        f"{scanner_exc}"
+    )
+    head = result.get("head", [])
+    assert any(
+        "CACHE_AUTHORITY" in str(m.get("content") or "") for m in head
+    ), (
+        f"broad-exception fallback must return the cached authoritative head, "
+        f"not stale disk; got {[m.get('content') for m in head]}"
+    )
+    with LOCK:
+        models.SESSIONS.pop(sid, None)
 
 
 # ── Re-gate #6138 round-2 regressions (2026-07-19) ───────────────────────────
@@ -505,7 +633,10 @@ def test_cached_messageful_session_without_sidecar_uses_authoritative_cache(
     "message_count, label",
     [
         (None, "missing message_count (legacy sidecar)"),
-        (15, "stale message_count (less than actual raw total)"),
+        # 1 is at/below raw_target (2 * limit = 10), so it is the strongest
+        # fail-first value: the pre-fix gate `total_count > len(raw_messages)`
+        # would have been `1 > 10` = False, skipping the fallback entirely.
+        (1, "stale-low message_count (at/below raw_target=10)"),
     ],
 )
 def test_duplicate_partial_run_longer_than_raw_multiplier_falls_back(
