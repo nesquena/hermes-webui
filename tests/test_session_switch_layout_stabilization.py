@@ -189,6 +189,78 @@ def test_same_session_force_reload_force_retires_prior_stabilization():
     assert "window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, true);" in load
 
 
+def test_every_post_begin_stale_return_retires_its_own_generation():
+    """After _begin arms the class, every reachable stale return in the INFLIGHT
+    and idle branches must retire the generation it armed (generation-gated,
+    non-forced) — otherwise an abandoned load that exits before a successor opens
+    its own stabilization leaves the class armed with no settle/watchdog owner.
+    A shared per-load helper (_retireOwnStabilization) does the gated retire.
+    """
+    load = _function_body(SESSIONS_JS, "loadSession")
+    # The helper is generation-gated and non-forced.
+    assert "const _retireOwnStabilization = () => {" in load
+    assert "window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, false);" in load
+    # Restrict to the post-begin region (after the _begin call) and require the
+    # retire on every stale return there. The 5 flagged exits: INFLIGHT reject,
+    # INFLIGHT success, reconnect pre-attach guard, idle reject, idle success.
+    post_begin = load[load.index("window._beginSessionSwitchLayoutStabilization(sid, _loadGeneration);"):]
+    assert post_begin.count("_retireOwnStabilization();") == 5, \
+        "all 5 post-begin stale returns must retire their own generation"
+    # Each retire must sit on a stale-load exit (immediately paired with a bail).
+    assert "_retireOwnStabilization();\n        _rearmActiveSessionStream();" in post_begin
+    assert "if (!_isCurrentLoad()) { _retireOwnStabilization(); return; }" in post_begin
+
+
+def test_stale_generation_cannot_clear_newer_armed_generation():
+    """Behavioral: the generation-gated retire an abandoned load performs must
+    NOT clear a newer owner's armed stabilization, but MUST clear its own when it
+    is still the live owner. Drives the real _begin/_end helpers.
+    """
+    fns = "\n".join(_function_body(UI_JS, n) for n in (
+        "_endSessionSwitchLayoutStabilization",
+        "_beginSessionSwitchLayoutStabilization",
+    ))
+    script = f"""
+const assert=require('assert');
+let _classes=new Set();
+const el={{classList:{{add:c=>_classes.add(c),remove:c=>_classes.delete(c),contains:c=>_classes.has(c)}}}};
+function $(id){{return id==='messages'?el:null;}}
+const document={{getElementById:()=>null}};
+global.setTimeout=()=>0; global.clearTimeout=()=>{{}};
+global.requestAnimationFrame=()=>0; global.cancelAnimationFrame=()=>{{}};
+let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutLoadGeneration=null;
+let _sessionSwitchLayoutStabilizationToken=0;
+let _sessionSwitchLayoutStabilizationTimer=0;
+let _sessionSwitchLayoutStabilizationObserver=null;
+let _sessionSwitchLayoutWatchdogTimer=0;
+let _sessionSwitchLayoutPostProcessPending=0;
+let _sessionSwitchLayoutSettleRequested=false;
+let _bottomSettleToken=0,_settleRO=null,_settleTimer=0,_settleFinalTimer=0,_settleRAF=0,_programmaticScroll=false;
+{fns}
+// Simulate the per-load gated retire (non-forced, own generation).
+function retire(gen){{ _endSessionSwitchLayoutStabilization(gen, undefined, false); }}
+
+// Case 1: abandoned owner with NO successor -> its own retire clears the class.
+_beginSessionSwitchLayoutStabilization('A', 1);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true);
+retire(1); // load gen 1 exits stale, no newer begin happened
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), false, 'abandoned owner retires itself');
+assert.strictEqual(_sessionSwitchLayoutLoadGeneration, null);
+
+// Case 2: a newer owner armed; an OLDER stale generation must NOT clear it.
+_beginSessionSwitchLayoutStabilization('B', 2);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true);
+retire(1); // stale gen 1 tries to retire after gen 2 became the owner
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true, 'stale gen cannot clear newer owner');
+assert.strictEqual(_sessionSwitchLayoutLoadGeneration, 2);
+// The true owner can still retire.
+retire(2);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), false, 'current owner retires');
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
 def test_authoritative_same_sid_load_force_retires_armed_stabilization():
     """Rapid A→B→A→B: a same-SID non-force load re-selecting the already-open
     session (the early-return no-op) is still the authoritative current load. If
@@ -282,6 +354,72 @@ assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true, 'sti
 advance(15000);
 assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), false, 'watchdog force-retired the stuck stabilization');
 assert.strictEqual(_sessionSwitchLayoutStabilizationSid, '', 'state cleared');
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_watchdog_retires_when_real_diff_producer_fetch_never_resolves():
+    """Real-producer wiring: loadDiffInline registers a session-switch pending
+    marker and releases it from its fetch promise's .finally. If the fetch never
+    resolves (a hung media endpoint), the marker never releases and the
+    quiet-check can't settle — so the independent watchdog must still retire the
+    class. Drives the REAL loadDiffInline against a fetch that never settles.
+    """
+    fns = "\n".join(_function_body(UI_JS, n) for n in (
+        "_endSessionSwitchLayoutStabilization",
+        "_beginSessionSwitchLayoutStabilization",
+        "_finishSessionSwitchLayoutStabilization",
+        "_scheduleSessionSwitchLayoutQuietCheck",
+        "_beginSessionSwitchLayoutPostProcess",
+        "_endSessionSwitchLayoutPostProcess",
+        "_settleSessionSwitchLayoutStabilization",
+        "loadDiffInline",
+    ))
+    script = f"""
+const assert=require('assert');
+let _now=0; const _timers=[];
+global.setTimeout=(fn,ms)=>{{const id={{fn,at:_now+(ms||0),cancelled:false}};_timers.push(id);return id;}};
+global.clearTimeout=(id)=>{{if(id&&typeof id==='object')id.cancelled=true;}};
+global.requestAnimationFrame=(fn)=>{{_timers.push({{fn,at:_now,cancelled:false}});return 0;}};
+global.cancelAnimationFrame=()=>{{}};
+function advance(ms){{_now+=ms;let ran=true;while(ran){{ran=false;_timers.slice().sort((a,b)=>a.at-b.at).forEach(t=>{{if(!t.cancelled&&t.at<=_now){{t.cancelled=true;ran=true;t.fn();}}}});}}}}
+let _classes=new Set();
+const messagesEl={{classList:{{add:c=>_classes.add(c),remove:c=>_classes.delete(c),contains:c=>_classes.has(c)}}}};
+function $(id){{return id==='messages'?messagesEl:null;}}
+const document={{getElementById:()=>null}};
+let _scrollPinned=false,_messageUserUnpinned=true;
+function scrollToBottom(){{}}
+function esc(s){{return String(s);}}
+function t(k){{return k;}}
+// A fetch that NEVER resolves (hung media endpoint).
+global.fetch=()=>new Promise(()=>{{}});
+// A single diff element pending inline load.
+let _diffAttrs={{}};
+const diffEl={{
+  dataset:{{path:'/x/y.diff'}},
+  setAttribute:(k,v)=>{{_diffAttrs[k]=v;}},
+  getAttribute:k=>_diffAttrs[k],
+}};
+const container={{querySelectorAll:sel=>sel.includes('diff-inline-load')?[diffEl]:[]}};
+let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutLoadGeneration=null;
+let _sessionSwitchLayoutStabilizationToken=0;
+let _sessionSwitchLayoutStabilizationTimer=0;
+let _sessionSwitchLayoutStabilizationObserver=null;
+let _sessionSwitchLayoutWatchdogTimer=0;
+let _sessionSwitchLayoutPostProcessPending=0;
+let _sessionSwitchLayoutSettleRequested=false;
+let _bottomSettleToken=0,_settleRO=null,_settleTimer=0,_settleFinalTimer=0,_settleRAF=0,_programmaticScroll=false;
+{fns}
+_beginSessionSwitchLayoutStabilization('sidA', 1);
+_settleSessionSwitchLayoutStabilization('sidA', 1, false);
+// Real producer registers its own pending marker via _beginSessionSwitchLayoutPostProcess.
+loadDiffInline(container);
+assert.strictEqual(_sessionSwitchLayoutPostProcessPending, 1, 'diff producer registered a pending marker');
+advance(1000);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), true, 'still armed while the hung fetch keeps pending>0');
+advance(15000);
+assert.strictEqual(_classes.has('session-switch-layout-stabilizing'), false, 'watchdog retired despite the never-resolving diff fetch');
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 

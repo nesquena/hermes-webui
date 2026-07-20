@@ -1504,6 +1504,16 @@ async function loadSession(sid){
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  // Retire the session-switch stabilization THIS load armed, generation-gated
+  // and non-forced: it only clears if the live stabilization is still ours, so a
+  // stale continuation can't tear down a newer owner. Called on every post-begin
+  // stale return so an abandoned generation that exits before a successor opens
+  // its own stabilization can't leave `session-switch-layout-stabilizing` armed.
+  const _retireOwnStabilization = () => {
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function'){
+      try { window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, false); } catch (_) {}
+    }
+  };
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -1914,12 +1924,14 @@ async function loadSession(sid){
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch(e) {
       if (!_isCurrentLoad()) {
+        _retireOwnStabilization();
         _rearmActiveSessionStream();
         return;
       }
       S.messages=inflightMessages;
     }
     if (!_isCurrentLoad()) {
+      _retireOwnStabilization();
       _rearmActiveSessionStream();
       return;
     }
@@ -1955,7 +1967,7 @@ async function loadSession(sid){
     let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
-      if (!_isCurrentLoad()) return;
+      if (!_isCurrentLoad()) { _retireOwnStabilization(); return; }
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
@@ -2031,6 +2043,7 @@ async function loadSession(sid){
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch (e) {
       if (!_isCurrentLoad()) {
+        _retireOwnStabilization();
         _rearmActiveSessionStream();
         return;
       }
@@ -2048,7 +2061,7 @@ async function loadSession(sid){
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) { _retireOwnStabilization(); return; }
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
