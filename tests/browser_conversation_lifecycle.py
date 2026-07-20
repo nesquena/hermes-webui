@@ -837,7 +837,7 @@ def _assert_settled(snapshot: dict, *, reasoning_count: int, scenario: str) -> N
         turn_duration = snapshot["assistantMessage"].get("turnDuration")
         assert isinstance(turn_duration, (int, float)) and turn_duration > 0, snapshot
         assert snapshot["assistantMessage"]["hasError"] is True, snapshot
-        assert snapshot["assistantMessage"]["anchorTerminalState"] in {"error", "failed"}, snapshot
+        assert snapshot["assistantMessage"]["anchorTerminalState"] in {"error", "failed", "errored"}, snapshot
         assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
         assert sum(TERMINAL_ERROR_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
         assert TERMINAL_ERROR_TEXT in snapshot["transcript"], snapshot

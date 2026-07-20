@@ -3303,15 +3303,20 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
         ),
         next((event for event in reversed(events) if event.get("terminal")), None),
     )
-    if malformed_envelope_run_id or len(event_run_ids) > 1:
+    if len(event_run_ids) > 1:
         return None
+    terminal_settlement_snapshot = settled or terminal_event is not None
+    if malformed_envelope_run_id:
+        if terminal_settlement_snapshot:
+            return None
+        event_run_ids.clear()
     summary_run_id = str(summary.get("run_id") or stream_id).strip()
     if len(event_run_ids) == 1:
         run_id = next(iter(event_run_ids))
-        if summary_run_id and summary_run_id != run_id:
+        if summary_run_id and summary_run_id not in {run_id, stream_id}:
             return None
     else:
-        if settled or terminal_event is not None:
+        if terminal_settlement_snapshot:
             return None
         run_id = summary_run_id or stream_id
     terminal_payload = (
