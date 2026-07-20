@@ -636,7 +636,7 @@ boot.js           Mobile nav, voice input, theme/skin boot, bfcache handler
 
 ```
 tests/            Pytest suite (~11,500 tests; isolated server/state fixtures)
-pyproject.toml    Tooling config (ruff lint gate) — not a packaged distribution
+pyproject.toml    Standard build metadata plus the Ruff lint gate; checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh
 Dockerfile        python:3.12-slim container image
 docker-compose.yml  Compose with named volume and optional auth
 .github/workflows/  CI: ruff + sharded pytest, browser smoke, Docker smoke,
