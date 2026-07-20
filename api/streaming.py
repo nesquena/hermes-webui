@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import copy
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Optional
 
@@ -337,19 +338,21 @@ def _request_targets_google_gemini_three(
     model_lower = str(model or '').strip().lower()
     if 'gemini-3' not in model_lower:
         return False
-    base_lower = str(base_url or '').strip().lower()
-    if 'generativelanguage.googleapis.com' in base_lower:
+    try:
+        hostname = (urlsplit(str(base_url or '').strip()).hostname or '').lower()
+    except ValueError:
+        hostname = ''
+    if hostname == 'generativelanguage.googleapis.com':
         return True
     if provider_profile is None:
         return False
-    module_name = str(getattr(type(provider_profile), '__module__', '') or '').lower()
     provider_id = str(
         getattr(provider_profile, 'provider_id', None)
         or getattr(provider_profile, 'id', None)
         or getattr(provider_profile, 'name', None)
         or ''
     ).strip().lower()
-    return 'google' in module_name or provider_id in {'google', 'gemini'}
+    return provider_id in {'google', 'gemini'}
 
 
 def _repair_google_gemini_current_turn_tool_state_for_request(
@@ -387,29 +390,6 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
 
     replay_turn_user_index = last_user_index
     if last_user_index == len(messages) - 1:
-        prior_msg = messages[last_user_index - 1] if last_user_index > 0 else None
-        prior_turn_incomplete = (
-            isinstance(prior_msg, dict)
-            and (
-                prior_msg.get('role') == 'tool'
-                or (
-                    prior_msg.get('role') == 'assistant'
-                    and isinstance(prior_msg.get('tool_calls'), list)
-                    and bool(prior_msg.get('tool_calls'))
-                )
-            )
-        )
-        if not prior_turn_incomplete:
-            return messages
-        replay_turn_user_index = None
-        for idx in range(last_user_index - 1, -1, -1):
-            msg = messages[idx]
-            if isinstance(msg, dict) and msg.get('role') == 'user':
-                replay_turn_user_index = idx
-                break
-        if replay_turn_user_index is None:
-            return messages
-    elif last_user_index >= len(messages) - 1:
         return messages
 
     drop_assistant_indexes = set()
