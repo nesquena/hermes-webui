@@ -175,9 +175,19 @@ def test_non_google_route_does_not_prune_gemini_named_model_history():
 
 
 def test_gemini3_request_preserves_completed_tool_turn_before_next_user_message():
-    messages = _prior_and_current_turn_history() + [
-        {"role": "assistant", "content": "Order 2 is pending."},
-        {"role": "user", "content": "Thanks, now check order 3."},
+    messages = [
+        {"role": "user", "content": "look up the first order"},
+        {
+            "role": "assistant",
+            "content": "Found it.",
+            "tool_calls": [{
+                "id": "call_prior",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"id":"1"}'},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_prior", "content": "order 1: shipped"},
+        {"role": "user", "content": "Thanks, now check order 2."},
     ]
     original = copy.deepcopy(messages)
 
@@ -189,6 +199,29 @@ def test_gemini3_request_preserves_completed_tool_turn_before_next_user_message(
 
     assert messages == original, "request-boundary repair must not mutate canonical history"
     assert result == original, "a completed prior tool turn must survive a later user message intact"
+
+
+@pytest.mark.parametrize(
+    "base_url, provider_profile, expected",
+    [
+        ("HTTPS://GENERATIVELANGUAGE.GOOGLEAPIS.COM/v1beta/openai", None, True),
+        ("https://custom.example/v1", types.SimpleNamespace(name="gemini"), True),
+        ("https://generativelanguage.googleapis.com.example/v1", None, False),
+        ("https://custom.example/generativelanguage.googleapis.com/v1", None, False),
+        ("https://custom.example/v1?provider=google", None, False),
+        ("https://custom.example/v1", types.SimpleNamespace(provider_id="google-compatible"), False),
+    ],
+)
+def test_gemini3_route_identity_requires_exact_host_or_provider_id(
+    base_url, provider_profile, expected
+):
+    from api.streaming import _request_targets_google_gemini_three
+
+    assert _request_targets_google_gemini_three(
+        "gemini-3-flash",
+        base_url=base_url,
+        provider_profile=provider_profile,
+    ) is expected
 
 
 def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outbound_copy(
@@ -215,8 +248,8 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
 
-    def _assistant_response(content):
-        message = types.SimpleNamespace(content=content, tool_calls=None)
+    def _assistant_response(content, tool_calls=None):
+        message = types.SimpleNamespace(content=content, tool_calls=tool_calls)
         choice = types.SimpleNamespace(message=message, finish_reason="stop")
         return types.SimpleNamespace(choices=[choice], model="stub/model", usage=None)
 
@@ -246,14 +279,25 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     fallback_resolution_calls = []
     captured_results = {}
 
+    active_tool_call = types.SimpleNamespace(
+        id="call_active",
+        type="function",
+        function=types.SimpleNamespace(
+            name="lookup",
+            arguments='{"id":"2"}',
+        ),
+    )
+
     def _primary_success_create(*_args, **kwargs):
         primary_success_calls.append(copy.deepcopy(kwargs))
+        if len(primary_success_calls) == 1:
+            return _assistant_response("Checking the next order.", [active_tool_call])
         return _assistant_response("primary stayed primary")
 
     def _fallback_primary_create(*_args, **kwargs):
         fallback_primary_calls.append(copy.deepcopy(kwargs))
-        if len(fallback_primary_calls) > 1:
-            raise AssertionError("primary request should switch to fallback after the first 429")
+        if len(fallback_primary_calls) == 1:
+            return _assistant_response("Checking the next order.", [active_tool_call])
         raise _RateLimitError()
 
     def _fallback_create(*_args, **kwargs):
@@ -306,6 +350,14 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             result = super().run_conversation(**kwargs)
             captured_results[self.session_id] = copy.deepcopy(result)
             return result
+
+        def _execute_tool_calls(self, assistant_message, messages, effective_task_id, api_call_count=0):
+            messages.append({
+                "role": "tool",
+                "tool_call_id": assistant_message.tool_calls[0].id,
+                "name": assistant_message.tool_calls[0].function.name,
+                "content": "order 2: pending",
+            })
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None, **_kw: {
@@ -402,8 +454,9 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 
     def _new_session(session_id, stream_id, pending_user_message):
         session = Session(session_id=session_id, title="Gemini fallback")
-        session.messages = _prior_and_current_turn_history()
-        session.context_messages = _prior_and_current_turn_history()
+        history = _prior_and_current_turn_history()[:4]
+        session.messages = history
+        session.context_messages = copy.deepcopy(history)
         session.pending_user_message = pending_user_message
         session.pending_attachments = []
         session.pending_started_at = 1234567890.0
@@ -428,13 +481,13 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
         )
         return Session.load(session_id)
 
-    def _assert_canonical_current_turn(messages):
+    def _assert_canonical_current_turn(messages, call_id="call_active"):
         assert any(
-            m.get("role") == "tool" and m.get("tool_call_id") == "call_current"
+            m.get("role") == "tool" and m.get("tool_call_id") == call_id
             for m in messages
         ), "canonical history must keep the current-turn tool row"
         assert any(
-            tc.get("id") == "call_current"
+            tc.get("id") == call_id
             for m in messages
             if m.get("role") == "assistant"
             for tc in (m.get("tool_calls") or [])
@@ -494,8 +547,8 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             lifecycle._sessions.update(lifecycle_sessions_snapshot)
             lifecycle._condition.notify_all()
 
-    assert len(primary_success_calls) == 1
-    primary_messages = primary_success_calls[0]["messages"]
+    assert len(primary_success_calls) == 2
+    primary_messages = primary_success_calls[1]["messages"]
     _assert_canonical_current_turn(primary_messages)
     primary_result = captured_results["issue6333-primary"]
     _assert_canonical_current_turn(primary_result["messages"])
@@ -505,13 +558,13 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     assert primary_result["messages"][-1]["content"] == "primary stayed primary"
     assert primary_saved.messages[-1]["content"] == "primary stayed primary"
 
-    assert len(fallback_primary_calls) == 1
+    assert len(fallback_primary_calls) == 2
     assert len(fallback_calls) == 1
     assert len(fallback_resolution_calls) == 1
     assert fallback_resolution_calls[0]["provider"] == "google"
     assert fallback_resolution_calls[0]["model"] == "gemini-3-flash"
 
-    fallback_primary_messages = fallback_primary_calls[0]["messages"]
+    fallback_primary_messages = fallback_primary_calls[1]["messages"]
     _assert_canonical_current_turn(fallback_primary_messages)
 
     fallback_result = captured_results["issue6333-fallback"]
@@ -525,7 +578,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     )
     assert "tool_calls" not in current_assistant
     assert not any(
-        m.get("role") == "tool" and m.get("tool_call_id") == "call_current"
+        m.get("role") == "tool" and m.get("tool_call_id") == "call_active"
         for m in fallback_messages
     ), "activated Gemini fallback must repair only its outbound request copy"
 
