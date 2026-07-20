@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- **Content-search and sidebar polling are faster: run-journal summaries are now cached.** Repeated reads of an unchanged run journal reuse a cached summary instead of re-parsing the whole file, keyed on a complete filesystem signature (device, inode, size, mtime, and ctime) so the cache is always dropped the instant the journal is appended to, replaced, truncated, or recreated — including a same-size rewrite that preserves mtime. Bounded LRU; a first-write race can never pin a stale empty result. Thanks @sjungwon03. (#6291)
+
 - **Live Stream: a settled Worklog now shows the side effects a turn performed (memory/skill saves).** The `state_saved` SSE event (memory + skill saves) was classified as an Assistant-Turn-Anchor side effect but the renderer-neutral scene projection discarded it, so the browser only flashed a toast and a reloaded Worklog lost that record. Anchor `artifacts`/`side_effects` are now projected into the settled `activity_scene_v1`. Purely additive — turns with no side effects render byte-identical (side-effect-only turns still don't force a Worklog), and the change is compatible with the stable-run-identity plumbing. Thanks @franksong2702. (#6204, #3400)
 
 - **Kanban board columns are now scrollable on mobile.** On a phone, a touch-drag inside a Kanban column was trapped in the column's nested scroller, so you couldn't scroll the board. The mobile layout now lets the column overscroll chain to the page/section, restoring natural scrolling; desktop and the pull-to-refresh behavior are unchanged. Thanks @jpalazz2. (#6306)
