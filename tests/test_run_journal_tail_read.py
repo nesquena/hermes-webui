@@ -525,3 +525,109 @@ def test_ordinary_size_done_eof_no_newline_rejected_both_readers(tmp_path):
 
 
 
+
+
+# ── Greptile P1 (2026-07-20): TOCTOU — file deleted between stat() and open() ─
+# The backward-scan helpers (_find_record_start_before, _rfind_byte_before,
+# _record_is_structurally_complete) wrap stat() in try/except but used to leave
+# the subsequent path.open() unguarded. A cleanup job racing a status poll could
+# delete the journal in that window; the FileNotFoundError would escape to the
+# HTTP handler → 500. Each helper must return its safe fallback instead.
+
+
+def test_find_record_start_before_returns_fallback_if_file_deleted(tmp_path, monkeypatch):
+    """_find_record_start_before: stat succeeds, then open() raises — must
+    return 0 (not let FileNotFoundError escape to the HTTP handler)."""
+    import json as _json
+    from pathlib import Path
+    from api import run_journal
+
+    p = tmp_path / "race.jsonl"
+    p.write_bytes((_json.dumps({"seq": 1, "event": "done"}) + "\n").encode("utf-8"))
+    real_open = Path.open
+
+    def racing_open(self, *a, **kw):
+        if self == p:
+            raise FileNotFoundError(str(p))
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    assert run_journal._find_record_start_before(p, 50) == 0
+
+
+def test_rfind_byte_before_returns_fallback_if_file_deleted(tmp_path, monkeypatch):
+    """_rfind_byte_before: open() raises FileNotFoundError — must return None."""
+    import json as _json
+    from pathlib import Path
+    from api import run_journal
+
+    p = tmp_path / "race.jsonl"
+    p.write_bytes((_json.dumps({"seq": 1}) + "\n").encode("utf-8"))
+    real_open = Path.open
+
+    def racing_open(self, *a, **kw):
+        if self == p:
+            raise FileNotFoundError(str(p))
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    assert run_journal._rfind_byte_before(p, b"\n", 50) is None
+
+
+def test_record_is_structurally_complete_returns_fallback_if_file_deleted(
+    tmp_path, monkeypatch
+):
+    """_record_is_structurally_complete: open() raises FileNotFoundError — must
+    return False (not raise)."""
+    import json as _json
+    from pathlib import Path
+    from api import run_journal
+
+    p = tmp_path / "race.jsonl"
+    p.write_bytes((_json.dumps({"seq": 1, "event": "done"}) + "\n").encode("utf-8"))
+    real_open = Path.open
+
+    def racing_open(self, *a, **kw):
+        if self == p:
+            raise FileNotFoundError(str(p))
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    assert run_journal._record_is_structurally_complete(p, 0) is False
+
+
+def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, monkeypatch):
+    """End-to-end TOCTOU: a journal large enough to trigger the boundary-scan
+    path; the boundary helper raises FileNotFoundError mid-scan. latest_run_summary
+    must return a safe summary (not propagate → 500 on the poll endpoint)."""
+    from api import run_journal
+    from api.run_journal import append_run_event
+
+    # Build a journal whose tail window straddles a record (so the boundary
+    # helpers fire). Substantial payloads so the tail cap excludes the first.
+    big = "x" * 50000
+    append_run_event("s1", "r1", "done", {"session": {}, "big": big}, session_dir=tmp_path)
+    append_run_event("s1", "r1", "done",
+                     {"terminal_state": "completed", "big": big},
+                     session_dir=tmp_path)
+
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    assert path.exists(), (
+        f"journal not written where expected: {path} (glob: "
+        f"{list(tmp_path.rglob('*.jsonl'))})"
+    )
+
+    # Patch the boundary helper to raise (simulating delete-during-scan) —
+    # latest_run_summary must catch via the helper's own try/except and return
+    # a safe summary, not propagate.
+    original = run_journal._find_record_start_before
+
+    def raising_find(p, seek_pos):
+        if p == path:
+            raise FileNotFoundError(str(path))
+        return original(p, seek_pos)
+
+    monkeypatch.setattr(run_journal, "_find_record_start_before", raising_find)
+    summary = run_journal.latest_run_summary("s1", "r1", session_dir=tmp_path)
+    # Must return a dict (safe summary), not raise.
+    assert isinstance(summary, dict)
