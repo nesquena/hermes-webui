@@ -4367,6 +4367,22 @@ def _compact_session_image_parts_for_persistence(session) -> int:
     return changed
 
 
+def _strip_base64_data_urls(text: str) -> str:
+    """Replace inline base64 data URIs with a placeholder.
+
+    Vision models send ``data:image/<type>;base64,<payload>`` as tool-call
+    arguments or tool results.  When these are dumped into the live-prompt
+    estimate the full payload bytes inflate every streaming frame.  Strip
+    them to a fixed marker so the client still sees *that* an image was
+    involved without the wire cost of the base64 blob.
+    """
+    return re.sub(
+        r'data:image/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+',
+        '[base64 image]',
+        text,
+    )
+
+
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -8121,7 +8137,7 @@ def _run_agent_streaming(
                     'type': 'function',
                     'function': {
                         'name': str(name or ''),
-                        'arguments': json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False, sort_keys=True),
+                        'arguments': _strip_base64_data_urls(json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False, sort_keys=True)),
                     },
                 }
                 _bump_live_prompt_estimate([{
@@ -8134,7 +8150,7 @@ def _run_agent_streaming(
             def _record_live_tool_complete(tool_call_id, name, function_result):
                 if not tool_call_id:
                     return False
-                _result_text = _tool_result_snippet(function_result)
+                _result_text = _strip_base64_data_urls(_tool_result_snippet(function_result))
                 _bump_live_prompt_estimate([{
                     'role': 'tool',
                     'name': str(name or ''),
