@@ -14302,6 +14302,23 @@ def handle_post(handler, parsed) -> bool:
                 updated_at=time.time(),
             )
 
+            try:
+                from api.session_media import clone_session_media_references
+
+                clone_session_media_references(
+                    [copied_session.messages, copied_session.context_messages],
+                    session.session_id,
+                    copied_session.session_id,
+                )
+            except (OSError, ValueError):
+                logger.warning(
+                    "Could not clone session media from %s to %s",
+                    session.session_id,
+                    copied_session.session_id,
+                    exc_info=True,
+                )
+                return bad(handler, "Could not copy session media", 500)
+
             with LOCK:
                 SESSIONS[copied_session.session_id] = copied_session
                 SESSIONS.move_to_end(copied_session.session_id)
@@ -15084,6 +15101,22 @@ def handle_post(handler, parsed) -> bool:
             parent_session_id=source.session_id,
             session_source="fork",
         )
+        try:
+            from api.session_media import clone_session_media_references
+
+            clone_session_media_references(
+                [branch.messages, branch.context_messages],
+                source.session_id,
+                branch.session_id,
+            )
+        except (OSError, ValueError):
+            logger.warning(
+                "Could not clone session media from %s to %s",
+                source.session_id,
+                branch.session_id,
+                exc_info=True,
+            )
+            return bad(handler, "Could not copy session media", 500)
         with LOCK:
             SESSIONS[branch.session_id] = branch
             SESSIONS.move_to_end(branch.session_id)

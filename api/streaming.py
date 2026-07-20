@@ -9086,6 +9086,16 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
+                    # Compact media references are session-relative. Give the
+                    # continuation verified ownership before changing the
+                    # authoritative id or committing any continuation JSON.
+                    from api.session_media import clone_session_media_references
+
+                    clone_session_media_references(
+                        [s.messages, s.context_messages],
+                        old_sid,
+                        new_sid,
+                    )
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation

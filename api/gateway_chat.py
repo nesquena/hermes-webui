@@ -387,7 +387,14 @@ def _run_gateway_runs_api_streaming(
 
     instructions_parts = []
     conversation_history = []
-    for entry in getattr(session, "context_messages", None) or []:
+    stored_history = getattr(session, "context_messages", None) or []
+    try:
+        from api.session_media import hydrate_session_media_urls
+
+        stored_history = hydrate_session_media_urls(stored_history, session_id)
+    except Exception:
+        logger.warning("Could not hydrate gateway session media for %s", session_id, exc_info=True)
+    for entry in stored_history:
         if not isinstance(entry, dict):
             continue
         role = str(entry.get("role") or "").strip().lower()
