@@ -159,6 +159,137 @@ def _safe_error(metric: str, exc: Exception) -> dict[str, str]:
     return {"metric": metric, "code": type(exc).__name__}
 
 
+def _zero_webui_runtime_payload() -> dict[str, Any]:
+    return {
+        "sessions": {"resident_count": 0, "effective_cap": 0},
+        "session_list_cache": {"entries": 0, "entry_cap": 0, "inflight_rebuilds": 0},
+        "streams": {
+            "active_streams": 0,
+            "total_subscribers": 0,
+            "total_offline_buffered_events": 0,
+            "total_offline_dropped_events": 0,
+            "per_stream_offline_buffer_cap": 0,
+        },
+        "models_cache": {
+            "loaded": False,
+            "provider_groups": 0,
+            "total_models": 0,
+            "age_seconds": None,
+        },
+    }
+
+
+def _webui_runtime_sources() -> dict[str, Any]:
+    from api import config as _config
+    from api import route_session_list_cache as _route_session_list_cache
+
+    return {
+        "sessions": _config.SESSIONS,
+        "sessions_lock": _config.LOCK,
+        "get_sessions_cache_max": _config.get_sessions_cache_max,
+        "streams": _config.STREAMS,
+        "streams_lock": _config.STREAMS_LOCK,
+        "stream_buffer_cap": _config.StreamChannel._OFFLINE_BUFFER_MAXLEN,
+        "session_list_cache": _route_session_list_cache._SESSIONS_CACHE,
+        "session_list_cache_inflight": _route_session_list_cache._SESSIONS_CACHE_INFLIGHT,
+        "session_list_cache_lock": _route_session_list_cache._SESSIONS_CACHE_LOCK,
+        "session_list_cache_cap": _route_session_list_cache._SESSIONS_CACHE_MAX_ENTRIES,
+        "models_cache_lock": _config._available_models_cache_lock,
+        "models_cache_snapshot": lambda: (
+            _config._available_models_cache,
+            _config._available_models_cache_ts,
+        ),
+        "is_valid_models_cache": _config._is_valid_models_cache,
+    }
+
+
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _models_cache_stats(snapshot: Any, cache_ts: Any, validator) -> dict[str, Any]:
+    stats = {"loaded": False, "provider_groups": 0, "total_models": 0, "age_seconds": None}
+    loaded = bool(callable(validator) and validator(snapshot))
+    if not loaded or not isinstance(snapshot, dict):
+        return stats
+    groups = snapshot.get("groups")
+    if not isinstance(groups, list):
+        return stats
+    stats["loaded"] = True
+    stats["provider_groups"] = len(groups)
+    total_models = 0
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for bucket in ("models", "extra_models"):
+            models = group.get(bucket)
+            if isinstance(models, list):
+                total_models += len(models)
+    stats["total_models"] = total_models
+    try:
+        ts = float(cache_ts)
+    except (TypeError, ValueError):
+        ts = 0.0
+    if ts > 0:
+        stats["age_seconds"] = round(max(0.0, time.monotonic() - ts), 1)
+    return stats
+
+
+def _webui_runtime_payload() -> dict[str, Any]:
+    payload = _zero_webui_runtime_payload()
+    try:
+        sources = _webui_runtime_sources()
+    except Exception:
+        raise
+
+    sessions = sources.get("sessions")
+    sessions_lock = sources.get("sessions_lock")
+    with sessions_lock:
+        payload["sessions"]["resident_count"] = len(sessions)
+    get_sessions_cache_max = sources.get("get_sessions_cache_max")
+    if callable(get_sessions_cache_max):
+        payload["sessions"]["effective_cap"] = _safe_int(get_sessions_cache_max())
+
+    session_list_cache = sources.get("session_list_cache")
+    session_list_cache_lock = sources.get("session_list_cache_lock")
+    session_list_cache_inflight = sources.get("session_list_cache_inflight")
+    with session_list_cache_lock:
+        payload["session_list_cache"]["entries"] = len(session_list_cache)
+        payload["session_list_cache"]["inflight_rebuilds"] = len(session_list_cache_inflight)
+        payload["session_list_cache"]["entry_cap"] = _safe_int(sources.get("session_list_cache_cap"))
+
+    streams = sources.get("streams")
+    streams_lock = sources.get("streams_lock")
+    stream_buffer_cap = _safe_int(sources.get("stream_buffer_cap"))
+    payload["streams"]["per_stream_offline_buffer_cap"] = stream_buffer_cap
+    total_subscribers = 0
+    total_offline_buffered_events = 0
+    total_offline_dropped_events = 0
+    stream_items: list[Any] = []
+    with streams_lock:
+        stream_items = list(streams.values())
+    payload["streams"]["active_streams"] = len(stream_items)
+    for channel in stream_items:
+        snapshot = channel.diagnostic_snapshot()
+        if not isinstance(snapshot, dict):
+            continue
+        total_subscribers += _safe_int(snapshot.get("subscriber_count"))
+        total_offline_buffered_events += _safe_int(snapshot.get("offline_buffered_events"))
+        total_offline_dropped_events += _safe_int(snapshot.get("offline_dropped_events"))
+    payload["streams"]["total_subscribers"] = total_subscribers
+    payload["streams"]["total_offline_buffered_events"] = total_offline_buffered_events
+    payload["streams"]["total_offline_dropped_events"] = total_offline_dropped_events
+
+    models_cache_lock = sources.get("models_cache_lock")
+    with models_cache_lock:
+        snapshot, cache_ts = sources["models_cache_snapshot"]()
+    payload["models_cache"] = _models_cache_stats(snapshot, cache_ts, sources["is_valid_models_cache"])
+    return payload
+
+
 def build_system_health_payload() -> dict[str, Any]:
     metrics: dict[str, Any] = {"cpu": None, "memory": None, "disk": None}
     errors: list[dict[str, str]] = []
@@ -182,6 +313,12 @@ def build_system_health_payload() -> dict[str, Any]:
         except Exception as exc:
             errors.append(_safe_error(name, exc))
 
+    try:
+        runtime = _webui_runtime_payload()
+    except Exception as exc:
+        runtime = _zero_webui_runtime_payload()
+        errors.append(_safe_error("webui_runtime", exc))
+
     available = any(metrics[name] is not None for name in metrics)
     status = "ok" if available and not errors else "partial" if available else "unavailable"
     return {
@@ -191,5 +328,6 @@ def build_system_health_payload() -> dict[str, Any]:
         "cpu": metrics["cpu"],
         "memory": metrics["memory"],
         "disk": metrics["disk"],
+        "webui_runtime": runtime,
         "errors": errors,
     }

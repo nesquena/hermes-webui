@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import threading
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -56,6 +57,22 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
         "_disk_usage",
         lambda: {"used_bytes": 55_500, "total_bytes": 100_000, "percent": 55.5},
     )
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_payload",
+        lambda: {
+            "sessions": {"resident_count": 2, "effective_cap": 100},
+            "session_list_cache": {"entries": 1, "entry_cap": 64, "inflight_rebuilds": 0},
+            "streams": {
+                "active_streams": 0,
+                "total_subscribers": 0,
+                "total_offline_buffered_events": 0,
+                "total_offline_dropped_events": 0,
+                "per_stream_offline_buffer_cap": 8192,
+            },
+            "models_cache": {"loaded": False, "provider_groups": 0, "total_models": 0, "age_seconds": None},
+        },
+    )
 
     payload = system_health.build_system_health_payload()
 
@@ -64,6 +81,7 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
     assert payload["cpu"] == {"percent": 17.3}
     assert payload["memory"] == {"used_bytes": 4000, "total_bytes": 10000, "percent": 40.0}
     assert payload["disk"] == {"used_bytes": 55500, "total_bytes": 100000, "percent": 55.5}
+    assert payload["webui_runtime"]["sessions"] == {"resident_count": 2, "effective_cap": 100}
     assert payload["checked_at"]
     rendered = repr(payload)
     for private_fragment in ("/home/", "/Users/", "mount", "path", "argv", "command", "env", "token"):
@@ -83,6 +101,7 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
         "_disk_usage",
         lambda: {"used_bytes": 1, "total_bytes": 4, "percent": 25.0},
     )
+    monkeypatch.setattr(system_health, "_webui_runtime_payload", system_health._zero_webui_runtime_payload)
 
     partial = system_health.build_system_health_payload()
     assert partial["status"] == "partial"
@@ -101,6 +120,182 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
     assert unavailable["memory"] is None
     assert unavailable["disk"] is None
     assert "/home/user" not in repr(unavailable)
+
+
+def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
+    from api import system_health
+
+    class _FakeChannel:
+        def __init__(self, subscribers, buffered, dropped):
+            self._snapshot = {
+                "subscriber_count": subscribers,
+                "offline_buffered_events": buffered,
+                "offline_dropped_events": dropped,
+            }
+
+        def diagnostic_snapshot(self):
+            return dict(self._snapshot)
+
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 10.0)
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 100, "total_bytes": 200, "percent": 50.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 30, "total_bytes": 60, "percent": 50.0},
+    )
+    monkeypatch.setattr(system_health.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        lambda: {
+            "sessions": {"a": object(), "b": object(), "c": object()},
+            "sessions_lock": threading.Lock(),
+            "get_sessions_cache_max": lambda: 123,
+            "streams": {
+                "one": _FakeChannel(2, 5, 1),
+                "two": _FakeChannel(1, 7, 3),
+            },
+            "streams_lock": threading.Lock(),
+            "stream_buffer_cap": 8192,
+            "session_list_cache": {("default",): object(), ("work",): object()},
+            "session_list_cache_inflight": {("default",): object()},
+            "session_list_cache_lock": threading.Lock(),
+            "session_list_cache_cap": 64,
+            "models_cache_lock": threading.Lock(),
+            "models_cache_snapshot": lambda: ({
+                "active_provider": "openai",
+                "default_model": "gpt-5.5",
+                "configured_model_badges": {},
+                "groups": [
+                    {
+                        "provider_id": "openai",
+                        "models": [{"id": "gpt-5.5"}, {"id": "gpt-5.5-mini"}],
+                        "extra_models": [{"id": "gpt-5.4"}],
+                    },
+                    {
+                        "provider_id": "anthropic",
+                        "models": [{"id": "claude"}],
+                    },
+                ],
+            }, 90.0),
+            "is_valid_models_cache": lambda snapshot: isinstance(snapshot, dict) and isinstance(snapshot.get("groups"), list),
+        },
+        raising=False,
+    )
+
+    payload = system_health.build_system_health_payload()
+
+    assert payload["webui_runtime"] == {
+        "sessions": {"resident_count": 3, "effective_cap": 123},
+        "session_list_cache": {"entries": 2, "entry_cap": 64, "inflight_rebuilds": 1},
+        "streams": {
+            "active_streams": 2,
+            "total_subscribers": 3,
+            "total_offline_buffered_events": 12,
+            "total_offline_dropped_events": 4,
+            "per_stream_offline_buffer_cap": 8192,
+        },
+        "models_cache": {
+            "loaded": True,
+            "provider_groups": 2,
+            "total_models": 4,
+            "age_seconds": 10.0,
+        },
+    }
+
+
+def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
+    from api import system_health
+
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        lambda: {
+            "sessions": {},
+            "sessions_lock": threading.Lock(),
+            "get_sessions_cache_max": lambda: 100,
+            "streams": {},
+            "streams_lock": threading.Lock(),
+            "stream_buffer_cap": 8192,
+            "session_list_cache": {},
+            "session_list_cache_inflight": {},
+            "session_list_cache_lock": threading.Lock(),
+            "session_list_cache_cap": 64,
+            "models_cache_lock": threading.Lock(),
+            "models_cache_snapshot": lambda: (None, 0.0),
+            "is_valid_models_cache": lambda snapshot: False,
+        },
+        raising=False,
+    )
+
+    payload = system_health._webui_runtime_payload()
+
+    assert payload == {
+        "sessions": {"resident_count": 0, "effective_cap": 100},
+        "session_list_cache": {"entries": 0, "entry_cap": 64, "inflight_rebuilds": 0},
+        "streams": {
+            "active_streams": 0,
+            "total_subscribers": 0,
+            "total_offline_buffered_events": 0,
+            "total_offline_dropped_events": 0,
+            "per_stream_offline_buffer_cap": 8192,
+        },
+        "models_cache": {
+            "loaded": False,
+            "provider_groups": 0,
+            "total_models": 0,
+            "age_seconds": None,
+        },
+    }
+
+
+def test_system_health_runtime_models_cache_invalid_and_untimestamped_states(monkeypatch):
+    from api import system_health
+
+    base_sources = {
+        "sessions": {}, "sessions_lock": threading.Lock(), "get_sessions_cache_max": lambda: 1,
+        "streams": {}, "streams_lock": threading.Lock(), "stream_buffer_cap": 8,
+        "session_list_cache": {}, "session_list_cache_inflight": {},
+        "session_list_cache_lock": threading.Lock(), "session_list_cache_cap": 2,
+        "models_cache_lock": threading.Lock(),
+        "is_valid_models_cache": lambda value: isinstance(value, dict) and value.get("valid") is True,
+    }
+
+    monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: {
+        **base_sources, "models_cache_snapshot": lambda: ({"groups": [{"models": [{"id": "secret"}]}]}, 10.0),
+    })
+    invalid = system_health._webui_runtime_payload()["models_cache"]
+    assert invalid == {"loaded": False, "provider_groups": 0, "total_models": 0, "age_seconds": None}
+
+    monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: {
+        **base_sources,
+        "models_cache_snapshot": lambda: ({"valid": True, "groups": []}, 0.0),
+    })
+    untimestamped = system_health._webui_runtime_payload()["models_cache"]
+    assert untimestamped == {"loaded": True, "provider_groups": 0, "total_models": 0, "age_seconds": None}
+
+
+def test_system_health_runtime_source_failure_is_reported(monkeypatch):
+    from api import system_health
+
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 10.0)
+    monkeypatch.setattr(system_health, "_memory_usage", lambda: {"used_bytes": 1, "total_bytes": 2, "percent": 50.0})
+    monkeypatch.setattr(system_health, "_disk_usage", lambda: {"used_bytes": 1, "total_bytes": 2, "percent": 50.0})
+    monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: (_ for _ in ()).throw(
+        RuntimeError("private /home/user/secret-token")
+    ))
+
+    payload = system_health.build_system_health_payload()
+
+    assert payload["status"] == "partial"
+    assert payload["available"] is True
+    assert payload["webui_runtime"] == system_health._zero_webui_runtime_payload()
+    assert payload["errors"] == [{"metric": "webui_runtime", "code": "RuntimeError"}]
+    assert "secret-token" not in repr(payload)
 
 
 def test_system_health_falls_back_to_psutil_when_procfs_is_unavailable(monkeypatch):
@@ -250,6 +445,18 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
             "cpu": {"percent": 12.0},
             "memory": {"used_bytes": 1, "total_bytes": 2, "percent": 50.0},
             "disk": {"used_bytes": 3, "total_bytes": 4, "percent": 75.0},
+            "webui_runtime": {
+                "sessions": {"resident_count": 1, "effective_cap": 100},
+                "session_list_cache": {"entries": 0, "entry_cap": 64, "inflight_rebuilds": 0},
+                "streams": {
+                    "active_streams": 0,
+                    "total_subscribers": 0,
+                    "total_offline_buffered_events": 0,
+                    "total_offline_dropped_events": 0,
+                    "per_stream_offline_buffer_cap": 8192,
+                },
+                "models_cache": {"loaded": False, "provider_groups": 0, "total_models": 0},
+            },
             "errors": [],
         },
     )
@@ -257,7 +464,7 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
     assert routes.handle_get(handler, urlparse("http://example.test/api/system/health")) is True
     payload = handler.json_body()
     assert payload["cpu"]["percent"] == 12.0
-    assert set(payload) == {"status", "available", "checked_at", "cpu", "memory", "disk", "errors"}
+    assert set(payload) == {"status", "available", "checked_at", "cpu", "memory", "disk", "webui_runtime", "errors"}
 
 
 def test_system_health_panel_markup_and_styles_live_under_insights_not_top_chrome():
