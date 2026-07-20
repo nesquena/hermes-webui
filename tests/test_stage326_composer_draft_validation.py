@@ -121,7 +121,7 @@ def test_draft_save_does_not_touch_session_updated_at():
 def test_draft_save_skips_unchanged_payload_before_persist():
     """Duplicate debounced draft POSTs should not rewrite the draft sidecar."""
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    draft_idx = src.find("sidecar_draft = read_composer_draft_sidecar(sid)")
+    draft_idx = src.find("sidecar_state, sidecar_draft = composer_draft_sidecar_state(sid)")
     unchanged_idx = src.find("if next_draft == current_draft and sidecar_draft is not None", draft_idx)
     save_idx = src.find("saved_draft = write_composer_draft_sidecar(sid, next_draft)", draft_idx)
 

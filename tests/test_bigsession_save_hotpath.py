@@ -157,22 +157,24 @@ def test_backup_guard_refuses_empty_overwrite_with_active_stream(session_store):
     )
 
 
-def test_noop_resave_skips_disk_write(session_store):
+def test_noop_resave_skips_disk_write(session_store, monkeypatch):
     s = _make_session("hotpath4", 2)
     s.save(skip_index=True)
     p = session_store / "hotpath4.json"
-    st1 = os.stat(p)
+    replace_calls = []
+    real_replace = _models._safe_replace
+    monkeypatch.setattr(
+        _models,
+        "_safe_replace",
+        lambda source, destination: (replace_calls.append((source, destination)), real_replace(source, destination))[1],
+    )
     # Identical content, no updated_at touch → must not rewrite the file.
     s.save(touch_updated_at=False, skip_index=True)
-    st2 = os.stat(p)
-    assert (st1.st_mtime_ns, st1.st_size) == (st2.st_mtime_ns, st2.st_size), (
-        "byte-identical re-save should skip the disk write"
-    )
-    # Real change → must write.
+    assert replace_calls == [], "byte-identical re-save should skip the disk write"
+    # Real change → must publish through the atomic writer.
     s.title = "changed"
     s.save(touch_updated_at=False, skip_index=True)
-    st3 = os.stat(p)
-    assert st3.st_mtime_ns != st1.st_mtime_ns
+    assert len(replace_calls) == 1
     assert json.loads(p.read_text(encoding="utf-8"))["title"] == "changed"
 
 

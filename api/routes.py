@@ -2132,8 +2132,18 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 # sidecar holds the user's durable composer draft.
                 try:
                     owner = Session.load(_sid)
-                    draft = resolve_composer_draft(
-                        _sid, getattr(owner, "composer_draft", None) if owner else None
+                    sidecar_state, sidecar_draft = composer_draft_sidecar_state(_sid)
+                    if sidecar_state == "unreadable":
+                        logger.warning(
+                            "Retaining webui zero-message row %s because its draft sidecar is unreadable",
+                            _sid,
+                        )
+                        missing_webui_orphan_ids.discard(_sid)
+                        continue
+                    draft = (
+                        sidecar_draft
+                        if sidecar_state == "present"
+                        else getattr(owner, "composer_draft", None) if owner else None
                     )
                 except Exception:
                     logger.warning(
@@ -2150,7 +2160,13 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 if owner is not None and has_draft:
                     missing_webui_orphan_ids.discard(_sid)
                     continue
-                delete_composer_draft_sidecar(_sid)
+                if not delete_composer_draft_sidecar(_sid):
+                    logger.warning(
+                        "Retaining webui zero-message row %s because its draft sidecar could not be removed",
+                        _sid,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
             try:
                 prune_session_from_index(_sid)
                 _diag("prune_orphaned_webui_zero_message")
@@ -9442,6 +9458,7 @@ from api.models import (
     write_composer_draft_sidecar,
     delete_composer_draft_sidecar,
     get_composer_draft_lock,
+    _fsync_composer_draft_directory,
     update_cached_composer_draft,
 )
 
@@ -14959,6 +14976,25 @@ def handle_post(handler, parsed) -> bool:
         # final state cannot contain a draft without an owning session.
         sidecar_deleted = False
         with get_composer_draft_lock(sid):
+            sidecar_state, _sidecar_draft = composer_draft_sidecar_state(sid)
+            if sidecar_state == "unreadable":
+                return bad(handler, "Saved draft is unreadable; session was retained", 500)
+            owner = None
+            try:
+                owner = Session.load(sid)
+                if owner is None:
+                    raise FileNotFoundError(p)
+                if sidecar_state == "present":
+                    # A failed unlink may mean ``unlink()`` succeeded but its
+                    # parent directory fsync did not. Persist the authoritative
+                    # draft in the legacy owner before staging so either outcome
+                    # is readable.
+                    owner.composer_draft = copy.deepcopy(_sidecar_draft)
+                    owner.save(touch_updated_at=False, skip_index=True)
+                    _fsync_composer_draft_directory(SESSION_DIR)
+            except Exception:
+                logger.exception("Failed to checkpoint draft before session deletion: %s", sid)
+                return bad(handler, "Failed to preserve saved draft; session was retained", 500)
             # Stage the owner under the same directory first. That lets a
             # sidecar-delete failure restore the owner atomically rather than
             # orphaning the authoritative draft after a partial delete.
@@ -14974,6 +15010,7 @@ def handle_post(handler, parsed) -> bool:
                 if staged_owner is not None:
                     try:
                         os.replace(staged_owner, p)
+                        _fsync_composer_draft_directory(SESSION_DIR)
                     except Exception:
                         logger.exception("Failed to restore session owner after draft-delete failure: %s", sid)
                 return bad(handler, "Failed to remove saved draft; session was retained", 500)
@@ -14981,7 +15018,29 @@ def handle_post(handler, parsed) -> bool:
                 if staged_owner is not None:
                     staged_owner.unlink(missing_ok=True)
             except Exception:
-                logger.warning("Failed to finalize staged session deletion for %s", sid, exc_info=True)
+                logger.exception("Failed to finalize staged session deletion for %s", sid)
+                try:
+                    if staged_owner is not None:
+                        os.replace(staged_owner, p)
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore staged session after unlink failure: %s", sid)
+                return bad(handler, "Failed to finalize session deletion; session was retained", 500)
+            try:
+                if staged_owner is not None:
+                    _fsync_composer_draft_directory(SESSION_DIR)
+            except Exception:
+                logger.exception("Failed to durably finalize staged session deletion for %s", sid)
+                # unlink succeeded but its directory entry is not confirmed
+                # durable. Recreate the canonical owner from the loaded snapshot.
+                try:
+                    if sidecar_state == "present":
+                        write_composer_draft_sidecar(sid, _sidecar_draft)
+                    owner.save(touch_updated_at=False, skip_index=True)
+                    _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore session after final directory fsync failure: %s", sid)
+                return bad(handler, "Failed to finalize session deletion; session was retained", 500)
             sidecar_deleted = True
             with LOCK:
                 SESSIONS.pop(sid, None)
@@ -20698,8 +20757,15 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 # same lock as POST/delete so cleanup cannot delete its owner
                 # between validation and a draft write.
                 s = Session.load(sid)
-                draft = resolve_composer_draft(
-                    sid, getattr(s, "composer_draft", None) if s else None
+                sidecar_state, sidecar_draft = composer_draft_sidecar_state(sid)
+                # Cleanup is destructive: a malformed or transiently unreadable
+                # authoritative sidecar is retention, never an empty fallback.
+                if sidecar_state == "unreadable":
+                    continue
+                draft = (
+                    sidecar_draft
+                    if sidecar_state == "present"
+                    else getattr(s, "composer_draft", None) if s else None
                 )
                 has_draft = bool(
                     str(draft.get("text") or "") or draft.get("files")
@@ -20712,11 +20778,54 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                         and not has_draft
                     )
                 if should_delete:
+                    if sidecar_state == "present":
+                        try:
+                            s.composer_draft = copy.deepcopy(sidecar_draft)
+                            s.save(touch_updated_at=False, skip_index=True)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except Exception:
+                            logger.exception("Failed to checkpoint draft before cleanup: %s", sid)
+                            continue
+                    staged_owner = p.with_name(f".{p.name}.deleting-{uuid.uuid4().hex}")
+                    try:
+                        os.replace(p, staged_owner)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        logger.warning("Failed to stage session file for cleanup: %s", sid, exc_info=True)
+                        continue
+                    if not delete_composer_draft_sidecar(sid):
+                        try:
+                            os.replace(staged_owner, p)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except OSError:
+                            logger.exception("Failed to restore staged session owner after cleanup failure: %s", sid)
+                        continue
+                    try:
+                        staged_owner.unlink()
+                    except OSError:
+                        logger.exception("Failed to finalize staged session cleanup: %s", sid)
+                        try:
+                            os.replace(staged_owner, p)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except OSError:
+                            logger.exception("Failed to restore staged cleanup owner after unlink failure: %s", sid)
+                        continue
+                    try:
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                    except OSError:
+                        logger.exception("Failed to durably finalize staged session cleanup: %s", sid)
+                        try:
+                            if sidecar_state == "present":
+                                write_composer_draft_sidecar(sid, sidecar_draft)
+                            s.save(touch_updated_at=False, skip_index=True)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except OSError:
+                            logger.exception("Failed to restore cleanup state after final directory fsync failure: %s", sid)
+                        continue
                     with LOCK:
                         SESSIONS.pop(sid, None)
-                    p.unlink(missing_ok=True)
                     p.with_suffix('.json.bak').unlink(missing_ok=True)
-                    delete_composer_draft_sidecar(sid)
                     cleaned += 1
                     phase1_removed_ids.add(sid)
         except Exception:
@@ -20823,6 +20932,9 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 with LOCK:
                     in_memory_owner = sid in SESSIONS
                 if not owner_exists and not in_memory_owner:
+                    sidecar_state, _sidecar_draft = composer_draft_sidecar_state(sid)
+                    if sidecar_state == "unreadable":
+                        continue
                     if delete_composer_draft_sidecar(sid):
                         cleaned += 1
     except Exception:

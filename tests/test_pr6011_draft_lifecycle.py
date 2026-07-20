@@ -134,6 +134,163 @@ def test_delete_restores_owner_when_authoritative_draft_unlink_fails(session_env
     assert models.read_composer_draft_sidecar(sid) == draft
 
 
+
+def test_delete_fsync_failure_after_sidecar_unlink_keeps_legacy_draft(session_env, monkeypatch):
+    from api import models
+
+    session_dir, _sessions = session_env
+    sid = "delete-sidecar-fsync-failure"
+    owner = models.Session(session_id=sid, title="Retain latest draft")
+    owner.save(skip_index=True)
+    draft = {"text": "latest durable draft", "files": []}
+    models.write_composer_draft_sidecar(sid, draft)
+    monkeypatch.setattr(
+        models,
+        "_fsync_composer_draft_parent",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated directory EIO")),
+    )
+
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert (session_dir / f"{sid}.json").exists()
+    assert models.Session.load(sid).composer_draft == draft
+
+
+def test_delete_refuses_sidecar_unlink_when_checkpoint_directory_fsync_fails(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "delete-checkpoint-directory-fsync-failure"
+    owner = models.Session(session_id=sid, title="Retain draft")
+    owner.save(skip_index=True)
+    draft = {"text": "draft remains authoritative", "files": []}
+    models.write_composer_draft_sidecar(sid, draft)
+    monkeypatch.setattr(
+        routes,
+        "_fsync_composer_draft_directory",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated checkpoint EIO")),
+    )
+    unlink_attempted = []
+    monkeypatch.setattr(
+        routes,
+        "delete_composer_draft_sidecar",
+        lambda _sid: unlink_attempted.append(_sid) or True,
+    )
+
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert unlink_attempted == []
+    assert (session_dir / f"{sid}.json").exists()
+    assert models.read_composer_draft_sidecar(sid) == draft
+
+
+def test_delete_rollback_failure_is_recovered_by_next_session_load(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, sessions = session_env
+    sid = "delete-rollback-load-recovery"
+    owner = models.Session(session_id=sid, title="Retain after rollback failure")
+    owner.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "durable", "files": []})
+    owner_path = session_dir / f"{sid}.json"
+    staged_prefix = str(session_dir / f".{sid}.json.deleting-")
+    original_replace = routes.os.replace
+    failed_restore = []
+
+    def fail_first_rollback(source, destination):
+        if (
+            str(source).startswith(staged_prefix)
+            and str(destination) == str(owner_path)
+            and not failed_restore
+        ):
+            failed_restore.append(True)
+            raise OSError("simulated delete rollback failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+    monkeypatch.setattr(routes.os, "replace", fail_first_rollback)
+
+    response = _post_session_delete(monkeypatch, sid)
+    sessions.clear()
+    listed = models.all_sessions()
+    metadata = models.Session.load_metadata_only(sid)
+    reloaded = models.Session.load(sid)
+
+    assert response["status"] == 500
+    assert failed_restore == [True]
+    assert owner_path.exists()
+    assert sid in {entry["session_id"] for entry in listed}
+    assert metadata is not None
+    assert metadata.session_id == sid
+    assert reloaded is not None
+    assert reloaded.session_id == sid
+
+
+def test_delete_returns_error_when_final_owner_unlink_directory_fsync_fails(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "delete-final-owner-fsync-failure"
+    owner = models.Session(session_id=sid, title="Delete only after durable unlink")
+    owner.save(skip_index=True)
+    monkeypatch.setattr(
+        routes,
+        "_fsync_composer_draft_directory",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated final unlink EIO")),
+    )
+
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert (session_dir / f"{sid}.json").exists()
+    assert models.Session.load(sid) is not None
+
+
+def test_delete_final_owner_unlink_failure_restores_staged_owner(session_env, monkeypatch):
+    from api import models
+
+    session_dir, _sessions = session_env
+    sid = "delete-final-owner-unlink-failure"
+    owner = models.Session(session_id=sid, title="Retain after unlink failure")
+    owner.save(skip_index=True)
+    owner_path = session_dir / f"{sid}.json"
+    original_unlink = type(owner_path).unlink
+
+    def fail_staged_unlink(path, *args, **kwargs):
+        if path.name.startswith(f".{sid}.json.deleting-"):
+            raise OSError("simulated staged owner unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(owner_path), "unlink", fail_staged_unlink)
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert owner_path.exists()
+    assert not list(session_dir.glob(f".{sid}.json.deleting-*"))
+
+
+def test_delete_refuses_to_remove_unreadable_authoritative_draft(session_env, monkeypatch):
+    from api import models
+
+    session_dir, _sessions = session_env
+    sid = "draft-delete-unreadable"
+    session = models.Session(session_id=sid, title="Retain unreadable draft")
+    session.save(skip_index=True)
+    owner_path = session_dir / f"{sid}.json"
+    sidecar_path = models.composer_draft_sidecar_path(sid)
+    assert sidecar_path is not None
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text("{malformed", encoding="utf-8")
+
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert owner_path.exists()
+    assert sidecar_path.read_text(encoding="utf-8") == "{malformed"
+
+
 def test_compression_rotation_moves_draft_to_continuation_owner(session_env):
     from api import models, streaming
 
@@ -551,6 +708,70 @@ def test_clear_skips_index_write_to_keep_checkpoint_and_final_save_durable(sessi
     assert models.Session.load(sid).composer_draft == {"text": "", "files": []}
 
 
+
+def test_draft_directory_fsync_is_noop_on_windows(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    open_calls = []
+    monkeypatch.setattr(models.os, "name", "nt")
+    monkeypatch.setattr(models.os, "open", lambda *_args, **_kwargs: open_calls.append(True) or 0)
+
+    models._fsync_composer_draft_directory(models.SESSION_DIR)
+
+    assert open_calls == []
+
+
+def test_write_draft_rejects_parent_directory_fsync_failure(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    monkeypatch.setattr(
+        models,
+        "_fsync_composer_draft_parent",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated directory EIO")),
+    )
+
+    with pytest.raises(OSError, match="directory EIO"):
+        models.write_composer_draft_sidecar("draft-parent-fsync-eio", {"text": "x", "files": []})
+
+
+def test_delete_draft_reports_parent_directory_fsync_failure(session_env, monkeypatch):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "draft-delete-parent-fsync-eio"
+    models.write_composer_draft_sidecar(sid, {"text": "x", "files": []})
+    monkeypatch.setattr(
+        models,
+        "_fsync_composer_draft_parent",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated directory EIO")),
+    )
+
+    assert models.delete_composer_draft_sidecar(sid) is False
+
+
+def test_migration_uses_retained_source_when_drafts_differ_with_equal_mtime(session_env):
+    from api import models
+    import os
+
+    _session_dir, _sessions = session_env
+    old_sid = "draft-equal-time-source"
+    new_sid = "draft-equal-time-destination"
+    models.write_composer_draft_sidecar(old_sid, {"text": "source", "files": []})
+    models.write_composer_draft_sidecar(new_sid, {"text": "destination", "files": []})
+    old_path = models.composer_draft_sidecar_path(old_sid)
+    new_path = models.composer_draft_sidecar_path(new_sid)
+    assert old_path is not None and new_path is not None
+    timestamp = 1_700_000_000_000_000_000
+    os.utime(old_path, ns=(timestamp, timestamp))
+    os.utime(new_path, ns=(timestamp, timestamp))
+
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid) is True
+    assert models.read_composer_draft_sidecar(old_sid) is None
+    assert models.read_composer_draft_sidecar(new_sid) == {"text": "source", "files": []}
+
+
 def test_delete_draft_sidecar_reports_unlink_failure(session_env, monkeypatch):
     from api import models
 
@@ -588,6 +809,126 @@ def test_cleanup_does_not_count_failed_orphan_sidecar_delete(session_env, monkey
 
     assert captured == {"ok": True, "cleaned": 0}
     assert (session_dir / "_drafts" / f"{sid}.json").exists()
+
+
+
+def test_cleanup_retains_owner_when_draft_sidecar_delete_fails(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "cleanup-owner-sidecar-delete-failure"
+    owner = models.Session(session_id=sid, title="Untitled")
+    owner.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "", "files": []})
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=False) is True
+
+    assert captured == {"ok": True, "cleaned": 0}
+    assert (session_dir / f"{sid}.json").exists()
+    assert models.read_composer_draft_sidecar(sid) == {"text": "", "files": []}
+
+
+def test_cleanup_fsync_failure_after_sidecar_unlink_keeps_legacy_draft(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "cleanup-sidecar-fsync-failure"
+    owner = models.Session(session_id=sid, title="Untitled")
+    owner.save(skip_index=True)
+    draft = {"text": "", "files": []}
+    models.write_composer_draft_sidecar(sid, draft)
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+    monkeypatch.setattr(
+        models,
+        "_fsync_composer_draft_parent",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated directory EIO")),
+    )
+
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=False) is True
+
+    assert captured == {"ok": True, "cleaned": 0}
+    assert (session_dir / f"{sid}.json").exists()
+    assert models.Session.load(sid).composer_draft == draft
+
+
+def test_cleanup_recovers_staged_owner_after_sidecar_delete_rollback_failure(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "cleanup-sidecar-delete-rollback-failure"
+    owner = models.Session(session_id=sid, title="Untitled")
+    owner.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "", "files": []})
+    owner_path = session_dir / f"{sid}.json"
+    staged_prefix = str(session_dir / f".{sid}.json.deleting-")
+    original_replace = routes.os.replace
+    failed_restore = []
+
+    def fail_first_rollback(source, destination):
+        if (
+            str(source).startswith(staged_prefix)
+            and str(destination) == str(owner_path)
+            and not failed_restore
+        ):
+            failed_restore.append(True)
+            raise OSError("simulated cleanup rollback failure")
+        return original_replace(source, destination)
+
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+    monkeypatch.setattr(routes.os, "replace", fail_first_rollback)
+
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=False) is True
+
+    assert failed_restore == [True]
+    assert captured == {"ok": True, "cleaned": 0}
+    assert owner_path.exists()
+    assert models.read_composer_draft_sidecar(sid) == {"text": "", "files": []}
+
+
+def test_cleanup_retains_unreadable_orphan_sidecar(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, sessions = session_env
+    sid = "cleanup-unreadable-orphan"
+    sidecar_path = models.composer_draft_sidecar_path(sid)
+    assert sidecar_path is not None
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text("{malformed", encoding="utf-8")
+    sessions.pop(sid, None)
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=False) is True
+
+    assert captured == {"ok": True, "cleaned": 0}
+    assert sidecar_path.read_text(encoding="utf-8") == "{malformed"
+
+
+def test_cleanup_retains_owner_when_sidecar_is_unreadable(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "cleanup-unreadable-owner"
+    owner = models.Session(session_id=sid, title="Untitled")
+    owner.save(skip_index=True)
+    sidecar_path = models.composer_draft_sidecar_path(sid)
+    assert sidecar_path is not None
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text("{malformed", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+
+    assert routes._handle_sessions_cleanup(SimpleNamespace(), {}, zero_only=False) is True
+
+    assert captured == {"ok": True, "cleaned": 0}
+    assert (session_dir / f"{sid}.json").exists()
+    assert sidecar_path.read_text(encoding="utf-8") == "{malformed"
 
 
 def test_clear_canonicalizes_legacy_draft_without_files(session_env, monkeypatch):

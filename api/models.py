@@ -2,6 +2,7 @@
 import collections
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -1276,22 +1277,33 @@ def _composer_draft_sidecar_signature(stat_result):
     )
 
 
-def _fsync_composer_draft_parent(path: Path) -> None:
-    """Best-effort directory durability after a draft replace or unlink."""
-    try:
-        flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_RDONLY", 0)
-        directory_fd = os.open(path.parent, flags)
-    except OSError:
+def _fsync_composer_draft_directory(path: Path) -> None:
+    """Durably publish a directory entry where the platform supports it."""
+    # Windows does not provide portable directory handles for ``os.fsync``.
+    # Sidecar writes still use fsynced files plus atomic replace; directory fsync
+    # is an unsupported extra durability step, not a reason to reject drafts.
+    if os.name == "nt":
         return
+    flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_RDONLY", 0)
+    try:
+        directory_fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+            return
+        raise
     try:
         os.fsync(directory_fd)
-    except OSError:
-        pass
+    except OSError as exc:
+        if exc.errno in {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+            return
+        raise
     finally:
-        try:
-            os.close(directory_fd)
-        except OSError:
-            pass
+        os.close(directory_fd)
+
+
+def _fsync_composer_draft_parent(path: Path) -> None:
+    """Durably publish a draft replace or unlink in its parent directory."""
+    _fsync_composer_draft_directory(path.parent)
 
 
 def composer_draft_sidecar_path(sid):
@@ -1346,7 +1358,10 @@ def write_composer_draft_sidecar(sid, draft) -> dict:
     if p is None:
         raise ValueError(f'Unsafe session_id {sid!r}; refusing to write draft sidecar')
     draft = dict(draft) if isinstance(draft, dict) else {}
+    drafts_dir_created = not p.parent.exists()
     p.parent.mkdir(parents=True, exist_ok=True)
+    if drafts_dir_created:
+        _fsync_composer_draft_directory(SESSION_DIR)
     payload = _json_dumps_session({'draft': draft, 'updated_at': time.time()})
     tmp = p.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
     try:
@@ -1383,7 +1398,9 @@ def delete_composer_draft_sidecar(sid) -> bool:
     if p is None:
         return True
     try:
-        p.unlink(missing_ok=True)
+        if not p.exists():
+            return True
+        p.unlink()
         _fsync_composer_draft_parent(p)
     except OSError:
         logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
@@ -1417,27 +1434,17 @@ def migrate_composer_draft_sidecar(old_sid, new_sid, *, finalize_source: bool = 
             return False
         if old_state == "absent":
             return True
-        old_path = composer_draft_sidecar_path(old_sid)
-        new_path = composer_draft_sidecar_path(new_sid)
-        if old_path is None or new_path is None:
-            return False
         copied_destination = False
         if new_state == "absent":
             write_composer_draft_sidecar(new_sid, old_draft)
             update_cached_composer_draft(new_sid, old_draft)
             copied_destination = True
         elif old_draft != new_draft:
-            # A failed prior move can leave a stale destination sidecar. If the
-            # retained source changed after that copy, it remains authoritative
-            # and must refresh the destination before source deletion.
-            try:
-                old_mtime = old_path.stat().st_mtime_ns
-                new_mtime = new_path.stat().st_mtime_ns
-            except OSError:
-                return False
-            if old_mtime > new_mtime:
-                write_composer_draft_sidecar(new_sid, old_draft)
-                update_cached_composer_draft(new_sid, old_draft)
+            # The old session remains the explicit owner until this operation
+            # succeeds, so its current draft is authoritative even when files
+            # share an mtime on coarse/coalesced filesystems.
+            write_composer_draft_sidecar(new_sid, old_draft)
+            update_cached_composer_draft(new_sid, old_draft)
         if not finalize_source:
             return True
         if delete_composer_draft_sidecar(old_sid):
@@ -1465,6 +1472,47 @@ def update_cached_composer_draft(sid, draft) -> None:
         cached = SESSIONS.get(sid)
         if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
             cached.composer_draft = copy.deepcopy(draft) if isinstance(draft, dict) else {}
+
+
+def _recover_staged_session_owner(sid, path: Path) -> Path:
+    """Restore a staged delete owner after its rollback failed.
+
+    Callers only invoke this after the primary owner path is absent. Acquiring
+    the draft stripe prevents a concurrent delete from being resurrected while
+    it still owns the staged file; once that delete releases the lock, a leftover
+    stage is an incomplete deletion and must be made discoverable again.
+    """
+    with get_composer_draft_lock(sid):
+        if path.exists():
+            return path
+        staged_candidates = sorted(path.parent.glob(f'.{path.name}.deleting-*'))
+        if not staged_candidates:
+            return path
+        try:
+            os.replace(staged_candidates[-1], path)
+            _fsync_composer_draft_directory(path.parent)
+        except OSError:
+            logger.exception("Failed to recover staged session owner for %s", sid)
+    return path
+
+
+def _recover_all_staged_session_owners() -> None:
+    """Make rollback leftovers visible before a sidebar/index scan."""
+    try:
+        staged_paths = list(SESSION_DIR.glob('.*.json.deleting-*'))
+    except OSError:
+        logger.debug("Failed to scan staged session owners", exc_info=True)
+        return
+    for staged_path in staged_paths:
+        name = staged_path.name
+        prefix = '.'
+        marker = '.json.deleting-'
+        if not name.startswith(prefix) or marker not in name:
+            continue
+        sid = name[len(prefix):].split(marker, 1)[0]
+        if not is_safe_session_id(sid):
+            continue
+        _recover_staged_session_owner(sid, SESSION_DIR / f'{sid}.json')
 
 
 def _load_session_from_path(path: Path) -> "Session | None":
@@ -1946,6 +1994,8 @@ class Session:
             return None
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
+            p = _recover_staged_session_owner(sid, p)
+        if not p.exists():
             return None
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
@@ -1999,6 +2049,8 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
+        if not p.exists():
+            p = _recover_staged_session_owner(sid, p)
         if not p.exists():
             return None
         try:
@@ -6172,6 +6224,7 @@ def _diag_stage(diag, name: str) -> None:
 
 
 def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
+    _recover_all_staged_session_owners()
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
