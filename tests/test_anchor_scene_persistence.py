@@ -445,6 +445,171 @@ def test_anchor_scene_persistence_trims_artifact_budget_instead_of_rejecting_sce
     assert sanitized["artifacts"][0]["payload"]["path"].startswith("reports/000-")
 
 
+def test_anchor_scene_persistence_rejects_explicit_foreign_artifact_owner(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    Session(
+        session_id="artifact-foreign-post",
+        messages=[
+            {"role": "user", "content": "write a file"},
+            {
+                "role": "assistant",
+                "content": "cancelled",
+                "timestamp": 10,
+                "_anchor_stream_id": "stream-good",
+            },
+        ],
+    ).save(skip_index=True)
+
+    foreign = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/foreign.md",
+            "source_tool": "write_file",
+            "tool_call_id": "call-foreign",
+        },
+        session_id="artifact-foreign-post",
+        run_id="stream-good",
+        stream_id="stream-foreign",
+        event_id="stream-foreign:1",
+        seq=1,
+    )
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+        "artifacts": [foreign],
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "session_id": "artifact-foreign-post",
+            "stream_id": "stream-good",
+            "message_index": 1,
+            "scene": scene,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: captured.update(error=msg, status=status) or True,
+    )
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    assert captured["status"] == 400
+    assert "artifact.stream_id" in captured["error"]
+
+    raw = json.loads((session_dir / "artifact-foreign-post.json").read_text(encoding="utf-8"))
+    assert not raw.get("anchor_activity_scenes")
+
+
+def test_anchor_scene_persistence_merges_browser_post_after_worker_settlement(tmp_path, monkeypatch):
+    from api import models, routes, streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="artifact-post-after-worker",
+        messages=[
+            {"role": "user", "content": "write then cancel"},
+            {"role": "assistant", "content": "Task cancelled.", "timestamp": 10},
+        ],
+    )
+    event = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/late-worker.md",
+            "source_tool": "write_file",
+            "tool_call_id": "call-late",
+        },
+        session_id=session.session_id,
+        run_id="stream-late",
+        stream_id="stream-late",
+        event_id="stream-late:2",
+        seq=2,
+    )
+    assert streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-late",
+        [event],
+        terminal_state="cancelled",
+        message_index=1,
+    )
+    session.save(skip_index=True)
+
+    stale_browser_scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {
+            "session_id": session.session_id,
+            "run_id": "stream-late",
+            "stream_id": "stream-late",
+        },
+        "activity_rows": [{"row_id": "browser-tool", "role": "tool", "tool_call_id": "call-late"}],
+        "artifacts": [],
+        "side_effects": [{"kind": "browser-row"}],
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "session_id": session.session_id,
+            "stream_id": "stream-late",
+            "message_index": 1,
+            "scene": stale_browser_scene,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        ) or True,
+    )
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    assert captured["status"] == 200
+
+    raw = json.loads((session_dir / "artifact-post-after-worker.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    scene = record["scene"]
+    assert scene["activity_rows"] == stale_browser_scene["activity_rows"]
+    assert scene["side_effects"] == stale_browser_scene["side_effects"]
+    assert scene["terminal_state"] == "cancelled"
+    assert scene["artifacts"][0]["payload"]["path"] == "reports/late-worker.md"
+
+
 def test_anchor_scene_persistence_prefers_unique_ref_over_stale_index(tmp_path, monkeypatch):
     from api import models, routes
     from api.models import Session

@@ -53,6 +53,7 @@ from api.artifact_references import (
     anchor_artifact_event_from_payload,
     bound_anchor_artifact_events,
     derive_file_artifact_references,
+    merge_anchor_activity_scene,
 )
 from api.metering import meter
 from api.run_journal import RunJournalWriter, _parse_run_journal_event_id
@@ -1668,12 +1669,17 @@ def _reconcile_stream_artifacts_into_terminal_anchor_scene(
     stream_id = str(stream_id or '').strip()
     if not stream_id:
         return False
-    artifacts = bound_anchor_artifact_events(
-        list(artifact_events or []),
-        session_id=getattr(session, 'session_id', None),
-        stream_id=stream_id,
-        run_id=stream_id,
-    )
+    try:
+        artifacts = bound_anchor_artifact_events(
+            list(artifact_events or []),
+            session_id=getattr(session, 'session_id', None),
+            stream_id=stream_id,
+            run_id=stream_id,
+            reject_owner_mismatch=True,
+        )
+    except ValueError:
+        logger.debug("Rejected foreign-owned anchor artifact during terminal reconciliation", exc_info=True)
+        return False
     if not artifacts:
         return False
     messages = getattr(session, 'messages', None)
@@ -1709,49 +1715,45 @@ def _reconcile_stream_artifacts_into_terminal_anchor_scene(
     key = ref or f"index:{idx}"
     records = dict(getattr(session, 'anchor_activity_scenes', None) or {})
     record = records.get(key) if isinstance(records.get(key), dict) else {}
-    scene = copy.deepcopy(record.get('scene')) if isinstance(record.get('scene'), dict) else {}
-    existing_artifacts = scene.get('artifacts') if isinstance(scene.get('artifacts'), list) else []
-    artifacts = bound_anchor_artifact_events(
-        [*existing_artifacts, *artifacts],
-        session_id=getattr(session, 'session_id', None),
-        stream_id=stream_id,
-        run_id=stream_id,
-    )
-    lifecycle = scene.get('lifecycle') if isinstance(scene.get('lifecycle'), dict) else {}
-    lifecycle = dict(lifecycle)
-    lifecycle['status'] = terminal_state
-    lifecycle['terminal_state'] = terminal_state
-    identity = scene.get('identity') if isinstance(scene.get('identity'), dict) else {}
-    identity = dict(identity)
-    identity['session_id'] = getattr(session, 'session_id', None)
-    identity['stream_id'] = stream_id
-    identity.setdefault('run_id', artifacts[0].get('run_id') or stream_id)
-    source_refs = [
-        str(item)
-        for item in identity.get('source_message_refs', [])
-        if str(item or '').strip()
-    ] if isinstance(identity.get('source_message_refs'), list) else []
-    if ref and ref not in source_refs:
-        source_refs.append(ref)
-    identity['source_message_refs'] = source_refs
-    final_answer = scene.get('final_answer')
+    existing_scene = record.get('scene') if isinstance(record.get('scene'), dict) else {}
+    final_answer = existing_scene.get('final_answer')
     if not isinstance(final_answer, str):
         final_answer = _assistant_message_plain_text(message)
-    scene.update({
-        'version': 'activity_scene_v1',
-        'mode': scene.get('mode') or 'compact_worklog',
-        'identity': identity,
-        'lifecycle': lifecycle,
-        'final_answer': final_answer,
-        'final_message_ref': ref or scene.get('final_message_ref'),
-        'terminal_state': terminal_state,
-        'activity_rows': scene.get('activity_rows') if isinstance(scene.get('activity_rows'), list) else [],
-        'artifacts': artifacts,
-        'side_effects': scene.get('side_effects') if isinstance(scene.get('side_effects'), list) else [],
-    })
     duration = _message_turn_duration(message)
-    if duration is not None and scene.get('turn_duration') is None:
-        scene['turn_duration'] = duration
+    incoming_scene = {
+        'version': 'activity_scene_v1',
+        'mode': 'compact_worklog',
+        'identity': {
+            'session_id': getattr(session, 'session_id', None),
+            'run_id': stream_id,
+            'stream_id': stream_id,
+            'source_message_refs': [ref] if ref else [],
+        },
+        'lifecycle': {
+            'status': terminal_state,
+            'terminal_state': terminal_state,
+        },
+        'final_answer': final_answer,
+        'final_message_ref': ref,
+        'terminal_state': terminal_state,
+        'artifacts': artifacts,
+    }
+    try:
+        scene = merge_anchor_activity_scene(
+            existing_scene,
+            incoming_scene,
+            session_id=getattr(session, 'session_id', None),
+            run_id=stream_id,
+            stream_id=stream_id,
+            terminal_state=terminal_state,
+            final_answer=final_answer,
+            final_message_ref=ref,
+            turn_duration=duration,
+            reject_owner_mismatch=True,
+        )
+    except ValueError:
+        logger.debug("Rejected foreign-owned anchor scene during terminal reconciliation", exc_info=True)
+        return False
     records[key] = {
         'version': 'anchor_activity_scene_record_v1',
         'message_index': idx,
@@ -9788,6 +9790,13 @@ def _run_agent_streaming(
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
+                        _reconcile_stream_artifacts_into_terminal_anchor_scene(
+                            s,
+                            stream_id,
+                            _anchor_artifact_events,
+                            terminal_state=_err_type or 'error',
+                            message_index=len(s.messages) - 1,
+                        )
                         try:
                             s.save()
                         except Exception:

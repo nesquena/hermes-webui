@@ -592,3 +592,259 @@ def test_terminal_reconciliation_rejects_foreign_stream_owner(tmp_path, monkeypa
         message_index=1,
     )
     assert not session.anchor_activity_scenes
+
+
+def test_terminal_reconciliation_rejects_explicit_foreign_artifact_owner(tmp_path):
+    from api import streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session = Session(
+        session_id="artifact-foreign-owner",
+        messages=[
+            {"role": "user", "content": "write"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "timestamp": 2,
+                "_anchor_stream_id": "stream-good",
+            },
+        ],
+    )
+    foreign = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/foreign-owner.md",
+            "source_tool": "write_file",
+        },
+        session_id=session.session_id,
+        run_id="stream-good",
+        stream_id="stream-foreign",
+        event_id="stream-foreign:3",
+        seq=3,
+    )
+
+    assert not streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-good",
+        [foreign],
+        terminal_state="completed",
+        message_index=1,
+    )
+    assert not session.anchor_activity_scenes
+
+
+def test_returned_apperror_settles_tool_artifact_before_terminal_save(tmp_path, monkeypatch):
+    import queue
+    from collections import OrderedDict
+
+    from api import config, models, routes, streaming
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    workspace = tmp_path / "workspace"
+    session_dir.mkdir()
+    workspace.mkdir()
+    target = workspace / "reports" / "returned-error.md"
+    target.parent.mkdir()
+
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(config, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    stream_id = "stream-returned-error"
+    session = Session(session_id="artifact-returned-error", title="Returned error")
+    session.pending_user_message = "write then fail"
+    session.active_stream_id = stream_id
+    session.save(skip_index=True)
+
+    class ReturnedErrorAgent:
+        def __init__(
+            self,
+            *,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+            **_kwargs,
+        ):
+            self.stream_delta_callback = stream_delta_callback
+            self.reasoning_callback = reasoning_callback
+            self.tool_progress_callback = tool_progress_callback
+            self.clarify_callback = clarify_callback
+            self.tool_start_callback = tool_start_callback
+            self.tool_complete_callback = tool_complete_callback
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0.0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            if self.tool_start_callback:
+                self.tool_start_callback("call-returned", "write_file", {"path": str(target)})
+            if self.tool_complete_callback:
+                self.tool_complete_callback(
+                    "call-returned",
+                    "write_file",
+                    {"path": str(target)},
+                    json.dumps({"bytes_written": 1, "resolved_path": str(target)}),
+                )
+            return {
+                "status": "error",
+                "error": "returned terminal failure",
+                "messages": kwargs.get("conversation_history") or [],
+            }
+
+        def interrupt(self, _message):
+            return None
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: ReturnedErrorAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "RunJournalWriter", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "register_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "update_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "unregister_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "unregister_stream_owner", lambda *args, **kwargs: None)
+
+    streaming.STREAMS[stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text="write then fail",
+            model="test-model",
+            workspace=str(workspace),
+            stream_id=stream_id,
+        )
+    finally:
+        streaming.STREAMS.pop(stream_id, None)
+
+    raw = json.loads((session_dir / "artifact-returned-error.json").read_text(encoding="utf-8"))
+    assert raw["messages"][-1]["_error"] is True
+    assert raw["messages"][-1]["_anchor_stream_id"] == stream_id
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    assert record["message_index"] == len(raw["messages"]) - 1
+    assert record["stream_id"] == stream_id
+    assert record["scene"]["terminal_state"] == "error"
+    assert record["scene"]["artifacts"][0]["payload"]["path"] == "reports/returned-error.md"
+
+
+def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_path, monkeypatch):
+    import queue
+    from collections import OrderedDict
+
+    from api import config, models, routes, streaming
+    from api.artifact_references import MAX_ANCHOR_ARTIFACT_BYTES, MAX_ANCHOR_ARTIFACT_REFERENCES
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    workspace = tmp_path / "workspace"
+    session_dir.mkdir()
+    workspace.mkdir()
+    (workspace / "reports").mkdir()
+
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(config, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    stream_id = "stream-many-artifacts"
+    session = Session(session_id="artifact-many-ingress", title="Many artifacts")
+    session.pending_user_message = "write many files"
+    session.active_stream_id = stream_id
+    session.save(skip_index=True)
+
+    class ManyArtifactsAgent:
+        def __init__(
+            self,
+            *,
+            tool_complete_callback=None,
+            **_kwargs,
+        ):
+            self.tool_complete_callback = tool_complete_callback
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0.0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            for idx in range(96):
+                target = workspace / "reports" / f"{idx:03d}-artifact.md"
+                if self.tool_complete_callback:
+                    self.tool_complete_callback(
+                        f"call-{idx:03d}",
+                        "write_file",
+                        {"path": str(target)},
+                        json.dumps({"bytes_written": 1, "resolved_path": str(target)}),
+                    )
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "completed": True,
+                "final_response": "done",
+                "messages": history + [
+                    {"role": "user", "content": kwargs.get("persist_user_message") or ""},
+                    {"role": "assistant", "content": "done"},
+                ],
+            }
+
+        def interrupt(self, _message):
+            return None
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: ManyArtifactsAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "RunJournalWriter", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "register_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "update_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "unregister_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "unregister_stream_owner", lambda *args, **kwargs: None)
+
+    streaming.STREAMS[stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text="write many files",
+            model="test-model",
+            workspace=str(workspace),
+            stream_id=stream_id,
+        )
+    finally:
+        streaming.STREAMS.pop(stream_id, None)
+
+    raw = json.loads((session_dir / "artifact-many-ingress.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    artifacts = record["scene"]["artifacts"]
+    encoded = json.dumps(artifacts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    assert 0 < len(artifacts) <= MAX_ANCHOR_ARTIFACT_REFERENCES
+    assert len(artifacts) < 96
+    assert len(encoded) <= MAX_ANCHOR_ARTIFACT_BYTES
+    assert artifacts[0]["payload"]["path"] == "reports/000-artifact.md"
+    assert artifacts[-1]["payload"]["path"] < "reports/096-artifact.md"

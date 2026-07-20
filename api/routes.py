@@ -65,6 +65,7 @@ from api.artifact_references import (
     anchor_artifact_event_from_payload,
     bound_anchor_activity_scene_artifacts,
     bound_anchor_artifact_events,
+    merge_anchor_activity_scene,
 )
 
 logger = logging.getLogger(__name__)
@@ -4998,12 +4999,33 @@ def _handle_session_anchor_scene(handler, body):
             if duration is not None:
                 scene["turn_duration"] = duration
         ref = _assistant_anchor_scene_message_ref(message)
+        request_stream_id = str(body.get("stream_id") or "").strip()
+        message_stream_id = str(message.get("_anchor_stream_id") or "").strip() if isinstance(message, dict) else ""
+        stream_id = message_stream_id or request_stream_id
+        if message_stream_id and request_stream_id and message_stream_id != request_stream_id:
+            return bad(handler, "scene.stream_id does not match assistant message", 400)
         records = dict(_anchor_scene_records(s))
+        key = ref or f"index:{idx}"
+        existing_record = records.get(key) if isinstance(records.get(key), dict) else {}
+        try:
+            scene = merge_anchor_activity_scene(
+                existing_record.get("scene") if isinstance(existing_record.get("scene"), dict) else {},
+                scene,
+                session_id=sid,
+                run_id=stream_id,
+                stream_id=stream_id,
+                final_message_ref=ref,
+                turn_duration=_anchor_scene_message_turn_duration(message),
+                reject_owner_mismatch=True,
+            )
+            scene = _sanitize_anchor_activity_scene(scene)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
         records[ref or f"index:{idx}"] = {
             "version": "anchor_activity_scene_record_v1",
             "message_index": idx,
             "message_ref": ref,
-            "stream_id": str(body.get("stream_id") or ""),
+            "stream_id": stream_id,
             "scene": scene,
             "updated_at": time.time(),
         }

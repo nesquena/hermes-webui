@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import copy
 from pathlib import Path
 
 
@@ -347,6 +348,92 @@ def _artifact_dedupe_key(event: dict) -> tuple:
     )
 
 
+def _anchor_owner_value(raw: dict, identity: dict, key: str) -> str | None:
+    limit = _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS.get(key, 512)
+    raw_value = _bounded_clean_string(raw.get(key), limit)
+    if raw_value:
+        return raw_value
+    return _bounded_clean_string(identity.get(key), limit)
+
+
+def anchor_artifact_owner_mismatch(
+    raw,
+    *,
+    session_id=None,
+    run_id=None,
+    stream_id=None,
+) -> str | None:
+    """Return the first explicit owner field that conflicts with the expected owner."""
+    if not isinstance(raw, dict):
+        return None
+    identity = raw.get('identity') if isinstance(raw.get('identity'), dict) else {}
+    expected_session_id = _bounded_clean_string(
+        session_id,
+        _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['session_id'],
+    )
+    expected_run_id = _bounded_clean_string(
+        run_id,
+        _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['run_id'],
+    )
+    expected_stream_id = _bounded_clean_string(
+        stream_id,
+        _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['stream_id'],
+    )
+    explicit_session_id = _anchor_owner_value(raw, identity, 'session_id')
+    if explicit_session_id and expected_session_id and explicit_session_id != expected_session_id:
+        return 'session_id'
+    explicit_run_id = _anchor_owner_value(raw, identity, 'run_id')
+    if explicit_run_id and expected_run_id and explicit_run_id != expected_run_id:
+        return 'run_id'
+    explicit_stream_id = _anchor_owner_value(raw, identity, 'stream_id')
+    if explicit_stream_id and expected_stream_id and explicit_stream_id != expected_stream_id:
+        # Durable run ids can outlive a transport stream rotation. Only allow a
+        # stream mismatch when the caller supplied a distinct durable run owner
+        # and the event explicitly matches it.
+        same_durable_run = (
+            explicit_run_id
+            and expected_run_id
+            and expected_stream_id
+            and expected_run_id != expected_stream_id
+            and explicit_run_id == expected_run_id
+        )
+        if not same_durable_run:
+            return 'stream_id'
+    return None
+
+
+def anchor_activity_scene_owner_mismatch(
+    scene,
+    *,
+    session_id=None,
+    run_id=None,
+    stream_id=None,
+) -> str | None:
+    """Return the first explicit scene/artifact owner mismatch, if any."""
+    if not isinstance(scene, dict):
+        return None
+    identity = scene.get('identity') if isinstance(scene.get('identity'), dict) else {}
+    if identity:
+        mismatch = anchor_artifact_owner_mismatch(
+            {'identity': identity},
+            session_id=session_id,
+            run_id=run_id,
+            stream_id=stream_id,
+        )
+        if mismatch:
+            return f'identity.{mismatch}'
+    for raw in scene.get('artifacts') if isinstance(scene.get('artifacts'), list) else []:
+        mismatch = anchor_artifact_owner_mismatch(
+            raw,
+            session_id=session_id,
+            run_id=run_id,
+            stream_id=stream_id,
+        )
+        if mismatch:
+            return f'artifact.{mismatch}'
+    return None
+
+
 def bound_anchor_artifact_events(
     events,
     *,
@@ -355,12 +442,22 @@ def bound_anchor_artifact_events(
     stream_id=None,
     max_count: int = MAX_ANCHOR_ARTIFACT_REFERENCES,
     max_bytes: int = MAX_ANCHOR_ARTIFACT_BYTES,
+    reject_owner_mismatch: bool = False,
 ) -> list[dict]:
     """Return a deterministic bounded prefix of valid Anchor artifact events."""
     out: list[dict] = []
     seen = set()
     total = 0
     for raw in events if isinstance(events, list) else []:
+        if reject_owner_mismatch:
+            mismatch = anchor_artifact_owner_mismatch(
+                raw,
+                session_id=session_id,
+                run_id=run_id,
+                stream_id=stream_id,
+            )
+            if mismatch:
+                raise ValueError(f'artifact owner mismatch: {mismatch}')
         event = anchor_artifact_event_from_raw(
             raw,
             session_id=session_id,
@@ -386,10 +483,141 @@ def bound_anchor_artifact_events(
     return out
 
 
-def bound_anchor_activity_scene_artifacts(scene):
+def bound_anchor_activity_scene_artifacts(
+    scene,
+    *,
+    session_id=None,
+    run_id=None,
+    stream_id=None,
+    reject_owner_mismatch: bool = False,
+):
     """Defensively cap scene artifacts without rejecting the whole Anchor scene."""
     if not isinstance(scene, dict):
         return scene
     next_scene = dict(scene)
-    next_scene['artifacts'] = bound_anchor_artifact_events(scene.get('artifacts') or [])
+    next_scene['artifacts'] = bound_anchor_artifact_events(
+        scene.get('artifacts') or [],
+        session_id=session_id,
+        run_id=run_id,
+        stream_id=stream_id,
+        reject_owner_mismatch=reject_owner_mismatch,
+    )
     return next_scene
+
+
+def _scene_list(scene: dict, key: str) -> list:
+    value = scene.get(key)
+    return copy.deepcopy(value) if isinstance(value, list) else []
+
+
+def _scene_dict(scene: dict, key: str) -> dict:
+    value = scene.get(key)
+    return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+
+def merge_anchor_activity_scene(
+    existing_scene,
+    incoming_scene,
+    *,
+    session_id=None,
+    run_id=None,
+    stream_id=None,
+    terminal_state=None,
+    final_answer=None,
+    final_message_ref=None,
+    turn_duration=None,
+    reject_owner_mismatch: bool = False,
+) -> dict:
+    """Merge browser and worker Anchor scenes with shared artifact ownership rules."""
+    existing = copy.deepcopy(existing_scene) if isinstance(existing_scene, dict) else {}
+    incoming = copy.deepcopy(incoming_scene) if isinstance(incoming_scene, dict) else {}
+    if reject_owner_mismatch:
+        for scene in (existing, incoming):
+            mismatch = anchor_activity_scene_owner_mismatch(
+                scene,
+                session_id=session_id,
+                run_id=run_id,
+                stream_id=stream_id,
+            )
+            if mismatch:
+                raise ValueError(f'anchor scene owner mismatch: {mismatch}')
+    merged = dict(existing)
+    merged.update(incoming)
+    merged['version'] = 'activity_scene_v1'
+    merged['mode'] = incoming.get('mode') or existing.get('mode') or 'compact_worklog'
+
+    identity = _scene_dict(incoming, 'identity')
+    identity.update(_scene_dict(existing, 'identity'))
+    clean_session_id = _bounded_clean_string(
+        session_id,
+        _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['session_id'],
+    )
+    clean_run_id = _bounded_clean_string(
+        run_id,
+        _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['run_id'],
+    )
+    clean_stream_id = _bounded_clean_string(
+        stream_id,
+        _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['stream_id'],
+    )
+    if clean_session_id:
+        identity['session_id'] = clean_session_id
+    if clean_run_id:
+        identity['run_id'] = clean_run_id
+    elif clean_stream_id and not identity.get('run_id'):
+        identity['run_id'] = clean_stream_id
+    if clean_stream_id:
+        identity['stream_id'] = clean_stream_id
+    source_refs = [
+        str(item)
+        for item in identity.get('source_message_refs', [])
+        if str(item or '').strip()
+    ] if isinstance(identity.get('source_message_refs'), list) else []
+    if final_message_ref and final_message_ref not in source_refs:
+        source_refs.append(final_message_ref)
+    identity['source_message_refs'] = source_refs
+    merged['identity'] = identity
+
+    lifecycle = _scene_dict(incoming, 'lifecycle')
+    lifecycle.update(_scene_dict(existing, 'lifecycle'))
+    if terminal_state:
+        lifecycle['status'] = terminal_state
+        lifecycle['terminal_state'] = terminal_state
+        merged['terminal_state'] = terminal_state
+    elif existing.get('terminal_state'):
+        merged['terminal_state'] = existing.get('terminal_state')
+    elif incoming.get('terminal_state'):
+        merged['terminal_state'] = incoming.get('terminal_state')
+    merged['lifecycle'] = lifecycle
+
+    if isinstance(final_answer, str):
+        merged['final_answer'] = final_answer
+    elif isinstance(incoming.get('final_answer'), str):
+        merged['final_answer'] = incoming.get('final_answer')
+    elif isinstance(existing.get('final_answer'), str):
+        merged['final_answer'] = existing.get('final_answer')
+    if final_message_ref:
+        merged['final_message_ref'] = final_message_ref
+    elif existing.get('final_message_ref') and not incoming.get('final_message_ref'):
+        merged['final_message_ref'] = existing.get('final_message_ref')
+    if turn_duration is not None and merged.get('turn_duration') is None:
+        merged['turn_duration'] = turn_duration
+
+    merged['activity_rows'] = (
+        _scene_list(incoming, 'activity_rows')
+        if isinstance(incoming.get('activity_rows'), list)
+        else _scene_list(existing, 'activity_rows')
+    )
+    merged['side_effects'] = (
+        _scene_list(incoming, 'side_effects')
+        if isinstance(incoming.get('side_effects'), list)
+        else _scene_list(existing, 'side_effects')
+    )
+    merged['artifacts'] = bound_anchor_artifact_events(
+        [*_scene_list(existing, 'artifacts'), *_scene_list(incoming, 'artifacts')],
+        session_id=clean_session_id,
+        run_id=clean_run_id or clean_stream_id,
+        stream_id=clean_stream_id,
+        reject_owner_mismatch=reject_owner_mismatch,
+    )
+    return merged
