@@ -4853,10 +4853,6 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             break
     message_final_answer = _anchor_scene_final_answer_text(final_message)
     scene_final_answer = _anchor_scene_final_answer_hint_from_scene(scene)
-    scene_final_answer = (
-        _anchor_scene_final_answer_hint_from_transcript(scene_final_answer, scene)
-        or scene_final_answer
-    )
     if not _anchor_scene_clean_text(scene_final_answer):
         scene_final_answer = _anchor_scene_final_answer_hint_from_transcript(message_final_answer, scene)
     final_answer = scene_final_answer if _anchor_scene_clean_text(scene_final_answer) else message_final_answer

@@ -3597,12 +3597,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const sceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromScene(base);
-    const finalAnswerHint=_anchorSceneFinalAnswerHintFromTranscript(sceneFinalAnswerHint,base)||sceneFinalAnswerHint;
+    const finalAnswerHint=sceneFinalAnswerHint;
     const optionFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint;
     const transcriptFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer;
-    const baseFinalAnswer=typeof base.final_answer==='string'
-      ? (_anchorSceneFinalAnswerHintFromTranscript(base.final_answer,base)||base.final_answer)
-      : '';
+    const baseFinalAnswer=typeof base.final_answer==='string'?base.final_answer:'';
     const finalAnswer=_anchorSceneCleanText(finalAnswerHint)
       ? finalAnswerHint
       : (_anchorSceneCleanText(optionFinalAnswer)
