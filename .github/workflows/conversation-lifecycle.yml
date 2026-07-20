@@ -31,6 +31,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [normal, terminal-error]
     steps:
       - uses: actions/checkout@v4
 
@@ -53,12 +57,13 @@ jobs:
       - name: Run conversation lifecycle gate
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
         run: python tests/browser_conversation_lifecycle.py
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: conversation-lifecycle-failure
+          name: conversation-lifecycle-failure-${{ matrix.scenario }}
           path: lifecycle-artifacts
           if-no-files-found: ignore
