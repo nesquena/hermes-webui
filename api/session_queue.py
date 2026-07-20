@@ -203,6 +203,60 @@ def delete_item(session_id: str, item_id: str) -> bool:
         return True
 
 
+def claim_item(session_id: str, item_id: str) -> dict[str, Any] | None:
+    """Remove one exact queued item and return a reversible claim receipt."""
+    if not session_id or not item_id:
+        return None
+    with _LOCK:
+        items = _read_items_unlocked(session_id)
+        for index, item in enumerate(items):
+            if str(item.get("id") or "") != str(item_id):
+                continue
+            claimed = items.pop(index)
+            _write_items_unlocked(session_id, items)
+            return {"item": dict(claimed), "index": index}
+    return None
+
+
+def restore_claim(session_id: str, claim: dict[str, Any] | None) -> None:
+    """Restore a failed queue claim at its original position without duplication."""
+    if not session_id or not isinstance(claim, dict):
+        return
+    item = claim.get("item")
+    if not isinstance(item, dict):
+        return
+    item_id = str(item.get("id") or "")
+    with _LOCK:
+        items = _read_items_unlocked(session_id)
+        if item_id and any(str(existing.get("id") or "") == item_id for existing in items):
+            return
+        try:
+            index = int(claim.get("index", len(items)))
+        except (TypeError, ValueError):
+            index = len(items)
+        items.insert(max(0, min(index, len(items))), dict(item))
+        _write_items_unlocked(session_id, items)
+
+
+def steer_text_for_item(item: dict[str, Any]) -> str:
+    """Build active-run guidance from the backend-authoritative queued payload."""
+    text = str((item or {}).get("text") or "").strip()
+    paths = []
+    for attachment in (item or {}).get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        path = str(attachment.get("path") or "").strip()
+        if path:
+            paths.append(path)
+    if not paths:
+        return text
+    note = (
+        f"[Attached files for this steer: {', '.join(paths)}]\n"
+        "Use the file tools/read_file to inspect these documents if needed."
+    )
+    return f"{text}\n\n{note}" if text else note
+
+
 def claim_next(session_id: str) -> dict[str, Any] | None:
     if not session_id:
         return None
