@@ -4092,10 +4092,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
     if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
     const sceneIdentity=_liveAnchorActivitySceneIdentity(scene, streamId);
-    if(!sceneIdentity.streamId||sceneIdentity.streamId!==streamId||!sceneIdentity.runId) return false;
+    if(!sceneIdentity.streamId||!sceneIdentity.runId) return false;
     const sceneKey=[
-      scene.identity&&scene.identity.stream_id||streamId||'',
-      scene.identity&&scene.identity.run_id||sceneIdentity.runId||'',
+      sceneIdentity.runId||'',
+      sceneIdentity.streamId||'',
       scene.activity_rows.length,
       scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
     ].join(':');
@@ -4125,17 +4125,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
       }
       const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
-      const rowStreamId=String(row.stream_id||rowIdentity.stream_id||streamId||'').trim();
+      const rowStreamId=String(row.stream_id||rowIdentity.stream_id||sceneIdentity.streamId||'').trim();
       if(!rowStreamId||rowStreamId!==sceneIdentity.streamId) return false;
       const rawRowRunId=String(row.run_id||rowIdentity.run_id||'').trim();
-      const rowRunId=(!rawRowRunId||rawRowRunId===streamId||rawRowRunId===sceneIdentity.streamId||rawRowRunId===sceneIdentity.runId)
+      const rowRunId=(!rawRowRunId||rawRowRunId===sceneIdentity.streamId||rawRowRunId===sceneIdentity.runId)
         ? sceneIdentity.runId
         : '';
       if(!rowRunId) return false;
       const sourceEvent={
         ...payload,
         source_event_type:sourceType,
-        local_id:row.local_id||row.row_id||`snapshot:${streamId}:${i}`,
+        local_id:row.local_id||row.row_id||`snapshot:${sceneIdentity.streamId}:${i}`,
         event_id:row.event_id||null,
         seq:row.seq??undefined,
         status:row.status||undefined,
