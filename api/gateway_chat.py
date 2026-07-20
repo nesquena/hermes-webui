@@ -1218,7 +1218,23 @@ def _run_gateway_chat_streaming(
                 else:
                     clear_process_wakeup_pause(s, reason="run_completed")
                 s.save()
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
+                put_gateway_event(
+                    "cancel",
+                    {
+                        "message": "Cancelled by user",
+                        "session_id": session_id,
+                        # This cancel is emitted while the session lock is held
+                        # during success-writeback rollback. Give the terminal
+                        # helper an explicit no-target payload so it does not
+                        # re-enter the lock or attach the cancelled run to an
+                        # unrelated prior assistant message.
+                        "session": {
+                            "session_id": session_id,
+                            "message_count": 0,
+                            "messages": [],
+                        },
+                    },
+                )
 
             # Recheck immediately before clearing the pause; Stop can arrive
             # while the success transcript is being assembled.
