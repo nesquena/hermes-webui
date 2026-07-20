@@ -3659,17 +3659,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const source=Array.isArray(artifacts)?artifacts:[];
     const out=[];
     const seen=new Set();
-    let total=0;
+    let total=2; // Complete serialized-list framing: '[' + ']'.
     for(const event of source){
       if(!event||typeof event!=='object') continue;
       const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
       if(!String(payload.path||'').trim()) continue;
       const key=_anchorSceneArtifactDedupeKey(event);
       if(key&&seen.has(key)) continue;
-      const size=_anchorSceneUtf8ByteSize(JSON.stringify(event));
-      if(out.length>=ANCHOR_SCENE_ARTIFACT_MAX_COUNT||total+size>ANCHOR_SCENE_ARTIFACT_MAX_BYTES) break;
+      let serialized='';
+      try{ serialized=JSON.stringify(event); }catch(_){ serialized=''; }
+      if(!serialized) continue;
+      const size=_anchorSceneUtf8ByteSize(serialized);
+      const framing=out.length?1:0;
+      if(out.length>=ANCHOR_SCENE_ARTIFACT_MAX_COUNT||total+framing+size>ANCHOR_SCENE_ARTIFACT_MAX_BYTES) break;
       if(key) seen.add(key);
-      total+=size;
+      total+=framing+size;
       out.push(event);
     }
     return out;

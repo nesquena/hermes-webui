@@ -55,12 +55,25 @@ def _bounded_clean_string(value, limit: int) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        value = str(value)
-    if not value or value != value.strip():
         return None
-    if _utf8_size(value) > limit:
+    if not value or _utf8_size(value) > limit:
+        return None
+    if value != value.strip():
         return None
     return value
+
+
+def _json_within_bytes(value, limit: int) -> bool:
+    total = 0
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(',', ':'))
+    try:
+        for chunk in encoder.iterencode(value):
+            total += _utf8_size(chunk)
+            if total > limit:
+                return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
 
 
 def _raw_paths_within_limits(paths) -> bool:
@@ -79,13 +92,13 @@ def _raw_paths_within_limits(paths) -> bool:
 
 def _result_object(result):
     if isinstance(result, dict):
-        return result
+        return result if _json_within_bytes(result, _MAX_RESULT_BYTES) else None
     if not isinstance(result, str):
         return None
     if _utf8_size(result) > _MAX_RESULT_BYTES:
         return None
     try:
-        parsed = json.loads(result.strip())
+        parsed = json.loads(result)
     except Exception:
         return None
     return parsed if isinstance(parsed, dict) else None
@@ -200,8 +213,8 @@ def derive_file_artifact_references(
         if (
             not isinstance(tool_call_id, str)
             or not tool_call_id
-            or tool_call_id != tool_call_id.strip()
             or _utf8_size(tool_call_id) > _MAX_TOOL_CALL_ID_BYTES
+            or tool_call_id != tool_call_id.strip()
         ):
             return []
         tid = tool_call_id
@@ -487,7 +500,7 @@ def bound_anchor_artifact_events(
     """Return a deterministic bounded prefix of valid Anchor artifact events."""
     out: list[dict] = []
     seen = set()
-    total = 0
+    total = 2  # Complete serialized list framing: '[' + ']'.
     for raw in events if isinstance(events, list) else []:
         if reject_owner_mismatch:
             mismatch = anchor_artifact_owner_mismatch(
@@ -516,10 +529,11 @@ def bound_anchor_artifact_events(
             separators=(',', ':'),
             default=str,
         ).encode('utf-8')
-        if len(out) >= max_count or total + len(encoded) > max_bytes:
+        framing = 1 if out else 0  # Comma before every item after the first.
+        if len(out) >= max_count or total + framing + len(encoded) > max_bytes:
             break
         seen.add(key)
-        total += len(encoded)
+        total += framing + len(encoded)
         out.append(event)
     return out
 

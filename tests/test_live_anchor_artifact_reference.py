@@ -7,11 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from api.artifact_references import derive_file_artifact_references
+from api.artifact_references import (
+    MAX_ANCHOR_ARTIFACT_BYTES,
+    MAX_ANCHOR_ARTIFACT_REFERENCES,
+    anchor_artifact_event_from_payload,
+    bound_anchor_artifact_events,
+    derive_file_artifact_references,
+)
 
 
 REPO = Path(__file__).resolve().parent.parent
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+ASSISTANT_TURN_ANCHORS_JS = (REPO / "static" / "assistant_turn_anchors.js").read_text(encoding="utf-8")
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
@@ -172,6 +179,30 @@ def test_artifact_derivation_limits_fail_closed_on_overflow(tmp_path):
 
     assert derive_file_artifact_references(
         "write_file",
+        {"path": str(workspace / "huge-dict.md")},
+        {
+            "bytes_written": 1,
+            "resolved_path": str(workspace / "huge-dict.md"),
+            "padding": "x" * (65 * 1024),
+        },
+        workspace,
+        tool_call_id="call-huge-dict-result",
+    ) == []
+
+    assert derive_file_artifact_references(
+        "write_file",
+        {"path": str(workspace / "unserializable.md")},
+        {
+            "bytes_written": 1,
+            "resolved_path": str(workspace / "unserializable.md"),
+            "unserializable": object(),
+        },
+        workspace,
+        tool_call_id="call-unserializable-result",
+    ) == []
+
+    assert derive_file_artifact_references(
+        "write_file",
         {"path": str(workspace / "tool-id.md")},
         json.dumps({"bytes_written": 1, "resolved_path": str(workspace / "tool-id.md")}),
         workspace,
@@ -203,6 +234,36 @@ def test_artifact_derivation_limits_fail_closed_on_overflow(tmp_path):
         workspace,
         tool_call_id="call-patch-overflow",
     ) == []
+
+
+def test_anchor_artifact_budget_counts_serialized_list_framing():
+    raw_events = [
+        anchor_artifact_event_from_payload(
+            {
+                "kind": "workspace_file",
+                "path": f"reports/{idx:03d}-{'x' * 53}.md",
+                "source_tool": "write_file",
+                "tool_call_id": f"call-{idx:03d}",
+            },
+            session_id="s",
+            run_id="r",
+            stream_id="r",
+            event_id=f"r:{idx + 1}",
+            seq=idx + 1,
+        )
+        for idx in range(MAX_ANCHOR_ARTIFACT_REFERENCES)
+    ]
+
+    bounded = bound_anchor_artifact_events(
+        raw_events,
+        session_id="s",
+        run_id="r",
+        stream_id="r",
+    )
+
+    encoded = json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(bounded) == MAX_ANCHOR_ARTIFACT_REFERENCES - 1
+    assert len(encoded) <= MAX_ANCHOR_ARTIFACT_BYTES
 
 
 def test_successful_patch_can_fall_back_to_v4a_targets(tmp_path):
@@ -367,6 +428,58 @@ def test_frontend_routes_artifact_sse_to_anchor_without_repainting_worklog():
     assert "S.activeStreamId!==streamId" in block
     assert "_applyToAnchor('artifact_reference',d,e,null,{render:false});" in block
     assert "'tool_complete','artifact_reference','todo_state'" in MESSAGES_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for browser artifact budget coverage")
+def test_frontend_anchor_registry_counts_artifact_list_framing():
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(REPO / "static" / "assistant_turn_anchors.js"))},'utf8');
+global.window=globalThis;
+eval(src);
+const anchors=globalThis.HermesAssistantTurnAnchors;
+const registry=anchors.createAssistantTurnAnchorRegistry({{session_id:'s',run_id:'r',stream_id:'r'}});
+for(let idx=0; idx<64; idx++){{
+  const path='reports/'+String(idx).padStart(3,'0')+'-'+('x'.repeat(169))+'.md';
+  const applied=anchors.applyAssistantTurnAnchorSourceEvent(registry,{{
+    type:'artifact_reference',
+    event_id:'r:'+(idx+1),
+    session_id:'s',
+    run_id:'r',
+    stream_id:'r',
+    seq:idx+1,
+    payload:{{
+      kind:'workspace_file',
+      path,
+      source_tool:'write_file',
+      tool_call_id:'call-'+String(idx).padStart(3,'0'),
+    }},
+  }});
+  if(!applied.applied) throw new Error('artifact event was not applied: '+applied.reason);
+}}
+const scene=anchors.projectAssistantTurnAnchorActivityScene(registry);
+const bytes=new TextEncoder().encode(JSON.stringify(scene.artifacts)).length;
+if(scene.artifacts.length!==63) throw new Error('expected 63 bounded artifacts, got '+scene.artifacts.length);
+if(bytes>32768) throw new Error('artifact list exceeded byte cap: '+bytes);
+"""
+    subprocess.run([NODE, "-e", script], check=True)
+
+
+def test_frontend_persistence_bounder_counts_artifact_list_framing():
+    messages_block = MESSAGES_JS[
+        MESSAGES_JS.index("function _boundedAnchorSceneArtifacts")
+        :MESSAGES_JS.index("function _boundedAnchorSceneForPersistence")
+    ]
+    anchors_block = ASSISTANT_TURN_ANCHORS_JS[
+        ASSISTANT_TURN_ANCHORS_JS.index("function _boundedAnchorArtifactEvents")
+        :ASSISTANT_TURN_ANCHORS_JS.index("function _appendBoundedAnchorArtifact")
+    ]
+
+    for block in (messages_block, anchors_block):
+        assert "let total=2" in block
+        assert "const framing=out.length?1:0;" in block
+        assert "total+framing+size>ANCHOR" in block
+        assert "total+=framing+size;" in block
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for browser hydration coverage")
