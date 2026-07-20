@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -195,6 +196,42 @@ _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 # load-modify-write/unlink sequence in both helpers.
 _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK = threading.Lock()
 _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK = threading.Lock()
+_SESSION_PUBLICATION_LOCKS_GUARD = threading.Lock()
+_SESSION_PUBLICATION_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = (
+    weakref.WeakValueDictionary()
+)
+_SESSION_PUBLICATION_DELETED: set[str] = set()
+
+
+def _get_session_publication_lock(session_id: str) -> threading.RLock:
+    """Return the lock shared by JSON save and destructive session cleanup."""
+    sid = str(session_id or "")
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        lock = _SESSION_PUBLICATION_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.RLock()
+            _SESSION_PUBLICATION_LOCKS[sid] = lock
+        return lock
+
+
+def _mark_session_deleted_for_publication(session_id: str) -> None:
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        _SESSION_PUBLICATION_DELETED.add(str(session_id or ""))
+
+
+def _unmark_session_deleted_for_publication(session_id: str) -> None:
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        _SESSION_PUBLICATION_DELETED.discard(str(session_id or ""))
+
+
+def _session_is_deleted_for_publication(session_id: str, path: Path) -> bool:
+    sid = str(session_id or "")
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        if sid in _SESSION_PUBLICATION_DELETED:
+            return True
+    # A live sidecar beats a stale durable tombstone after restart. An absent
+    # sidecar plus tombstone is authoritative and must reject a late save.
+    return not path.exists() and sid in _load_webui_deleted_session_tombstone()
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -791,6 +828,11 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
+    # Explicit new-session/import paths call this before their first save.
+    # Retire the process-local deletion marker together with its durable peer
+    # so deliberately recreating the same identity remains supported. A stale
+    # worker cannot reach this helper because save rejects the marker first.
+    _unmark_session_deleted_for_publication(sid)
     with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
         current = set(_load_webui_deleted_session_tombstone())
         if sid not in current:
@@ -1344,8 +1386,23 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        with _get_session_publication_lock(self.session_id):
+            return self._save_under_publication_lock(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+            )
+
+    def _save_under_publication_lock(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        if _session_is_deleted_for_publication(self.session_id, self.path):
+            raise RuntimeError(
+                f"Refusing to publish deleted session {self.session_id!r}"
+            )
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial
@@ -1369,13 +1426,13 @@ class Session:
         # context_messages, so every session read and JSON response repeats its
         # base64 work. Persist a private reference and hydrate only when a later
         # model call needs the original data URL.
-        try:
-            from api.session_media import externalize_large_session_media
+        from api.session_media import (
+            externalize_large_session_media,
+            verify_session_media_references,
+        )
 
-            externalize_large_session_media(self.messages, self.session_id)
-            externalize_large_session_media(self.context_messages, self.session_id)
-        except Exception:
-            logger.warning("Could not externalize session media for %s", self.session_id, exc_info=True)
+        externalize_large_session_media(self.messages, self.session_id)
+        externalize_large_session_media(self.context_messages, self.session_id)
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1500,6 +1557,20 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+            # Verify the exact retained media authority at the publication
+            # boundary. A missing or corrupt blob must leave the previous JSON
+            # untouched even when serialization and backup work took time.
+            verify_session_media_references(
+                [self.messages, self.context_messages],
+                self.session_id,
+            )
+            # Delete and save share the publication lock, but keep the
+            # authoritative deletion check directly adjacent to replace so a
+            # future refactor cannot reintroduce a check-then-publish gap.
+            if _session_is_deleted_for_publication(self.session_id, self.path):
+                raise RuntimeError(
+                    f"Refusing to publish deleted session {self.session_id!r}"
+                )
             _safe_replace(tmp, self.path)
         except Exception:
             try:

@@ -1574,18 +1574,52 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
-def _cleanup_ephemeral_cancelled_turn(session) -> None:
-    """Remove transient /btw session state after a cancel without saving it."""
+def _cleanup_ephemeral_session(session, *, stream_id: str | None = None) -> None:
+    """Retire every resource owned by one transient ``/btw`` session."""
+    session_id = str(getattr(session, "session_id", "") or "")
+    parent_session_id = str(getattr(session, "parent_session_id", "") or "")
+    stream_id = str(stream_id or getattr(session, "active_stream_id", "") or "")
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    with LOCK:
+        SESSIONS.pop(session_id, None)
+    if stream_id:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            CANCEL_FLAGS.pop(stream_id, None)
+            AGENT_INSTANCES.pop(stream_id, None)
+            STREAM_PARTIAL_TEXT.pop(stream_id, None)
+            STREAM_REASONING_TEXT.pop(stream_id, None)
+            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+            STREAM_LAST_EVENT_ID.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        Path(session.path).unlink(missing_ok=True)
+        Path(session.path).with_suffix(".json.bak").unlink(missing_ok=True)
     except Exception:
-        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+        logger.debug("Failed to remove ephemeral session JSON", exc_info=True)
+    try:
+        from api.session_media import remove_session_media
+
+        remove_session_media(session_id)
+    except Exception:
+        logger.debug("Failed to remove ephemeral session media", exc_info=True)
+    if parent_session_id:
+        try:
+            from api.background import cleanup_btw
+
+            cleanup_btw(parent_session_id)
+        except Exception:
+            logger.debug("Failed to remove ephemeral tracking", exc_info=True)
+
+
+def _cleanup_ephemeral_cancelled_turn(session) -> None:
+    """Remove transient /btw session state after a cancel without saving it."""
+    _cleanup_ephemeral_session(session)
 
 
 def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
@@ -8964,11 +8998,6 @@ def _run_agent_streaming(
                 })
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -10754,10 +10783,11 @@ def _run_agent_streaming(
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
                 s.messages.append(_error_message)
-                try:
-                    s.save()
-                except Exception:
-                    pass
+                if not ephemeral:
+                    try:
+                        s.save()
+                    except Exception:
+                        pass
                 if not ephemeral:
                     try:
                         append_turn_journal_event_for_stream(
@@ -10832,6 +10862,9 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        if ephemeral and s is not None:
+            _cleanup_ephemeral_session(s, stream_id=stream_id)
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run

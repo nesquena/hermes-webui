@@ -9343,6 +9343,9 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _get_session_publication_lock,
+    _mark_session_deleted_for_publication,
+    _unmark_session_deleted_for_publication,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -9573,6 +9576,7 @@ from api.streaming import (
     _sse,
     _sse_set_write_deadline,
     _run_agent_streaming,
+    _cleanup_ephemeral_session,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
@@ -14781,48 +14785,81 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Delete from WebUI session store
-        with LOCK:
-            SESSIONS.pop(sid, None)
-        # Evict cached agent so turn count doesn't leak into a recycled session
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
         except Exception:
             return bad(handler, "Invalid session_id", 400)
-        sidecar_deleted = False
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session file %s", p)
-        sidecar_deleted = not p.exists()
-        try:
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+        # Session JSON publication and destructive cleanup share one authority.
+        # Mark deletion before unlinking so a worker holding a stale Session
+        # cannot publish after this critical section completes.
+        media_cleanup_error = None
+        storage_cleanup_error = None
+        with _get_session_publication_lock(sid):
+            _mark_session_deleted_for_publication(sid)
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                _unmark_session_deleted_for_publication(sid)
+                logger.warning("Failed to unlink session file %s", p, exc_info=True)
+                return bad(handler, "Could not delete session storage", 500)
+            sidecar_deleted = not p.exists()
+            if not sidecar_deleted:
+                _unmark_session_deleted_for_publication(sid)
+                return bad(handler, "Could not delete session storage", 500)
+            if not is_messaging_session:
+                try:
+                    _record_webui_deleted_session_tombstone(sid)
+                    tombstone_persisted = (
+                        sid in _load_webui_deleted_session_tombstone()
+                    )
+                except Exception:
+                    tombstone_persisted = False
+                    logger.warning(
+                        "Failed to tombstone deleted WebUI session %s",
+                        sid,
+                        exc_info=True,
+                    )
+                if not tombstone_persisted:
+                    storage_cleanup_error = RuntimeError(
+                        "Could not persist deleted-session tombstone"
+                    )
+            try:
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+            except Exception:
+                logger.debug(
+                    "Failed to unlink session backup file %s",
+                    p.with_suffix('.json.bak'),
+                    exc_info=True,
+                )
+            try:
+                from api.session_media import remove_session_media
+
+                remove_session_media(sid)
+            except Exception as exc:
+                media_cleanup_error = exc
+                logger.warning(
+                    "Failed to clean private media for deleted session %s",
+                    sid,
+                    exc_info=True,
+                )
+        # Cache eviction happens after the publication lock is released to avoid
+        # reversing LOCK -> publication-lock order used by existing save paths.
+        with LOCK:
+            SESSIONS.pop(sid, None)
+        # Evict cached agent so turn count doesn't leak into a recycled session.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         try:
             prune_session_from_index(sid)
         except Exception:
             logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-        if sidecar_deleted and not is_messaging_session:
-            try:
-                _record_webui_deleted_session_tombstone(sid)
-            except Exception:
-                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
             shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
         except Exception:
             logger.debug("Failed to clean attachment dir for deleted session %s", sid)
-        try:
-            from api.session_media import remove_session_media
-
-            remove_session_media(sid)
-        except Exception:
-            logger.debug("Failed to clean private media for deleted session %s", sid)
         # Remove the turn-journal shards and the run-journal directory so a
         # deleted conversation is not recoverable from disk. The session JSON +
         # state.db rows are cleared above, but these journals retain the user's
@@ -14870,6 +14907,10 @@ def handle_post(handler, parsed) -> bool:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
+        if media_cleanup_error is not None:
+            return bad(handler, "Session deleted but private media cleanup failed", 500)
+        if storage_cleanup_error is not None:
+            return bad(handler, "Session deleted but storage cleanup failed", 500)
         return j(
             handler,
             {
@@ -20660,6 +20701,7 @@ def _handle_btw(handler, body):
         getattr(s, "context_messages", None) or []
     )
     ephemeral.title = f"btw: {question[:60]}"
+    ephemeral.parent_session_id = s.session_id
     try:
         from api.session_media import clone_session_media_references
 
@@ -20669,6 +20711,7 @@ def _handle_btw(handler, body):
             ephemeral.session_id,
         )
     except (OSError, ValueError):
+        _cleanup_ephemeral_session(ephemeral)
         logger.warning(
             "Could not clone session media from %s to btw session %s",
             s.session_id,
@@ -20676,37 +20719,32 @@ def _handle_btw(handler, body):
             exc_info=True,
         )
         return bad(handler, "Could not copy session media", 500)
-    try:
-        ephemeral.save()
-    except Exception:
-        try:
-            from api.session_media import remove_session_media
-
-            remove_session_media(ephemeral.session_id)
-        except Exception:
-            logger.debug("Failed to roll back btw session media", exc_info=True)
-        logger.warning("Could not persist btw session %s", ephemeral.session_id, exc_info=True)
-        return bad(handler, "Could not create side-question session", 500)
-    with LOCK:
-        SESSIONS[ephemeral.session_id] = ephemeral
-        SESSIONS.move_to_end(ephemeral.session_id)
-        _evict_sessions_over_cap()
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
-    ephemeral.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, ephemeral.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    from api.background import track_btw
-    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
-        kwargs={"ephemeral": True, "model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
+    try:
+        ephemeral.save()
+        stream = create_stream_channel()
+        thr = threading.Thread(
+            target=_run_agent_streaming,
+            args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
+            kwargs={"ephemeral": True, "model_provider": model_provider},
+            daemon=True,
+        )
+        register_stream_owner(stream_id, ephemeral.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        with LOCK:
+            SESSIONS[ephemeral.session_id] = ephemeral
+            SESSIONS.move_to_end(ephemeral.session_id)
+            _evict_sessions_over_cap()
+        from api.background import track_btw
+
+        track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
+        thr.start()
+    except Exception:
+        _cleanup_ephemeral_session(ephemeral, stream_id=stream_id)
+        logger.warning("Could not start btw session %s", ephemeral.session_id, exc_info=True)
+        return bad(handler, "Could not start side-question session", 500)
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
