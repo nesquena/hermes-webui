@@ -50,6 +50,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
     ctl.sh                 Daemon lifecycle wrapper (start/stop/restart/status/logs) for homelab installs.
+    mcp_server.py          Profile-scoped MCP project/session tools, including bounded read-only project context.
     pyproject.toml         Standard build metadata plus the Ruff lint gate; source-checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh.
     Dockerfile             python:3.12-slim container image
     docker-compose.yml     Compose config with named volume and optional auth
@@ -62,6 +63,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
+      project_context.py   Read-only global recent-message projection for one profile/project.
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
       startup.py           Startup helpers: auto_install_agent_deps()
       state_sync.py        /insights sync — message_count to the agent's state.db
