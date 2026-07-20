@@ -5,6 +5,8 @@
 
 ### Changed
 
+- **The repository is now pip-installable with standard packaging metadata.** `pyproject.toml` gains a `[build-system]` + `[project]` section (setuptools + setuptools-scm) so packagers and distros can `pip install .` and get a proper wheel (`api` + `static` bundled). The normal `bootstrap.py` / `start.sh` / `ctl.sh` source-checkout launch path is unchanged. setuptools-scm writes its version to a separate `api/_scm_version.py` (not the Docker-owned `api/_version.py`), and the runtime version detector reads it as an explicit fallback (normalizing the PEP 440 value to a `v…` form) so an installed wheel reports a real version instead of `unknown` — Docker and git-checkout version resolution are byte-identical to before. Thanks @rodboev. (#6337, #2695)
+
 - **Transparent Stream can now hide its per-event timestamp chips.** A new opt-in setting (Settings → the Transparent Stream activity area) lets you suppress the small per-event timestamp chips inside Transparent Stream while keeping the assistant response footer time visible — narrowing the visual noise without removing timing information entirely. Default is unchanged (chips shown). Thanks @rodboev. (#6130, #6099)
 
 - **Internal: removed a dead `rowIndex` parameter from the settled-scene row projector.** `attachLiveStream`'s `pushRow` helper carried an unused positional index left over from before final-segment eligibility moved to a row-identity `WeakSet`; dropping it is a pure no-op refactor (differential execution confirms byte-identical settled scenes — ordering, dedupe, final-prefix suppression, and sequence assignment all unchanged). Thanks @webtecnica. (#6258)
