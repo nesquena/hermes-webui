@@ -46,6 +46,12 @@ def test_completion_nonzero_exit_and_truncated_output():
     assert meta["exit_code"] == 3
 
 
+def test_completion_negative_exit_code_round_trips():
+    # Signal-killed processes report negative returncodes (e.g. SIGKILL → -9).
+    meta = wakeup_display_meta(format_wakeup_prompt(_completion_evt(exit_code=-9)))
+    assert meta["exit_code"] == -9
+
+
 def test_completion_empty_sid_and_command():
     meta = wakeup_display_meta(format_wakeup_prompt(_completion_evt(session_id="", command="")))
     assert meta["type"] == "completion"

@@ -15375,11 +15375,12 @@ function _processWakeupInfo(m, text){
 function _processWakeupCardHtml(info, rawText, extras){
   const isWatch=info.type==='watch_match';
   const exitStr=info.exitCode==null?'':String(info.exitCode);
-  const exitKnown=/^\d+$/.test(exitStr);
+  // Signal-killed processes report negative exit codes (subprocess returncode).
+  const exitKnown=/^-?\d+$/.test(exitStr);
   const exitOk=exitStr==='0';
   let chip;
   if(isWatch){
-    chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code>${esc(String(info.pattern||''))}</code></span>`;
+    chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
     const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
@@ -15904,7 +15905,7 @@ function renderMessages(options){
       if(wakeupInfo){
         noticeClass+=' process-wakeup-notice-card';
         const exitStr=wakeupInfo.exitCode==null?'':String(wakeupInfo.exitCode);
-        if(wakeupInfo.type==='completion'&&/^\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
+        if(wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
         noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
       }else{
         const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
@@ -15919,14 +15920,18 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='process_wakeup';
         delete row.dataset.editing;
-        // A user-expanded card serializes `open=""` into innerHTML; normalize
-        // it out of the comparison so streaming rerenders neither churn the
-        // DOM nor collapse the card, and restore open state when the content
-        // really did change.
-        if(row.dataset.rawText!==processText||row.innerHTML.replace(' open=""','')!==nextRowHtml){
+        // Compare against the HTML we last SET (expando), not live innerHTML:
+        // a user-expanded <details> serializes an open attribute into
+        // innerHTML, which would force a rebuild-and-collapse on every
+        // streaming rerender. The expando comparison is
+        // serialization-independent while still rebuilding when the markup
+        // genuinely changes (locale/timestamp format); open state is
+        // user-driven, so it is captured and restored across rebuilds.
+        if(row.dataset.rawText!==processText||row._wakeupRenderedHtml!==nextRowHtml){
           const _priorCard=row.querySelector&&row.querySelector('details.process-wakeup-card');
           const _wasOpen=!!(_priorCard&&_priorCard.open);
           row.dataset.rawText=processText;
+          row._wakeupRenderedHtml=nextRowHtml;
           row.innerHTML=nextRowHtml;
           if(_wasOpen){
             const _card=row.querySelector('details.process-wakeup-card');
@@ -15942,6 +15947,7 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='process_wakeup';
         row.dataset.rawText=processText;
+        row._wakeupRenderedHtml=nextRowHtml;
         row.innerHTML=nextRowHtml;
       }
       inner.appendChild(row);

@@ -66,11 +66,13 @@ eval(extractFunc('_processWakeupCardHtml'));
 
 const okBody = '[IMPORTANT: Background process proc_1 completed (exit_code=0).\nCommand: npm run build\nOutput:\nall good]';
 const failBody = '[IMPORTANT: Background process proc_2 completed (exit_code=3).\nCommand: pytest -q\nOutput:\n1 failed]';
+const signalBody = '[IMPORTANT: Background process proc_3 completed (exit_code=-9).\nCommand: sleep 999\nOutput:\n]';
 const watchBody = '[IMPORTANT: Background process w1 matched watch pattern "ERROR.*timeout".\nCommand: tail -f app.log\nMatched output:\nERROR request timeout\n(3 earlier matches were suppressed by rate limit)]';
 const htmlBody = '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: echo "<script>alert(1)</script>"\nOutput:\n<b>bold</b>]';
 
 const okInfo = _processWakeupInfo({}, okBody);
 const failInfo = _processWakeupInfo({}, failBody);
+const signalInfo = _processWakeupInfo({}, signalBody);
 const watchInfo = _processWakeupInfo({}, watchBody);
 const htmlInfo = _processWakeupInfo({}, htmlBody);
 const metaOnlyInfo = _processWakeupInfo(
@@ -91,6 +93,7 @@ process.stdout.write(JSON.stringify({
   emptyIsNull: _processWakeupInfo({content: ''}, '') === null,
   okCard: _processWakeupCardHtml(okInfo, okBody, extras),
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
+  signalCard: _processWakeupCardHtml(signalInfo, signalBody, extras),
   watchCard: _processWakeupCardHtml(watchInfo, watchBody, extras),
   htmlCard: _processWakeupCardHtml(htmlInfo, htmlBody, extras),
   metaOnlyCard: _processWakeupCardHtml(metaOnlyInfo, 'some future format the client parser does not know', extras),
@@ -166,10 +169,17 @@ def test_card_markup_collapsed_by_default_with_exit_chip():
     assert 'class="process-wakeup-chip fail"' in fail_card
     assert "exit 3" in fail_card
 
+    # Signal-killed processes report negative returncodes; still a failure.
+    signal_card = result["signalCard"]
+    assert 'class="process-wakeup-chip fail"' in signal_card
+    assert "exit -9" in signal_card
+
     watch_card = result["watchCard"]
     assert 'class="process-wakeup-chip watch"' in watch_card
     assert "ERROR.*timeout" in watch_card
     assert "process_wakeup_suppressed:3" in watch_card
+    # The truncatable pattern <code> must expose the full pattern on hover.
+    assert '<code title="ERROR.*timeout">' in watch_card
 
 
 def test_card_escapes_command_and_output():
