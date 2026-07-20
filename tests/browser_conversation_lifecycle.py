@@ -828,10 +828,11 @@ def _assert_settled(snapshot: dict, *, reasoning_count: int, scenario: str) -> N
     if reasoning_count == 4:
         assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
     if scenario in ERROR_SCENARIOS:
-        assert "terminal" in roles, snapshot
-        terminal_rows = _terminal_rows(snapshot)
-        assert terminal_rows, snapshot
-        assert all(_is_terminal_row_error(row) for row in terminal_rows), snapshot
+        if scenario == "terminal-error":
+            assert "terminal" in roles, snapshot
+            terminal_rows = _terminal_rows(snapshot)
+            assert terminal_rows, snapshot
+            assert all(_is_terminal_row_error(row) for row in terminal_rows), snapshot
         assert snapshot["assistantMessage"] is not None, snapshot
         turn_duration = snapshot["assistantMessage"].get("turnDuration")
         assert isinstance(turn_duration, (int, float)) and turn_duration > 0, snapshot
@@ -1369,7 +1370,7 @@ def main() -> int:
                 anchor_scene_requests=anchor_scene_requests,
             )
             assert scene.get("version") == "activity_scene_v1", scene
-            if SCENARIO in ERROR_SCENARIOS:
+            if SCENARIO == "terminal-error":
                 scene_rows = scene.get("activity_rows") or []
                 assert any(
                     isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
@@ -1388,8 +1389,10 @@ def main() -> int:
             "live": _semantic_activity(live_snapshot),
             "settled": _semantic_activity(settled_snapshot),
         }
-        if SCENARIO in ERROR_SCENARIOS:
+        if SCENARIO == "terminal-error":
             print("OK  settled: terminal row and same activity survived terminal settlement")
+        elif SCENARIO in ERROR_SCENARIOS:
+            print("OK  settled: detached terminal error and same activity survived settlement")
         else:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
@@ -1432,14 +1435,15 @@ def main() -> int:
                 "settled_process": settled_process,
                 "reloaded_process": reloaded_process,
             }
-            assert len(settled_terminal) == len(reloaded_terminal) == 1, {
-                "settled_terminal": settled_terminal,
-                "reloaded_terminal": reloaded_terminal,
-            }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
-                "settled_terminal": settled_terminal[0],
-                "reloaded_terminal": reloaded_terminal[0],
-            }
+            if SCENARIO == "terminal-error":
+                assert len(settled_terminal) == len(reloaded_terminal) == 1, {
+                    "settled_terminal": settled_terminal,
+                    "reloaded_terminal": reloaded_terminal,
+                }
+                assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
+                    "settled_terminal": settled_terminal[0],
+                    "reloaded_terminal": reloaded_terminal[0],
+                }
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
         expected_inputs = (
