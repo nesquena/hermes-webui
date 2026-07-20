@@ -9307,6 +9307,7 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
     new_session,
@@ -16777,7 +16778,12 @@ def _handle_sessions_search(handler, parsed):
             continue
         if content_search:
             try:
-                sess = get_session(s["session_id"])
+                # Scan accessor, not get_session(): a content search walks every
+                # session, and routing that through the LRU would evict the
+                # user's working set on every keystroke-debounced search.
+                sess = get_session_for_scan(s["session_id"])
+                if sess is None:
+                    continue
                 msgs = sess.messages[:depth] if depth else sess.messages
                 for m in msgs:
                     c = _session_search_message_text(m)
