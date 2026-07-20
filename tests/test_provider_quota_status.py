@@ -221,6 +221,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
     old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
 
     import api.providers as providers
+    default_scope = providers._codex_reset_default_scope()
     seen = {}
     previous_home = os.environ.get("HERMES_HOME")
 
@@ -298,6 +299,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
             "complete": True,
             "redeemable": True,
             "reason_code": None,
+            "redemption_scope": default_scope,
         },
         "available": True,
         "unavailable_reason": None,
@@ -446,6 +448,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert snapshot["windows"][0]["label"] == "Session"
     assert snapshot["windows"][0]["used_percent"] == 15
     assert snapshot["banked_resets"] == {
+        "redemption_scope": providers._codex_reset_default_scope(),
         "available_count": 2,
         "complete": True,
         "redeemable": False,
@@ -462,6 +465,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
         "plans": ["Pro", "Plus"],
         "next_reset_at": "2030-03-17T17:46:40Z",
         "banked_resets": {
+            "redemption_scope": providers._codex_reset_default_scope(),
             "available_count": 2,
             "complete": True,
             "redeemable": False,
@@ -491,6 +495,11 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "status": "available",
                 "plan": "Pro",
                 "banked_resets": {
+                    "redemption_scope": providers._codex_reset_redemption_scope(
+                        account_id="acct-primary",
+                        base_url="https://chatgpt.com/backend-api/codex",
+                        api_key=primary_token,
+                    ),
                     "available_count": 2,
                     "complete": True,
                     "redeemable": True,
@@ -538,6 +547,11 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 ],
                 "details": ["Credits balance: $12.50"],
                 "banked_resets": {
+                    "redemption_scope": providers._codex_reset_redemption_scope(
+                        account_id="acct-exhausted",
+                        base_url="https://chatgpt.com/backend-api/codex",
+                        api_key=exhausted_token,
+                    ),
                     "available_count": 0,
                     "complete": True,
                     "redeemable": False,
@@ -551,6 +565,19 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     }
     assert primary_token not in output
     assert exhausted_token not in output
+    assert snapshot["pool"]["credentials"][0]["banked_resets"]["redemption_scope"] == providers._codex_reset_redemption_scope(
+        account_id="acct-primary",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=primary_token,
+    )
+    assert snapshot["pool"]["credentials"][1]["banked_resets"]["redemption_scope"] == providers._codex_reset_redemption_scope(
+        account_id="acct-exhausted",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=exhausted_token,
+    )
+    assert snapshot["banked_resets"]["redemption_scope"] == providers._codex_reset_default_scope()
+    assert "acct-primary" not in json.dumps(snapshot)
+    assert "acct-exhausted" not in json.dumps(snapshot)
 
 
 def test_codex_account_usage_subprocess_retries_expired_pool_exhaustion(monkeypatch, capsys):
@@ -843,6 +870,8 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
     """Parent process serialization must preserve pooled credential summaries."""
     import api.providers as providers
 
+    default_scope = providers._codex_reset_default_scope()
+
     payload = {
         "provider": "openai-codex",
         "source": "usage_api_pool",
@@ -865,7 +894,11 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
                     "label": "Credential 1",
                     "status": "available",
                     "windows": [],
-                    "banked_resets": {"available_count": 2, "complete": True},
+                    "banked_resets": {
+                        "available_count": 2,
+                        "complete": True,
+                        "redemption_scope": default_scope,
+                    },
                 },
                 {
                     "label": "Credential 2",
@@ -880,6 +913,7 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
             "complete": False,
             "redeemable": False,
             "reason_code": "ambiguous_pool",
+            "redemption_scope": default_scope,
         },
     }
 
@@ -1345,6 +1379,46 @@ def test_openai_api_key_detection_falls_through_after_codex_jwt_config_value(mon
         _restore_config(old_cfg, old_mtime)
 
 
+def test_codex_actionable_status_scope_binds_to_resolved_account(monkeypatch):
+    import api.providers as providers
+
+    def b64url(payload: bytes) -> str:
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    account_id = "acct-status-scope"
+    token = ".".join((
+        b64url(b'{"alg":"none","typ":"JWT"}'),
+        b64url(json.dumps({"https://api.openai.com/auth": {"chatgpt_account_id": account_id}}).encode()),
+        "signature",
+    ))
+    credential = {
+        "provider": "openai-codex",
+        "source": "credential_pool",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": token,
+        "account_id": None,
+        "redemption_scope": None,
+    }
+    monkeypatch.setattr(providers, "_resolve_codex_reset_credential", lambda: (credential, ""))
+    account_limits = {
+        "banked_resets": {
+            "available_count": 2,
+            "redeemable": True,
+            "redemption_scope": providers._codex_reset_default_scope(),
+        }
+    }
+
+    providers._annotate_codex_reset_redemption_scope(account_limits)
+
+    assert account_limits["banked_resets"]["redemption_scope"] == providers._codex_reset_redemption_scope(
+        account_id=account_id,
+        base_url=credential["base_url"],
+        api_key=token,
+    )
+    assert account_id not in json.dumps(account_limits)
+    assert token not in json.dumps(account_limits)
+
+
 def test_provider_quota_route_is_registered():
     """The backend must expose a route for the UI to poll quota status."""
     routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
@@ -1399,7 +1473,7 @@ def test_provider_quota_card_has_manual_refresh_control():
     header_end = panels.index('<div class="provider-quota-body">', header_start)
     header = panels[header_start:header_end]
     assert header.index("data-provider-quota-refresh") < header.index("data-provider-quota-reset")
-    assert "bankedResetState.count" in header
+    assert "_providerQuotaResetActionCountLabel(resetCount)" in header
 
 
 def test_provider_quota_i18n_keys_exist_for_all_locales():

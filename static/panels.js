@@ -10835,6 +10835,216 @@ function _providerQuotaWindowMeta(used,reset){
   return meta;
 }
 
+const _PROVIDER_QUOTA_REDEMPTION_PENDING_KEY='hermes-provider-quota-reset-pending-v1';
+const _PROVIDER_QUOTA_REDEMPTION_PENDING_VERSION=1;
+const _PROVIDER_QUOTA_REDEMPTION_SCOPE_RE=/^[0-9a-f]{64}$/;
+const _CANONICAL_UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function _providerQuotaResetClassifyRedeemOutcome(value){
+  const redemption=value&&value.redemption;
+  if(!redemption||typeof redemption!=='object') return 'unknown';
+  const state=String(redemption.state||'').trim().toLowerCase();
+  if(!state) return 'unknown';
+  if(state==='unknown'||state==='unknown_outcome'||state==='conflict'||state==='in_progress'){
+    return 'unknown';
+  }
+  return 'definitive';
+}
+
+function _providerQuotaResetSetButtonUnknownOutcome(button, text){
+  if(!button) return;
+  button.disabled=true;
+  if(typeof text==='string') button.textContent=text;
+  button.removeAttribute('aria-busy');
+  button.setAttribute('aria-disabled','true');
+}
+
+function _providerQuotaResetScopeFromStatus(status){
+  const scope=status&&status.account_limits&&status.account_limits.banked_resets&&status.account_limits.banked_resets.redemption_scope;
+  return _providerQuotaResetNormalizeScope(scope);
+}
+
+function _providerQuotaResetCanonicalizeRedeemRequestId(value){
+  if(typeof value!=='string') return '';
+  const normalized=value.toLowerCase();
+  return _CANONICAL_UUID_RE.test(normalized)?normalized:'';
+}
+
+function _providerQuotaResetNormalizeScope(scope){
+  if(typeof scope!=='string') return '';
+  const normalized=scope.trim().toLowerCase();
+  return _PROVIDER_QUOTA_REDEMPTION_SCOPE_RE.test(normalized)?normalized:'';
+}
+
+function _providerQuotaResetGenerateRequestId(){
+  try{
+    const secureCrypto=(typeof globalThis==='object'&&globalThis&&typeof globalThis.crypto==='object'&&globalThis.crypto)?globalThis.crypto:null;
+    if(!secureCrypto||typeof secureCrypto.getRandomValues!=='function') return '';
+    if(typeof secureCrypto.randomUUID==='function') return _providerQuotaResetCanonicalizeRedeemRequestId(secureCrypto.randomUUID());
+    const bytes=new Uint8Array(16);
+    secureCrypto.getRandomValues(bytes);
+    bytes[6]=(bytes[6]&0x0f)|0x40;
+    bytes[8]=(bytes[8]&0x3f)|0x80;
+    const toHex=(value)=>value.toString(16).padStart(2,'0');
+    return `${toHex(bytes[0])}${toHex(bytes[1])}${toHex(bytes[2])}${toHex(bytes[3])}-${toHex(bytes[4])}${toHex(bytes[5])}-${toHex(bytes[6])}${toHex(bytes[7])}-${toHex(bytes[8])}${toHex(bytes[9])}-${toHex(bytes[10])}${toHex(bytes[11])}${toHex(bytes[12])}${toHex(bytes[13])}${toHex(bytes[14])}${toHex(bytes[15])}`;
+  }catch(_e){
+    return '';
+  }
+}
+
+function _providerQuotaResetNormalizeRecord(scope, value){
+  const normalizedScope=_providerQuotaResetNormalizeScope(scope);
+  if(!normalizedScope) return null;
+  const requestId=_providerQuotaResetCanonicalizeRedeemRequestId(value&&value.request_id);
+  if(!requestId) return null;
+  const availableCount=Number(value&&value.available_count);
+  const createdAt=Number(value&&value.created_at);
+  if(!Number.isFinite(availableCount)||availableCount<0) return null;
+  if(!Number.isFinite(createdAt)||createdAt<=0) return null;
+  return {
+    scope:normalizedScope,
+    request_id:requestId,
+    available_count:availableCount,
+    created_at:createdAt,
+  };
+}
+
+function _providerQuotaResetReadPendingRecords(){
+  const empty=Object.create(null);
+  try{
+    const raw=localStorage.getItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY);
+    if(!raw) return empty;
+    const parsed=JSON.parse(raw);
+    if(!parsed||typeof parsed!=='object'||parsed.version!==_PROVIDER_QUOTA_REDEMPTION_PENDING_VERSION||!parsed.records||typeof parsed.records!=='object'||Array.isArray(parsed.records)){
+      localStorage.removeItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY);
+      return empty;
+    }
+    const records=Object.create(null);
+    let repaired=false;
+    for(const scope of Object.keys(parsed.records)){
+      const normalized=_providerQuotaResetNormalizeRecord(scope, parsed.records[scope]);
+      if(!normalized){
+        repaired=true;
+        continue;
+      }
+      records[normalized.scope]=normalized;
+    }
+    if(repaired){
+      if(Object.keys(records).length===0) localStorage.removeItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY);
+      else localStorage.setItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY, JSON.stringify({version:_PROVIDER_QUOTA_REDEMPTION_PENDING_VERSION,records}));
+    }
+    return records;
+  }catch(_e){
+    try{localStorage.removeItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY);}catch(_x){}
+    return empty;
+  }
+}
+
+function _providerQuotaResetWritePendingRecords(records){
+  if(!records||typeof records!=='object'||Array.isArray(records)) return false;
+  const normalizedRecords=Object.create(null);
+  try{
+    for(const scope of Object.keys(records)){
+      const normalized=_providerQuotaResetNormalizeRecord(scope, records[scope]);
+      if(!normalized) continue;
+      normalizedRecords[normalized.scope]=normalized;
+    }
+  }catch(_e){
+    return false;
+  }
+  try{
+    if(Object.keys(normalizedRecords).length===0){
+      localStorage.removeItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY);
+    }else{
+      localStorage.setItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY, JSON.stringify({version:_PROVIDER_QUOTA_REDEMPTION_PENDING_VERSION,records:normalizedRecords}));
+    }
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
+
+function _providerQuotaResetPendingRecordForScope(scope){
+  const normalizedScope=_providerQuotaResetNormalizeScope(scope);
+  if(!normalizedScope) return null;
+  const records=_providerQuotaResetReadPendingRecords();
+  return Object.prototype.hasOwnProperty.call(records, normalizedScope) ? records[normalizedScope] : null;
+}
+
+function _providerQuotaResetHasPendingForOtherScope(scope){
+  const normalizedScope=_providerQuotaResetNormalizeScope(scope);
+  const records=_providerQuotaResetReadPendingRecords();
+  if(!normalizedScope) return Object.keys(records).length>0;
+  return Object.keys(records).some(entry=>entry!==normalizedScope);
+}
+
+function _providerQuotaResetSetPendingRecord(scope, requestId, availableCount){
+  const normalizedScope=_providerQuotaResetNormalizeScope(scope);
+  const normalizedRequestId=_providerQuotaResetCanonicalizeRedeemRequestId(requestId);
+  const normalizedCount=Number(availableCount);
+  if(!normalizedScope||!normalizedRequestId) return false;
+  if(!Number.isFinite(normalizedCount)||normalizedCount<0) return false;
+  const records=Object.create(null);
+  const current=_providerQuotaResetReadPendingRecords();
+  Object.keys(current).forEach((entry)=>{ records[entry]=current[entry]; });
+  records[normalizedScope]={
+    scope:normalizedScope,
+    request_id:normalizedRequestId,
+    available_count:normalizedCount,
+    created_at:Date.now(),
+  };
+  return _providerQuotaResetWritePendingRecords(records);
+}
+
+function _providerQuotaResetClearPendingRecord(scope, requestId){
+  const normalizedScope=_providerQuotaResetNormalizeScope(scope);
+  const normalizedRequestId=_providerQuotaResetCanonicalizeRedeemRequestId(requestId);
+  if(!normalizedScope||!normalizedRequestId) return false;
+  const records=_providerQuotaResetReadPendingRecords();
+  if(!Object.prototype.hasOwnProperty.call(records, normalizedScope)) return false;
+  if(records[normalizedScope].request_id!==normalizedRequestId) return false;
+  delete records[normalizedScope];
+  if(!Object.keys(records).length){
+    try{localStorage.removeItem(_PROVIDER_QUOTA_REDEMPTION_PENDING_KEY);}catch(_e){return false;}
+    return true;
+  }
+  return _providerQuotaResetWritePendingRecords(records);
+}
+
+function _providerQuotaResetGetOrCreateRequestId(scope, status){
+  const normalizedScope=_providerQuotaResetNormalizeScope(scope);
+  if(!normalizedScope) return null;
+  const existing=_providerQuotaResetPendingRecordForScope(normalizedScope);
+  if(existing&&existing.request_id) return existing.request_id;
+  const preCount=Number(status&&status.account_limits&&status.account_limits.banked_resets&&status.account_limits.banked_resets.available_count);
+  if(!Number.isFinite(preCount) || preCount < 0) return null;
+  const requestId=_providerQuotaResetGenerateRequestId();
+  if(!requestId) return null;
+  if(!_providerQuotaResetSetPendingRecord(normalizedScope, requestId, preCount)) return null;
+  return requestId;
+}
+
+function _providerQuotaResetActionCountLabel(count){
+  const normalized=Number.isFinite(Number(count))?Number(count):0;
+  return t('provider_quota_reset_action_count', normalized);
+}
+
+function _providerQuotaResetMaybeClearOnObservedDecrement(status){
+  const scope=_providerQuotaResetScopeFromStatus(status);
+  if(!scope) return false;
+  const pending=_providerQuotaResetPendingRecordForScope(scope);
+  if(!pending) return false;
+  const redemptionState=String(status&&status.redemption&&status.redemption.state||'').trim().toLowerCase();
+  if(redemptionState==='unknown'||redemptionState==='unknown_outcome'||redemptionState==='conflict'||redemptionState==='in_progress') return false;
+  const observed=Number(status&&status.account_limits&&status.account_limits.banked_resets&&status.account_limits.banked_resets.available_count);
+  if(!Number.isFinite(observed)) return false;
+  if(observed < pending.available_count){
+    _providerQuotaResetClearPendingRecord(scope,pending.request_id);
+    return true;
+  }
+  return false;
+}
+
 function _providerQuotaRetryAfterText(value){
   const retry=_formatProviderQuotaReset(value);
   return retry?t('provider_quota_retry_after',retry):'';
@@ -10889,6 +11099,7 @@ function _parseProviderQuotaApiError(error){
 
 async function _redeemProviderQuotaReset(card,button,status){
   if(!card||!button) return;
+  const originalText=button.textContent;
   const requiresForce=_providerQuotaResetRequestForce(status);
   const confirmMessage=requiresForce
     ? t('provider_quota_reset_force_message')
@@ -10903,20 +11114,71 @@ async function _redeemProviderQuotaReset(card,button,status){
   if(!ok){
     if(card.isConnected){
       button.disabled=false;
-      button.textContent=t('provider_quota_reset_action');
+      button.textContent=originalText;
+      button.removeAttribute('aria-busy');
+      button.removeAttribute('aria-disabled');
+    }
+    return;
+  }
+
+  const scope=_providerQuotaResetScopeFromStatus(status);
+  if(!scope){
+    if(_providerQuotaResetHasPendingForOtherScope(scope)){
+      _providerQuotaResetSetButtonUnknownOutcome(button,originalText);
+      if(typeof showToast==='function') showToast(t('provider_quota_reset_unknown_outcome'));
+      return;
+    }
+    if(card.isConnected){
+      button.disabled=false;
+      button.textContent=originalText;
+      button.removeAttribute('aria-busy');
+      button.removeAttribute('aria-disabled');
+    }
+    if(typeof showToast==='function') showToast(t('provider_quota_reset_failed'));
+    return;
+  }
+
+  if(_providerQuotaResetHasPendingForOtherScope(scope)){
+    if(card.isConnected){
+      button.disabled=true;
+      button.textContent=originalText;
+      button.setAttribute('aria-disabled','true');
       button.removeAttribute('aria-busy');
     }
+    if(typeof showToast==='function') showToast(t('provider_quota_reset_unknown_outcome'));
     return;
   }
 
   button.disabled=true;
   button.textContent=t('provider_quota_reset_busy');
   button.setAttribute('aria-busy','true');
+  button.setAttribute('aria-disabled','true');
+
+  const requestId=_providerQuotaResetGetOrCreateRequestId(scope,status);
+  if(!requestId){
+    if(card.isConnected){
+      button.disabled=false;
+      button.textContent=originalText;
+      button.removeAttribute('aria-busy');
+      button.removeAttribute('aria-disabled');
+    }
+    if(typeof showToast==='function') showToast(t('provider_quota_reset_failed'));
+    return;
+  }
+
   let unknownOutcome=false;
   try{
     let next;
     try{
-      next=await api('/api/provider/openai-codex/reset',{method:'POST',body:JSON.stringify({force:requiresForce}),retries:0,timeoutMs:90000});
+      next=await api('/api/provider/openai-codex/reset',{
+        method:'POST',
+        body:JSON.stringify({
+          force:requiresForce,
+          redeem_request_id:requestId,
+        }),
+        retries:0,
+        timeoutMs:90000,
+      });
       if(next&&next.quota_status){
         next={...next.quota_status,redemption:next.redemption||null};
       }
@@ -10954,8 +11216,15 @@ async function _redeemProviderQuotaReset(card,button,status){
         unknownOutcome=true;
       }
     }
-    const redemptionState=String(next&&next.redemption&&next.redemption.state||'').toLowerCase();
-    if(redemptionState==='unknown'||redemptionState==='unknown_outcome') unknownOutcome=true;
+    const outcomeClass=_providerQuotaResetClassifyRedeemOutcome(next);
+    unknownOutcome = outcomeClass!=='definitive';
+    if(!unknownOutcome){
+      _providerQuotaResetClearPendingRecord(scope,requestId);
+    }
+    if(unknownOutcome && (!next||!next.redemption||!next.redemption.message)){
+      next=next||{};
+      next.redemption={ok:false,state:'unknown_outcome',message:t('provider_quota_reset_unknown_outcome')};
+    }
     const fresh=_buildProviderQuotaCard(next);
     if(fresh){
       card.replaceWith(fresh);
@@ -10972,24 +11241,21 @@ async function _redeemProviderQuotaReset(card,button,status){
         const unknownResetButton=typeof fresh?.querySelector === 'function'
           ? fresh.querySelector('[data-provider-quota-reset]')
           : null;
-        if(unknownResetButton){
-          unknownResetButton.disabled=true;
-          unknownResetButton.setAttribute('aria-busy','true');
-          unknownResetButton.setAttribute('aria-disabled','true');
-        }
-        if(button){
-          button.disabled=true;
-          button.setAttribute('aria-busy','true');
-          button.setAttribute('aria-disabled','true');
-        }
+        if(unknownResetButton) _providerQuotaResetSetButtonUnknownOutcome(unknownResetButton, unknownResetButton.textContent);
+        _providerQuotaResetSetButtonUnknownOutcome(button, originalText);
         if(typeof showToast === 'function'){
           showToast(t('provider_quota_reset_unknown_outcome'));
         }
       }
       return;
     }
+    if(unknownOutcome){
+      _providerQuotaResetSetButtonUnknownOutcome(button, originalText);
+      if(typeof showToast === 'function') showToast(t('provider_quota_reset_unknown_outcome'));
+    }
   }catch(error){
     if(unknownOutcome){
+      _providerQuotaResetSetButtonUnknownOutcome(button, originalText);
       if(typeof showToast==='function') showToast(t('provider_quota_reset_unknown_outcome'));
       return;
     }
@@ -10997,8 +11263,9 @@ async function _redeemProviderQuotaReset(card,button,status){
   }
   if(card.isConnected && !unknownOutcome){
     button.disabled=false;
-    button.textContent=t('provider_quota_reset_action');
+    button.textContent=originalText;
     button.removeAttribute('aria-busy');
+    button.removeAttribute('aria-disabled');
   }
 }
 
@@ -11082,6 +11349,13 @@ function _buildProviderQuotaPoolBreakdown(accountLimits){
 
 function _buildProviderQuotaCard(status){
   if(!status) return null;
+  const isCodexQuotaProvider=status.provider==='openai-codex';
+  if(isCodexQuotaProvider){
+    const redemption=status&&status.redemption;
+    if(!redemption){
+      _providerQuotaResetMaybeClearOnObservedDecrement(status);
+    }
+  }
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
@@ -11090,6 +11364,14 @@ function _buildProviderQuotaCard(status){
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
   const quota=status.quota||null;
   const bankedResetState=_providerQuotaBankedResetState(status);
+  const scope=_providerQuotaResetScopeFromStatus(status);
+  const pendingRecord=isCodexQuotaProvider&&scope ? _providerQuotaResetPendingRecordForScope(scope) : null;
+  const hasPendingOtherScope=isCodexQuotaProvider ? _providerQuotaResetHasPendingForOtherScope(scope) : false;
+  const hasPending=!!pendingRecord || hasPendingOtherScope;
+  const shouldRenderResetButton=isCodexQuotaProvider&&(bankedResetState.canRedeem || hasPending);
+  const disableResetButton=hasPending;
+  const resetCount=Number.isFinite(Number(bankedResetState.count))?bankedResetState.count:0;
+  const unknownOutcomeMessage=(isCodexQuotaProvider&&hasPending) ? t('provider_quota_reset_unknown_outcome') : null;
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
@@ -11112,8 +11394,9 @@ function _buildProviderQuotaCard(status){
       ? `<div class="provider-quota-details">${details.map(d=>`<span>${esc(d)}</span>`).join('')}</div>`
       : '';
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
-    const redemption=status.redemption&&status.redemption.message
-      ? `<div class="provider-quota-feedback provider-quota-feedback-${status.redemption.ok===false?'error':'success'}">${esc(status.redemption.message)}</div>`
+    const redemptionMessage=unknownOutcomeMessage || (isCodexQuotaProvider && status.redemption&&status.redemption.message ? status.redemption.message : null);
+    const redemption=redemptionMessage
+      ? `<div class="provider-quota-feedback provider-quota-feedback-${unknownOutcomeMessage||status.redemption&&status.redemption.ok===false?'error':'success'}">${esc(redemptionMessage)}</div>`
       : '';
     body=windowHtml+detailHtml+redemption+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
@@ -11126,7 +11409,7 @@ function _buildProviderQuotaCard(status){
   }else{
     body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_unavailable'))}</div>`;
   }
-  if(status.redemption&&status.redemption.message&&body.indexOf('provider-quota-feedback')===-1){
+  if(isCodexQuotaProvider&&status.redemption&&status.redemption.message&&body.indexOf('provider-quota-feedback')===-1){
     body=`<div class="provider-quota-feedback provider-quota-feedback-${status.redemption.ok===false?'error':'success'}">${esc(status.redemption.message)}</div>`+body;
   }
   card.innerHTML=`
@@ -11139,7 +11422,7 @@ function _buildProviderQuotaCard(status){
       <div class="provider-quota-actions">
         <span class="provider-quota-badge">${esc(_providerQuotaStatusLabel(state))}</span>
         <button class="provider-quota-refresh" type="button" data-provider-quota-refresh title="${esc(t('provider_quota_refresh_title'))}">${esc(t('provider_quota_refresh_usage'))}</button>
-        ${bankedResetState.canRedeem?`<button class="provider-quota-refresh provider-quota-reset-btn" type="button" data-provider-quota-reset>${esc(t('provider_quota_reset_action')+' ('+bankedResetState.count+')')}</button>`:''}
+        ${shouldRenderResetButton?`<button class="provider-quota-refresh provider-quota-reset-btn" type="button" data-provider-quota-reset${disableResetButton?' disabled':''}${disableResetButton?' aria-disabled="true"':''}>${esc(_providerQuotaResetActionCountLabel(resetCount))}</button>`:''}
       </div>
     </div>
     <div class="provider-quota-body">${body}</div>

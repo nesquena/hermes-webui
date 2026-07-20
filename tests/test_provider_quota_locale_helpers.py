@@ -2,6 +2,7 @@
 
 RESET_FALLBACK_KEYS = {
     "provider_quota_banked_resets",
+    "provider_quota_reset_action_count",
     "provider_quota_reset_action",
     "provider_quota_reset_busy",
     "provider_quota_reset_failed",

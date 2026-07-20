@@ -1291,6 +1291,7 @@ const LOCALES = {
     provider_quota_used_meta: '{0} used',
     provider_quota_resets_meta: 'resets {0}',
     provider_quota_banked_resets: 'Banked resets: {0}',
+    provider_quota_reset_action_count: 'Redeem reset ({0})',
     provider_quota_reset_action: 'Redeem reset',
     provider_quota_reset_busy: 'Redeeming…',
     provider_quota_reset_failed: 'Reset redemption failed.',
