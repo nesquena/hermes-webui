@@ -267,15 +267,21 @@ def _find_record_start_before(path: Path, seek_pos: int) -> int:
     except (FileNotFoundError, OSError):
         return 0
     pos = min(seek_pos, size)
-    with path.open("rb") as fh:
-        while pos > 0:
-            read_from = max(0, pos - chunk_size)
-            fh.seek(read_from)
-            block = fh.read(pos - read_from)
-            nl = block.rfind(b"\n")
-            if nl >= 0:
-                return read_from + nl + 1
-            pos = read_from
+    try:
+        with path.open("rb") as fh:
+            while pos > 0:
+                read_from = max(0, pos - chunk_size)
+                fh.seek(read_from)
+                block = fh.read(pos - read_from)
+                nl = block.rfind(b"\n")
+                if nl >= 0:
+                    return read_from + nl + 1
+                pos = read_from
+    except (FileNotFoundError, OSError):
+        # TOCTOU: journal deleted between the stat() above and this open/read
+        # (cleanup racing a status poll). Return the safe fallback rather than
+        # letting the exception escape to the HTTP handler. (#6139 Greptile P1)
+        return 0
     return 0
 
 
@@ -325,15 +331,21 @@ def _rfind_byte_before(path: Path, byte: bytes, end_offset: int) -> int | None:
     ``end_offset - 1``, scanning backward in bounded chunks. None if not found."""
     chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
     pos = end_offset
-    with path.open("rb") as fh:
-        while pos > 0:
-            read_from = max(0, pos - chunk_size)
-            fh.seek(read_from)
-            block = fh.read(pos - read_from)
-            idx = block.rfind(byte)
-            if idx >= 0:
-                return read_from + idx
-            pos = read_from
+    try:
+        with path.open("rb") as fh:
+            while pos > 0:
+                read_from = max(0, pos - chunk_size)
+                fh.seek(read_from)
+                block = fh.read(pos - read_from)
+                idx = block.rfind(byte)
+                if idx >= 0:
+                    return read_from + idx
+                pos = read_from
+    except (FileNotFoundError, OSError):
+        # TOCTOU: journal deleted before/during the scan. Return the safe
+        # fallback (None = byte not found) rather than escaping to the caller.
+        # (#6139 Greptile P1)
+        return None
     return None
 
 
@@ -358,58 +370,65 @@ def _record_is_structurally_complete(path: Path, record_start: int) -> bool:
         return False
     in_string = False
     escaped = False
-    with path.open("rb") as fh:
-        fh.seek(record_start)
-        while pos < size:
-            chunk = fh.read(min(chunk_size, size - pos))
-            if not chunk:
-                break
-            chunk_len = len(chunk)
-            for ci in range(chunk_len):
-                b = chunk[ci]
-                pos += 1
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif b == 0x5C:  # backslash
-                        escaped = True
-                    elif b == 0x22:  # closing quote
-                        in_string = False
-                    continue
-                if b == 0x22:  # opening quote
-                    in_string = True
-                elif b == 0x7B:  # '{'
-                    depth += 1
-                elif b == 0x7D:  # '}'
-                    depth -= 1
-                    if depth == 0:
-                        # Object closed at position `pos` (1 past the '}').
-                        # The record is complete iff the byte(s) right after are a
-                        # newline terminator (\n or \r\n). Look at the next byte
-                        # in the current chunk first (avoid file-cursor drift),
-                        # else read fresh from the file.
-                        if ci + 1 < chunk_len:
-                            nb = chunk[ci + 1]
-                            if nb == 0x0A:  # \n — complete
-                                return True
-                            if nb == 0x0D:  # \r — need to check for \r\n
-                                if ci + 2 < chunk_len:
-                                    return chunk[ci + 2] == 0x0A
-                                # \r at chunk end: read from file to check for \n
-                                fh.seek(pos + 1)
-                                return fh.read(1) == b"\n"
-                            return False  # any other byte after } is not a terminator
-                        # Terminator is in the next chunk: read up to 2 bytes
-                        # from file to distinguish \r\n (CRLF) from a bare \r.
-                        fh.seek(pos)
-                        nb = fh.read(2)
-                        return nb == b"\r\n" or nb[:1] == b"\n"
-                elif b == 0x0A and depth == 0:  # newline at depth 0 before close
-                    return False
-            # depth > 0 here means the record spans more chunks; keep scanning.
-        # Reached EOF: a record ending at EOF is only complete if a real newline
-        # terminator was seen — NOT if the `}` is the last byte. A write
-        # interrupted after `}` but before the `\n` is crash-truncated.
+    try:
+        with path.open("rb") as fh:
+            fh.seek(record_start)
+            while pos < size:
+                chunk = fh.read(min(chunk_size, size - pos))
+                if not chunk:
+                    break
+                chunk_len = len(chunk)
+                for ci in range(chunk_len):
+                    b = chunk[ci]
+                    pos += 1
+                    if in_string:
+                        if escaped:
+                            escaped = False
+                        elif b == 0x5C:  # backslash
+                            escaped = True
+                        elif b == 0x22:  # closing quote
+                            in_string = False
+                        continue
+                    if b == 0x22:  # opening quote
+                        in_string = True
+                    elif b == 0x7B:  # '{'
+                        depth += 1
+                    elif b == 0x7D:  # '}'
+                        depth -= 1
+                        if depth == 0:
+                            # Object closed at position `pos` (1 past the '}').
+                            # The record is complete iff the byte(s) right after are a
+                            # newline terminator (\n or \r\n). Look at the next byte
+                            # in the current chunk first (avoid file-cursor drift),
+                            # else read fresh from the file.
+                            if ci + 1 < chunk_len:
+                                nb = chunk[ci + 1]
+                                if nb == 0x0A:  # \n — complete
+                                    return True
+                                if nb == 0x0D:  # \r — need to check for \r\n
+                                    if ci + 2 < chunk_len:
+                                        return chunk[ci + 2] == 0x0A
+                                    # \r at chunk end: read from file to check for \n
+                                    fh.seek(pos + 1)
+                                    return fh.read(1) == b"\n"
+                                return False  # any other byte after } is not a terminator
+                            # Terminator is in the next chunk: read up to 2 bytes
+                            # from file to distinguish \r\n (CRLF) from a bare \r.
+                            fh.seek(pos)
+                            nb = fh.read(2)
+                            return nb == b"\r\n" or nb[:1] == b"\n"
+                    elif b == 0x0A and depth == 0:  # newline at depth 0 before close
+                        return False
+                # depth > 0 here means the record spans more chunks; keep scanning.
+            # Reached EOF: a record ending at EOF is only complete if a real newline
+            # terminator was seen — NOT if the `}` is the last byte. A write
+            # interrupted after `}` but before the `\n` is crash-truncated.
+            return False
+    except (FileNotFoundError, OSError):
+        # TOCTOU: journal deleted between the stat() above and this open/read
+        # (cleanup racing a status poll). Return the safe fallback (False =
+        # record not complete) rather than letting the exception escape to the
+        # HTTP handler. (#6139 Greptile P1)
         return False
 
 
