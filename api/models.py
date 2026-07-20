@@ -1265,42 +1265,79 @@ def _cache_composer_draft_sidecar(sid, stat_key, draft) -> None:
             _DRAFT_SIDECAR_CACHE.popitem(last=False)
 
 
+def _composer_draft_sidecar_signature(stat_result):
+    """Return an identity-sensitive cache token for a derived draft sidecar."""
+    return (
+        int(getattr(stat_result, "st_dev", 0)),
+        int(getattr(stat_result, "st_ino", 0)),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(getattr(stat_result, "st_ctime_ns", 0)),
+    )
+
+
+def _fsync_composer_draft_parent(path: Path) -> None:
+    """Best-effort directory durability after a draft replace or unlink."""
+    try:
+        flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_RDONLY", 0)
+        directory_fd = os.open(path.parent, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
+
+
 def composer_draft_sidecar_path(sid):
     if not is_safe_session_id(str(sid or '')):
         return None
     return SESSION_DIR / _DRAFT_SIDECAR_DIRNAME / f'{sid}.json'
 
 
-def read_composer_draft_sidecar(sid):
-    """Return the sidecar draft dict for *sid*, or None when absent/unreadable.
+def composer_draft_sidecar_state(sid) -> tuple[str, dict | None]:
+    """Return ``present``, ``absent``, or ``unreadable`` without conflating loss.
 
-    None means "no sidecar" (caller falls back to the legacy in-file field);
-    an existing sidecar with an empty draft is a real, authoritative value —
-    that distinction is what lets a cleared draft win over a stale legacy one.
+    Destructive operations must not treat a malformed or temporarily unreadable
+    authoritative draft as absent; only callers that intentionally display the
+    legacy fallback should use ``read_composer_draft_sidecar`` below.
     """
     p = composer_draft_sidecar_path(sid)
     if p is None:
-        return None
+        return "unreadable", None
     try:
         st = p.stat()
+    except FileNotFoundError:
+        return "absent", None
     except OSError:
-        return None
-    stat_key = (st.st_mtime_ns, st.st_size)
+        return "unreadable", None
+    stat_key = _composer_draft_sidecar_signature(st)
     key = str(sid)
     with _DRAFT_SIDECAR_LOCK:
         cached = _DRAFT_SIDECAR_CACHE.get(key)
         if cached is not None and cached[0] == stat_key:
             _DRAFT_SIDECAR_CACHE.move_to_end(key)
-            return copy.deepcopy(cached[1])
+            return "present", copy.deepcopy(cached[1])
     try:
         data = _json_loads_session(p.read_text(encoding='utf-8'))
+        draft = data.get('draft') if isinstance(data, dict) else None
+        if not isinstance(draft, dict):
+            raise ValueError("draft sidecar has invalid shape")
     except Exception:
-        return None
-    draft = data.get('draft') if isinstance(data, dict) else None
-    if not isinstance(draft, dict):
-        return None
+        return "unreadable", None
     _cache_composer_draft_sidecar(sid, stat_key, draft)
-    return draft
+    return "present", draft
+
+
+def read_composer_draft_sidecar(sid):
+    """Return the sidecar draft dict for display, or None when not usable."""
+    state, draft = composer_draft_sidecar_state(sid)
+    return draft if state == "present" else None
 
 
 def write_composer_draft_sidecar(sid, draft) -> dict:
@@ -1318,6 +1355,7 @@ def write_composer_draft_sidecar(sid, draft) -> dict:
             f.flush()
             os.fsync(f.fileno())
         _safe_replace(tmp, p)
+        _fsync_composer_draft_parent(p)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
@@ -1326,7 +1364,7 @@ def write_composer_draft_sidecar(sid, draft) -> dict:
         raise
     try:
         st = p.stat()
-        _cache_composer_draft_sidecar(sid, (st.st_mtime_ns, st.st_size), draft)
+        _cache_composer_draft_sidecar(sid, _composer_draft_sidecar_signature(st), draft)
     except OSError:
         pass
     return draft
@@ -1346,18 +1384,23 @@ def delete_composer_draft_sidecar(sid) -> bool:
         return True
     try:
         p.unlink(missing_ok=True)
+        _fsync_composer_draft_parent(p)
     except OSError:
         logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
         return False
     return not p.exists()
 
 
-def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
-    """Move draft ownership across a session-id rotation without clobbering a newer draft."""
+def migrate_composer_draft_sidecar(old_sid, new_sid, *, finalize_source: bool = True) -> bool:
+    """Move/copy a draft across a session-id rotation.
+
+    With ``finalize_source=False`` the destination is made durable but the old
+    owner remains authoritative until its continuation session JSON is saved.
+    """
     old_sid = str(old_sid or '')
     new_sid = str(new_sid or '')
     if old_sid == new_sid or not is_safe_session_id(old_sid) or not is_safe_session_id(new_sid):
-        return
+        return True
     # Acquire unique fixed stripes by stripe index, not by session id. Two
     # unrelated migrations can map their old/new ids to the same pair of
     # stripes in inverse SID order; a global stripe order prevents deadlock.
@@ -1368,13 +1411,43 @@ def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
     with ExitStack() as lock_stack:
         for stripe_index in stripe_indexes:
             lock_stack.enter_context(_COMPOSER_DRAFT_LOCK_STRIPES[stripe_index])
-        old_draft = read_composer_draft_sidecar(old_sid)
-        if old_draft is None:
-            return
-        if read_composer_draft_sidecar(new_sid) is None:
+        old_state, old_draft = composer_draft_sidecar_state(old_sid)
+        new_state, new_draft = composer_draft_sidecar_state(new_sid)
+        if old_state == "unreadable" or new_state == "unreadable":
+            return False
+        if old_state == "absent":
+            return True
+        old_path = composer_draft_sidecar_path(old_sid)
+        new_path = composer_draft_sidecar_path(new_sid)
+        if old_path is None or new_path is None:
+            return False
+        copied_destination = False
+        if new_state == "absent":
             write_composer_draft_sidecar(new_sid, old_draft)
             update_cached_composer_draft(new_sid, old_draft)
-        delete_composer_draft_sidecar(old_sid)
+            copied_destination = True
+        elif old_draft != new_draft:
+            # A failed prior move can leave a stale destination sidecar. If the
+            # retained source changed after that copy, it remains authoritative
+            # and must refresh the destination before source deletion.
+            try:
+                old_mtime = old_path.stat().st_mtime_ns
+                new_mtime = new_path.stat().st_mtime_ns
+            except OSError:
+                return False
+            if old_mtime > new_mtime:
+                write_composer_draft_sidecar(new_sid, old_draft)
+                update_cached_composer_draft(new_sid, old_draft)
+        if not finalize_source:
+            return True
+        if delete_composer_draft_sidecar(old_sid):
+            return True
+        if copied_destination:
+            # Do not leave a partial move when the source remains authoritative.
+            # Best effort only: a second filesystem error still reports failure
+            # and the caller will keep the original session ownership.
+            delete_composer_draft_sidecar(new_sid)
+        return False
 
 
 def resolve_composer_draft(sid, legacy=None) -> dict:
@@ -1390,8 +1463,8 @@ def update_cached_composer_draft(sid, draft) -> None:
     code paths that still read the attribute directly see the sidecar value."""
     with LOCK:
         cached = SESSIONS.get(sid)
-    if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
-        cached.composer_draft = dict(draft) if isinstance(draft, dict) else {}
+        if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
+            cached.composer_draft = copy.deepcopy(draft) if isinstance(draft, dict) else {}
 
 
 def _load_session_from_path(path: Path) -> "Session | None":

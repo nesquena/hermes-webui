@@ -369,7 +369,12 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
+    clear_idx = max(
+        routes_src.find("if parsed.path == '/api/session/clear':", delete_idx),
+        routes_src.find('if parsed.path == "/api/session/clear":', delete_idx),
+    )
+    assert clear_idx > delete_idx, "session/delete handler boundary not found"
+    delete_block = routes_src[delete_idx:clear_idx]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 

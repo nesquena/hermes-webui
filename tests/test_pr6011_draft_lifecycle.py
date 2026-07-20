@@ -61,6 +61,33 @@ def _post_draft(monkeypatch, payload):
     return captured
 
 
+
+def _post_session_delete(monkeypatch, sid):
+    from api import routes
+
+    raw = json.dumps({"session_id": sid}).encode("utf-8")
+    captured = {}
+
+    def fake_j(_handler, body, status=200, extra_headers=None):
+        captured.update(payload=body, status=status, extra_headers=extra_headers)
+        return True
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: fake_j(handler, {"error": message}, status=status),
+    )
+    handler = SimpleNamespace(
+        command="POST",
+        headers={"Content-Length": str(len(raw))},
+        rfile=BytesIO(raw),
+        _safe_webui_print=lambda *_args, **_kwargs: None,
+    )
+    assert routes.handle_post(handler, SimpleNamespace(path="/api/session/delete")) is True
+    return captured
+
+
 def test_first_nonempty_draft_persists_restartable_session_record(session_env, monkeypatch):
     from api import models
 
@@ -85,6 +112,26 @@ def test_first_nonempty_draft_persists_restartable_session_record(session_env, m
         "text": "survive restart",
         "files": [],
     }
+
+
+
+def test_delete_restores_owner_when_authoritative_draft_unlink_fails(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "draft-delete-sidecar-failure"
+    session = models.Session(session_id=sid, title="Retain draft")
+    session.save(skip_index=True)
+    draft = {"text": "latest durable text", "files": []}
+    models.write_composer_draft_sidecar(sid, draft)
+    owner_path = session_dir / f"{sid}.json"
+
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert owner_path.exists()
+    assert models.read_composer_draft_sidecar(sid) == draft
 
 
 def test_compression_rotation_moves_draft_to_continuation_owner(session_env):
@@ -275,6 +322,122 @@ def test_bulk_zero_message_prune_removes_empty_owner_and_tombstones(session_env,
     assert models.read_composer_draft_sidecar(sid) is None
     assert pruned == [sid]
     assert tombstoned == [sid]
+
+
+
+def test_draft_post_refuses_to_overwrite_unreadable_authoritative_sidecar(session_env, monkeypatch):
+    from api import models
+
+    session_dir, _sessions = session_env
+    sid = "draft-unreadable-sidecar"
+    session = models.Session(session_id=sid, title="Corrupt draft")
+    session.save(skip_index=True)
+    draft_path = models.composer_draft_sidecar_path(sid)
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text("{not json", encoding="utf-8")
+
+    response = _post_draft(monkeypatch, {"session_id": sid, "text": "must not overwrite", "files": []})
+
+    assert response["status"] == 500
+    assert draft_path.read_text(encoding="utf-8") == "{not json"
+
+
+def test_draft_cache_rejects_same_size_mtime_atomic_replacement(session_env):
+    from api import models
+    import os
+
+    sid = "draft-cache-identity"
+    models.write_composer_draft_sidecar(sid, {"text": "old", "files": []})
+    path = models.composer_draft_sidecar_path(sid)
+    original = path.stat()
+    assert models.read_composer_draft_sidecar(sid)["text"] == "old"
+
+    replacement = path.with_suffix(".replacement")
+    replacement.write_text(
+        path.read_text(encoding="utf-8").replace('"old"', '"new"'),
+        encoding="utf-8",
+    )
+    assert replacement.stat().st_size == original.st_size
+    os.replace(replacement, path)
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    assert models.read_composer_draft_sidecar(sid) == {"text": "new", "files": []}
+
+
+
+
+def test_draft_preflight_copy_keeps_source_until_continuation_owner_is_saved(session_env):
+    from api import models
+
+    old_sid = "draft-preflight-old"
+    new_sid = "draft-preflight-new"
+    draft = {"text": "do not orphan", "files": []}
+    models.write_composer_draft_sidecar(old_sid, draft)
+
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid, finalize_source=False) is True
+    assert models.read_composer_draft_sidecar(old_sid) == draft
+    assert models.read_composer_draft_sidecar(new_sid) == draft
+
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid) is True
+    assert models.read_composer_draft_sidecar(old_sid) is None
+
+
+def test_draft_migration_rolls_back_new_sidecar_when_source_delete_fails(session_env, monkeypatch):
+    from api import models
+
+    old_sid = "draft-rollback-old"
+    new_sid = "draft-rollback-new"
+    draft = {"text": "keep old ownership", "files": []}
+    models.write_composer_draft_sidecar(old_sid, draft)
+    real_delete = models.delete_composer_draft_sidecar
+
+    def fail_only_source_delete(sid):
+        return False if sid == old_sid else real_delete(sid)
+
+    monkeypatch.setattr(models, "delete_composer_draft_sidecar", fail_only_source_delete)
+
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid) is False
+    assert models.read_composer_draft_sidecar(old_sid) == draft
+    assert models.read_composer_draft_sidecar(new_sid) is None
+
+
+
+def test_draft_migration_refreshes_stale_destination_after_failed_rollback(session_env, monkeypatch):
+    from api import models
+    import os
+
+    old_sid = "draft-stale-source"
+    new_sid = "draft-stale-destination"
+    models.write_composer_draft_sidecar(old_sid, {"text": "first", "files": []})
+    original_delete = models.delete_composer_draft_sidecar
+
+    monkeypatch.setattr(models, "delete_composer_draft_sidecar", lambda _sid: False)
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid) is False
+    old_path = models.composer_draft_sidecar_path(old_sid)
+    new_path = models.composer_draft_sidecar_path(new_sid)
+    assert old_path is not None and new_path is not None
+    models.write_composer_draft_sidecar(old_sid, {"text": "newest", "files": []})
+    newer_ns = max(old_path.stat().st_mtime_ns, new_path.stat().st_mtime_ns + 1)
+    os.utime(old_path, ns=(newer_ns, newer_ns))
+
+    monkeypatch.setattr(models, "delete_composer_draft_sidecar", original_delete)
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid) is True
+    assert models.read_composer_draft_sidecar(new_sid) == {"text": "newest", "files": []}
+    assert models.read_composer_draft_sidecar(old_sid) is None
+
+
+def test_draft_migration_fails_closed_when_old_sidecar_is_unreadable(session_env):
+    from api import models
+
+    old_sid = "draft-corrupt-source"
+    new_sid = "draft-corrupt-destination"
+    old_path = models.composer_draft_sidecar_path(old_sid)
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text("{not json", encoding="utf-8")
+
+    assert models.migrate_composer_draft_sidecar(old_sid, new_sid) is False
+    assert old_path.exists()
+    assert models.composer_draft_sidecar_path(new_sid).exists() is False
 
 
 def test_clear_is_canonical_durable_and_does_not_clobber_newer_draft(session_env, monkeypatch):

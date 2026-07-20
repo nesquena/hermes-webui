@@ -9438,7 +9438,7 @@ from api.models import (
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
     resolve_composer_draft,
-    read_composer_draft_sidecar,
+    composer_draft_sidecar_state,
     write_composer_draft_sidecar,
     delete_composer_draft_sidecar,
     get_composer_draft_lock,
@@ -14764,8 +14764,10 @@ def handle_post(handler, parsed) -> bool:
                 s_meta = get_session(sid, metadata_only=True)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-            sidecar_draft = read_composer_draft_sidecar(sid)
-            if sidecar_draft is not None:
+            sidecar_state, sidecar_draft = composer_draft_sidecar_state(sid)
+            if sidecar_state == "unreadable":
+                return bad(handler, "Saved draft is unreadable; refusing to overwrite it", status=500)
+            if sidecar_state == "present":
                 current_draft = dict(sidecar_draft)
             else:
                 current_draft = dict(getattr(s_meta, "composer_draft", {}) or {})
@@ -14957,24 +14959,39 @@ def handle_post(handler, parsed) -> bool:
         # final state cannot contain a draft without an owning session.
         sidecar_deleted = False
         with get_composer_draft_lock(sid):
+            # Stage the owner under the same directory first. That lets a
+            # sidecar-delete failure restore the owner atomically rather than
+            # orphaning the authoritative draft after a partial delete.
+            staged_owner = p.with_name(f".{p.name}.deleting-{uuid.uuid4().hex}")
+            try:
+                os.replace(p, staged_owner)
+            except FileNotFoundError:
+                staged_owner = None
+            except Exception:
+                logger.debug("Failed to stage session file for deletion %s", p, exc_info=True)
+                return bad(handler, "Failed to remove session; saved draft was retained", 500)
+            if not delete_composer_draft_sidecar(sid):
+                if staged_owner is not None:
+                    try:
+                        os.replace(staged_owner, p)
+                    except Exception:
+                        logger.exception("Failed to restore session owner after draft-delete failure: %s", sid)
+                return bad(handler, "Failed to remove saved draft; session was retained", 500)
+            try:
+                if staged_owner is not None:
+                    staged_owner.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to finalize staged session deletion for %s", sid, exc_info=True)
+            sidecar_deleted = True
             with LOCK:
                 SESSIONS.pop(sid, None)
             # Evict cached agent so turn count doesn't leak into a recycled session
             from api.config import _evict_session_agent
             _evict_session_agent(sid)
             try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            try:
-                delete_composer_draft_sidecar(sid)
-            except Exception:
-                logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
         try:
             prune_session_from_index(sid)
         except Exception:
@@ -20791,7 +20808,18 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         for draft_path in drafts_dir.glob('*.json'):
             sid = draft_path.stem
             with get_composer_draft_lock(sid):
-                owner_exists = (SESSION_DIR / f'{sid}.json').exists()
+                owner_path = SESSION_DIR / f'{sid}.json'
+                # Recover a rare failed delete rollback before deciding this
+                # draft is orphaned. The staging name is same-directory and
+                # contains the authoritative owner JSON.
+                if not owner_path.exists():
+                    staged_candidates = sorted(SESSION_DIR.glob(f'.{sid}.json.deleting-*'))
+                    if staged_candidates:
+                        try:
+                            os.replace(staged_candidates[-1], owner_path)
+                        except OSError:
+                            logger.warning("Failed to restore staged session owner for draft cleanup: %s", sid)
+                owner_exists = owner_path.exists()
                 with LOCK:
                     in_memory_owner = sid in SESSIONS
                 if not owner_exists and not in_memory_owner:
