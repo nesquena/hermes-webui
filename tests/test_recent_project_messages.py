@@ -1,7 +1,9 @@
 """Contract tests for bounded, profile-scoped project message reads."""
 
+import base64
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -300,11 +302,11 @@ def test_classifier_does_not_drop_plain_user_discussion_of_context_compaction(pr
     _seed(
         project_store,
         [{"session_id": "regular"}],
-        [("regular", "user", "context compaction strategies are worth discussing", 1.0)],
+        [("regular", "user", "context compaction: strategies are worth discussing", 1.0)],
     )
 
     assert [m["content"] for m in _read(project_store)["messages"]] == [
-        "context compaction strategies are worth discussing"
+        "context compaction: strategies are worth discussing"
     ]
 
 
@@ -334,6 +336,43 @@ def test_limit_and_opaque_before_cursor_page_without_overlap(project_store):
         _read(project_store, before="not-a-valid-cursor")
     with pytest.raises(ValueError, match="before"):
         _read(project_store, roles=["assistant"], before=first["next_before"])
+
+
+def test_cursor_reuse_is_rejected_across_every_query_scope_dimension(project_store):
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [("session_a", "user", "message", 1.0)],
+    )
+    first = _read(project_store)
+    cursor = first["next_before"]
+    _write_json(
+        project_store["projects_file"],
+        [
+            {"project_id": PROJECT_ID, "name": "Example", "profile": PROFILE},
+            {"project_id": "project00002", "name": "Other project", "profile": PROFILE},
+            {"project_id": PROJECT_ID, "name": "Other profile", "profile": "other"},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="before"):
+        _read(project_store, roles=["assistant"], before=cursor)
+    with pytest.raises(ValueError, match="before"):
+        _read(project_store, include_archived=True, before=cursor)
+    with pytest.raises(ValueError, match="before"):
+        recent_project_messages(
+            project_id="project00002",
+            profile=PROFILE,
+            before=cursor,
+            **project_store,
+        )
+    with pytest.raises(ValueError, match="before"):
+        recent_project_messages(
+            project_id=PROJECT_ID,
+            profile="other",
+            before=cursor,
+            **project_store,
+        )
 
 
 def test_archived_sessions_are_opt_in(project_store):
@@ -389,7 +428,10 @@ def test_synthetic_tail_saturation_fails_bounded_and_reports_partial(project_sto
     assert result["diagnostics"]["candidate_rows_read"] == 26
 
 
-@pytest.mark.parametrize("index_value", [None, {"not": "a list"}])
+@pytest.mark.parametrize(
+    "index_value",
+    [None, {"not": "a list"}, ["not-a-row"], [{"not": "a session row"}]],
+)
 def test_missing_or_malformed_index_reports_partial(project_store, index_value):
     if index_value is None:
         project_store["session_index_file"].unlink()
@@ -400,7 +442,66 @@ def test_missing_or_malformed_index_reports_partial(project_store, index_value):
 
     assert result["messages"] == []
     assert result["partial"] is True
+    assert (
+        result["diagnostics"]["session_index_unavailable"]
+        + result["diagnostics"]["invalid_index_rows"]
+        == 1
+    )
+
+
+def test_unreadable_index_reports_partial(project_store, monkeypatch):
+    original_read_text = Path.read_text
+
+    def fail_index_read(path, *args, **kwargs):
+        if path == project_store["session_index_file"]:
+            raise OSError("fixture-owned unreadable index")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_index_read)
+
+    result = _read(project_store)
+
+    assert result["messages"] == []
+    assert result["partial"] is True
     assert result["diagnostics"]["session_index_unavailable"] == 1
+
+
+def test_malformed_foreign_index_row_does_not_degrade_owned_scope(project_store):
+    _seed(
+        project_store,
+        [{"session_id": "valid"}],
+        [("valid", "user", "safe", 1.0)],
+    )
+    index = json.loads(project_store["session_index_file"].read_text(encoding="utf-8"))
+    index.append(
+        {
+            "session_id": "unsafe/session",
+            "project_id": "foreign00001",
+            "profile": "other",
+        }
+    )
+    _write_json(project_store["session_index_file"], index)
+
+    result = _read(project_store)
+
+    assert [message["content"] for message in result["messages"]] == ["safe"]
+    assert result["partial"] is False
+    assert result["diagnostics"]["invalid_index_rows"] == 0
+
+
+def test_diagnostics_are_counts_only(project_store):
+    _seed(
+        project_store,
+        [{"session_id": "valid"}, {"session_id": "missing"}],
+        [("valid", "user", "safe", 1.0)],
+    )
+    (project_store["session_dir"] / "missing.json").unlink()
+
+    result = _read(project_store)
+
+    assert result["classifier"] == "project_context_v1"
+    assert result["diagnostics"]
+    assert all(type(value) is int for value in result["diagnostics"].values())
 
 
 def test_malformed_and_non_finite_timestamps_fail_closed_per_row(project_store):
@@ -410,7 +511,9 @@ def test_malformed_and_non_finite_timestamps_fail_closed_per_row(project_store):
         [
             ("session_a", "user", "valid", 1.0),
             ("session_a", "user", "malformed", "not-a-timestamp"),
-            ("session_a", "user", "non-finite", "NaN"),
+            ("session_a", "user", "nan", "NaN"),
+            ("session_a", "user", "positive-infinity", "Infinity"),
+            ("session_a", "user", "negative-infinity", "-Infinity"),
         ],
     )
 
@@ -418,7 +521,16 @@ def test_malformed_and_non_finite_timestamps_fail_closed_per_row(project_store):
 
     assert [m["content"] for m in result["messages"]] == ["valid"]
     assert result["partial"] is True
-    assert result["diagnostics"]["invalid_timestamp_rows"] == 2
+    assert result["diagnostics"]["invalid_timestamp_rows"] == 4
+    padded = result["next_before"] + "=" * (-len(result["next_before"]) % 4)
+    cursor_json = base64.urlsafe_b64decode(padded).decode("utf-8")
+
+    def reject_non_standard_constant(value):
+        raise AssertionError(f"non-standard JSON constant in cursor: {value}")
+
+    decoded = json.loads(cursor_json, parse_constant=reject_non_standard_constant)
+    assert decoded[0] == 2
+    assert decoded[2] == 1.0
 
 
 def test_limit_contract_is_default_five_and_max_twenty(project_store):
