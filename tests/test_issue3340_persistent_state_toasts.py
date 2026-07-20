@@ -66,7 +66,7 @@ def test_frontend_handles_state_saved_sse_and_reuses_dedupe():
     assert "String(d.action||'').toLowerCase()==='created'" in block
     assert "d=(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))?parsed:{};" in block
     assert "if((d.session_id||activeSid)!==activeSid) return;" in block
-    assert "_applyToAnchor('state_saved',d,e);" in block
+    assert "_applyToAnchor('state_saved',d,e,null,{render:false});" in block
     assert "'state_saved'" in MESSAGES_JS
 
 

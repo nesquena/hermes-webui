@@ -494,7 +494,7 @@ def test_projected_outcomes_survive_settlement_and_reload():
             _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
             _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
             _js_function_source(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows"),
-            _js_function_source(MESSAGES_JS, "_anchorSceneHasOutcomeCollections"),
+            _js_function_source(MESSAGES_JS, "_anchorSceneHasOwnedOutcomes"),
             _js_function_source(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant"),
         ]
     )
