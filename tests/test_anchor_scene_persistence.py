@@ -2397,7 +2397,16 @@ def test_terminal_journal_materializes_missing_settled_anchor_scene(monkeypatch)
             "event_id": f"{stream_id}:6",
             "created_at": 6.0,
             "terminal": True,
-            "payload": {"session": {"message_count": 2}},
+            "payload": {
+                "session": {
+                    "session_id": "session-detached-terminal",
+                    "message_count": 2,
+                    "messages": [
+                        {"role": "user", "content": "do work"},
+                        {"role": "assistant", "content": "working final answer", "_ts": 6.0},
+                    ],
+                },
+            },
         },
     ]
     summary = {
@@ -2420,7 +2429,7 @@ def test_terminal_journal_materializes_missing_settled_anchor_scene(monkeypatch)
         anchor_activity_scenes={},
         save_calls=0,
     )
-    monkeypatch.setattr(routes, "latest_terminal_run_summary_for_session", lambda sid: summary)
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: [summary])
     monkeypatch.setattr(routes, "find_run_summary", lambda sid: summary)
     monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
@@ -2449,6 +2458,402 @@ def test_terminal_journal_materializes_missing_settled_anchor_scene(monkeypatch)
             "done": True,
         },
     ]
+
+
+def test_terminal_journal_materialization_fails_closed_without_terminal_target(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    stream_id = "stream-detached-cancel-no-target"
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "checking"},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {"text": "partial work"},
+        },
+        {
+            "event": "cancel",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "terminal": True,
+            "payload": {"message": "Cancelled by user"},
+        },
+    ]
+    summary = {
+        "session_id": "session-detached-cancel-no-target",
+        "run_id": stream_id,
+        "last_seq": 3,
+        "last_event_id": f"{stream_id}:3",
+        "terminal": True,
+        "terminal_state": "interrupted-by-user",
+    }
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "partial work", "_ts": 3.0},
+        {"role": "user", "content": "newer prompt"},
+        {"role": "assistant", "content": "newer answer", "_ts": 4.0},
+    ]
+    session = SessionStub(
+        session_id="session-detached-cancel-no-target",
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: [summary])
+    monkeypatch.setattr(routes, "find_run_summary", lambda sid: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
+    assert session.save_calls == 0
+    assert session.anchor_activity_scenes == {}
+
+
+def test_terminal_journal_materialization_fails_closed_without_message_ref(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    stream_id = "stream-detached-index-only"
+    events = [
+        {
+            "event": "token",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "partial work"},
+        },
+        {
+            "event": "cancel",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "terminal": True,
+            "payload": {
+                "message": "Cancelled by user",
+                "terminal_message_target": {
+                    "version": "terminal_message_target_v1",
+                    "session_id": "session-detached-index-only",
+                    "run_id": stream_id,
+                    "stream_id": stream_id,
+                    "message_index": 1,
+                },
+            },
+        },
+    ]
+    summary = {
+        "session_id": "session-detached-index-only",
+        "run_id": stream_id,
+        "last_seq": 2,
+        "last_event_id": f"{stream_id}:2",
+        "terminal": True,
+        "terminal_state": "interrupted-by-user",
+    }
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "partial work", "_ts": 2.0},
+    ]
+    session = SessionStub(
+        session_id="session-detached-index-only",
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: [summary])
+    monkeypatch.setattr(routes, "find_run_summary", lambda sid: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
+    assert session.save_calls == 0
+
+
+def test_terminal_journal_materializes_detached_cancel_with_owned_target(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    stream_id = "stream-detached-cancel-target"
+    messages = [
+        {"role": "user", "content": "do work"},
+        {
+            "role": "assistant",
+            "content": "**Task cancelled:** Cancelled by user",
+            "_ts": 3.0,
+        },
+        {"role": "user", "content": "newer prompt"},
+        {"role": "assistant", "content": "newer answer", "_ts": 4.0},
+    ]
+    events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "checking"},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {"text": "partial work"},
+        },
+        {
+            "event": "cancel",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "terminal": True,
+            "payload": {
+                "message": "Cancelled by user",
+                "session": {
+                    "session_id": "session-detached-cancel-target",
+                    "message_count": 2,
+                    "messages": messages[:2],
+                },
+            },
+        },
+    ]
+    summary = {
+        "session_id": "session-detached-cancel-target",
+        "run_id": stream_id,
+        "last_seq": 3,
+        "last_event_id": f"{stream_id}:3",
+        "terminal": True,
+        "terminal_state": "interrupted-by-user",
+    }
+    session = SessionStub(
+        session_id="session-detached-cancel-target",
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: [summary])
+    monkeypatch.setattr(routes, "find_run_summary", lambda sid: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+    assert session.save_calls == 1
+    assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
+    record = next(iter(session.anchor_activity_scenes.values()))
+    assert record["message_index"] == 1
+    assert record["stream_id"] == stream_id
+    assert record["scene"]["terminal_state"] == "interrupted-by-user"
+    assert _anchor_scene_visible_semantics(record["scene"]) == [
+        {"role": "thinking", "kind": "reasoning", "text": "checking"},
+        {"role": "prose", "kind": "process_prose", "text": "partial work"},
+    ]
+
+
+def test_terminal_journal_rejects_mismatched_terminal_target(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    stream_id = "stream-detached-mismatch"
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "old assistant", "_ts": 2.0},
+    ]
+    events = [
+        {
+            "event": "token",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "old assistant"},
+        },
+        {
+            "event": "apperror",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "terminal": True,
+            "payload": {
+                "type": "gateway_error",
+                "message": "Gateway failed",
+                "terminal_message_target": {
+                    "version": "terminal_message_target_v1",
+                    "session_id": "session-detached-mismatch",
+                    "run_id": stream_id,
+                    "stream_id": stream_id,
+                    "message_index": 1,
+                    "message_ref": _client_anchor_scene_message_ref(
+                        {"role": "assistant", "content": "different", "_ts": 2.0}
+                    ),
+                },
+            },
+        },
+    ]
+    summary = {
+        "session_id": "session-detached-mismatch",
+        "run_id": stream_id,
+        "last_seq": 2,
+        "last_event_id": f"{stream_id}:2",
+        "terminal": True,
+        "terminal_state": "errored",
+    }
+    session = SessionStub(
+        session_id="session-detached-mismatch",
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: [summary])
+    monkeypatch.setattr(routes, "find_run_summary", lambda sid: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda session_id, run_id: {"events": events})
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
+    assert session.save_calls == 0
+
+
+def test_terminal_journal_materializes_older_unresolved_terminal_once(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    old_stream = "stream-old-terminal"
+    new_stream = "stream-new-terminal"
+    messages = [
+        {"role": "user", "content": "old work"},
+        {"role": "assistant", "content": "old answer", "_ts": 2.0},
+        {"role": "user", "content": "new work"},
+        {"role": "assistant", "content": "new answer", "_ts": 4.0},
+    ]
+    summaries = [
+        {
+            "session_id": "session-older-unresolved",
+            "run_id": new_stream,
+            "last_seq": 2,
+            "last_event_id": f"{new_stream}:2",
+            "terminal": True,
+            "terminal_state": "completed",
+        },
+        {
+            "session_id": "session-older-unresolved",
+            "run_id": old_stream,
+            "last_seq": 3,
+            "last_event_id": f"{old_stream}:3",
+            "terminal": True,
+            "terminal_state": "completed",
+        },
+    ]
+    old_events = [
+        {
+            "event": "reasoning",
+            "seq": 1,
+            "event_id": f"{old_stream}:1",
+            "created_at": 1.0,
+            "payload": {"text": "old thinking"},
+        },
+        {
+            "event": "token",
+            "seq": 2,
+            "event_id": f"{old_stream}:2",
+            "created_at": 2.0,
+            "payload": {"text": "old answer"},
+        },
+        {
+            "event": "done",
+            "seq": 3,
+            "event_id": f"{old_stream}:3",
+            "created_at": 3.0,
+            "terminal": True,
+            "payload": {
+                "session": {
+                    "session_id": "session-older-unresolved",
+                    "message_count": 2,
+                    "messages": messages[:2],
+                },
+            },
+        },
+    ]
+    new_events = [
+        {
+            "event": "token",
+            "seq": 1,
+            "event_id": f"{new_stream}:1",
+            "created_at": 3.0,
+            "payload": {"text": "new answer"},
+        },
+        {
+            "event": "done",
+            "seq": 2,
+            "event_id": f"{new_stream}:2",
+            "created_at": 4.0,
+            "terminal": True,
+            "payload": {
+                "session": {
+                    "session_id": "session-older-unresolved",
+                    "message_count": 4,
+                    "messages": messages,
+                },
+            },
+        },
+    ]
+    new_ref = _client_anchor_scene_message_ref(messages[3])
+    session = SessionStub(
+        session_id="session-older-unresolved",
+        tool_calls=[],
+        anchor_activity_scenes={
+            new_ref: {
+                "version": "anchor_activity_scene_record_v1",
+                "message_index": 3,
+                "message_ref": new_ref,
+                "stream_id": new_stream,
+                "scene": {"version": "activity_scene_v1", "activity_rows": [{"role": "prose"}]},
+                "updated_at": 1.0,
+            }
+        },
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: summaries)
+    monkeypatch.setattr(routes, "find_run_summary", lambda rid: summaries[0] if rid == new_stream else summaries[1])
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": new_events if run_id == new_stream else old_events},
+    )
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {new_stream})
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+    assert session.save_calls == 1
+    assert {record["stream_id"] for record in session.anchor_activity_scenes.values()} == {
+        new_stream,
+        old_stream,
+    }
+    old_record = [
+        record for record in session.anchor_activity_scenes.values() if record["stream_id"] == old_stream
+    ][0]
+    assert old_record["message_index"] == 1
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
+    assert session.save_calls == 1
 
 
 def test_anchor_scene_hydration_splits_final_suffix_from_owned_process_prefix():

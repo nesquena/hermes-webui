@@ -567,15 +567,39 @@ def latest_terminal_run_summary_for_session(
     session_dir: Path | None = None,
 ) -> dict | None:
     """Return the newest terminal run journal summary for one session."""
+    summaries = terminal_run_summaries_for_session(
+        session_id,
+        session_dir=session_dir,
+        limit=1,
+    )
+    return summaries[0] if summaries else None
+
+
+def terminal_run_summaries_for_session(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+    limit: int = 16,
+    max_candidates: int = 64,
+) -> list[dict]:
+    """Return newest terminal run summaries for one session from a bounded window."""
     try:
         sid = _validate_id(session_id, "session_id")
     except ValueError:
-        return None
+        return []
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     session_root = root / RUN_JOURNAL_DIR_NAME / sid
     if not session_root.exists():
-        return None
-    latest: tuple[float, str, dict] | None = None
+        return []
+    try:
+        limit = max(1, min(int(limit), 64))
+    except (TypeError, ValueError):
+        limit = 16
+    try:
+        max_candidates = max(limit, min(int(max_candidates), 256))
+    except (TypeError, ValueError):
+        max_candidates = 64
+    candidates: list[tuple[float, str, Path]] = []
     for path in session_root.glob("*.jsonl"):
         try:
             run_id = _validate_id(path.stem, "run_id")
@@ -585,15 +609,18 @@ def latest_terminal_run_summary_for_session(
             mtime = path.stat().st_mtime
         except OSError:
             continue
+        candidates.append((mtime, run_id, path))
+    summaries: list[dict] = []
+    for _mtime, run_id, path in sorted(candidates, reverse=True)[:max_candidates]:
         summary = latest_run_summary(sid, run_id, session_dir=root)
         if not summary.get("terminal"):
             continue
         summary = dict(summary)
         summary["path"] = str(path)
-        candidate = (mtime, run_id, summary)
-        if latest is None or candidate[:2] > latest[:2]:
-            latest = candidate
-    return latest[2] if latest else None
+        summaries.append(summary)
+        if len(summaries) >= limit:
+            break
+    return summaries
 
 
 def read_session_run_events(

@@ -3166,6 +3166,55 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
+def _terminal_anchor_scene_target_from_payload(
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+    terminal_payload: dict,
+) -> dict | None:
+    if not isinstance(terminal_payload, dict):
+        return None
+    raw_target = terminal_payload.get("terminal_message_target")
+    if isinstance(raw_target, dict):
+        return {
+            "version": str(raw_target.get("version") or "terminal_message_target_v1"),
+            "session_id": str(raw_target.get("session_id") or ""),
+            "run_id": str(raw_target.get("run_id") or ""),
+            "stream_id": str(raw_target.get("stream_id") or ""),
+            "message_index": raw_target.get("message_index"),
+            "message_ref": str(raw_target.get("message_ref") or ""),
+        }
+    terminal_session = terminal_payload.get("session")
+    if not isinstance(terminal_session, dict):
+        return None
+    terminal_messages = (
+        terminal_session.get("messages")
+        if isinstance(terminal_session.get("messages"), list)
+        else []
+    )
+    terminal_message_count = terminal_session.get("message_count")
+    try:
+        terminal_message_count = int(terminal_message_count)
+    except (TypeError, ValueError):
+        terminal_message_count = len(terminal_messages) if terminal_messages else None
+    if terminal_message_count is None or terminal_message_count <= 0:
+        return None
+    terminal_message_index = terminal_message_count - 1
+    message_ref = ""
+    if 0 <= terminal_message_index < len(terminal_messages):
+        terminal_message = terminal_messages[terminal_message_index]
+        if isinstance(terminal_message, dict) and terminal_message.get("role") == "assistant":
+            message_ref = _assistant_anchor_scene_message_ref(terminal_message)
+    return {
+        "version": "terminal_message_target_v1",
+        "session_id": str(terminal_session.get("session_id") or session_id),
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "message_index": terminal_message_index,
+        "message_ref": message_ref,
+    }
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: bool = False) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3216,16 +3265,17 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
         else {}
     )
     terminal_state = str(summary.get("terminal_state") or "").strip() if summary.get("terminal") else ""
-    terminal_message_index = None
-    terminal_session = terminal_payload.get("session") if isinstance(terminal_payload.get("session"), dict) else {}
-    terminal_messages = terminal_session.get("messages") if isinstance(terminal_session.get("messages"), list) else []
-    terminal_message_count = terminal_session.get("message_count")
-    try:
-        terminal_message_count = int(terminal_message_count)
-    except (TypeError, ValueError):
-        terminal_message_count = len(terminal_messages) if terminal_messages else None
-    if terminal_message_count is not None and terminal_message_count > 0:
-        terminal_message_index = terminal_message_count - 1
+    terminal_message_target = _terminal_anchor_scene_target_from_payload(
+        session_id,
+        stream_id,
+        run_id,
+        terminal_payload,
+    )
+    terminal_message_index = (
+        terminal_message_target.get("message_index")
+        if isinstance(terminal_message_target, dict)
+        else None
+    )
     snapshot_row_status = "completed" if settled else "running"
 
     assistant_text = ""
@@ -3892,6 +3942,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
         "last_event_id": last_event_id,
         "terminal_state": terminal_state or None,
         "terminal_message_index": terminal_message_index,
+        "terminal_message_target": terminal_message_target,
         "event_count": len(events),
         "fresh_segment": fresh_segment,
         "messages": messages,
@@ -5244,27 +5295,61 @@ def _anchor_scene_record_exists_for_message(records, message, message_index) -> 
     return False
 
 
+def _anchor_scene_record_exists_for_stream(records, stream_id: str) -> bool:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id or not isinstance(records, dict):
+        return False
+    for record in records.values():
+        if isinstance(record, dict) and str(record.get("stream_id") or "") == stream_id:
+            return True
+    return False
+
+
 def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
-    if not isinstance(messages, list):
+    if not isinstance(messages, list) or not isinstance(snapshot, dict):
         return None
-    terminal_index = None
-    if isinstance(snapshot, dict):
-        try:
-            terminal_index = int(snapshot.get("terminal_message_index"))
-        except (TypeError, ValueError):
-            terminal_index = None
-    if terminal_index is not None:
-        terminal_index = max(0, min(terminal_index, len(messages) - 1))
-        for idx in range(terminal_index, -1, -1):
-            message = messages[idx]
-            if isinstance(message, dict) and message.get("role") == "assistant":
-                return idx
+    target = snapshot.get("terminal_message_target")
+    if not isinstance(target, dict):
         return None
-    for idx in range(len(messages) - 1, -1, -1):
-        message = messages[idx]
-        if isinstance(message, dict) and message.get("role") == "assistant":
-            return idx
-    return None
+    if str(target.get("version") or "terminal_message_target_v1") != "terminal_message_target_v1":
+        return None
+    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot.get("anchor_activity_scene"), dict) else {}
+    identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+    expected_session_id = str(snapshot.get("session_id") or "").strip()
+    expected_stream_id = str(snapshot.get("stream_id") or "").strip()
+    expected_run_id = str(identity.get("run_id") or expected_stream_id).strip()
+    target_session_id = str(target.get("session_id") or "").strip()
+    target_stream_id = str(target.get("stream_id") or "").strip()
+    target_run_id = str(target.get("run_id") or "").strip()
+    if (
+        not target_session_id
+        or not target_stream_id
+        or not target_run_id
+        or target_session_id != expected_session_id
+        or target_stream_id != expected_stream_id
+        or target_run_id != expected_run_id
+    ):
+        return None
+    try:
+        terminal_index = int(target.get("message_index"))
+    except (TypeError, ValueError):
+        terminal_index = None
+    message_ref = _normalize_anchor_scene_message_ref(target.get("message_ref") or "")
+    if not message_ref:
+        return None
+    matches = [
+        (idx, message)
+        for idx, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and _assistant_anchor_scene_message_ref(message) == message_ref
+    ]
+    if len(matches) != 1:
+        return None
+    matched_index, _matched_message = matches[0]
+    if terminal_index is not None and terminal_index != matched_index:
+        return None
+    return matched_index
 
 
 def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, handler=None) -> bool:
@@ -5272,48 +5357,54 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
     sid = str(getattr(session, "session_id", "") or "").strip()
     if not sid or not isinstance(messages, list) or not messages:
         return False
-    summary = latest_terminal_run_summary_for_session(sid)
-    if not summary:
+    summaries = terminal_run_summaries_for_session(sid, limit=16, max_candidates=64)
+    if not summaries:
         return False
-    stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
-    if not stream_id or stream_id in _active_stream_ids():
-        return False
-    snapshot = _run_journal_live_snapshot(stream_id, handler=handler, settled=True)
-    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
-    rows = scene.get("activity_rows") if isinstance(scene, dict) else None
-    if not isinstance(rows, list) or not rows:
-        return False
-    message_index = _terminal_anchor_scene_message_index(messages, snapshot)
-    if message_index is None or not (0 <= message_index < len(messages)):
-        return False
-    message = messages[message_index]
-    if not isinstance(message, dict) or message.get("role") != "assistant":
-        return False
-    if _anchor_scene_record_exists_for_message(_anchor_scene_records(session), message, message_index):
-        return False
-    completed_scene = _complete_hydrated_anchor_scene(
-        messages,
-        scene,
-        message_index,
-        message_offset=0,
-        tool_calls=getattr(session, "tool_calls", None),
-        stream_id=stream_id,
-    )
-    if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
-        return False
+    active_stream_ids = _active_stream_ids()
     with _get_session_agent_lock(sid):
         records = dict(_anchor_scene_records(session))
-        if _anchor_scene_record_exists_for_message(records, message, message_index):
+        changed = False
+        for summary in summaries:
+            stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
+            if not stream_id or stream_id in active_stream_ids:
+                continue
+            if _anchor_scene_record_exists_for_stream(records, stream_id):
+                continue
+            snapshot = _run_journal_live_snapshot(stream_id, handler=handler, settled=True)
+            scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+            rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+            if not isinstance(rows, list) or not rows:
+                continue
+            message_index = _terminal_anchor_scene_message_index(messages, snapshot)
+            if message_index is None or not (0 <= message_index < len(messages)):
+                continue
+            message = messages[message_index]
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            if _anchor_scene_record_exists_for_message(records, message, message_index):
+                continue
+            completed_scene = _complete_hydrated_anchor_scene(
+                messages,
+                scene,
+                message_index,
+                message_offset=0,
+                tool_calls=getattr(session, "tool_calls", None),
+                stream_id=stream_id,
+            )
+            if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
+                continue
+            ref = _assistant_anchor_scene_message_ref(message)
+            records[ref or f"index:{message_index}"] = {
+                "version": "anchor_activity_scene_record_v1",
+                "message_index": message_index,
+                "message_ref": ref,
+                "stream_id": stream_id,
+                "scene": completed_scene,
+                "updated_at": time.time(),
+            }
+            changed = True
+        if not changed:
             return False
-        ref = _assistant_anchor_scene_message_ref(message)
-        records[ref or f"index:{message_index}"] = {
-            "version": "anchor_activity_scene_record_v1",
-            "message_index": message_index,
-            "message_ref": ref,
-            "stream_id": stream_id,
-            "scene": completed_scene,
-            "updated_at": time.time(),
-        }
         if len(records) > 256:
             ordered = sorted(
                 records.items(),
@@ -10058,11 +10149,11 @@ from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
     find_run_summary,
-    latest_terminal_run_summary_for_session,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
+    terminal_run_summaries_for_session,
 )
 from api.todo_state import attach_todo_state
 from api.providers import (

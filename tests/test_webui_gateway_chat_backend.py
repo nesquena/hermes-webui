@@ -463,6 +463,8 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert apperrors
     assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
     assert apperrors[-1]["session_id"] == s.session_id
+    assert apperrors[-1]["session"]["message_count"] == len(apperrors[-1]["session"]["messages"])
+    assert apperrors[-1]["session"]["messages"][-1].get("_error") is True
     saved = models.get_session(s.session_id)
     user_messages = [m for m in saved.messages if m.get("role") == "user"]
     assert len(user_messages) == 2
@@ -496,6 +498,8 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
     assert empty_errors[-1]["type"] == "gateway_empty_response"
     assert empty_errors[-1]["session_id"] == s.session_id
+    assert empty_errors[-1]["session"]["message_count"] == len(empty_errors[-1]["session"]["messages"])
+    assert empty_errors[-1]["session"]["messages"][-1].get("_error") is True
 
     response_error[0] = "Gateway provider failed without a known classification"
     unknown_stream_id = "stream-gateway-unknown-terminal-error-test"
@@ -519,6 +523,8 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     unknown_errors = [item[1] for item in unknown_events if item[0] == "apperror"]
     assert unknown_errors[-1]["type"] == "error"
     assert "Gateway provider failed" in unknown_errors[-1]["message"]
+    assert unknown_errors[-1]["session"]["message_count"] == len(unknown_errors[-1]["session"]["messages"])
+    assert unknown_errors[-1]["session"]["messages"][-1].get("_error") is True
 
     response_error[0] = "partial"
     partial_stream_id = "stream-gateway-partial-terminal-error-test"

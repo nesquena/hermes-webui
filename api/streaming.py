@@ -7317,6 +7317,18 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'error'):
             return
+        if event in ('cancel', 'error', 'apperror'):
+            payload = data if isinstance(data, dict) else {}
+            if not isinstance(payload.get('session'), dict) and s is not None:
+                session_payload = _redacted_session_payload_with_full_messages(
+                    s,
+                    tool_calls=getattr(s, 'tool_calls', None),
+                )
+                if session_payload:
+                    payload = dict(payload)
+                    payload['session'] = session_payload
+                    payload['session_id'] = session_payload.get('session_id') or session_id
+                    data = payload
         event_id = None
         if run_journal is not None:
             try:

@@ -9,6 +9,7 @@ from api.run_journal import (
     latest_run_summary,
     read_run_events,
     stale_interrupted_event,
+    terminal_run_summaries_for_session,
 )
 
 
@@ -118,6 +119,22 @@ def test_latest_terminal_run_summary_for_session_skips_running_runs(tmp_path):
     assert summary["run_id"] == "run_3"
     assert summary["terminal"] is True
     assert summary["terminal_state"] == "interrupted-by-user"
+
+
+def test_terminal_run_summaries_for_session_returns_bounded_newest_terminals(tmp_path):
+    append_run_event("session_1", "run_1", "token", {"text": "old"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
+    append_run_event("session_1", "run_2", "token", {"text": "running"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_3", "token", {"text": "cancel"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_3", "cancel", {"message": "Cancelled"}, session_dir=tmp_path)
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=2)
+
+    assert [summary["run_id"] for summary in summaries] == ["run_3", "run_1"]
+    assert [summary["terminal_state"] for summary in summaries] == [
+        "interrupted-by-user",
+        "completed",
+    ]
 
 
 def test_latest_summary_reuses_unchanged_journal_summary_without_reparsing(tmp_path, monkeypatch):

@@ -617,6 +617,84 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         return error_payload
 
 
+def _settle_gateway_terminal_payload(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    error_payload,
+):
+    from api.streaming import (
+        _cancelled_turn_content,
+        _materialize_pending_user_turn_before_error,
+        _session_payload_with_full_messages,
+        _snapshot_and_append_partial_on_error,
+    )
+
+    payload = dict(error_payload) if isinstance(error_payload, dict) else {}
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        if not _stream_writeback_is_current(session, stream_id):
+            return None
+        turn_duration_seconds = 0.0
+        try:
+            pending_ts = getattr(session, "pending_started_at", None)
+            if pending_ts:
+                turn_duration_seconds = max(0.0, time.time() - float(pending_ts))
+        except Exception:
+            pass
+        _materialize_pending_user_turn_before_error(session)
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        try:
+            _snapshot_and_append_partial_on_error(session, stream_id)
+        except Exception:
+            logger.debug("Failed to snapshot gateway partials on terminal payload", exc_info=True)
+        error_type = str(payload.get("type") or "").strip().lower()
+        label = str(payload.get("label") or "").strip()
+        if not label:
+            label = "Task cancelled" if error_type in {"cancelled", "canceled"} else "Gateway request failed"
+        message = str(payload.get("message") or label).strip()
+        hint = str(payload.get("hint") or "").strip()
+        if error_type in {"cancelled", "canceled"}:
+            content = _cancelled_turn_content(message)
+        else:
+            content = f"**{label}:** {message}" + (f"\n\n*{hint}*" if hint else "")
+        error_message = {
+            "role": "assistant",
+            "content": content,
+            "timestamp": int(time.time()),
+            "_error": True,
+            "_turnDuration": round(turn_duration_seconds, 3),
+        }
+        if payload.get("details"):
+            error_message["provider_details"] = payload["details"]
+        if error_type in {"cancelled", "canceled"}:
+            error_message["provider_details"] = message
+            error_message["provider_details_label"] = "Cancellation details"
+        elif error_type == "interrupted":
+            error_message["provider_details_label"] = "Interruption details"
+        if not isinstance(session.messages, list):
+            session.messages = []
+        session.messages.append(error_message)
+        session.workspace = str(workspace)
+        session.model = model
+        session.model_provider = model_provider
+        try:
+            session.save()
+        except Exception:
+            logger.debug("Failed to persist gateway terminal payload settlement", exc_info=True)
+        payload["session"] = redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=[])
+        )
+        payload["session_id"] = session.session_id
+        return payload
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -702,6 +780,28 @@ def _run_gateway_chat_streaming(
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
+        if event in {"cancel", "error", "apperror"}:
+            payload = data if isinstance(data, dict) else {}
+            if not isinstance(payload.get("session"), dict):
+                if event == "cancel":
+                    payload = dict(payload)
+                    payload.setdefault("label", "Task cancelled")
+                    payload.setdefault("type", "cancelled")
+                    payload.setdefault("message", "Cancelled by user")
+                try:
+                    settled_payload = _settle_gateway_terminal_payload(
+                        session_id,
+                        stream_id,
+                        workspace,
+                        model,
+                        model_provider,
+                        payload,
+                    )
+                except Exception:
+                    settled_payload = None
+                    logger.debug("Failed to settle gateway terminal payload", exc_info=True)
+                if settled_payload is not None:
+                    data = settled_payload
         event_id = None
         if run_journal is not None:
             try:
