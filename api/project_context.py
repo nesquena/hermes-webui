@@ -56,14 +56,15 @@ def _load_json_list(path: Path) -> list[dict[str, Any]]:
     return [row for row in value if isinstance(row, dict)]
 
 
-def _load_json_list_with_status(path: Path) -> tuple[list[dict[str, Any]], bool]:
+def _load_json_list_with_status(path: Path) -> tuple[list[dict[str, Any]], bool, int]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return [], False
+        return [], False, 0
     if not isinstance(value, list):
-        return [], False
-    return [row for row in value if isinstance(row, dict)], True
+        return [], False, 0
+    rows = [row for row in value if isinstance(row, dict)]
+    return rows, True, len(value) - len(rows)
 
 
 def _normalize_roles(roles: Any) -> tuple[str, ...]:
@@ -176,16 +177,21 @@ def _eligible_session_metadata(
         "archived_sessions_excluded": 0,
     }
     eligible: dict[str, dict[str, Any]] = {}
-    index_rows, index_available = _load_json_list_with_status(session_index_file)
+    index_rows, index_available, malformed_rows = _load_json_list_with_status(session_index_file)
     diagnostics["session_index_unavailable"] = 0 if index_available else 1
+    diagnostics["invalid_index_rows"] += malformed_rows
     for row in index_rows:
-        if row.get("project_id") != project_id or not _profiles_match(row.get("profile"), profile):
+        if "project_id" in row and row.get("project_id") != project_id:
             continue
-        diagnostics["index_rows_considered"] += 1
+        if "profile" in row and not _profiles_match(row.get("profile"), profile):
+            continue
         sid = str(row.get("session_id") or "")
         if not is_safe_session_id(sid):
             diagnostics["invalid_index_rows"] += 1
             continue
+        if row.get("project_id") != project_id or not _profiles_match(row.get("profile"), profile):
+            continue
+        diagnostics["index_rows_considered"] += 1
         sidecar_path = session_dir / f"{sid}.json"
         if not sidecar_path.is_file():
             diagnostics["missing_sidecars"] += 1
