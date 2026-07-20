@@ -5452,6 +5452,7 @@ main.main > #mainPlugin{display:none;}
 .extension-sidecar-row-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;}
 .extension-sidecar-title{font-size:13px;font-weight:600;color:var(--text);overflow-wrap:anywhere;min-width:0;}
 .extension-sidecar-meta{margin-top:2px;font-size:11px;color:var(--muted);overflow-wrap:anywhere;}
+.extension-sidecar-warning{margin-top:8px;padding:7px 9px;border:1px solid var(--warning,#d29922);border-radius:6px;background:var(--warning-bg,rgba(210,153,34,0.12));color:var(--warning,#d29922);font-size:11px;line-height:1.4;overflow-wrap:anywhere;}
 .extension-sidecar-fields{display:grid;grid-template-columns:1fr;gap:5px;margin-top:8px;}
 .extension-sidecar-fields>div{display:flex;align-items:flex-start;gap:8px;min-width:0;font-size:12px;color:var(--muted);}
 .extension-sidecar-fields span{flex:0 0 82px;}
