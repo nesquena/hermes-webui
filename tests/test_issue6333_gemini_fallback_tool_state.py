@@ -16,11 +16,61 @@ sys.path.insert(0, str(REPO_ROOT))
 GOOGLE_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 
 
-def _repair(messages, *, model, base_url):
+def _mark_boundary(messages, index):
+    from api.streaming import _GEMINI_REQUEST_BOUNDARY_MARKER
+
+    marked = copy.deepcopy(messages)
+    marked[index] = dict(marked[index])
+    marked[index][_GEMINI_REQUEST_BOUNDARY_MARKER] = True
+    return marked
+
+
+def _boundary_marker_key():
+    from api.streaming import _GEMINI_REQUEST_BOUNDARY_MARKER
+
+    return _GEMINI_REQUEST_BOUNDARY_MARKER
+
+
+def _import_real_conversation_loop():
+    original_agent_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "agent" or name.startswith("agent.")
+    }
+
+    for name, module in list(original_agent_modules.items()):
+        if name != "agent" and not name.startswith("agent."):
+            continue
+        if isinstance(module, types.ModuleType) and getattr(module, "__file__", None) is None:
+            sys.modules.pop(name, None)
+
+    def _restore_agent_modules():
+        for name in list(sys.modules):
+            if (name == "agent" or name.startswith("agent.")) and name not in original_agent_modules:
+                sys.modules.pop(name, None)
+        for name, module in original_agent_modules.items():
+            sys.modules[name] = module
+
+    try:
+        conversation_loop = pytest.importorskip(
+            "agent.conversation_loop",
+            reason="hermes-agent conversation loop not importable",
+        )
+    except BaseException:
+        _restore_agent_modules()
+        raise
+
+    agent_pkg = sys.modules.get("agent")
+    if isinstance(agent_pkg, types.ModuleType):
+        agent_pkg.conversation_loop = conversation_loop  # type: ignore[attr-defined]
+    return conversation_loop, _restore_agent_modules
+
+
+def _repair(messages, *, model, base_url, boundary_index):
     from api.streaming import _repair_google_gemini_current_turn_tool_state_for_request
 
     return _repair_google_gemini_current_turn_tool_state_for_request(
-        messages,
+        _mark_boundary(messages, boundary_index),
         model=model,
         base_url=base_url,
     )
@@ -75,6 +125,7 @@ def test_gemini3_request_repairs_only_current_turn_and_leaves_input_untouched():
         messages,
         model="gemini-3-flash",
         base_url=GOOGLE_OPENAI_BASE,
+        boundary_index=3,
     )
 
     assert messages == original, "request-boundary repair must not mutate canonical history"
@@ -135,6 +186,7 @@ def test_gemini3_parallel_group_keeps_unsigned_siblings_when_first_call_is_signe
         messages,
         model="gemini-3-flash",
         base_url=GOOGLE_OPENAI_BASE,
+        boundary_index=0,
     )
 
     assistant = next(m for m in result if m.get("role") == "assistant")
@@ -157,6 +209,7 @@ def test_gemini25_request_does_not_prune_unsigned_current_turn_history():
         messages,
         model="gemini-2.5-flash",
         base_url=GOOGLE_OPENAI_BASE,
+        boundary_index=3,
     )
 
     assert result == messages, "Gemini 2.5 is out of scope for the strict current-turn repair"
@@ -169,6 +222,7 @@ def test_non_google_route_does_not_prune_gemini_named_model_history():
         messages,
         model="gemini-3-flash",
         base_url="https://openrouter.ai/api/v1",
+        boundary_index=3,
     )
 
     assert result == messages, "only Google Gemini requests should receive the request-boundary repair"
@@ -195,6 +249,7 @@ def test_gemini3_request_preserves_completed_tool_turn_before_next_user_message(
         messages,
         model="gemini-3-flash",
         base_url=GOOGLE_OPENAI_BASE,
+        boundary_index=3,
     )
 
     assert messages == original, "request-boundary repair must not mutate canonical history"
@@ -234,6 +289,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     import api.session_lifecycle as lifecycle
     import api.streaming as streaming
     from api.models import Session
+    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
     ChatCompletionsTransport = pytest.importorskip(
         "agent.transports.chat_completions",
         reason="hermes-agent transport modules not importable",
@@ -248,9 +304,9 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
 
-    def _assistant_response(content, tool_calls=None):
+    def _assistant_response(content, tool_calls=None, finish_reason="stop"):
         message = types.SimpleNamespace(content=content, tool_calls=tool_calls)
-        choice = types.SimpleNamespace(message=message, finish_reason="stop")
+        choice = types.SimpleNamespace(message=message, finish_reason=finish_reason)
         return types.SimpleNamespace(choices=[choice], model="stub/model", usage=None)
 
     class _RateLimitError(Exception):
@@ -278,6 +334,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     fallback_calls = []
     fallback_resolution_calls = []
     captured_results = {}
+    tool_executions = []
 
     active_tool_call = types.SimpleNamespace(
         id="call_active",
@@ -298,6 +355,8 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
         fallback_primary_calls.append(copy.deepcopy(kwargs))
         if len(fallback_primary_calls) == 1:
             return _assistant_response("Checking the next order.", [active_tool_call])
+        if len(fallback_primary_calls) == 2:
+            return _assistant_response("The order status is", finish_reason="length")
         raise _RateLimitError()
 
     def _fallback_create(*_args, **kwargs):
@@ -336,7 +395,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             self.tool_delay = 0
             self.compression_enabled = False
             self.save_trajectories = False
-            self.valid_tool_names = set()
+            self.valid_tool_names = {"lookup"}
             self._persist_session = lambda *args, **kwargs: None
             self._save_trajectory = lambda *args, **kwargs: None
             self._cleanup_task_resources = lambda *args, **kwargs: None
@@ -352,12 +411,14 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             return result
 
         def _execute_tool_calls(self, assistant_message, messages, effective_task_id, api_call_count=0):
-            messages.append({
+            tool_row = {
                 "role": "tool",
                 "tool_call_id": assistant_message.tool_calls[0].id,
                 "name": assistant_message.tool_calls[0].function.name,
                 "content": "order 2: pending",
-            })
+            }
+            tool_executions.append(copy.deepcopy(tool_row))
+            messages.append(tool_row)
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None, **_kw: {
@@ -438,6 +499,8 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 
     sessions = {}
     original_build_kwargs = ChatCompletionsTransport.build_kwargs
+    original_build_turn_context = conversation_loop.build_turn_context
+    original_reanchor = conversation_loop.reanchor_current_turn_user_idx
     original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
     sessions_snapshot = dict(models.SESSIONS)
     streams_snapshot = dict(config.STREAMS)
@@ -454,7 +517,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 
     def _new_session(session_id, stream_id, pending_user_message):
         session = Session(session_id=session_id, title="Gemini fallback")
-        history = _prior_and_current_turn_history()[:4]
+        history = _prior_and_current_turn_history()[:3]
         session.messages = history
         session.context_messages = copy.deepcopy(history)
         session.pending_user_message = pending_user_message
@@ -521,7 +584,10 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             msg_text="continue with fallback",
         )
     finally:
+        restore_agent_modules()
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
+        conversation_loop.build_turn_context = original_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = original_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag
         models.SESSIONS.clear()
         models.SESSIONS.update(sessions_snapshot)
@@ -548,6 +614,23 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             lifecycle._condition.notify_all()
 
     assert len(primary_success_calls) == 2
+    primary_first_messages = primary_success_calls[0]["messages"]
+    fallback_first_messages = fallback_primary_calls[0]["messages"]
+    for first_messages, user_text in (
+        (primary_first_messages, "continue without fallback"),
+        (fallback_first_messages, "continue with fallback"),
+    ):
+        assert first_messages[0]["role"] == "system"
+        assert first_messages[1:-1] == _prior_and_current_turn_history()[:3]
+        assert first_messages[-1]["role"] == "user"
+        assert first_messages[-1]["content"].endswith(user_text)
+    expected_tool_row = {
+        "role": "tool",
+        "tool_call_id": "call_active",
+        "name": "lookup",
+        "content": "order 2: pending",
+    }
+    assert tool_executions == [expected_tool_row, expected_tool_row]
     primary_messages = primary_success_calls[1]["messages"]
     _assert_canonical_current_turn(primary_messages)
     primary_result = captured_results["issue6333-primary"]
@@ -558,14 +641,21 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     assert primary_result["messages"][-1]["content"] == "primary stayed primary"
     assert primary_saved.messages[-1]["content"] == "primary stayed primary"
 
-    assert len(fallback_primary_calls) == 2
+    assert len(fallback_primary_calls) == 3
+    assert fallback_first_messages[-1]["role"] == "user"
+    assert fallback_first_messages[-1]["content"].endswith("continue with fallback")
     assert len(fallback_calls) == 1
     assert len(fallback_resolution_calls) == 1
     assert fallback_resolution_calls[0]["provider"] == "google"
     assert fallback_resolution_calls[0]["model"] == "gemini-3-flash"
 
-    fallback_primary_messages = fallback_primary_calls[1]["messages"]
+    fallback_primary_messages = fallback_primary_calls[2]["messages"]
     _assert_canonical_current_turn(fallback_primary_messages)
+    assert any(
+        message.get("role") == "user"
+        and "truncated by the output length limit" in message.get("content", "")
+        for message in fallback_primary_messages
+    ), "the fallback request must follow the real synthetic continuation user row"
 
     fallback_result = captured_results["issue6333-fallback"]
     _assert_canonical_current_turn(fallback_result["messages"])
@@ -588,10 +678,19 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     assert fallback_result["messages"][-1]["content"] == "fallback recovered"
     assert fallback_saved.messages[-1]["content"] == "fallback recovered"
 
+    from api.streaming import _GEMINI_REQUEST_BOUNDARY_MARKER
+    for call in primary_success_calls + fallback_primary_calls + fallback_calls:
+        assert not any(
+            _GEMINI_REQUEST_BOUNDARY_MARKER in message
+            for message in call["messages"]
+            if isinstance(message, dict)
+        )
+
 
 def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_history():
     from api.streaming import _install_gemini_request_boundary_wrapper
     import api.streaming as streaming
+    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
     get_transport = pytest.importorskip(
         "agent.transports",
         reason="hermes-agent transport modules not importable",
@@ -603,6 +702,8 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
 
     original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
     original_build_kwargs = ChatCompletionsTransport.build_kwargs
+    original_build_turn_context = conversation_loop.build_turn_context
+    original_reanchor = conversation_loop.reanchor_current_turn_user_idx
     baseline_build_kwargs = getattr(
         original_build_kwargs,
         "_webui_original_build_kwargs",
@@ -616,8 +717,10 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
         transport = get_transport("chat_completions")
         assert transport is not None
 
-        messages = _prior_and_current_turn_history()
-        original = copy.deepcopy(messages)
+        messages = _mark_boundary(_prior_and_current_turn_history(), 3)
+        marked_original = copy.deepcopy(messages)
+        original = [dict(message) for message in messages]
+        original[3].pop(_boundary_marker_key(), None)
 
         primary_kwargs = transport.build_kwargs(
             model="glm-5.2",
@@ -631,7 +734,8 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
             },
         )
         assert primary_kwargs["messages"] == original
-        assert messages == original, "the wrapper must not mutate canonical history for a successful non-Google primary turn"
+        assert messages[3].get(_boundary_marker_key()) is True
+        assert messages == marked_original
 
         fallback_kwargs = transport.build_kwargs(
             model="gemini-3-flash",
@@ -641,7 +745,7 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
         )
 
         result = fallback_kwargs["messages"]
-        assert messages == original, "the transport wrapper must repair only the outbound request copy"
+        assert messages == marked_original, "the transport wrapper must repair only the outbound request copy"
         assert any(
             m.get("role") == "tool" and m.get("tool_call_id") == "call_prior"
             for m in result
@@ -651,13 +755,49 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
             for m in result
         ), "the wrapped build path must strip the current-turn unsigned group before Gemini sees it"
     finally:
+        restore_agent_modules()
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
+        conversation_loop.build_turn_context = original_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = original_reanchor
+        streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag
+
+
+def test_boundary_wrapper_reanchors_rebuilt_message_list_and_strips_marker():
+    import api.streaming as streaming
+    from api.streaming import _install_gemini_request_boundary_wrapper
+    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+
+    original_reanchor = conversation_loop.reanchor_current_turn_user_idx
+    original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
+    baseline_reanchor = getattr(
+        original_reanchor,
+        "_webui_original_reanchor",
+        original_reanchor,
+    )
+    try:
+        conversation_loop.reanchor_current_turn_user_idx = baseline_reanchor
+        streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
+        _install_gemini_request_boundary_wrapper()
+
+        rebuilt = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "summary"},
+            {"role": "user", "content": "current"},
+        ]
+        assert conversation_loop.reanchor_current_turn_user_idx(rebuilt, "current") == 2
+        outbound = rebuilt[2].copy()
+        assert outbound.pop(streaming._GEMINI_REQUEST_BOUNDARY_MARKER) is True
+        assert rebuilt[2] == {"role": "user", "content": "current"}
+    finally:
+        restore_agent_modules()
+        conversation_loop.reanchor_current_turn_user_idx = original_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag
 
 
 def test_transport_wrapper_rewraps_replaced_real_chat_transport():
     from api.streaming import _install_gemini_request_boundary_wrapper
     import api.streaming as streaming
+    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
     ChatCompletionsTransport = pytest.importorskip(
         "agent.transports.chat_completions",
         reason="hermes-agent transport modules not importable",
@@ -665,18 +805,36 @@ def test_transport_wrapper_rewraps_replaced_real_chat_transport():
 
     original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
     original_build_kwargs = ChatCompletionsTransport.build_kwargs
+    original_build_turn_context = conversation_loop.build_turn_context
+    original_reanchor = conversation_loop.reanchor_current_turn_user_idx
     baseline_build_kwargs = getattr(
         original_build_kwargs,
         "_webui_original_build_kwargs",
         original_build_kwargs,
     )
+    baseline_build_turn_context = getattr(
+        original_build_turn_context,
+        "_webui_original_build_turn_context",
+        original_build_turn_context,
+    )
+    baseline_reanchor = getattr(
+        original_reanchor,
+        "_webui_original_reanchor",
+        original_reanchor,
+    )
     try:
         ChatCompletionsTransport.build_kwargs = baseline_build_kwargs
+        conversation_loop.build_turn_context = baseline_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = baseline_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
 
         _install_gemini_request_boundary_wrapper()
         first_wrapper = ChatCompletionsTransport.build_kwargs
+        first_build_turn_context = conversation_loop.build_turn_context
+        first_reanchor = conversation_loop.reanchor_current_turn_user_idx
         assert getattr(first_wrapper, "_webui_gemini_request_boundary_wrapper", False)
+        assert getattr(first_build_turn_context, "_webui_gemini_request_boundary_wrapper", False)
+        assert getattr(first_reanchor, "_webui_gemini_request_boundary_wrapper", False)
 
         def replacement_build_kwargs(self, model, messages, tools=None, **params):
             return {
@@ -687,6 +845,15 @@ def test_transport_wrapper_rewraps_replaced_real_chat_transport():
             }
 
         ChatCompletionsTransport.build_kwargs = replacement_build_kwargs
+
+        def replacement_build_turn_context(*args, **kwargs):
+            return args, kwargs
+
+        def replacement_reanchor(messages, user_message):
+            return 0
+
+        conversation_loop.build_turn_context = replacement_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = replacement_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
 
         _install_gemini_request_boundary_wrapper()
@@ -694,11 +861,23 @@ def test_transport_wrapper_rewraps_replaced_real_chat_transport():
         assert getattr(rewrapped, "_webui_gemini_request_boundary_wrapper", False)
         assert getattr(rewrapped, "_webui_original_build_kwargs", None) is replacement_build_kwargs
         assert rewrapped is not replacement_build_kwargs
+        rewrapped_build_turn_context = conversation_loop.build_turn_context
+        rewrapped_reanchor = conversation_loop.reanchor_current_turn_user_idx
+        assert getattr(
+            rewrapped_build_turn_context,
+            "_webui_original_build_turn_context",
+            None,
+        ) is replacement_build_turn_context
+        assert getattr(rewrapped_reanchor, "_webui_original_reanchor", None) is replacement_reanchor
+        assert rewrapped_build_turn_context is not replacement_build_turn_context
+        assert rewrapped_reanchor is not replacement_reanchor
 
         _install_gemini_request_boundary_wrapper()
         assert ChatCompletionsTransport.build_kwargs is rewrapped
+        assert conversation_loop.build_turn_context is rewrapped_build_turn_context
+        assert conversation_loop.reanchor_current_turn_user_idx is rewrapped_reanchor
 
-        messages = _prior_and_current_turn_history()
+        messages = _mark_boundary(_prior_and_current_turn_history(), 3)
         kwargs = ChatCompletionsTransport().build_kwargs(
             model="gemini-3-flash",
             messages=messages,
@@ -710,6 +889,21 @@ def test_transport_wrapper_rewraps_replaced_real_chat_transport():
             m.get("role") == "tool" and m.get("tool_call_id") == "call_current"
             for m in result
         ), "reinstall must re-wrap a replaced transport before Gemini sees the request"
+        malformed = [{
+            "role": "user",
+            "content": "malformed boundary",
+            streaming._GEMINI_REQUEST_BOUNDARY_MARKER: "invalid",
+        }]
+        delegated = ChatCompletionsTransport().build_kwargs(
+            model="glm-5.2",
+            messages=malformed,
+            tools=None,
+            base_url="https://integrate.api.nvidia.com/v1",
+        )
+        assert streaming._GEMINI_REQUEST_BOUNDARY_MARKER not in delegated["messages"][0]
     finally:
+        restore_agent_modules()
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
+        conversation_loop.build_turn_context = original_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = original_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag

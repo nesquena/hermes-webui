@@ -162,6 +162,14 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
 _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
 _GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK = threading.Lock()
+_GEMINI_REQUEST_BOUNDARY_MARKER = "_webui_gemini_request_boundary"
+
+
+class _GeminiRequestBoundaryMessage(dict):
+    def copy(self):
+        copied = dict(self)
+        copied[_GEMINI_REQUEST_BOUNDARY_MARKER] = True
+        return copied
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -372,30 +380,42 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
     """
     if not isinstance(messages, list):
         return messages
+
+    boundary_indexes = []
+    marker_found = False
+    marker_free_messages = []
+    for idx, message in enumerate(messages):
+        if not isinstance(message, dict) or _GEMINI_REQUEST_BOUNDARY_MARKER not in message:
+            marker_free_messages.append(message)
+            continue
+        marker_found = True
+        marker_free = dict(message)
+        marker = marker_free.pop(_GEMINI_REQUEST_BOUNDARY_MARKER)
+        marker_free_messages.append(marker_free)
+        if marker is True and marker_free.get('role') == 'user':
+            boundary_indexes.append(idx)
+
+    if not boundary_indexes:
+        return marker_free_messages if marker_found else messages
+
     if not _request_targets_google_gemini_three(
         model,
         base_url=base_url,
         provider_profile=provider_profile,
     ):
-        return messages
+        return marker_free_messages
 
-    last_user_index = None
-    for idx in range(len(messages) - 1, -1, -1):
-        msg = messages[idx]
-        if isinstance(msg, dict) and msg.get('role') == 'user':
-            last_user_index = idx
-            break
-    if last_user_index is None:
-        return messages
+    if len(boundary_indexes) != 1:
+        return marker_free_messages
 
-    replay_turn_user_index = last_user_index
-    if last_user_index == len(messages) - 1:
-        return messages
+    replay_turn_user_index = boundary_indexes[0]
+    if replay_turn_user_index == len(marker_free_messages) - 1:
+        return marker_free_messages
 
     drop_assistant_indexes = set()
     dropped_tool_call_ids: set[str] = set()
     for idx in range(replay_turn_user_index + 1, len(messages)):
-        msg = messages[idx]
+        msg = marker_free_messages[idx]
         if not isinstance(msg, dict) or msg.get('role') != 'assistant':
             continue
         tool_calls = msg.get('tool_calls')
@@ -412,10 +432,10 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
                 dropped_tool_call_ids.add(str(tool_id))
 
     if not drop_assistant_indexes and not dropped_tool_call_ids:
-        return messages
+        return marker_free_messages
 
     repaired = []
-    for idx, msg in enumerate(messages):
+    for idx, msg in enumerate(marker_free_messages):
         if idx <= replay_turn_user_index or not isinstance(msg, dict):
             repaired.append(msg)
             continue
@@ -437,32 +457,68 @@ def _repair_google_gemini_current_turn_tool_state_for_request(
 
 
 def _install_gemini_request_boundary_wrapper() -> None:
-    """Patch the agent chat-completions transport with a request-boundary repair."""
+    """Patch the Agent request boundary and chat-completions transport."""
     global _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
-    try:
-        from agent.transports.chat_completions import ChatCompletionsTransport
-    except Exception:
-        logger.debug("gemini request-boundary wrapper: transport unavailable", exc_info=True)
-        return
-
     with _GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK:
-        current_build_kwargs = ChatCompletionsTransport.build_kwargs
-        if getattr(current_build_kwargs, "_webui_gemini_request_boundary_wrapper", False):
-            _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
-            return
+        try:
+            from agent import conversation_loop
 
-        def _wrapped_build_kwargs(self, model, messages, tools=None, **params):
-            repaired_messages = _repair_google_gemini_current_turn_tool_state_for_request(
-                messages,
-                model=model,
-                base_url=params.get('base_url'),
-                provider_profile=params.get('provider_profile'),
-            )
-            return current_build_kwargs(self, model, repaired_messages, tools, **params)
+            current_build_turn_context = conversation_loop.build_turn_context
+            if not getattr(current_build_turn_context, "_webui_gemini_request_boundary_wrapper", False):
+                original_build_turn_context = current_build_turn_context
 
-        _wrapped_build_kwargs.__dict__["_webui_gemini_request_boundary_wrapper"] = True
-        _wrapped_build_kwargs.__dict__["_webui_original_build_kwargs"] = current_build_kwargs
-        ChatCompletionsTransport.build_kwargs = _wrapped_build_kwargs
+                def _wrapped_build_turn_context(*args, **kwargs):
+                    ctx = original_build_turn_context(*args, **kwargs)
+                    idx = getattr(ctx, "current_turn_user_idx", -1)
+                    messages = getattr(ctx, "messages", None)
+                    if isinstance(messages, list) and 0 <= idx < len(messages):
+                        message = messages[idx]
+                        if isinstance(message, dict) and message.get('role') == 'user':
+                            messages[idx] = _GeminiRequestBoundaryMessage(message)
+                    return ctx
+
+                _wrapped_build_turn_context.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+                _wrapped_build_turn_context.__dict__["_webui_original_build_turn_context"] = original_build_turn_context
+                conversation_loop.build_turn_context = _wrapped_build_turn_context
+
+            current_reanchor = conversation_loop.reanchor_current_turn_user_idx
+            if not getattr(current_reanchor, "_webui_gemini_request_boundary_wrapper", False):
+                original_reanchor = current_reanchor
+
+                def _wrapped_reanchor(messages, user_message):
+                    idx = original_reanchor(messages, user_message)
+                    if 0 <= idx < len(messages):
+                        message = messages[idx]
+                        if isinstance(message, dict) and message.get('role') == 'user':
+                            messages[idx] = _GeminiRequestBoundaryMessage(message)
+                    return idx
+
+                _wrapped_reanchor.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+                _wrapped_reanchor.__dict__["_webui_original_reanchor"] = original_reanchor
+                conversation_loop.reanchor_current_turn_user_idx = _wrapped_reanchor
+        except Exception:
+            logger.debug("gemini request-boundary wrapper: Agent hooks unavailable", exc_info=True)
+
+        try:
+            from agent.transports.chat_completions import ChatCompletionsTransport
+
+            current_build_kwargs = ChatCompletionsTransport.build_kwargs
+            if not getattr(current_build_kwargs, "_webui_gemini_request_boundary_wrapper", False):
+
+                def _wrapped_build_kwargs(self, model, messages, tools=None, **params):
+                    repaired_messages = _repair_google_gemini_current_turn_tool_state_for_request(
+                        messages,
+                        model=model,
+                        base_url=params.get('base_url'),
+                        provider_profile=params.get('provider_profile'),
+                    )
+                    return current_build_kwargs(self, model, repaired_messages, tools, **params)
+
+                _wrapped_build_kwargs.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+                _wrapped_build_kwargs.__dict__["_webui_original_build_kwargs"] = current_build_kwargs
+                ChatCompletionsTransport.build_kwargs = _wrapped_build_kwargs
+        except Exception:
+            logger.debug("gemini request-boundary wrapper: transport unavailable", exc_info=True)
         _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
 
 
