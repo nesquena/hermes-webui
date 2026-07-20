@@ -51,7 +51,7 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIR_FD_OK = all(
     function in getattr(os, "supports_dir_fd", set())
     for function in (os.open, os.mkdir, os.stat, os.unlink, os.rmdir, os.link)
-)
+) and os.listdir in getattr(os, "supports_fd", set())
 _MEDIA_IO_LOCK = threading.RLock()
 
 
@@ -842,13 +842,12 @@ def _remove_tree_at(parent_fd: int, name: str) -> None:
     except FileNotFoundError:
         return
     try:
-        with os.scandir(child_fd) as entries:
-            for entry in entries:
-                info = entry.stat(follow_symlinks=False)
-                if stat.S_ISDIR(info.st_mode):
-                    _remove_tree_at(child_fd, entry.name)
-                else:
-                    os.unlink(entry.name, dir_fd=child_fd)
+        for entry_name in os.listdir(child_fd):
+            info = os.stat(entry_name, dir_fd=child_fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                _remove_tree_at(child_fd, entry_name)
+            else:
+                os.unlink(entry_name, dir_fd=child_fd)
     finally:
         os.close(child_fd)
     os.rmdir(name, dir_fd=parent_fd)
