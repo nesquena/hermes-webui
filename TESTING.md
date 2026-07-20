@@ -93,18 +93,24 @@ that breaks the page for everyone).
 
 ## Public conversation lifecycle gate
 
-`tests/browser_conversation_lifecycle.py` adds the first public, deterministic
-chat golden path. It drives the real composer and real WebUI server in Chromium,
-while a localhost-only fixture supplies reasoning, tool, and final-answer events
-through the existing Hermes Gateway Runs API. The gate asserts semantic activity
-during live streaming, after settlement, and after a hard reload, including
+`tests/browser_conversation_lifecycle.py` adds a public deterministic
+multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,
+while a localhost-only fixture supplies reasoning, tool, process, and final/error
+events through the existing Hermes Gateway Runs API. The gate now covers both
+normal and terminal-error proof-matrix rows, asserting semantic activity during
+live streaming, after settlement, and after hard reload, including
 transcript-backed `activity_scene_v1` persistence and zero unexpected browser
 errors. It uses isolated temporary state and no provider credentials.
 
 ```bash
 pip install -r requirements.txt playwright
 python -m playwright install --with-deps chromium
+
+# Normal-path deterministic conversation lifecycle gate.
 python tests/browser_conversation_lifecycle.py
+
+# Terminal-error lifecycle gate (new row in the proof matrix).
+LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
 ```
 
 To certify that the gate catches its target failure, the test owns an opt-in
@@ -114,12 +120,19 @@ must fail at the hard-reload boundary:
 ```bash
 LIFECYCLE_TEST_BITE=drop-anchor-persistence \
   python tests/browser_conversation_lifecycle.py
+
+# Terminal-state-specific mutation bite: remove terminal row from persisted scene
+# so hard reload cannot recover terminal status.
+LIFECYCLE_SCENARIO=terminal-error \
+LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
+  python tests/browser_conversation_lifecycle.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs this test
-without blocking merges while the public matrix is being established. The
-maintainer's private QA harness remains broader; later public slices will add
-session switching, reconnect/replay, cancellation, compression, and recovery.
+The dedicated `Conversation lifecycle (informational)` workflow runs both current
+proof rows (`normal` and `terminal-error`) and stays non-blocking while the public
+matrix expands to additional behavior rows. The maintainer's private QA harness
+remains broader; later public slices will add session switching, reconnect/replay,
+cancellation, compression, and recovery.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present

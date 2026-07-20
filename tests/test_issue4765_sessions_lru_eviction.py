@@ -413,3 +413,122 @@ def test_stale_unsaved_shell_with_draft_stays_resident(isolated_session_env):
     assert _session_is_evictable(shell) is False, (
         "a stale shell with an active composer draft must stay resident"
     )
+def test_content_search_scan_does_not_evict_the_working_set(isolated_session_env):
+    """A content search must not push the user's open sessions out of the cache.
+
+    /api/sessions/search?content=1 walks EVERY session. Routing that through
+    get_session() inserted each one into the LRU and marked it recently-used, so
+    a single search over an install with more sessions than the cap flushed the
+    whole cache — the classic buffer-pool scan-pollution problem. The sessions
+    the user actually had open were the ones evicted.
+
+    get_session_for_scan() reads without promoting or inserting, so a scan is
+    transparent to the LRU.
+    """
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import get_session, get_session_for_scan
+
+    _cfg.SESSIONS_MAX = 5
+
+    working = []
+    for i in range(4):
+        s = _make_persisted_session(900 + i)
+        get_session(s.session_id)          # the user opens it -> legitimately cached
+        working.append(s.session_id)
+
+    corpus = [_make_persisted_session(i).session_id for i in range(60)]
+
+    for sid in corpus:                     # what the content search does
+        assert get_session_for_scan(sid) is not None
+
+    for sid in working:
+        assert sid in SESSIONS, "a scan evicted the user's working set"
+    assert not any(sid in SESSIONS for sid in corpus), "the scan polluted the LRU"
+    assert len(SESSIONS) <= _cfg.SESSIONS_MAX
+
+
+def test_scan_accessor_reuses_resident_sessions_without_promoting(isolated_session_env):
+    """A scan hit must reuse the cached object but must not refresh its recency."""
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import get_session, get_session_for_scan
+
+    _cfg.SESSIONS_MAX = 50
+    first = _make_persisted_session(801)
+    second = _make_persisted_session(802)
+    get_session(first.session_id)
+    get_session(second.session_id)         # second is now the most-recent entry
+
+    order_before = list(SESSIONS.keys())
+    scanned = get_session_for_scan(first.session_id)
+
+    assert scanned is SESSIONS[first.session_id], "scan should reuse the resident object"
+    assert list(SESSIONS.keys()) == order_before, "scan must not promote in the LRU"
+
+
+def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
+    isolated_session_env, monkeypatch,
+):
+    """The real search path must find state.db-only recovery text without LRU churn."""
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    from api import models, routes
+    from api.config import SESSIONS
+
+    working = _make_persisted_session(950)
+    stale = _make_persisted_session(
+        951,
+        messages=[{"role": "user", "content": "old prompt", "timestamp": 100.0}],
+    )
+    stale.active_stream_id = "dead-stream"
+    stale.pending_user_message = "recover me"
+    stale.pending_started_at = 102.0
+    stale.save()
+    _insert(working)
+    _insert(stale)
+    order_before = list(SESSIONS.keys())
+    size_before = len(SESSIONS)
+
+    recovered = [
+        {"role": "user", "content": "old prompt", "timestamp": 100.0},
+        {"role": "user", "content": "recover me", "timestamp": 102.0},
+        {"role": "assistant", "content": "state-db-only needle", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid, profile=None: {"message_count": len(recovered), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid, **kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        routes,
+        "all_sessions",
+        lambda: [{"session_id": stale.session_id, "title": stale.title, "profile": "default"}],
+    )
+    monkeypatch.setattr(routes, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status,
+        ),
+    )
+
+    routes._handle_sessions_search(
+        SimpleNamespace(),
+        urlparse("/api/sessions/search?q=needle&content=1&depth=0"),
+    )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
+    assert captured["payload"]["sessions"][0]["session_id"] == stale.session_id
+    assert list(SESSIONS.keys()) == order_before, "scan recovery must not promote the LRU"
+    assert len(SESSIONS) == size_before, "scan recovery must not insert or evict cache entries"

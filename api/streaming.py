@@ -4279,6 +4279,76 @@ def _should_strip_reasoning_content(
     return False
 
 
+def _compact_image_parts_for_persistence(messages) -> int:
+    """Replace persisted image parts with text placeholders after a completed turn.
+
+    The active model receives native image parts while a tool call is running. Once
+    the turn has completed, retaining base64 data URLs in both the visible
+    transcript and ``context_messages`` makes every JSON sidecar save/load and
+    session API response scale with the image bytes. Hermes Agent's durable
+    session store applies the same text-only policy for completed multimodal
+    tool results. Keep text parts and the surrounding tool-call chain intact so
+    future turns retain the conversational record and can re-open the original
+    image from the preceding tool-call arguments when needed.
+
+    This intentionally mutates the owned session message rows in place. It is
+    called only after ``run_conversation()`` has returned, so it never removes
+    image parts that the current model invocation still needs.
+    """
+    changed = 0
+    for message in messages or ():
+        # Mirror Hermes Agent's durable-session policy: native *tool* results
+        # are transient input for the current model call. User attachments are
+        # a separate product contract and must remain intact here.
+        if not isinstance(message, dict) or message.get('role') != 'tool':
+            continue
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+
+        compacted_content = []
+        image_parts = 0
+        for part in content:
+            if not isinstance(part, dict):
+                # A provider can legally return scalar content alongside typed
+                # parts. Preserve it unchanged rather than flattening/reordering
+                # the structured result during durable-session compaction.
+                compacted_content.append(part)
+                continue
+            part_type = part.get('type')
+            # Guard the set-membership with an isinstance check: a JSON-valid
+            # part can carry an unhashable ``type`` (e.g. a list), and
+            # ``unhashable in {...}`` raises TypeError — which would turn an
+            # otherwise-complete streaming send into the error path before the
+            # session is saved. Only the three string image types are compacted;
+            # every other part (including non-string ``type`` values) is preserved.
+            if isinstance(part_type, str) and part_type in {'image', 'image_url', 'input_image'}:
+                compacted_content.append({'type': 'text', 'text': '[screenshot]'})
+                image_parts += 1
+            else:
+                compacted_content.append(part)
+
+        if image_parts:
+            message['content'] = compacted_content
+            changed += image_parts
+    return changed
+
+
+def _compact_session_image_parts_for_persistence(session) -> int:
+    """Compact completed native-vision tool results in both durable histories."""
+    changed = (
+        _compact_image_parts_for_persistence(getattr(session, 'context_messages', None))
+        + _compact_image_parts_for_persistence(getattr(session, 'messages', None))
+    )
+    if changed:
+        logger.info(
+            "Compacted %d completed image message part(s) for session %s",
+            changed,
+            getattr(session, 'session_id', None),
+        )
+    return changed
+
+
 def _sanitize_messages_for_api(
     messages,
     *,
@@ -6517,6 +6587,15 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
             _live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', live_tool_calls)
             if _live_tools is not live_tool_calls:
                 _snap_tool_calls = list(_live_tools.get(stream_id, []) or [])
+
+    # Seal projected live tool rows so the durable scene cannot disagree with
+    # the settled terminal state (#6309). Any tool call that was still running
+    # at error time is marked as completed with the terminal-error metadata.
+    if _snap_tool_calls:
+        for _tc in _snap_tool_calls:
+            if isinstance(_tc, dict) and not _tc.get('done'):
+                _tc['done'] = True
+                _tc['_sealed_by_terminal_error'] = True
 
     _partial_msg = _build_partial_message(_snap_partial_text, _snap_reasoning, _snap_tool_calls)
     if _partial_msg is None:
@@ -9106,6 +9185,7 @@ def _run_agent_streaming(
                         msg_text,
                         source=getattr(s, 'pending_user_source', None) or 'webui',
                     )
+                    _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -9457,8 +9537,8 @@ def _run_agent_streaming(
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
+                                _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
-                                # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
@@ -9526,6 +9606,14 @@ def _run_agent_streaming(
                                     + 'send a message, switch the model/provider, or fix the credentials.'
                                 )
                                 _error_payload['hint'] = _err_hint
+                        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
+                        _turn_duration_seconds = 0.0
+                        try:
+                            _pending_ts = getattr(s, 'pending_started_at', None)
+                            if _pending_ts:
+                                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
+                        except Exception:
+                            pass
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
@@ -9545,6 +9633,7 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
+                            '_turnDuration': round(_turn_duration_seconds, 3),
                         }
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
@@ -10670,6 +10759,7 @@ def _run_agent_streaming(
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
+                                _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
@@ -10751,6 +10841,14 @@ def _run_agent_streaming(
                             + 'send a message, switch the model/provider, or fix the credentials.'
                         )
                         _error_payload['hint'] = _exc_hint
+                # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
+                _turn_duration_seconds = 0.0
+                try:
+                    _pending_ts = getattr(s, 'pending_started_at', None)
+                    if _pending_ts:
+                        _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
+                except Exception:
+                    pass
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -10766,6 +10864,7 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
+                    '_turnDuration': round(_turn_duration_seconds, 3),
                 }
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(

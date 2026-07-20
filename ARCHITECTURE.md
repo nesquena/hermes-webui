@@ -50,7 +50,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
     ctl.sh                 Daemon lifecycle wrapper (start/stop/restart/status/logs) for homelab installs.
-    pyproject.toml         Tooling config (ruff lint gate). NOT a packaged distribution.
+    pyproject.toml         Standard build metadata plus the Ruff lint gate; source-checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh.
     Dockerfile             python:3.12-slim container image
     docker-compose.yml     Compose config with named volume and optional auth
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
