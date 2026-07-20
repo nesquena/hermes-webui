@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- **Content search no longer evicts your open sessions from the cache.** A content search scans many sessions, and each scan used to promote/cold-load sessions into the in-memory LRU — evicting the sessions you actually have open. Search now reads through a scan-only accessor that keeps the same disk-freshness, journal-recovery, and state.db reconciliation (so recent content stays searchable) but doesn't disturb the working-set cache. Thanks @ai-ag2026. (#6084, #6083)
+
 - **Watching the same terminal from two tabs no longer splits the output stream.** Terminal output is now broadcast to every subscribed viewer instead of draining from one shared queue, so a second tab (or a reconnect) sees the full stream rather than a random half. SSE responses carry event `id:`s and a reconnecting viewer replays only events after its `Last-Event-ID` cursor (fresh viewers still get the full bounded backlog). Thanks @ai-ag2026. (#5836)
 
 - **A turn that ends in an error no longer shows impossible "still running" tool work or a wrong duration.** On a terminal error, the settled (and reloaded) Worklog now freezes the turn's duration before cleanup and seals any still-projected tool rows as done, so a settled/reloaded transcript can't disagree with the terminal state. Successful and cancel paths are unchanged. Thanks @webtecnica. (#6323, #6309)
