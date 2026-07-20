@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from api.streaming import (
+    _compact_image_parts_for_persistence,
+    _compact_session_image_parts_for_persistence,
     _restore_reasoning_metadata,
     _sanitize_messages_for_api,
     _strip_oob_blocks,
@@ -22,6 +24,171 @@ OOB_BLOCK = (
 
 def _contains_oob(value) -> bool:
     return "OUT-OF-BAND USER MESSAGE" in json.dumps(value)
+
+
+
+def test_compact_image_parts_for_persistence_keeps_text_and_drops_base64():
+    image_data_url = "data:image/png;base64," + ("A" * 1_000_000)
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "vision-1"}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "vision-1",
+            "content": [
+                {"type": "text", "text": "Image loaded into your context."},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        },
+    ]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 1
+    assert messages[1]["content"] == [
+        {"type": "text", "text": "Image loaded into your context."},
+        {"type": "text", "text": "[screenshot]"},
+    ]
+    assert "data:image" not in json.dumps(messages)
+    assert messages[0]["tool_calls"] == [{"id": "vision-1"}]
+
+
+
+
+def test_compact_image_parts_for_persistence_counts_each_image_part():
+    messages = [
+        {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "Before and after"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "input_image", "image_url": {"url": "data:image/png;base64,BBBB"}},
+            ],
+        }
+    ]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 2
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "Before and after"},
+        {"type": "text", "text": "[screenshot]"},
+        {"type": "text", "text": "[screenshot]"},
+    ]
+
+
+def test_compact_image_parts_for_persistence_preserves_interleaved_non_image_parts():
+    document = {"type": "document", "document": {"name": "report.pdf", "id": "doc-1"}}
+    scalar = "provider extension payload"
+    messages = [
+        {
+            "role": "tool",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "text", "text": "between"},
+                document,
+                scalar,
+                {"type": "input_image", "image_url": {"url": "data:image/png;base64,BBBB"}},
+                {"type": "input_text", "content": "after"},
+            ],
+        }
+    ]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 2
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "[screenshot]"},
+        {"type": "text", "text": "between"},
+        document,
+        scalar,
+        {"type": "text", "text": "[screenshot]"},
+        {"type": "input_text", "content": "after"},
+    ]
+    assert "data:image" not in json.dumps(messages)
+    assert _compact_image_parts_for_persistence(messages) == 0
+
+
+def test_compact_image_parts_for_persistence_survives_unhashable_part_type():
+    # A JSON-valid part can carry a non-string (unhashable) ``type`` such as a
+    # list or dict. ``part.get("type") in {...}`` would raise TypeError on an
+    # unhashable value, turning an otherwise-complete streaming send into the
+    # error path before the session is saved. Such parts must be preserved
+    # unchanged, and real image parts alongside them must still compact.
+    list_type = {"type": ["provider-extension"], "data": "x"}
+    dict_type = {"type": {"nested": "kind"}, "data": "y"}
+    messages = [
+        {
+            "role": "tool",
+            "content": [
+                list_type,
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                dict_type,
+            ],
+        }
+    ]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 1
+    assert messages[0]["content"] == [
+        list_type,
+        {"type": "text", "text": "[screenshot]"},
+        dict_type,
+    ]
+    assert "data:image" not in json.dumps(messages)
+    # Idempotent: a second pass changes nothing and still does not raise.
+    assert _compact_image_parts_for_persistence(messages) == 0
+
+
+def test_compact_session_image_parts_for_persistence_compacts_both_histories():
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + ("A" * 4096)}}
+    session = SimpleNamespace(
+        session_id="vision-turn",
+        messages=[{"role": "tool", "content": [{"type": "text", "text": "display"}, image.copy()]}],
+        context_messages=[{"role": "tool", "content": [{"type": "text", "text": "context"}, image.copy()]}],
+    )
+
+    changed = _compact_session_image_parts_for_persistence(session)
+
+    assert changed == 2
+    assert session.messages[0]["content"] == [
+        {"type": "text", "text": "display"},
+        {"type": "text", "text": "[screenshot]"},
+    ]
+    assert session.context_messages[0]["content"] == [
+        {"type": "text", "text": "context"},
+        {"type": "text", "text": "[screenshot]"},
+    ]
+
+
+def test_compact_image_parts_for_persistence_keeps_user_image_attachment():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect this attachment"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        }
+    ]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 0
+    assert messages[0]["content"][1]["type"] == "image_url"
+
+
+def test_compact_image_parts_for_persistence_leaves_text_history_unchanged():
+    messages = [{"role": "tool", "content": "plain tool output"}]
+
+    changed = _compact_image_parts_for_persistence(messages)
+
+    assert changed == 0
+    assert messages == [{"role": "tool", "content": "plain tool output"}]
 
 
 def test_strip_oob_blocks_string():
