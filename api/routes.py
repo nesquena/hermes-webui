@@ -18321,7 +18321,7 @@ def _handle_tts(handler, parsed):
     if engine == "voicebox":
         # Read VoiceBox config from Hermes config.yaml
         endpoint = "http://localhost:17494"
-        profile_id = "fa296c25-e979-46e8-aff6-dc930cfad3d0"
+        profile_id = ""
         try:
             from api.config import get_config
             cfg = get_config() or {}
@@ -18341,6 +18341,11 @@ def _handle_tts(handler, parsed):
         except Exception:
             pass  # fall back to defaults
 
+        if not profile_id:
+            logger.error("VoiceBox TTS: no default_profile configured — set tts.voicebox.default_profile in config.yaml")
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS not configured: default_profile is required", 502)
+
         voicebox_engine = "luxtts"
 
         # Step 1: Submit generation request
@@ -18354,7 +18359,7 @@ def _handle_tts(handler, parsed):
             "Content-Type": "application/json",
         })
         try:
-            with _tts_open(gen_req, timeout=30) as resp:
+            with _tts_open(gen_req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
                 gen_data = json.loads(resp.read().decode())
         except Exception:
             logger.exception("VoiceBox TTS generation request failed")
@@ -18367,41 +18372,53 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "VoiceBox TTS generation failed: no id returned", 502)
 
-        # Step 2: Poll until completed
+        # Step 2: Poll until completed via SSE (single connection, line-by-line)
         status_url = f"{endpoint}/generate/{gen_id}/status"
         completed = False
-        for _ in range(120):
+        deadline = time.time() + 120
+        while time.time() < deadline:
             try:
-                with _tts_open(Request(status_url), timeout=10) as resp:
-                    for line in resp.read().decode().split("\n"):
-                        line = line.strip()
-                        if line.startswith("data: "):
-                            try:
-                                d = json.loads(line[6:])
-                                if d.get("status") == "completed":
-                                    completed = True
-                                    break
-                                if d.get("status") == "failed":
-                                    err_msg = d.get("error", "unknown error")
-                                    logger.error("VoiceBox TTS generation failed: %s", err_msg)
-                                    from api.helpers import bad as _bad
-                                    return _bad(handler, f"VoiceBox TTS failed: {err_msg}", 502)
-                            except json.JSONDecodeError:
-                                continue
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                with _tts_open(
+                    Request(status_url),
+                    timeout=min(30, remaining),
+                    opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler()),
+                ) as resp:
+                    while time.time() < deadline:
+                        raw = resp.readline()
+                        if not raw:
+                            break  # stream ended, reconnect
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            d = json.loads(line[6:])
+                            if d.get("status") == "completed":
+                                completed = True
+                                break
+                            if d.get("status") == "failed":
+                                err_msg = d.get("error", "unknown error")
+                                logger.error("VoiceBox TTS generation failed: %s", err_msg)
+                                from api.helpers import bad as _bad
+                                return _bad(handler, f"VoiceBox TTS failed: {err_msg}", 502)
+                        except json.JSONDecodeError:
+                            continue
                 if completed:
                     break
             except Exception:
                 logger.debug("VoiceBox TTS poll error", exc_info=True)
-            import time
             time.sleep(1)
-        else:
+
+        if not completed:
             from api.helpers import bad as _bad
             return _bad(handler, "VoiceBox TTS generation timed out", 502)
 
         # Step 3: Download audio
         audio_url = f"{endpoint}/audio/{gen_id}"
         try:
-            with _tts_open(Request(audio_url), timeout=30) as resp:
+            with _tts_open(Request(audio_url), timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
                 audio_data = _buffer_tts_audio_response(resp)
         except Exception:
             logger.exception("VoiceBox TTS audio download failed")
