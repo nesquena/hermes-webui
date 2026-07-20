@@ -2823,7 +2823,9 @@ from api.config import (
     set_reasoning_display,
     set_reasoning_effort,
     create_stream_channel,
+    get_config,
     get_webui_session_save_mode,
+    get_config_snapshot,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
@@ -21180,6 +21182,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    gateway_chat_enabled: bool | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21220,6 +21223,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                external_runtime_owned=gateway_chat_enabled,
             )
 
         def _legacy_adapter_factory():
@@ -21260,7 +21264,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
-        external_runtime_owned=webui_gateway_chat_enabled(get_config()),
+        external_runtime_owned=gateway_chat_enabled,
     )
 
 
@@ -21986,7 +21990,7 @@ def _handle_chat_start(handler, body, diag=None):
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
-        config_snapshot = get_config()
+        config_snapshot = get_config_snapshot()
         gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
         if body.get("moa_config"):
             if gateway_chat_enabled:
@@ -22038,12 +22042,14 @@ def _handle_chat_start(handler, body, diag=None):
             from api.config import get_effective_default_model
 
             model_config = config_snapshot.get("model") if isinstance(config_snapshot, dict) else None
+            configured_default, configured_default_provider, configured_default_is_moa = (
+                _moa_fast_path_model_state(get_effective_default_model(config_snapshot))
+            )
             configured_provider = _clean_session_model_provider(
                 model_config.get("provider") if isinstance(model_config, dict) else None
             )
-            configured_default, _configured_default_provider, _configured_default_normalized = (
-                _moa_fast_path_model_state(get_effective_default_model(config_snapshot))
-            )
+            if configured_provider is None and configured_default_is_moa:
+                configured_provider = configured_default_provider
             if (
                 configured_provider != "moa"
                 or model != configured_default
@@ -22071,6 +22077,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "gateway_chat_enabled": gateway_chat_enabled,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -25678,9 +25685,6 @@ def _handle_session_import(handler, body):
     publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 
-
-# ── MCP Server helpers ──
-from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
 
 def _mask_secrets(obj):
     """Mask sensitive values in env vars and headers."""
