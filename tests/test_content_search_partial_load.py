@@ -524,7 +524,6 @@ def test_broad_exception_fallback_preserves_cache_authority(tmp_path, monkeypatc
     # Inserting from within the scanner thread (rather than racing with a second
     # thread) makes the test deterministic without coupling to internal scanner
     # timing — the cache is guaranteed to be present when the exception fires.
-    original_scan = Session._scan_to_messages_array
     cache_inserted_by_scan = []
 
     def _forcing_scan(*args, **kwargs):
