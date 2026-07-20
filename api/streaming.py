@@ -172,6 +172,47 @@ class _GeminiRequestBoundaryMessage(dict):
         return copied
 
 
+def _strip_materialized_gemini_request_boundary_marker(message):
+    if not isinstance(message, dict):
+        return message
+    cleaned = dict(message)
+    cleaned.pop(_GEMINI_REQUEST_BOUNDARY_MARKER, None)
+    return cleaned
+
+
+def _normalize_canonical_gemini_request_boundary_message(message):
+    if not isinstance(message, dict):
+        return message
+    if type(message) is dict and _GEMINI_REQUEST_BOUNDARY_MARKER not in message:
+        return message
+    return _strip_materialized_gemini_request_boundary_marker(message)
+
+
+def _clear_materialized_gemini_request_boundary_markers(messages):
+    if not isinstance(messages, list):
+        return
+    for idx, message in enumerate(messages):
+        normalized = _normalize_canonical_gemini_request_boundary_message(message)
+        if normalized is not message:
+            messages[idx] = normalized
+
+
+def _sanitize_materialized_gemini_request_boundary_history(messages):
+    _clear_materialized_gemini_request_boundary_markers(messages)
+    return messages
+
+
+def _replace_message_with_boundary_marker(messages, idx):
+    if not isinstance(messages, list) or not (0 <= idx < len(messages)):
+        return
+    message = messages[idx]
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return
+    messages[idx] = _GeminiRequestBoundaryMessage(
+        _strip_materialized_gemini_request_boundary_marker(message)
+    )
+
+
 def _stream_writeback_diag_threshold_seconds(environ=None):
     if environ is None:
         environ = os.environ
@@ -471,10 +512,9 @@ def _install_gemini_request_boundary_wrapper() -> None:
                     ctx = original_build_turn_context(*args, **kwargs)
                     idx = getattr(ctx, "current_turn_user_idx", -1)
                     messages = getattr(ctx, "messages", None)
-                    if isinstance(messages, list) and 0 <= idx < len(messages):
-                        message = messages[idx]
-                        if isinstance(message, dict) and message.get('role') == 'user':
-                            messages[idx] = _GeminiRequestBoundaryMessage(message)
+                    if isinstance(messages, list):
+                        _clear_materialized_gemini_request_boundary_markers(messages)
+                        _replace_message_with_boundary_marker(messages, idx)
                     return ctx
 
                 _wrapped_build_turn_context.__dict__["_webui_gemini_request_boundary_wrapper"] = True
@@ -487,10 +527,9 @@ def _install_gemini_request_boundary_wrapper() -> None:
 
                 def _wrapped_reanchor(messages, user_message):
                     idx = original_reanchor(messages, user_message)
-                    if 0 <= idx < len(messages):
-                        message = messages[idx]
-                        if isinstance(message, dict) and message.get('role') == 'user':
-                            messages[idx] = _GeminiRequestBoundaryMessage(message)
+                    if isinstance(messages, list):
+                        _clear_materialized_gemini_request_boundary_markers(messages)
+                        _replace_message_with_boundary_marker(messages, idx)
                     return idx
 
                 _wrapped_reanchor.__dict__["_webui_gemini_request_boundary_wrapper"] = True
@@ -9450,6 +9489,9 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "merge_result"):
                     _tool_limit_reached = _agent_result_tool_limit_reached(result)
                     _result_messages = result.get('messages') or _previous_context_messages
+                    _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        _result_messages
+                    )
                     _result_messages = _drop_synthetic_max_iteration_summary_requests(
                         _result_messages,
                         enabled=_tool_limit_reached,
@@ -9507,7 +9549,12 @@ def _run_agent_streaming(
                         _next_context_messages,
                         msg_text,
                     )
-                    s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                    _next_context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        _next_context_messages
+                    )
+                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        _deduplicate_context_messages(_next_context_messages)
+                    )
                     s.messages = _merge_display_messages_after_agent_result(
                         _previous_messages,
                         _previous_context_messages,
@@ -9515,6 +9562,7 @@ def _run_agent_streaming(
                         msg_text,
                         source=getattr(s, 'pending_user_source', None) or 'webui',
                     )
+                    s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
@@ -9833,6 +9881,9 @@ def _run_agent_streaming(
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
                                 _result_messages = result.get('messages') or _previous_context_messages
+                                _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _result_messages
+                                )
                                 _result_messages = _drop_synthetic_max_iteration_summary_requests(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
@@ -9852,7 +9903,12 @@ def _run_agent_streaming(
                                     _next_context_messages,
                                     msg_text,
                                 )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                                _next_context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _next_context_messages
+                                )
+                                s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _deduplicate_context_messages(_next_context_messages)
+                                )
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -9860,6 +9916,7 @@ def _run_agent_streaming(
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
+                                s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
                                 # normal post-result persistence path by
@@ -10002,6 +10059,9 @@ def _run_agent_streaming(
                     s.context_messages = _prune_context_tool_results_after_compression(
                         agent,
                         s.context_messages,
+                    )
+                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        s.context_messages
                     )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
@@ -11061,6 +11121,9 @@ def _run_agent_streaming(
                                     )
                                     return
                                 _result_messages = _heal_result.get('messages') or _previous_context_messages
+                                _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _result_messages
+                                )
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )
@@ -11075,7 +11138,12 @@ def _run_agent_streaming(
                                     _next_context_messages,
                                     msg_text,
                                 )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                                _next_context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _next_context_messages
+                                )
+                                s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _deduplicate_context_messages(_next_context_messages)
+                                )
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -11083,6 +11151,7 @@ def _run_agent_streaming(
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
+                                s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
                                 s.save()
