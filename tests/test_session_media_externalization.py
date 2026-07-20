@@ -3,9 +3,8 @@ import base64
 import hashlib
 import io
 import json
-import os
-import shutil
 import threading
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
@@ -17,10 +16,10 @@ from api.models import Session
 from api.streaming import _sanitize_messages_for_api
 
 
-def _large_png_data_url():
+def _large_png_data_url(fill=b"\0"):
     # This is intentionally synthetic: the signature is sufficient for the
     # storage boundary, and keeps the regression test free of user media.
-    raw = b"\x89PNG\r\n\x1a\n" + (b"\0" * (70 * 1024))
+    raw = b"\x89PNG\r\n\x1a\n" + (fill * (70 * 1024))
     return raw, "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
 
 
@@ -92,7 +91,7 @@ def _assert_destination_media_is_independent(destination, source_id, raw, data_u
     destination_files = list(session_media._session_media_dir(destination_id).iterdir())
     assert len(destination_files) == 1
     assert destination_files[0].read_bytes() == raw
-    shutil.rmtree(session_media._session_media_dir(source_id).parent)
+    session_media.remove_session_media(source_id)
     hydrated_messages = session_media.hydrate_session_media_urls(destination.messages, destination_id)
     hydrated_context = session_media.hydrate_session_media_urls(destination.context_messages, destination_id)
     assert hydrated_messages[0]["content"][1]["image_url"]["url"] == data_url
@@ -109,7 +108,7 @@ def test_externalize_and_hydrate_round_trip(tmp_path, monkeypatch):
     assert ref.startswith("webui-media://")
     assert data_url not in json.dumps(messages)
 
-    files = list((tmp_path / "attachments" / "media-test" / "session-media").iterdir())
+    files = list((tmp_path / "session-media" / "media-test").iterdir())
     assert len(files) == 1
     assert files[0].read_bytes() == raw
     hydrated = session_media.hydrate_session_media_urls(messages, "media-test")
@@ -136,7 +135,7 @@ def test_save_compacts_both_visible_and_model_context(tmp_path, monkeypatch):
     assert serialized.count("webui-media://") == 2
     # Deduplication keeps the one image once even when visible/context copies
     # both contained it before save.
-    files = list((tmp_path / "attachments" / "media-save" / "session-media").iterdir())
+    files = list((tmp_path / "session-media" / "media-save").iterdir())
     assert len(files) == 1
     assert files[0].read_bytes() == raw
 
@@ -167,14 +166,20 @@ def test_small_or_noncanonical_data_urls_stay_in_json(tmp_path, monkeypatch):
     assert messages[2]["content"][0]["image_url"]["url"].startswith("data:image/svg+xml")
 
 
-def test_uses_the_configured_attachment_root(tmp_path, monkeypatch):
+def test_private_store_ignores_attachment_root_moves(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     custom_root = tmp_path / "custom-inbox"
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(custom_root))
     _raw, data_url = _large_png_data_url()
     messages = [_image_message(data_url)]
 
     assert session_media.externalize_large_session_media(messages, "media-custom") == 1
-    assert list((custom_root / "media-custom" / "session-media").iterdir())
+    assert list((tmp_path / "session-media" / "media-custom").iterdir())
+    assert not custom_root.exists()
+
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(tmp_path / "moved-inbox"))
+    hydrated = session_media.hydrate_session_media_urls(messages, "media-custom")
+    assert hydrated[0]["content"][1]["image_url"]["url"] == data_url
 
 
 def test_stale_tmp_file_is_rewritten_before_returning_reference(tmp_path, monkeypatch):
@@ -185,13 +190,15 @@ def test_stale_tmp_file_is_rewritten_before_returning_reference(tmp_path, monkey
     media_dir.mkdir(parents=True)
     digest = hashlib.sha256(raw).hexdigest()
     filename = f"{digest}.png"
-    stale_tmp = media_dir / f".{filename}.{os.getpid()}.{threading.get_ident()}.tmp"
+    stale_tmp = media_dir / f".{filename}.stale.tmp"
     stale_tmp.write_bytes(b"interrupted prior write")
     messages = [_image_message(data_url)]
 
     assert session_media.externalize_large_session_media(messages, session_id) == 1
     assert (media_dir / filename).read_bytes() == raw
-    assert not stale_tmp.exists()
+    # Random exclusive temp names ensure an unrelated stale file cannot block
+    # or be mistaken for the in-flight write.
+    assert stale_tmp.read_bytes() == b"interrupted prior write"
 
 
 def test_clone_references_verifies_hash_before_writing_destination(tmp_path, monkeypatch):
@@ -354,3 +361,358 @@ def test_gateway_runs_api_hydrates_compact_history_without_mutation(tmp_path, mo
     assert data_url in outbound
     assert "webui-media://" not in outbound
     assert stored_history[0]["content"][1]["image_url"]["url"] == stored_ref
+
+
+def test_hydration_and_provider_sanitizer_fail_closed_on_digest_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    session_media.externalize_large_session_media(messages, "media-corrupt")
+    media_file = next(session_media._session_media_dir("media-corrupt").iterdir())
+    media_file.write_bytes(b"\x89PNG\r\n\x1a\n" + (b"x" * (70 * 1024)))
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="digest"):
+        session_media.hydrate_session_media_urls(messages, "media-corrupt")
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="digest"):
+        _sanitize_messages_for_api(messages, session_id="media-corrupt")
+
+
+def test_gateway_corrupt_media_never_reaches_urlopen(tmp_path, monkeypatch):
+    from api.gateway_chat import _run_gateway_runs_api_streaming
+
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    history = [_image_message(data_url)]
+    session_media.externalize_large_session_media(history, "gateway-corrupt")
+    next(session_media._session_media_dir("gateway-corrupt").iterdir()).write_bytes(
+        b"\x89PNG\r\n\x1a\ncorrupt"
+    )
+    called = False
+
+    def unexpected_urlopen(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("corrupt private media crossed the Gateway boundary")
+
+    monkeypatch.setattr("urllib.request.urlopen", unexpected_urlopen)
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="digest"):
+        _run_gateway_runs_api_streaming(
+            session_id="gateway-corrupt",
+            msg_text="continue",
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id="gateway-corrupt-stream",
+            base_url="http://gw:8642",
+            api_key="secret",
+            prefill_messages=[],
+            body_extras={},
+            put_gateway_event=lambda *_args, **_kwargs: None,
+            cancel_event=threading.Event(),
+            session=SimpleNamespace(context_messages=history),
+        )
+    assert not called
+
+
+def test_clone_preflights_all_references_before_destination_publication(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw_a, data_a = _large_png_data_url(b"a")
+    _raw_b, data_b = _large_png_data_url(b"b")
+    messages = [_image_message(data_a), _image_message(data_b)]
+    session_media.externalize_large_session_media(messages, "multi-source")
+    files = sorted(session_media._session_media_dir("multi-source").iterdir())
+    files[-1].write_bytes(b"\x89PNG\r\n\x1a\ncorrupt")
+
+    with pytest.raises(session_media.SessionMediaIntegrityError):
+        session_media.clone_session_media_references(
+            messages,
+            "multi-source",
+            "multi-destination",
+        )
+    assert not session_media._session_media_dir("multi-destination").exists()
+
+
+def test_clone_rolls_back_all_published_blobs_on_directory_fsync_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw_a, data_a = _large_png_data_url(b"a")
+    _raw_b, data_b = _large_png_data_url(b"b")
+    messages = [_image_message(data_a), _image_message(data_b)]
+    session_media.externalize_large_session_media(messages, "rollback-source")
+    destination_dir = session_media._session_media_dir("rollback-destination")
+    destination_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        session_media,
+        "_fsync_dir",
+        lambda _fd: (_ for _ in ()).throw(OSError("directory fsync failed")),
+    )
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        session_media.clone_session_media_references(
+            messages,
+            "rollback-source",
+            "rollback-destination",
+        )
+    assert list(destination_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["replace", "directory_fsync"])
+def test_externalize_rolls_back_publication_failures(failure, tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    media_dir = session_media._session_media_dir("publication-failure")
+    media_dir.mkdir(parents=True)
+
+    if failure == "replace":
+        monkeypatch.setattr(
+            session_media.os,
+            "replace",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            session_media,
+            "_fsync_dir",
+            lambda _fd: (_ for _ in ()).throw(OSError("directory fsync failed")),
+        )
+
+    with pytest.raises(OSError, match="failed"):
+        session_media.externalize_large_session_media(messages, "publication-failure")
+    assert messages[0]["content"][1]["image_url"]["url"] == data_url
+    assert list(media_dir.iterdir()) == []
+
+
+def test_private_store_rejects_symlink_component(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    private_root = tmp_path / "session-media"
+    outside = tmp_path / "outside"
+    private_root.mkdir()
+    outside.mkdir()
+    (private_root / "symlink-session").symlink_to(outside, target_is_directory=True)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+
+    with pytest.raises(OSError):
+        session_media.externalize_large_session_media(messages, "symlink-session")
+    assert messages[0]["content"][1]["image_url"]["url"] == data_url
+    assert list(outside.iterdir()) == []
+
+
+def test_parent_swap_is_detected_without_writing_outside(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    media_dir = session_media._session_media_dir("swap-session")
+    media_dir.mkdir(parents=True)
+    moved = media_dir.with_name("swap-session-held")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_replace = session_media.os.replace
+
+    def swap_then_replace(source, destination, **kwargs):
+        media_dir.rename(moved)
+        media_dir.symlink_to(outside, target_is_directory=True)
+        return real_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(session_media.os, "replace", swap_then_replace)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="directory changed"):
+        session_media.externalize_large_session_media(messages, "swap-session")
+    assert messages[0]["content"][1]["image_url"]["url"] == data_url
+    assert list(outside.iterdir()) == []
+    assert list(moved.iterdir()) == []
+
+
+def test_concurrent_writers_publish_one_verified_blob(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    raw, data_url = _large_png_data_url()
+    values = [[_image_message(data_url)] for _ in range(8)]
+    errors = []
+
+    def write(value):
+        try:
+            session_media.externalize_large_session_media(value, "concurrent-session")
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            errors.append(exc)
+
+    workers = [threading.Thread(target=write, args=(value,)) for value in values]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert errors == []
+    refs = {value[0]["content"][1]["image_url"]["url"] for value in values}
+    assert len(refs) == 1
+    files = list(session_media._session_media_dir("concurrent-session").iterdir())
+    assert len(files) == 1
+    assert files[0].read_bytes() == raw
+
+
+def test_remove_session_media_deletes_only_requested_namespace(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    first = [_image_message(data_url)]
+    second = [_image_message(data_url)]
+    session_media.externalize_large_session_media(first, "delete-first")
+    session_media.externalize_large_session_media(second, "keep-second")
+
+    session_media.remove_session_media("delete-first")
+
+    assert not session_media._session_media_dir("delete-first").exists()
+    assert session_media._session_media_dir("keep-second").exists()
+    assert session_media.hydrate_session_media_urls(second, "keep-second")
+
+
+def test_archive_named_session_media_cannot_precreate_private_namespace(tmp_path, monkeypatch):
+    from api.upload import extract_archive
+
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    attachment_session = tmp_path / "attachments" / "archive-session"
+    attachment_session.mkdir(parents=True)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("attacker.txt", "not private media")
+    extract_archive(archive.getvalue(), "session-media.zip", attachment_session)
+    assert (attachment_session / "session-media" / "attacker.txt").exists()
+
+    raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    session_media.externalize_large_session_media(messages, "archive-session")
+    private_files = list(session_media._session_media_dir("archive-session").iterdir())
+    assert len(private_files) == 1
+    assert private_files[0].read_bytes() == raw
+
+
+def test_legacy_attachment_media_is_verified_and_migrated(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    raw, _data_url = _large_png_data_url()
+    filename = f"{hashlib.sha256(raw).hexdigest()}.png"
+    legacy = tmp_path / "attachments" / "legacy-session" / "session-media"
+    legacy.mkdir(parents=True)
+    (legacy / filename).write_bytes(raw)
+    messages = [_image_message(f"webui-media://{filename}")]
+
+    hydrated = session_media.hydrate_session_media_urls(messages, "legacy-session")
+    assert hydrated[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert (tmp_path / "session-media" / "legacy-session" / filename).read_bytes() == raw
+
+
+def test_btw_clones_media_before_new_session_is_published(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    raw, data_url = _large_png_data_url()
+    source = Session(
+        session_id="btw-source",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    source.save(skip_index=True)
+    models.SESSIONS[source.session_id] = source
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args: None)
+    monkeypatch.setattr("api.background.track_btw", lambda *_args: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(routes.threading, "Thread", NoopThread)
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_btw(
+        _FakeHandler("/api/btw"),
+        {"session_id": source.session_id, "question": "What is in the image?"},
+    )
+
+    assert "bad" not in captured
+    destination_id = captured["ok"]["session_id"]
+    destination = Session.load(destination_id)
+    session_media.remove_session_media(source.session_id)
+    hydrated = session_media.hydrate_session_media_urls(
+        destination.context_messages,
+        destination_id,
+    )
+    assert hydrated[0]["content"][1]["image_url"]["url"] == data_url
+    assert next(session_media._session_media_dir(destination_id).iterdir()).read_bytes() == raw
+
+
+def test_export_import_inlines_verified_media_and_establishes_new_ownership(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    raw, data_url = _large_png_data_url()
+    source = Session(
+        session_id="export-source",
+        workspace=str(tmp_path),
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    source.save(skip_index=True)
+    models.SESSIONS[source.session_id] = source
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(routes, "_profiles_match", lambda *_args: True)
+    export_handler = _FakeHandler("/api/session/export")
+
+    routes._handle_session_export(
+        export_handler,
+        urlparse(f"/api/session/export?session_id={source.session_id}"),
+    )
+    exported = json.loads(export_handler.wfile.getvalue())
+    assert data_url in json.dumps(exported)
+    assert "webui-media://" not in json.dumps(exported)
+
+    session_media.remove_session_media(source.session_id)
+    captured = _capture_route(monkeypatch)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: path)
+    routes._handle_session_import(_FakeHandler("/api/session/import"), exported)
+    assert "bad" not in captured
+    imported_id = captured["ok"]["session"]["session_id"]
+    imported = Session.load(imported_id)
+    hydrated = session_media.hydrate_session_media_urls(imported.context_messages, imported_id)
+    assert hydrated[0]["content"][1]["image_url"]["url"] == data_url
+    assert next(session_media._session_media_dir(imported_id).iterdir()).read_bytes() == raw
+
+
+def test_import_rejects_private_references_without_publishing_session(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    session_media.externalize_large_session_media(messages, "foreign-source")
+    before = set(models.SESSIONS)
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_session_import(
+        _FakeHandler("/api/session/import"),
+        {"messages": messages, "workspace": str(tmp_path)},
+    )
+    assert captured["bad"][1] == 400
+    assert set(models.SESSIONS) == before
+
+
+def test_manual_compression_stops_before_provider_on_corrupt_media(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)] + [
+        {"role": "assistant", "content": "one"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "three"},
+    ]
+    session = Session(session_id="compress-corrupt", messages=messages)
+    session.save(skip_index=True)
+    next(session_media._session_media_dir(session.session_id).iterdir()).write_bytes(
+        b"\x89PNG\r\n\x1a\ncorrupt"
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_session_compress(
+        _FakeHandler("/api/session/compress"),
+        {"session_id": session.session_id},
+    )
+    assert captured["bad"][1] == 400
+    assert "digest verification" in captured["bad"][0]

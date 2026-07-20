@@ -4273,12 +4273,13 @@ def _sanitize_messages_for_api(
     causing 400s on every later text-only turn (#2297).
     """
     if session_id:
-        try:
-            from api.session_media import hydrate_session_media_urls
+        from api.session_media import hydrate_session_media_urls
 
-            messages = hydrate_session_media_urls(messages, session_id)
-        except Exception:
-            logger.warning("Could not hydrate session media for %s", session_id, exc_info=True)
+        # Private references are a local storage contract, never a provider
+        # fallback.  Missing, corrupt, or unsafe media must stop the request
+        # here with an actionable local error instead of crossing the model
+        # boundary as ``webui-media://...``.
+        messages = hydrate_session_media_urls(messages, session_id)
     strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
@@ -4406,7 +4407,17 @@ def _sanitize_messages_for_api(
             # Keep but strip the temporary marker
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
         final.append(msg)
+    from api.session_media import assert_no_session_media_references
+
+    assert_no_session_media_references(final, context="provider conversation history")
     return final
+
+
+def _assert_model_request_has_no_private_media(payload) -> None:
+    """Final recursive guard immediately before an Agent model call."""
+    from api.session_media import assert_no_session_media_references
+
+    assert_no_session_media_references(payload, context="Agent model request")
 
 
 def _api_safe_message_positions(messages):
@@ -8907,6 +8918,7 @@ def _run_agent_streaming(
                     cfg=_cfg,
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            _assert_model_request_has_no_private_media(_run_conversation_kwargs)
             result = agent.run_conversation(**_run_conversation_kwargs)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
@@ -9366,6 +9378,7 @@ def _run_agent_streaming(
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
+                                _assert_model_request_has_no_private_media(_heal_kwargs)
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
@@ -10587,6 +10600,7 @@ def _run_agent_streaming(
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
+                        _assert_model_request_has_no_private_media(_heal_kwargs2)
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         # Retry succeeded — persist the result normally
                         if s is not None:

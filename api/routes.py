@@ -14817,6 +14817,12 @@ def handle_post(handler, parsed) -> bool:
             shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
         except Exception:
             logger.debug("Failed to clean attachment dir for deleted session %s", sid)
+        try:
+            from api.session_media import remove_session_media
+
+            remove_session_media(sid)
+        except Exception:
+            logger.debug("Failed to clean private media for deleted session %s", sid)
         # Remove the turn-journal shards and the run-journal directory so a
         # deleted conversation is not recoverable from disk. The session JSON +
         # state.db rows are cleared above, but these journals retain the user's
@@ -16663,6 +16669,20 @@ def _handle_session_export(handler, parsed):
     if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
+    try:
+        from api.session_media import (
+            assert_no_session_media_references,
+            hydrate_session_media_urls,
+        )
+
+        # Exports are portable documents, not handles into this installation's
+        # private store.  Inline verified media before serializing so importing
+        # the file under a new id can establish fresh ownership.
+        safe = hydrate_session_media_urls(safe, sid)
+        assert_no_session_media_references(safe, context="session export")
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not create a portable export for session %s", sid, exc_info=True)
+        return bad(handler, str(exc), 409)
     qs = parse_qs(parsed.query)
     fmt = qs.get("format", ["json"])[0].lower()
     if fmt == "html":
@@ -20623,19 +20643,54 @@ def _handle_btw(handler, body):
             if current_stream_id in STREAMS:
                 return j(handler, {"error": "session already has an active stream"}, status=409)
         s.active_stream_id = None
-    # Create ephemeral hidden session inheriting context
-    from api.models import new_session as _new_session
+    # Create the ephemeral session privately.  Do not use new_session() here:
+    # that publishes the new id in SESSIONS before copied media ownership has
+    # been established.
     model_provider = getattr(s, 'model_provider', None)
-    ephemeral = _new_session(
+    ephemeral = Session(
         workspace=s.workspace,
         model=s.model,
         model_provider=model_provider,
         profile=getattr(s, 'profile', None),
     )
-    # Copy conversation history for context (agent reads from messages)
-    ephemeral.messages = list(s.messages or [])
+    # Copy both display and authoritative model history.  Clone every compact
+    # media reference transactionally before the first save/cache publication.
+    ephemeral.messages = copy.deepcopy(s.messages or [])
+    ephemeral.context_messages = copy.deepcopy(
+        getattr(s, "context_messages", None) or []
+    )
     ephemeral.title = f"btw: {question[:60]}"
-    ephemeral.save()
+    try:
+        from api.session_media import clone_session_media_references
+
+        clone_session_media_references(
+            [ephemeral.messages, ephemeral.context_messages],
+            s.session_id,
+            ephemeral.session_id,
+        )
+    except (OSError, ValueError):
+        logger.warning(
+            "Could not clone session media from %s to btw session %s",
+            s.session_id,
+            ephemeral.session_id,
+            exc_info=True,
+        )
+        return bad(handler, "Could not copy session media", 500)
+    try:
+        ephemeral.save()
+    except Exception:
+        try:
+            from api.session_media import remove_session_media
+
+            remove_session_media(ephemeral.session_id)
+        except Exception:
+            logger.debug("Failed to roll back btw session media", exc_info=True)
+        logger.warning("Could not persist btw session %s", ephemeral.session_id, exc_info=True)
+        return bad(handler, "Could not create side-question session", 500)
+    with LOCK:
+        SESSIONS[ephemeral.session_id] = ephemeral
+        SESSIONS.move_to_end(ephemeral.session_id)
+        _evict_sessions_over_cap()
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
     ephemeral.save()
@@ -22309,10 +22364,10 @@ def _handle_chat_sync(handler, body):
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
 
-            result = agent.run_conversation(
-                user_message=workspace_ctx + msg,
-                system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(
+            _run_kwargs = {
+                "user_message": workspace_ctx + msg,
+                "system_message": workspace_system_msg,
+                "conversation_history": _sanitize_messages_for_api(
                     _previous_context_messages,
                     cfg=get_config(),
                     session_id=s.session_id,
@@ -22320,9 +22375,13 @@ def _handle_chat_sync(handler, body):
                     effective_provider=_provider,
                     effective_base_url=_base_url,
                 ),
-                task_id=s.session_id,
-                persist_user_message=msg,
-            )
+                "task_id": s.session_id,
+                "persist_user_message": msg,
+            }
+            from api.streaming import _assert_model_request_has_no_private_media
+
+            _assert_model_request_has_no_private_media(_run_kwargs)
+            result = agent.run_conversation(**_run_kwargs)
     finally:
         with _ENV_LOCK:
             if old_cwd is None:
@@ -25674,6 +25733,19 @@ def _handle_session_import(handler, body):
     messages = body.get("messages")
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
+    try:
+        from api.session_media import assert_no_session_media_references
+
+        # A private URI is meaningful only inside the source installation and
+        # session id.  Portable exports contain verified inline data URLs;
+        # reject hand-authored/legacy JSON that tries to retain private handles.
+        assert_no_session_media_references(body, context="session import")
+    except ValueError:
+        return bad(
+            handler,
+            "JSON import contains a private session media reference; export the source session again to create a portable file",
+            400,
+        )
     title = body.get("title", "Imported session")
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
@@ -25684,16 +25756,23 @@ def _handle_session_import(handler, body):
         title=title,
         workspace=workspace,
         model=model,
-        messages=messages,
-        tool_calls=body.get("tool_calls", []),
+        messages=copy.deepcopy(messages),
+        context_messages=copy.deepcopy(
+            body.get("context_messages")
+            if isinstance(body.get("context_messages"), list)
+            else []
+        ),
+        tool_calls=copy.deepcopy(body.get("tool_calls", [])),
         profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
+    # Save first: Session.save externalizes portable inline media under the new
+    # id.  Only then may the imported session become observable from the cache.
+    s.save()
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-    s.save()
     publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 

@@ -389,13 +389,17 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     fake_queue = queue.Queue()
     streaming.STREAMS["stream_auth_retry"] = fake_queue
     config.STREAM_PARTIAL_TEXT["stream_auth_retry"] = ""
+    private_media_guard = mock.Mock(
+        wraps=streaming._assert_model_request_has_no_private_media
+    )
 
     with mock.patch.object(streaming, "get_session", return_value=session), \
          mock.patch.object(streaming, "_get_ai_agent", return_value=agent_cls), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
-         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt), \
+         mock.patch.object(streaming, "_assert_model_request_has_no_private_media", private_media_guard):
         streaming._run_agent_streaming(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
@@ -403,6 +407,10 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
             workspace=str(tmp_path),
             stream_id="stream_auth_retry",
         )
+
+    # The final recursive private-media assertion guards both the initial
+    # provider request and the credential self-heal retry request.
+    assert private_media_guard.call_count == 2
 
     saved = Session.load("auth_retry")
     assert saved is not None
