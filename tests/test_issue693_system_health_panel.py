@@ -43,6 +43,11 @@ class _FakeHandler:
         return json.loads(bytes(self.body).decode("utf-8"))
 
 
+def _snapshot_when_locked(lock, snapshot):
+    assert lock.locked()
+    return snapshot
+
+
 def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
     from api import system_health
 
@@ -124,6 +129,7 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
 
 def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
     from api import system_health
+    models_cache_lock = threading.Lock()
 
     class _FakeChannel:
         def __init__(self, subscribers, buffered, dropped):
@@ -165,8 +171,8 @@ def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
             "session_list_cache_inflight": {("default",): object()},
             "session_list_cache_lock": threading.Lock(),
             "session_list_cache_cap": 64,
-            "models_cache_lock": threading.Lock(),
-            "models_cache_snapshot": lambda: ({
+            "models_cache_lock": models_cache_lock,
+            "models_cache_snapshot": lambda: _snapshot_when_locked(models_cache_lock, ({
                 "active_provider": "openai",
                 "default_model": "gpt-5.5",
                 "configured_model_badges": {},
@@ -181,7 +187,7 @@ def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
                         "models": [{"id": "claude"}],
                     },
                 ],
-            }, 90.0),
+            }, 90.0)),
             "is_valid_models_cache": lambda snapshot: isinstance(snapshot, dict) and isinstance(snapshot.get("groups"), list),
         },
         raising=False,
@@ -210,6 +216,7 @@ def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
 
 def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
     from api import system_health
+    models_cache_lock = threading.Lock()
 
     monkeypatch.setattr(
         system_health,
@@ -225,8 +232,8 @@ def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
             "session_list_cache_inflight": {},
             "session_list_cache_lock": threading.Lock(),
             "session_list_cache_cap": 64,
-            "models_cache_lock": threading.Lock(),
-            "models_cache_snapshot": lambda: (None, 0.0),
+            "models_cache_lock": models_cache_lock,
+            "models_cache_snapshot": lambda: _snapshot_when_locked(models_cache_lock, (None, 0.0)),
             "is_valid_models_cache": lambda snapshot: False,
         },
         raising=False,
@@ -255,25 +262,31 @@ def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
 
 def test_system_health_runtime_models_cache_invalid_and_untimestamped_states(monkeypatch):
     from api import system_health
+    models_cache_lock = threading.Lock()
 
     base_sources = {
         "sessions": {}, "sessions_lock": threading.Lock(), "get_sessions_cache_max": lambda: 1,
         "streams": {}, "streams_lock": threading.Lock(), "stream_buffer_cap": 8,
         "session_list_cache": {}, "session_list_cache_inflight": {},
         "session_list_cache_lock": threading.Lock(), "session_list_cache_cap": 2,
-        "models_cache_lock": threading.Lock(),
+        "models_cache_lock": models_cache_lock,
         "is_valid_models_cache": lambda value: isinstance(value, dict) and value.get("valid") is True,
     }
 
     monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: {
-        **base_sources, "models_cache_snapshot": lambda: ({"groups": [{"models": [{"id": "secret"}]}]}, 10.0),
+        **base_sources,
+        "models_cache_snapshot": lambda: _snapshot_when_locked(
+            models_cache_lock, ({"groups": [{"models": [{"id": "secret"}]}]}, 10.0)
+        ),
     })
     invalid = system_health._webui_runtime_payload()["models_cache"]
     assert invalid == {"loaded": False, "provider_groups": 0, "total_models": 0, "age_seconds": None}
 
     monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: {
         **base_sources,
-        "models_cache_snapshot": lambda: ({"valid": True, "groups": []}, 0.0),
+        "models_cache_snapshot": lambda: _snapshot_when_locked(
+            models_cache_lock, ({"valid": True, "groups": []}, 0.0)
+        ),
     })
     untimestamped = system_health._webui_runtime_payload()["models_cache"]
     assert untimestamped == {"loaded": True, "provider_groups": 0, "total_models": 0, "age_seconds": None}
