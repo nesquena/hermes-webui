@@ -1,6 +1,8 @@
 """
 Hermes Web UI -- HTTP helper functions.
 """
+import base64 as _base64
+import binascii as _binascii
 import functools
 import json as _json
 import logging
@@ -341,6 +343,13 @@ def _build_redact_fn():
         r"""(Authorization:\s*(?:Bearer|Bot)\s+)([^\s'",\]\)]+)""",
         _re.IGNORECASE,
     )
+    # A rejected image data URI can place a syntactically valid AWS key at an
+    # arbitrary base64 alignment, immediately after another base64 character.
+    # The general credential regex uses token boundaries to avoid rewriting
+    # prose identifiers; this defense-in-depth pass ensures the fail-closed
+    # image path still removes the maintainer's embedded-suffix attack even
+    # when hermes-agent is unavailable and the local fallback owns redaction.
+    _EMBEDDED_AWS_ACCESS_KEY_RE = _re.compile(r"AKIA[A-Z0-9]{16}")
     _ENV_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
         r"\s*=\s*(['\"]?)(\S+)\2"
@@ -408,6 +417,7 @@ def _build_redact_fn():
         if not isinstance(text, str) or not text:
             return text
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
+        text = _EMBEDDED_AWS_ACCESS_KEY_RE.sub(lambda m: _mask(m.group(0)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
@@ -576,6 +586,360 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
     return _redact_fn_cached(text)
 
 
+_RASTER_IMAGE_DATA_URI_PREFIXES = (
+    ("data:image/png;base64,", "png"),
+    ("data:image/jpeg;base64,", "jpeg"),
+    ("data:image/jpg;base64,", "jpeg"),
+    ("data:image/gif;base64,", "gif"),
+    ("data:image/webp;base64,", "webp"),
+    ("data:image/bmp;base64,", "bmp"),
+)
+
+
+def _is_native_raster_data_uri(text: str) -> bool:
+    """Return whether *text* is one complete, canonical raster data URI.
+
+    Native image content is opaque binary, not text that the credential regexes
+    can safely rewrite. The exemption is a credential-boundary decision, so a
+    matching header or magic prefix is not enough: decode the entire canonical
+    base64 payload and require the image format to terminate exactly at the end
+    of the decoded bytes. Any malformed, ambiguous, or trailing content falls
+    through to normal text redaction.
+    """
+    if not isinstance(text, str):
+        return False
+    image_kind = None
+    payload_start = 0
+    for prefix, candidate_kind in _RASTER_IMAGE_DATA_URI_PREFIXES:
+        # URI schemes and MIME type tokens are case-insensitive. Only normalize
+        # this short header slice — never the multi-megabyte base64 payload.
+        if text[:len(prefix)].lower() == prefix:
+            image_kind = candidate_kind
+            payload_start = len(prefix)
+            break
+    if image_kind is None:
+        return False
+
+    payload = text[payload_start:]
+    if not payload:
+        return False
+    try:
+        raw = _base64.b64decode(payload, validate=True)
+    except (_binascii.Error, ValueError):
+        return False
+    # validate=True rejects foreign characters and misplaced padding; this
+    # round-trip also rejects non-canonical pad bits and missing/extra padding.
+    if _base64.b64encode(raw).decode("ascii") != payload:
+        return False
+
+    if image_kind == "png":
+        return _is_complete_png(raw)
+    if image_kind == "jpeg":
+        return _is_complete_jpeg(raw)
+    if image_kind == "gif":
+        return _is_complete_gif(raw)
+    if image_kind == "webp":
+        return _is_complete_webp(raw)
+    if image_kind == "bmp":
+        return _is_complete_bmp(raw)
+    return False
+
+
+def _is_complete_png(raw: bytes) -> bool:
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    pos = 8
+    chunk_index = 0
+    saw_idat = False
+    while pos < len(raw):
+        if pos + 12 > len(raw):
+            return False
+        length = int.from_bytes(raw[pos:pos + 4], "big")
+        chunk_type = raw[pos + 4:pos + 8]
+        data_start = pos + 8
+        data_end = data_start + length
+        chunk_end = data_end + 4
+        if chunk_end > len(raw):
+            return False
+        if not all((65 <= value <= 90) or (97 <= value <= 122) for value in chunk_type):
+            return False
+        if not 65 <= chunk_type[2] <= 90:  # PNG reserved bit must be zero.
+            return False
+        expected_crc = int.from_bytes(raw[data_end:chunk_end], "big")
+        actual_crc = _binascii.crc32(chunk_type + raw[data_start:data_end]) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            return False
+
+        if chunk_index == 0:
+            if chunk_type != b"IHDR" or length != 13:
+                return False
+            width = int.from_bytes(raw[data_start:data_start + 4], "big")
+            height = int.from_bytes(raw[data_start + 4:data_start + 8], "big")
+            bit_depth = raw[data_start + 8]
+            color_type = raw[data_start + 9]
+            valid_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                not width
+                or not height
+                or bit_depth not in valid_depths.get(color_type, set())
+                or raw[data_start + 10] != 0
+                or raw[data_start + 11] != 0
+                or raw[data_start + 12] not in {0, 1}
+            ):
+                return False
+        elif chunk_type == b"IHDR":
+            return False
+
+        if chunk_type == b"IDAT":
+            saw_idat = True
+        if chunk_type == b"IEND":
+            return length == 0 and saw_idat and chunk_end == len(raw)
+        pos = chunk_end
+        chunk_index += 1
+    return False
+
+
+_JPEG_SOF_MARKERS = {
+    0xC0, 0xC1, 0xC2, 0xC3,
+    0xC5, 0xC6, 0xC7,
+    0xC9, 0xCA, 0xCB,
+    0xCD, 0xCE, 0xCF,
+}
+
+
+def _is_complete_jpeg(raw: bytes) -> bool:
+    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
+        return False
+    pos = 2
+    saw_sof = False
+    saw_scan = False
+    while pos < len(raw):
+        marker_start = pos
+        if raw[pos] != 0xFF:
+            return False
+        while pos < len(raw) and raw[pos] == 0xFF:
+            pos += 1
+        if pos >= len(raw):
+            return False
+        marker = raw[pos]
+        pos += 1
+        if marker == 0xD9:
+            return saw_sof and saw_scan and pos == len(raw)
+        if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
+            return False
+        if pos + 2 > len(raw):
+            return False
+        segment_length = int.from_bytes(raw[pos:pos + 2], "big")
+        if segment_length < 2:
+            return False
+        segment_end = pos + segment_length
+        if segment_end > len(raw):
+            return False
+        if marker in _JPEG_SOF_MARKERS:
+            if segment_length < 8:
+                return False
+            saw_sof = True
+        if marker != 0xDA:
+            pos = segment_end
+            continue
+
+        saw_scan = True
+        pos = segment_end
+        while pos < len(raw):
+            if raw[pos] != 0xFF:
+                pos += 1
+                continue
+            marker_start = pos
+            while pos < len(raw) and raw[pos] == 0xFF:
+                pos += 1
+            if pos >= len(raw):
+                return False
+            scan_marker = raw[pos]
+            if scan_marker == 0x00 or 0xD0 <= scan_marker <= 0xD7:
+                pos += 1
+                continue
+            pos = marker_start
+            break
+        else:
+            return False
+    return False
+
+
+def _gif_subblocks_end(raw: bytes, pos: int) -> int | None:
+    while pos < len(raw):
+        size = raw[pos]
+        pos += 1
+        if size == 0:
+            return pos
+        if pos + size > len(raw):
+            return None
+        pos += size
+    return None
+
+
+def _is_complete_gif(raw: bytes) -> bool:
+    if len(raw) < 14 or not raw.startswith((b"GIF87a", b"GIF89a")):
+        return False
+    width = int.from_bytes(raw[6:8], "little")
+    height = int.from_bytes(raw[8:10], "little")
+    if not width or not height:
+        return False
+    packed = raw[10]
+    pos = 13
+    if packed & 0x80:
+        pos += 3 * (1 << ((packed & 0x07) + 1))
+    if pos > len(raw):
+        return False
+    saw_image = False
+    while pos < len(raw):
+        introducer = raw[pos]
+        pos += 1
+        if introducer == 0x3B:
+            return saw_image and pos == len(raw)
+        if introducer == 0x21:
+            if pos >= len(raw):
+                return False
+            pos += 1  # extension label
+            end = _gif_subblocks_end(raw, pos)
+            if end is None:
+                return False
+            pos = end
+            continue
+        if introducer != 0x2C or pos + 9 > len(raw):
+            return False
+        image_width = int.from_bytes(raw[pos + 4:pos + 6], "little")
+        image_height = int.from_bytes(raw[pos + 6:pos + 8], "little")
+        image_packed = raw[pos + 8]
+        if not image_width or not image_height:
+            return False
+        pos += 9
+        if image_packed & 0x80:
+            pos += 3 * (1 << ((image_packed & 0x07) + 1))
+        if pos >= len(raw):
+            return False
+        lzw_minimum_code_size = raw[pos]
+        if not 2 <= lzw_minimum_code_size <= 11:
+            return False
+        pos += 1
+        end = _gif_subblocks_end(raw, pos)
+        if end is None:
+            return False
+        pos = end
+        saw_image = True
+    return False
+
+
+def _is_webp_image_chunk(chunk_type: bytes, data: bytes) -> bool:
+    if chunk_type == b"VP8 ":
+        if len(data) < 10 or data[3:6] != b"\x9d\x01\x2a":
+            return False
+        width = int.from_bytes(data[6:8], "little") & 0x3FFF
+        height = int.from_bytes(data[8:10], "little") & 0x3FFF
+        return bool(width and height)
+    if chunk_type == b"VP8L":
+        # The three high bits of the fifth byte are the version number. The
+        # current lossless bitstream defines only version zero.
+        return len(data) >= 5 and data[0] == 0x2F and not data[4] & 0xE0
+    return False
+
+
+def _is_complete_webp_frame(data: bytes) -> bool:
+    """Validate the nested chunks in one extended-WebP animation frame."""
+    if len(data) < 16 or data[15] & 0xFC:
+        return False
+    pos = 16
+    saw_image = False
+    while pos < len(data):
+        if pos + 8 > len(data):
+            return False
+        chunk_type = data[pos:pos + 4]
+        chunk_size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        data_start = pos + 8
+        data_end = data_start + chunk_size
+        chunk_end = data_end + (chunk_size & 1)
+        if chunk_end > len(data):
+            return False
+        chunk_data = data[data_start:data_end]
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if saw_image or not _is_webp_image_chunk(chunk_type, chunk_data):
+                return False
+            saw_image = True
+        elif chunk_type != b"ALPH":
+            return False
+        pos = chunk_end
+    return saw_image and pos == len(data)
+
+
+def _is_complete_webp(raw: bytes) -> bool:
+    if (
+        len(raw) < 20
+        or raw[:4] != b"RIFF"
+        or raw[8:12] != b"WEBP"
+        or int.from_bytes(raw[4:8], "little") + 8 != len(raw)
+    ):
+        return False
+    pos = 12
+    saw_image = False
+    while pos < len(raw):
+        if pos + 8 > len(raw):
+            return False
+        chunk_type = raw[pos:pos + 4]
+        chunk_size = int.from_bytes(raw[pos + 4:pos + 8], "little")
+        data_start = pos + 8
+        data_end = data_start + chunk_size
+        chunk_end = data_end + (chunk_size & 1)
+        if chunk_end > len(raw):
+            return False
+        data = raw[data_start:data_end]
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if saw_image or not _is_webp_image_chunk(chunk_type, data):
+                return False
+            saw_image = True
+        elif chunk_type == b"VP8X":
+            if len(data) != 10 or data[0] & 0x81 or any(data[1:4]):
+                return False
+        elif chunk_type == b"ANMF":
+            if not _is_complete_webp_frame(data):
+                return False
+            saw_image = True
+        pos = chunk_end
+    return saw_image and pos == len(raw)
+
+
+def _is_complete_bmp(raw: bytes) -> bool:
+    if len(raw) < 26 or raw[:2] != b"BM":
+        return False
+    if int.from_bytes(raw[2:6], "little") != len(raw):
+        return False
+    pixel_offset = int.from_bytes(raw[10:14], "little")
+    dib_size = int.from_bytes(raw[14:18], "little")
+    if dib_size == 12:
+        width = int.from_bytes(raw[18:20], "little")
+        height = int.from_bytes(raw[20:22], "little")
+        planes = int.from_bytes(raw[22:24], "little")
+        bits_per_pixel = int.from_bytes(raw[24:26], "little")
+    elif dib_size >= 40 and 14 + dib_size <= len(raw):
+        width = int.from_bytes(raw[18:22], "little", signed=True)
+        height = int.from_bytes(raw[22:26], "little", signed=True)
+        planes = int.from_bytes(raw[26:28], "little")
+        bits_per_pixel = int.from_bytes(raw[28:30], "little")
+    else:
+        return False
+    return (
+        bool(width)
+        and bool(height)
+        and planes == 1
+        and bits_per_pixel in {1, 2, 4, 8, 16, 24, 32}
+        and 14 + dib_size <= pixel_offset < len(raw)
+    )
+
+
 def _redact_value(v, *, _enabled: bool | None = None):
     """Recursively redact credentials from strings, dicts, and lists.
 
@@ -585,10 +949,62 @@ def _redact_value(v, *, _enabled: bool | None = None):
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {k: _redact_value(val, _enabled=_enabled) for k, val in v.items()}
+        return {
+            key: _redact_value(value, _enabled=_enabled)
+            for key, value in v.items()
+        }
     if isinstance(v, list):
         return [_redact_value(item, _enabled=_enabled) for item in v]
     return v
+
+
+def _redact_message_content_part(part, *, _enabled: bool):
+    """Redact one canonical ``messages[*].content[*]`` part.
+
+    The raster exemption exists only at this authoritative schema position.
+    Image-shaped dictionaries in metadata, tools, todos, journals, or arbitrary
+    nested values remain on the normal fail-closed redaction path.
+    """
+    if not _enabled or not (
+        isinstance(part, dict)
+        and part.get("type") == "image_url"
+        and isinstance(part.get("image_url"), dict)
+    ):
+        return _redact_value(part, _enabled=_enabled)
+    result = {}
+    for key, value in part.items():
+        if key != "image_url":
+            result[key] = _redact_value(value, _enabled=_enabled)
+            continue
+        result[key] = {
+            image_key: image_value
+            if image_key == "url" and _is_native_raster_data_uri(image_value)
+            else _redact_value(image_value, _enabled=_enabled)
+            for image_key, image_value in value.items()
+        }
+    return result
+
+
+def _redact_messages(messages, *, _enabled: bool):
+    if not isinstance(messages, list):
+        return _redact_value(messages, _enabled=_enabled)
+    redacted = []
+    for message in messages:
+        if not isinstance(message, dict):
+            redacted.append(_redact_value(message, _enabled=_enabled))
+            continue
+        item = {}
+        allow_native_image = message.get("role") == "user"
+        for key, value in message.items():
+            if allow_native_image and key == "content" and isinstance(value, list):
+                item[key] = [
+                    _redact_message_content_part(part, _enabled=_enabled)
+                    for part in value
+                ]
+            else:
+                item[key] = _redact_value(value, _enabled=_enabled)
+        redacted.append(item)
+    return redacted
 
 
 def redact_session_data(session_dict: dict) -> dict:
@@ -610,7 +1026,7 @@ def redact_session_data(session_dict: dict) -> dict:
     if isinstance(result.get('title'), str):
         result['title'] = _redact_text(result['title'], _enabled=_enabled)
     if 'messages' in result:
-        result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
+        result['messages'] = _redact_messages(result['messages'], _enabled=_enabled)
     if 'tool_calls' in result:
         result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
     if 'todo_state' in result:
