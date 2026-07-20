@@ -71,7 +71,13 @@ def _token_path(ext_id: str) -> Path:
 
 
 def _valid_ext_id(ext_id: object) -> bool:
-    return isinstance(ext_id, str) and bool(_EXT_ID_RE.match(ext_id))
+    # Use fullmatch (not match) so a trailing newline can't slip through: in
+    # Python's ``re`` a ``$`` anchor also matches just before a final ``\n``,
+    # so ``match`` would accept ``"templates\n"`` and _token_path would build a
+    # filename containing a literal newline. fullmatch anchors truly to the end.
+    # Kept identical to ``_valid_extension_id`` in api/extensions.py (fullmatch
+    # + strip) so the two validators cannot diverge.
+    return isinstance(ext_id, str) and bool(_EXT_ID_RE.fullmatch(ext_id.strip()))
 
 
 def _fingerprint(path: Path) -> Optional[Tuple]:
