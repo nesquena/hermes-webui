@@ -2603,6 +2603,19 @@
   .composer-reasoning-chip.inactive{opacity:.78;}
   .composer-reasoning-chip:hover{color:var(--text);background-color:var(--hover-bg);}
   .composer-reasoning-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg);}
+  .composer-fast-mode-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:32px;flex:0 0 auto;padding:8px 10px;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s,opacity .15s;}
+  .composer-fast-mode-btn[hidden]{display:none!important;}
+  .composer-fast-mode-btn:hover:not(:disabled),.composer-fast-mode-btn:focus-visible{color:var(--text);background:var(--hover-bg);}
+  .composer-fast-mode-btn:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;}
+  .composer-fast-mode-btn[aria-pressed="true"]{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  .composer-fast-mode-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;color:var(--muted);transition:color .15s,filter .15s;}
+  .composer-fast-mode-icon svg,.composer-fast-mode-icon path{transition:fill .15s,stroke .15s;}
+  [aria-pressed="true"] .composer-fast-mode-icon{color:var(--warning);filter:drop-shadow(0 0 3px color-mix(in srgb,var(--warning) 55%,transparent));}
+  [aria-pressed="true"] .composer-fast-mode-icon path{fill:currentColor;}
+  .composer-fast-mode-label{display:inline-flex;align-items:center;font-size:11px;font-weight:700;line-height:1;}
+  .composer-fast-mode-btn:disabled{cursor:default;opacity:.45;}
+  .composer-fast-mode-btn.loading svg{opacity:.55;}
+  .composer-fast-mode-btn.error{color:var(--error);border-color:var(--error);}
   .composer-reasoning-icon,.composer-reasoning-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-reasoning-chevron{display:none;}
   .composer-reasoning-label{display:inline-flex;align-items:center;justify-content:center;min-width:1.6ch;font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;}
@@ -2991,6 +3004,7 @@
   .composer-footer.cf-burger .composer-left > .composer-model-wrap,
   .composer-footer.cf-burger .provider-quota-chip,
   .composer-footer.cf-burger .composer-left > .composer-reasoning-wrap,
+  .composer-footer.cf-burger .composer-fast-mode-btn,
   .composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none!important;}
   .composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
   .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex;}
@@ -3111,6 +3125,7 @@
     .composer-workspace-chip{display:none!important;}
     .composer-left > .composer-model-wrap,
     .composer-left > .composer-reasoning-wrap,
+    .composer-fast-mode-btn,
     .composer-left > .composer-toolsets-wrap{display:none!important;}
     /* Saved prompts is a desktop-only composer affordance — too much for the
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */

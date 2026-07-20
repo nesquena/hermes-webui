@@ -2822,6 +2822,8 @@ from api.config import (
     get_reasoning_status,
     set_reasoning_display,
     set_reasoning_effort,
+    get_fast_mode_status,
+    set_fast_mode,
     create_stream_channel,
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
@@ -12466,6 +12468,12 @@ def handle_get(handler, parsed) -> bool:
             ),
         )
 
+    if parsed.path == "/api/fast-mode":
+        query = parse_qs(parsed.query)
+        model_id = (query.get("model", [""])[0] or "").strip() or None
+        provider_id = (query.get("provider", [""])[0] or "").strip() or None
+        return j(handler, get_fast_mode_status(model_id=model_id, provider_id=provider_id))
+
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
 
@@ -14488,6 +14496,21 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/fast-mode":
+        try:
+            if "enabled" not in body:
+                return bad(handler, "enabled is required")
+            return j(
+                handler,
+                set_fast_mode(
+                    body.get("enabled"),
+                    model_id=str(body.get("model") or "").strip() or None,
+                    provider_id=str(body.get("provider") or "").strip() or None,
+                ),
+            )
+        except ValueError as e:
+            return bad(handler, str(e))
 
     if parsed.path == "/api/admin/reload":
         # Hot-reload api.models module to pick up code changes without restart.

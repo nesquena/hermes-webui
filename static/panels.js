@@ -7091,6 +7091,9 @@ async function switchToProfile(name) {
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
       refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
     }
+    if (typeof refreshProfileTransitionFastMode === 'function') {
+      refreshProfileTransitionFastMode(data.default_model, data.default_model_provider);
+    }
 
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
