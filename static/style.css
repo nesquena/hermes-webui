@@ -7024,6 +7024,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   .kanban-modal-overlay{padding:12px;}
   .kanban-modal{padding:16px 16px 14px;border-radius:14px;}
   .kanban-modal-row-inline{flex-direction:column;gap:0;}
+  .kanban-column-body{overscroll-behavior:auto;}
 }
 
 /* ── Logs panel (#1455) ───────────────────────────────────────────────────── */
