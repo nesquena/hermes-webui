@@ -6,6 +6,8 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import pytest
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
@@ -199,8 +201,14 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     import api.session_lifecycle as lifecycle
     import api.streaming as streaming
     from api.models import Session
-    from agent.transports.chat_completions import ChatCompletionsTransport
-    import run_agent
+    ChatCompletionsTransport = pytest.importorskip(
+        "agent.transports.chat_completions",
+        reason="hermes-agent transport modules not importable",
+    ).ChatCompletionsTransport
+    run_agent = pytest.importorskip(
+        "run_agent",
+        reason="hermes-agent runner not importable",
+    )
 
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -531,8 +539,14 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_history():
     from api.streaming import _install_gemini_request_boundary_wrapper
     import api.streaming as streaming
-    from agent.transports import get_transport
-    from agent.transports.chat_completions import ChatCompletionsTransport
+    get_transport = pytest.importorskip(
+        "agent.transports",
+        reason="hermes-agent transport modules not importable",
+    ).get_transport
+    ChatCompletionsTransport = pytest.importorskip(
+        "agent.transports.chat_completions",
+        reason="hermes-agent transport modules not importable",
+    ).ChatCompletionsTransport
 
     original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
     original_build_kwargs = ChatCompletionsTransport.build_kwargs
@@ -591,7 +605,10 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
 def test_transport_wrapper_rewraps_replaced_real_chat_transport():
     from api.streaming import _install_gemini_request_boundary_wrapper
     import api.streaming as streaming
-    from agent.transports.chat_completions import ChatCompletionsTransport
+    ChatCompletionsTransport = pytest.importorskip(
+        "agent.transports.chat_completions",
+        reason="hermes-agent transport modules not importable",
+    ).ChatCompletionsTransport
 
     original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
     original_build_kwargs = ChatCompletionsTransport.build_kwargs
