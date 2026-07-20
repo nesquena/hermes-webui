@@ -527,6 +527,10 @@ def get_config_snapshot() -> dict:
                 return copy.deepcopy(cfg)
         except NameError:
             pass
+        if not _cfg_path_matches_active_profile_home(
+            config_path
+        ) and not _profile_home_requires_isolated_env(config_path.parent):
+            return copy.deepcopy(_cfg_cache)
         return _expanded_config_snapshot_from_path(config_path)
 
 
@@ -574,6 +578,10 @@ def get_config_snapshot_with_source_fingerprint() -> tuple[dict, dict]:
                 return copy.deepcopy(cfg), _models_cache_source_fingerprint()
         except NameError:
             pass
+        if not _cfg_path_matches_active_profile_home(
+            config_path
+        ) and not _profile_home_requires_isolated_env(config_path.parent):
+            return copy.deepcopy(_cfg_cache), _models_cache_source_fingerprint()
         snapshot, config_fingerprint = _config_yaml_fingerprint_stable(config_path)
         return snapshot, _models_cache_source_fingerprint_for_snapshot(
             config_path=config_path,
