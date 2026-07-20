@@ -22564,10 +22564,14 @@ def _handle_notifications_events(handler, parsed):
 
     try:
         initial = notification_summary(limit=200, all_profiles=all_profiles)
-        seen = {str(row.get("id") or "") for row in initial.get("notifications", []) if row.get("id")}
+        seen = {
+            str(row.get("notification_key") or "")
+            for row in initial.get("notifications", [])
+            if row.get("notification_key")
+        }
+        handler.wfile.write(sse_event("snapshot", initial))
+        handler.wfile.flush()
         if once:
-            handler.wfile.write(sse_event("snapshot", initial))
-            handler.wfile.flush()
             return True
 
         last_heartbeat = time.time()
@@ -22578,10 +22582,11 @@ def _handle_notifications_events(handler, parsed):
             current = notification_summary(limit=200, all_profiles=all_profiles)
             new_rows = [
                 row for row in reversed(current.get("notifications", []))
-                if row.get("id") and str(row.get("id")) not in seen
+                if row.get("notification_key")
+                and str(row.get("notification_key")) not in seen
             ]
             for row in new_rows:
-                seen.add(str(row.get("id")))
+                seen.add(str(row.get("notification_key")))
                 handler.wfile.write(sse_event("notification", row))
                 handler.wfile.flush()
             now = time.time()

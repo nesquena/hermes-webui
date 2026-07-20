@@ -8,10 +8,10 @@
 // server's isolated-profile guard.
 
 let _notificationsCache = [];
-let _notificationsSelectedId = '';
+let _notificationsSelectedKey = '';
 let _notificationsEventSource = null;
 let _notificationsReconnectTimer = null;
-let _notificationsSeenIds = new Set();
+let _notificationsSeenKeys = new Set();
 let _notificationsUnreadCount = 0;
 
 function _notificationsUrl(path, params) {
@@ -30,6 +30,12 @@ function _notificationsApiParams(extra) {
 
 function _notificationId(row) {
   return row && row.id != null ? String(row.id) : '';
+}
+
+function _notificationKey(row) {
+  const id = _notificationId(row);
+  if (!id) return '';
+  return JSON.stringify([String(row && row.profile || ''), id]);
 }
 
 function _notificationCreated(row) {
@@ -59,13 +65,13 @@ function _sortNotifications(rows) {
 }
 
 function _mergeNotification(row) {
-  const id = _notificationId(row);
-  if (!id) return false;
-  const idx = _notificationsCache.findIndex(n => _notificationId(n) === id);
+  const key = _notificationKey(row);
+  if (!key) return false;
+  const idx = _notificationsCache.findIndex(n => _notificationKey(n) === key);
   if (idx >= 0) _notificationsCache[idx] = Object.assign({}, _notificationsCache[idx], row);
   else _notificationsCache.unshift(row);
   _notificationsCache = _sortNotifications(_notificationsCache).slice(0, 200);
-  _notificationsSeenIds.add(id);
+  _notificationsSeenKeys.add(key);
   return idx < 0;
 }
 
@@ -99,10 +105,10 @@ function _renderNotificationList() {
     return;
   }
   box.innerHTML = _notificationsCache.map(row => {
-    const id = _notificationId(row);
+    const key = _notificationKey(row);
     const unread = row && !row.read_at;
-    const selected = id && id === _notificationsSelectedId;
-    return `<button type="button" class="notification-row ${unread ? 'unread' : ''} ${selected ? 'active' : ''}" data-notification-id="${esc(id)}" onclick="openNotificationDetail(this.dataset.notificationId)">
+    const selected = key && key === _notificationsSelectedKey;
+    return `<button type="button" class="notification-row ${unread ? 'unread' : ''} ${selected ? 'active' : ''}" data-notification-key="${esc(key)}" onclick="openNotificationDetail(this.dataset.notificationKey)">
       <span class="notification-row-dot" aria-hidden="true"></span>
       <span class="notification-row-main">
         <span class="notification-row-title">${esc(_notificationTitle(row))}</span>
@@ -111,10 +117,10 @@ function _renderNotificationList() {
       </span>
     </button>`;
   }).join('');
-  if (!_notificationsSelectedId || !_notificationsCache.some(row => _notificationId(row) === _notificationsSelectedId)) {
-    _notificationsSelectedId = _notificationId(_notificationsCache[0]) || '';
+  if (!_notificationsSelectedKey || !_notificationsCache.some(row => _notificationKey(row) === _notificationsSelectedKey)) {
+    _notificationsSelectedKey = _notificationKey(_notificationsCache[0]) || '';
   }
-  _renderNotificationDetail(_notificationsCache.find(row => _notificationId(row) === _notificationsSelectedId) || null);
+  _renderNotificationDetail(_notificationsCache.find(row => _notificationKey(row) === _notificationsSelectedKey) || null);
 }
 
 function _renderNotificationDetail(row) {
@@ -150,7 +156,7 @@ function _renderNotificationDetail(row) {
 function _renderNotifications(summary) {
   const rows = summary && Array.isArray(summary.notifications) ? summary.notifications : _notificationsCache;
   _notificationsCache = _sortNotifications(rows);
-  _notificationsSeenIds = new Set(_notificationsCache.map(_notificationId).filter(Boolean));
+  _notificationsSeenKeys = new Set(_notificationsCache.map(_notificationKey).filter(Boolean));
   _setNotificationBadge(summary && Number.isFinite(Number(summary.unread_count)) ? Number(summary.unread_count) : _notificationsCache.filter(n => !n.read_at).length);
   _renderNotificationList();
 }
@@ -172,16 +178,18 @@ async function loadNotifications(force) {
   }
 }
 
-function openNotificationDetail(id) {
-  _notificationsSelectedId = String(id || '');
+function openNotificationDetail(key) {
+  _notificationsSelectedKey = String(key || '');
   _renderNotificationList();
 }
 
 async function markSelectedNotificationRead() {
-  if (!_notificationsSelectedId) return;
-  const row = _notificationsCache.find(n => _notificationId(n) === _notificationsSelectedId);
+  if (!_notificationsSelectedKey) return;
+  const row = _notificationsCache.find(n => _notificationKey(n) === _notificationsSelectedKey);
+  const notificationId = _notificationId(row);
+  if (!notificationId) return;
   try {
-    const payload = { id: _notificationsSelectedId };
+    const payload = { id: notificationId };
     if (row && row.profile) payload.profile = row.profile;
     const data = await api('/api/notifications/read', { method: 'POST', body: JSON.stringify(payload) });
     if (data && data.notification) _mergeNotification(data.notification);
@@ -222,8 +230,10 @@ function _handleNotificationEvent(row) {
 
 function startNotificationInboxStream() {
   if (typeof window === 'undefined') return;
-  loadNotifications(false).catch(() => {});
-  if (typeof EventSource === 'undefined') return;
+  if (typeof EventSource === 'undefined') {
+    loadNotifications(false).catch(() => {});
+    return;
+  }
   if (_notificationsEventSource) return;
   const url = _notificationsUrl('api/notifications/events', _notificationsApiParams());
   try {
@@ -237,6 +247,7 @@ function startNotificationInboxStream() {
     _notificationsEventSource.onerror = function() {
       try { _notificationsEventSource.close(); } catch (_) {}
       _notificationsEventSource = null;
+      loadNotifications(false).catch(() => {});
       if (_notificationsReconnectTimer) return;
       _notificationsReconnectTimer = setTimeout(() => {
         _notificationsReconnectTimer = null;

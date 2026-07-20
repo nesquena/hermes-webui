@@ -8,6 +8,8 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+import pytest
+
 from tests._pytest_port import BASE
 
 
@@ -282,3 +284,123 @@ def test_mark_read_allows_visible_profile_in_multi_profile_mode(tmp_path, monkey
     assert result is not None
     assert result["id"] == "visible-notification"
     assert result["read_at"]
+
+
+def test_cross_profile_identity_is_authoritative_and_composite(tmp_path, monkeypatch):
+    from api import cron_notifications, profiles
+
+    default_home = tmp_path / "hermes"
+    wolf_home = default_home / "profiles" / "wolf-of-hermes"
+    _reset(default_home)
+    _reset(wolf_home)
+    _write_record(
+        {
+            "id": "shared-id",
+            "profile": "wolf-of-hermes",
+            "created_at": "2026-01-01T00:00:00Z",
+            "read_at": None,
+        },
+        home=default_home,
+    )
+    _write_record(
+        {
+            "id": "shared-id",
+            "profile": "default",
+            "created_at": "2026-01-02T00:00:00Z",
+            "read_at": None,
+        },
+        home=wolf_home,
+    )
+
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: default_home)
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: wolf_home if name == "wolf-of-hermes" else default_home,
+    )
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": "wolf-of-hermes"}],
+    )
+
+    summary = cron_notifications.notification_summary(all_profiles=True, limit=10)
+
+    assert len(summary["notifications"]) == 2
+    assert {row["profile"] for row in summary["notifications"]} == {
+        "default",
+        "wolf-of-hermes",
+    }
+    assert {row["notification_key"] for row in summary["notifications"]} == {
+        '["default","shared-id"]',
+        '["wolf-of-hermes","shared-id"]',
+    }
+
+    marked = cron_notifications.mark_read("shared-id", profile="wolf-of-hermes")
+
+    assert marked is not None
+    assert marked["profile"] == "wolf-of-hermes"
+    assert marked["notification_key"] == '["wolf-of-hermes","shared-id"]'
+    default_row = json.loads(_notification_file(default_home).read_text(encoding="utf-8"))
+    wolf_row = json.loads(_notification_file(wolf_home).read_text(encoding="utf-8"))
+    assert default_row["read_at"] is None
+    assert wolf_row["read_at"]
+
+
+def test_notification_reader_rejects_symlinked_data_file(tmp_path):
+    from api import cron_notifications
+
+    home = tmp_path / "hermes"
+    cron_dir = home / "cron"
+    cron_dir.mkdir(parents=True)
+    external = tmp_path / "external-notifications.jsonl"
+    external.write_text('{"id":"external"}\n', encoding="utf-8")
+    before_mode = external.stat().st_mode
+    _notification_file(home).symlink_to(external)
+
+    with pytest.raises(OSError):
+        cron_notifications._read_records(home, "default")
+
+    assert external.read_text(encoding="utf-8") == '{"id":"external"}\n'
+    assert external.stat().st_mode == before_mode
+
+
+def test_notification_reader_rejects_symlinked_lock_file(tmp_path):
+    from api import cron_notifications
+
+    home = tmp_path / "hermes"
+    _write_record(
+        {"id": "local", "created_at": "2026-01-01T00:00:00Z"},
+        home=home,
+    )
+    external = tmp_path / "external-lock"
+    external.write_text("outside", encoding="utf-8")
+    before_mode = external.stat().st_mode
+    _notification_file(home).with_suffix(".jsonl.lock").symlink_to(external)
+
+    with pytest.raises(OSError):
+        cron_notifications._read_records(home, "default")
+
+    assert external.read_text(encoding="utf-8") == "outside"
+    assert external.stat().st_mode == before_mode
+
+
+def test_notification_reader_rejects_symlinked_parent_component(tmp_path):
+    from api import cron_notifications
+
+    external_home = tmp_path / "external-home"
+    _write_record(
+        {"id": "outside", "created_at": "2026-01-01T00:00:00Z"},
+        home=external_home,
+    )
+    external_path = _notification_file(external_home)
+    before = external_path.read_bytes()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(external_home, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        cron_notifications._read_records(linked_parent, "default")
+
+    assert external_path.read_bytes() == before

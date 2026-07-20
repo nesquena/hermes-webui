@@ -6,7 +6,10 @@ import copy
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "plan_cron_webui_migration.py"
@@ -88,3 +91,156 @@ def test_apply_writes_only_delivery_changes_and_backups(tmp_path):
     manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["changes"]) == 3
     assert {item["profile"] for item in manifest["backups"]} == {"default", "newsletteros"}
+
+
+def test_profile_symlink_is_rejected_before_plan_or_apply(tmp_path):
+    home = tmp_path / "hermes"
+    profiles_dir = home / "profiles"
+    profiles_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-profile"
+    outside_jobs = outside / "cron" / "jobs.json"
+    _write_jobs(
+        outside_jobs,
+        [{"id": "outside", "deliver": "origin", "prompt": "preserve"}],
+    )
+    before = outside_jobs.read_bytes()
+    (profiles_dir / "escaped").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked profile directory rejected"):
+        mod.build_plan(home)
+
+    assert outside_jobs.read_bytes() == before
+
+
+def test_home_symlink_is_rejected_before_resolution(tmp_path):
+    real_home = _sample_home(tmp_path)
+    linked_home = tmp_path / "linked-hermes"
+    linked_home.symlink_to(real_home, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked path component rejected"):
+        mod.build_plan(linked_home)
+
+
+def test_cron_symlink_is_rejected_before_plan_or_apply(tmp_path):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    outside_cron = tmp_path / "outside-cron"
+    outside_jobs = outside_cron / "jobs.json"
+    _write_jobs(
+        outside_jobs,
+        [{"id": "outside", "deliver": "origin", "prompt": "preserve"}],
+    )
+    before = outside_jobs.read_bytes()
+    (home / "cron").symlink_to(outside_cron, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked path component rejected"):
+        mod.build_plan(home)
+
+    assert outside_jobs.read_bytes() == before
+
+
+def test_apply_rejects_cron_swap_after_descriptor_open(tmp_path, monkeypatch):
+    home = _sample_home(tmp_path)
+    reports, changes, planned = mod.build_plan(home)
+    original_path = home / "cron" / "jobs.json"
+    original_before = original_path.read_bytes()
+    outside_cron = tmp_path / "outside-cron"
+    outside_jobs = outside_cron / "jobs.json"
+    _write_jobs(
+        outside_jobs,
+        [{"id": "outside", "deliver": "origin", "prompt": "preserve"}],
+    )
+    outside_before = outside_jobs.read_bytes()
+    real_backup = mod.backup_file_from_fd
+    swapped = False
+
+    def swap_then_backup(source_fd, backup_dir, profile):
+        nonlocal swapped
+        if profile == "default" and not swapped:
+            swapped = True
+            (home / "cron").rename(home / "cron-before-swap")
+            (home / "cron").symlink_to(outside_cron, target_is_directory=True)
+        return real_backup(source_fd, backup_dir, profile)
+
+    monkeypatch.setattr(mod, "backup_file_from_fd", swap_then_backup)
+
+    with pytest.raises((OSError, ValueError)):
+        mod.apply_plan(home, tmp_path / "backup", reports, changes, planned)
+
+    assert swapped is True
+    assert outside_jobs.read_bytes() == outside_before
+    assert (home / "cron-before-swap" / "jobs.json").read_bytes() == original_before
+
+
+def test_apply_rejects_jobs_changed_after_plan(tmp_path):
+    home = _sample_home(tmp_path)
+    reports, changes, planned = mod.build_plan(home)
+    jobs_path = home / "cron" / "jobs.json"
+    current = json.loads(jobs_path.read_text(encoding="utf-8"))
+    current["jobs"].append(
+        {
+            "id": "concurrent-job",
+            "name": "Concurrent job",
+            "deliver": "local",
+            "prompt": "must survive",
+        }
+    )
+    jobs_path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+    changed_bytes = jobs_path.read_bytes()
+
+    with pytest.raises(ValueError, match="jobs contents changed after planning"):
+        mod.apply_plan(home, tmp_path / "backup", reports, changes, planned)
+
+    assert jobs_path.read_bytes() == changed_bytes
+
+
+def test_canonical_writer_waits_and_preserves_both_changes(
+    tmp_path, monkeypatch
+):
+    if mod.fcntl is None:
+        pytest.skip("POSIX flock required")
+    home = _sample_home(tmp_path)
+    reports, changes, planned = mod.build_plan(home)
+    jobs_path = home / "cron" / "jobs.json"
+    migration_has_lock = threading.Event()
+    writer_done = threading.Event()
+    real_backup = mod.backup_file_from_fd
+
+    def signal_after_lock(source_fd, backup_dir, profile):
+        if profile == "default":
+            migration_has_lock.set()
+        return real_backup(source_fd, backup_dir, profile)
+
+    def canonical_writer():
+        assert migration_has_lock.wait(timeout=5)
+        lock_path = home / "cron" / mod.JOBS_LOCK_FILE
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            mod.fcntl.flock(lock_file.fileno(), mod.fcntl.LOCK_EX)
+            current = json.loads(jobs_path.read_text(encoding="utf-8"))
+            current["jobs"].append(
+                {
+                    "id": "concurrent-job",
+                    "name": "Concurrent job",
+                    "deliver": "local",
+                    "prompt": "must survive",
+                }
+            )
+            temp_path = home / "cron" / ".writer-jobs.tmp"
+            temp_path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+            temp_path.replace(jobs_path)
+            mod.fcntl.flock(lock_file.fileno(), mod.fcntl.LOCK_UN)
+        writer_done.set()
+
+    monkeypatch.setattr(mod, "backup_file_from_fd", signal_after_lock)
+    writer = threading.Thread(target=canonical_writer)
+    writer.start()
+    try:
+        mod.apply_plan(home, tmp_path / "backup", reports, changes, planned)
+        assert writer_done.wait(timeout=5)
+    finally:
+        writer.join(timeout=5)
+
+    final = json.loads(jobs_path.read_text(encoding="utf-8"))
+    by_id = {job["id"]: job for job in final["jobs"]}
+    assert by_id["default-origin"]["deliver"] == "webui,origin"
+    assert by_id["concurrent-job"]["prompt"] == "must survive"

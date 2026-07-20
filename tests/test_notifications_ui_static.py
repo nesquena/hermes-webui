@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 NOTIFICATIONS = (ROOT / "static" / "notifications.js").read_text(encoding="utf-8")
+ROUTES = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -40,7 +41,22 @@ def test_notifications_js_uses_aggregate_api_sse_and_badge_without_duplicate_toa
 
 
 def test_notification_ids_never_enter_inline_javascript_string_literals():
-    assert "openNotificationDetail(this.dataset.notificationId)" in NOTIFICATIONS
+    assert "openNotificationDetail(this.dataset.notificationKey)" in NOTIFICATIONS
     assert "openNotificationCronJob(this.dataset.jobId)" in NOTIFICATIONS
+    assert "data-notification-key" in NOTIFICATIONS
+    assert "data-notification-id" not in NOTIFICATIONS
     assert "openNotificationDetail('${esc(id)}')" not in NOTIFICATIONS
     assert "openNotificationCronJob('${esc(String(row.job_id))}')" not in NOTIFICATIONS
+
+
+def test_notification_identity_is_profile_scoped_end_to_end():
+    assert "JSON.stringify([String(row && row.profile || ''), id])" in NOTIFICATIONS
+    assert "_notificationsSelectedKey" in NOTIFICATIONS
+    assert "_notificationsSeenKeys" in NOTIFICATIONS
+    assert "payload.profile = row.profile" in NOTIFICATIONS
+
+
+def test_sse_connection_snapshot_precedes_once_exit():
+    snapshot = 'handler.wfile.write(sse_event("snapshot", initial))'
+    assert snapshot in ROUTES
+    assert ROUTES.index(snapshot) < ROUTES.index("if once:", ROUTES.index(snapshot))
