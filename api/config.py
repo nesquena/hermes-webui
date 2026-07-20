@@ -6299,8 +6299,11 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     # preserving vendor hierarchy for multi-slash IDs (#3360).
     # Skip for URI-scheme IDs whose slashes are path separators (#3429).
     bare = lookup_id.split("/", 1)[1] if ("/" in lookup_id and not _has_scheme(lookup_id)) else lookup_id
+    is_gpt_56 = bare.lower().startswith("gpt-5.6-")
     return " ".join(
-        w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
+        w.capitalize() if is_gpt_56 and w.lower() in {"sol", "terra", "luna", "pro"}
+        else w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit())
+        else w.capitalize()
         for w in bare.replace("_", "-").split("-")
     )
 

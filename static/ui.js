@@ -6921,10 +6921,12 @@ function scrollToBottom(){
 function _fmtOllamaLabel(mid){
   const [namePart, ...variantParts] = mid.split(':');
   const variant = variantParts.join(':');
+  const isGpt56 = /^gpt-5\.6-/i.test(namePart);
   const _fmt = (s) => {
     const tokens = s.replace(/[-_]/g, ' ').split(' ');
     return tokens.map(t => {
       const alphaOnly = t.replace(/\./g, '');
+      if (isGpt56 && /^(sol|terra|luna|pro)$/i.test(t)) return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
       if (t.length <= 3 && /^[a-zA-Z.]+$/.test(t)) return t.toUpperCase();
       if (/^\d/.test(alphaOnly)) return t.toUpperCase();
       return t.charAt(0).toUpperCase() + t.slice(1);
