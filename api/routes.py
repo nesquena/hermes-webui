@@ -20737,6 +20737,9 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     user_msg = {"role": "user", "content": msg}
     if source and source != "webui":
         user_msg["_source"] = source
+        from api.process_event_utils import attach_wakeup_display_meta
+
+        attach_wakeup_display_meta(user_msg, source)
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = int(started_at)
     if attachments:

@@ -64,6 +64,7 @@ from api.models import (
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 from api.process_event_utils import (
+    attach_wakeup_display_meta,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
@@ -5755,6 +5756,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         current_user_msg = {'role': 'user', 'content': msg_text}
         if source and source != 'webui':
             current_user_msg['_source'] = source
+            attach_wakeup_display_meta(current_user_msg, source)
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -5817,6 +5819,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             display_msg['content'] = msg_text
             if source and source != 'webui':
                 display_msg['_source'] = source
+                attach_wakeup_display_meta(display_msg, source)
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -6334,6 +6337,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     }
     if pending_source != 'webui':
         recovered['_source'] = pending_source
+        attach_wakeup_display_meta(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)

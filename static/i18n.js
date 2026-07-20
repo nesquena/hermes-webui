@@ -364,6 +364,8 @@ const LOCALES = {
   bg_no_answer:'(no answer)',
   bg_failed:'Background task failed: ',
   process_wakeup_label:'Background wakeup',
+  process_wakeup_matched:'Watch pattern matched',
+  process_wakeup_suppressed:'{0} earlier matches were suppressed by rate limit',
   undo_exchange:'Undo last exchange',
   cmd_status:'Show session info',
   cmd_voice:'Toggle microphone input',

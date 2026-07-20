@@ -15339,6 +15339,60 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
+// #6345: parse the synthetic wakeup body back into display fields. Mirrors the
+// two structured api/background_process.format_wakeup_prompt shapes (pinned by
+// tests/test_background_process_wakeup_format.py); other event kinds return
+// null and keep the raw-notice fallback.
+function _parseProcessWakeupBody(text){
+  const s=String(text||'');
+  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
+  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null,suppressed:0};
+  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*?)(?:\n\((\d+) earlier matches were suppressed by rate limit\))?\]$/);
+  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null,suppressed:m[5]?parseInt(m[5],10):0};
+  return null;
+}
+// Server-stamped _wakeup_meta (authoritative when present) merged over the
+// client parse; the output section only ever comes from the parse because the
+// meta deliberately carries header fields only.
+function _processWakeupInfo(m, text){
+  const parsed=_parseProcessWakeupBody(text);
+  const meta=(m&&m._wakeup_meta&&typeof m._wakeup_meta==='object')?m._wakeup_meta:null;
+  if(!parsed&&!meta) return null;
+  const pick=(metaKey,parsedKey)=>{
+    if(meta&&meta[metaKey]!=null) return meta[metaKey];
+    return parsed?parsed[parsedKey]:null;
+  };
+  return {
+    type:String(pick('type','type')||''),
+    taskId:String(pick('task_id','taskId')||''),
+    command:String(pick('command','command')||''),
+    exitCode:pick('exit_code','exitCode'),
+    pattern:pick('pattern','pattern'),
+    suppressed:Number(pick('suppressed','suppressed')||0),
+    output:parsed?parsed.output:null,
+  };
+}
+function _processWakeupCardHtml(info, rawText, extras){
+  const isWatch=info.type==='watch_match';
+  const exitStr=info.exitCode==null?'':String(info.exitCode);
+  const exitKnown=/^\d+$/.test(exitStr);
+  const exitOk=exitStr==='0';
+  let chip;
+  if(isWatch){
+    chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code>${esc(String(info.pattern||''))}</code></span>`;
+  }else{
+    const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
+    const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
+  }
+  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  const outText=info.output!=null?String(info.output).trim():String(rawText||'');
+  const outHtml=outText?`<pre class="process-wakeup-text">${esc(outText)}</pre>`:'';
+  const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
+  const supHtml=info.suppressed?`<div class="process-wakeup-suppressed">${esc(t('process_wakeup_suppressed',info.suppressed))}</div>`:'';
+  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${supHtml}${extras.footHtml||''}</div></details>`;
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -15841,8 +15895,22 @@ function renderMessages(options){
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const processText=String(rowDisplayContent||'').trim();
       const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
-      const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
-      const nextRowHtml=`<div class="process-wakeup-notice"><div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}</div>`;
+      // #6345: structured completions/watch-matches render as a collapsed
+      // summary card; anything unparseable keeps the raw notice below so the
+      // fallback is never worse than the old full-text dump.
+      const wakeupInfo=_processWakeupInfo(m, processText);
+      let noticeClass='process-wakeup-notice';
+      let noticeInnerHtml;
+      if(wakeupInfo){
+        noticeClass+=' process-wakeup-notice-card';
+        const exitStr=wakeupInfo.exitCode==null?'':String(wakeupInfo.exitCode);
+        if(wakeupInfo.type==='completion'&&/^\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
+        noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
+      }else{
+        const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
+        noticeInnerHtml=`<div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}`;
+      }
+      const nextRowHtml=`<div class="${noticeClass}">${noticeInnerHtml}</div>`;
       if(row){
         row.className='msg-row process-wakeup-row';
         row.id=_userMessageDomId(rawIdx);
@@ -15851,9 +15919,19 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='process_wakeup';
         delete row.dataset.editing;
-        if(row.dataset.rawText!==processText||row.innerHTML!==nextRowHtml){
+        // A user-expanded card serializes `open=""` into innerHTML; normalize
+        // it out of the comparison so streaming rerenders neither churn the
+        // DOM nor collapse the card, and restore open state when the content
+        // really did change.
+        if(row.dataset.rawText!==processText||row.innerHTML.replace(' open=""','')!==nextRowHtml){
+          const _priorCard=row.querySelector&&row.querySelector('details.process-wakeup-card');
+          const _wasOpen=!!(_priorCard&&_priorCard.open);
           row.dataset.rawText=processText;
           row.innerHTML=nextRowHtml;
+          if(_wasOpen){
+            const _card=row.querySelector('details.process-wakeup-card');
+            if(_card) _card.open=true;
+          }
         }
       }else{
         row=document.createElement('div');
