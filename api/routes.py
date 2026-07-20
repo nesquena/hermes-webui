@@ -22364,6 +22364,7 @@ def _handle_chat_sync(handler, body):
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
+                _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
             )
@@ -22441,6 +22442,7 @@ def _handle_chat_sync(handler, body):
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
         )
+        _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
             s.title = title_from(s.messages, s.title)
