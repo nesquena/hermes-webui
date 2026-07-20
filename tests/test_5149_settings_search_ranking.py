@@ -130,6 +130,13 @@ class FakeElement {
 
   set innerHTML(value) {
     this._innerHTML = String(value || '');
+    if (!this._innerHTML) {
+      for (const child of this.children) {
+        child.parentElement = null;
+        child.parentNode = null;
+      }
+      this.children = [];
+    }
   }
 
   get innerHTML() {
@@ -448,6 +455,11 @@ function setupDom(mode) {
     providerCard.appendChild(makeProviderField('provider', 'API Key', 'sk-test'));
     providers.appendChild(providerCard);
     plugins.appendChild(makePluginCard('Plugin Sample'));
+  } else if (mode === 'live-before-dynamic') {
+    conversation.appendChild(makeSettingsField({
+      labelText: 'Theme',
+      descriptionText: 'Choose the interface color theme',
+    }));
   }
 
   return {
@@ -493,6 +505,28 @@ function runScenario(command) {
       globalThis._settingsIndex = null;
       globalThis._settingsIndexPromise = null;
       globalThis._settingsSearchSeq = 0;
+
+      if (command === 'live-before-dynamic') {
+        let releaseProviderLoad;
+        globalThis.loadProvidersPanel = () => new Promise((resolveLoad) => {
+          releaseProviderLoad = resolveLoad;
+        });
+        const searchPromise = filterSettings('theme');
+        await Promise.resolve();
+        await Promise.resolve();
+        const results = $('settingsSearchResults');
+        const liveLabels = [];
+        for (const child of results.children || []) {
+          if (!child || typeof child.innerHTML !== 'string') continue;
+          const match = child.innerHTML.match(/<span class="settings-search-label">([^<]*)<\/span>/);
+          if (match) liveLabels.push(match[1]);
+        }
+        const liveDisplay = results.style.display;
+        releaseProviderLoad();
+        await searchPromise;
+        resolve({ liveLabels, liveDisplay });
+        return;
+      }
 
       let query = '';
       if (command === 'title-vs-description') query = 'priority';
@@ -617,3 +651,8 @@ def test_provider_and_plugin_cards_remain_searchable(driver_file):
     assert "Provider Alpha" in provider_payload["labels"]
     assert "Provider Alpha API Key" in field_payload["labels"]
     assert "Plugin Sample" in plugin_payload["labels"]
+
+
+def test_static_results_render_while_dynamic_panes_are_loading(driver_file):
+    payload = _run_driver(driver_file, "live-before-dynamic")
+    assert payload["liveLabels"] == ["Theme"]
