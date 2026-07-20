@@ -456,7 +456,7 @@ def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | No
 
 
 def _detect_webui_version() -> str:
-    """Detect the running WebUI version from git or a baked-in fallback file.
+    """Detect the running WebUI version from git or installed fallback files.
 
     Resolution order:
       1. ``git describe --tags --always --dirty`` — works in any git checkout.
@@ -466,7 +466,9 @@ def _detect_webui_version() -> str:
       2. ``api/_version.py`` — a fallback written by the Docker / CI release
          workflow when ``.git`` is not present in the image.  Expected to define
          ``__version__ = 'vX.Y.Z'``.
-      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+      3. ``api/_scm_version.py`` — setuptools-scm output in an installed wheel.
+         Its PEP 440 value is normalized to the channel-neutral ``v...`` form.
+      4. ``'unknown'`` — last resort; displayed as-is in the settings badge.
     """
     # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
     # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
@@ -489,6 +491,16 @@ def _detect_webui_version() -> str:
                 return m.group(1)
         except Exception:
             pass
+
+    # Installed-wheel fallback: setuptools-scm writes a generated module that
+    # is separate from the Docker/Nix-owned _version.py contract above.
+    try:
+        from api._scm_version import __version__ as scm_version
+        scm_version = str(scm_version).strip()
+        if scm_version:
+            return scm_version if scm_version.startswith(('v', 'exp-v')) else f'v{scm_version}'
+    except Exception:
+        pass
 
     return 'unknown'
 
