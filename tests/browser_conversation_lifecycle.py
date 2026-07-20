@@ -576,6 +576,8 @@ def _process_rows(snapshot: dict) -> list[dict]:
 
 def _is_terminal_process_row_text(text: str) -> bool:
     text = " ".join(text.split())
+    if not text:
+        return False
     return (
         TERMINAL_PROCESS_TEXT.startswith(text)
         or text.startswith(TERMINAL_PROCESS_TEXT)
