@@ -10891,12 +10891,14 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     """
     from api.helpers import j, bad
     from api import config as _cfg
+    from api import session_queue as _session_queue
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     text = str((body or {}).get("text", "") or "").strip()
+    queue_item_id = str((body or {}).get("queue_item_id", "") or "").strip()
     if not sid:
         return bad(handler, "session_id required")
-    if not text:
+    if not text and not queue_item_id:
         return bad(handler, "text required")
 
     evicted_cached_entry = None
@@ -10969,12 +10971,25 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         return j(handler, {"accepted": False, "fallback": "stream_dead",
                            "stream_id": None})
 
+    queue_claim = None
+    if queue_item_id:
+        queue_claim = _session_queue.claim_item(sid, queue_item_id)
+        if queue_claim is None:
+            return j(handler, {"accepted": False, "fallback": "queue_item_not_found",
+                               "stream_id": active_stream_id})
+        text = _session_queue.steer_text_for_item(queue_claim["item"])
+
     try:
         accepted = bool(agent.steer(text))
     except Exception as exc:
+        if queue_claim is not None:
+            _session_queue.restore_claim(sid, queue_claim)
         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
+
+    if not accepted and queue_claim is not None:
+        _session_queue.restore_claim(sid, queue_claim)
 
     return j(handler, {"accepted": accepted, "fallback": None,
                        "stream_id": active_stream_id})

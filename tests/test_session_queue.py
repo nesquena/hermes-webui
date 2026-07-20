@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import types
+from urllib.parse import urlparse
 
 from api import config
 from api import routes
@@ -92,6 +93,39 @@ vm.runInContext({json.dumps(queue_src)}, ctx, {{filename: 'ui-queue.js'}});
 }});
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_queue_steer_capability_route_is_read_only_and_cache_safe():
+    handler = _FakeHandler()
+
+    handled = routes.handle_get(
+        handler, urlparse("http://example.test/api/session/queue/steer-capability")
+    )
+
+    assert handled is None
+    assert handler.status == 200
+    assert handler.headers["Cache-Control"] == "no-store"
+    assert handler.json_body() == {
+        "ok": True,
+        "queue_item_steer": True,
+        "protocol": 1,
+    }
+
+
+def test_queue_steer_capability_fails_closed_against_old_backend():
+    _run_queue_sync_node_script(
+        r"""
+fetch = async () => ({ok: false, status: 404, json: async () => ({error: 'not found'})});
+if(await _ensureQueueSteerCapability() !== false || _queueSteerCapability !== false){
+  throw new Error('old backend must leave queued steer disabled');
+}
+_queueSteerCapability = null;
+fetch = async () => ({ok: true, status: 200, json: async () => ({queue_item_steer: true, protocol: 1})});
+if(await _ensureQueueSteerCapability() !== true || _queueSteerCapability !== true){
+  throw new Error('new backend capability handshake was not accepted');
+}
+"""
+    )
 
 
 def test_enqueue_persists_and_lists_session_queue(monkeypatch, tmp_path):
@@ -228,6 +262,101 @@ if(calls[1].body.id !== 'srv-ghost' || calls[1].body.session_id !== sid){
 }
 """
     )
+
+
+def test_frontend_queue_upgrade_to_steer_removes_only_accepted_entry():
+    _run_queue_sync_node_script(
+        r"""
+const sid = 'sid-steer';
+SESSION_QUEUES[sid] = [
+  {text: 'keep queued', _queued_at: 1, _server_owned: true, _server_queue_id: 'srv-keep'},
+  {text: 'steer this', _queued_at: 2, _server_owned: true, _server_queue_id: 'srv-steer'},
+];
+S.session = {session_id: sid, active_stream_id: 'stream-1'};
+S.activeStreamId = 'stream-1';
+S.busy = true;
+const calls = [];
+fetch = async (url, opts) => {
+  calls.push({url: String(url), body: JSON.parse(opts.body)});
+  return {ok: true, json: async () => ({accepted: true, fallback: null, stream_id: 'stream-1'})};
+};
+const accepted = await _steerQueuedEntry(sid, 2);
+if(!accepted) throw new Error('expected queued steer to be accepted');
+if(calls.length !== 1 || !calls[0].url.includes('api/chat/steer')){
+  throw new Error('wrong steer request: '+JSON.stringify(calls));
+}
+if(calls[0].body.queue_item_id !== 'srv-steer' || calls[0].body.text !== 'steer this'){
+  throw new Error('steer payload did not identify the selected queue item: '+JSON.stringify(calls[0].body));
+}
+const q = SESSION_QUEUES[sid];
+if(q.length !== 1 || q[0]._server_queue_id !== 'srv-keep'){
+  throw new Error('accepted steer removed the wrong queue entry: '+JSON.stringify(q));
+}
+"""
+    )
+
+
+def test_frontend_queue_upgrade_to_steer_keeps_entry_on_rejection():
+    _run_queue_sync_node_script(
+        r"""
+const sid = 'sid-steer-reject';
+SESSION_QUEUES[sid] = [
+  {text: 'still queued', _queued_at: 7, _server_owned: true, _server_queue_id: 'srv-reject'},
+];
+S.session = {session_id: sid, active_stream_id: 'stream-2'};
+S.activeStreamId = 'stream-2';
+S.busy = true;
+fetch = async () => ({ok: true, json: async () => ({accepted: false, fallback: 'stream_dead'})});
+const accepted = await _steerQueuedEntry(sid, 7);
+if(accepted) throw new Error('rejected steer must return false');
+const q = SESSION_QUEUES[sid];
+if(q.length !== 1 || q[0]._server_queue_id !== 'srv-reject'){
+  throw new Error('rejected steer lost the queued entry: '+JSON.stringify(q));
+}
+"""
+    )
+
+
+def test_queue_claim_by_id_preserves_other_items_and_can_be_restored(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    first = session_queue.enqueue("sid-claim", {"text": "first"})
+    second = session_queue.enqueue("sid-claim", {"text": "second"})
+
+    claimed = session_queue.claim_item("sid-claim", second["id"])
+
+    assert claimed is not None
+    assert claimed["item"]["id"] == second["id"]
+    assert claimed["index"] == 1
+    assert [item["id"] for item in session_queue.list_queue("sid-claim")] == [first["id"]]
+
+    session_queue.restore_claim("sid-claim", claimed)
+    assert [item["id"] for item in session_queue.list_queue("sid-claim")] == [
+        first["id"],
+        second["id"],
+    ]
+
+
+def test_queue_claim_by_id_is_atomic_under_concurrency(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue("sid-concurrent-claim", {"text": "claim once"})
+    barrier = threading.Barrier(3)
+    claims = []
+
+    def claim_selected():
+        barrier.wait()
+        claims.append(session_queue.claim_item("sid-concurrent-claim", item["id"]))
+
+    workers = [threading.Thread(target=claim_selected) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert sum(claim is not None for claim in claims) == 1
+    assert session_queue.list_queue("sid-concurrent-claim") == []
 
 
 def test_existing_session_load_syncs_backend_queue():

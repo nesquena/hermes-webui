@@ -13396,6 +13396,13 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/stream":
         return _handle_clarify_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/session/queue/steer-capability":
+        return j(
+            handler,
+            {"ok": True, "queue_item_steer": True, "protocol": 1},
+            extra_headers={"Cache-Control": "no-store"},
+        )
+
     if parsed.path == "/api/session/queue":
         query = parse_qs(parsed.query)
         sid = query.get("session_id", [""])[0]

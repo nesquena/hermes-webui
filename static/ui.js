@@ -342,6 +342,85 @@ function shiftQueuedSessionMessage(sid){
   return next;
 }
 function _serverEntryOwnedOrPending(entry){return !!(entry&&(entry._server_owned||entry._server_pending));}
+function _queuedEntryKey(entry){
+  if(!entry)return'';
+  if(entry._server_queue_id)return'server:'+entry._server_queue_id;
+  if(entry._client_queue_id)return'client:'+entry._client_queue_id;
+  return'time:'+String(entry._queued_at||'')+':'+String(entry.text||entry.message||entry.content||'');
+}
+let _queueSteerCapability=null;
+let _queueSteerCapabilityPromise=null;
+async function _ensureQueueSteerCapability(){
+  if(_queueSteerCapability===true||_queueSteerCapability===false)return _queueSteerCapability;
+  if(_queueSteerCapabilityPromise)return _queueSteerCapabilityPromise;
+  _queueSteerCapabilityPromise=fetch(new URL('api/session/queue/steer-capability',document.baseURI||location.href).href,{credentials:'include',cache:'no-store'})
+    .then(async response=>{
+      if(!response.ok)return false;
+      const data=await response.json().catch(()=>({}));
+      return !!(data&&data.queue_item_steer===true&&Number(data.protocol)>=1);
+    })
+    .catch(()=>false)
+    .then(supported=>{
+      _queueSteerCapability=supported;
+      const sid=S.session&&S.session.session_id;
+      if(sid){delete _queueRenderKeys[sid];updateQueueBadge(sid);}
+      return supported;
+    })
+    .finally(()=>{_queueSteerCapabilityPromise=null;});
+  return _queueSteerCapabilityPromise;
+}
+async function _steerQueuedEntry(sid, entryKey){
+  const q=_getSessionQueue(sid,false);
+  const findIndex=()=>q.findIndex(entry=>_queuedEntryKey(entry)===String(entryKey)||entry&&entry._queued_at===entryKey);
+  let idx=findIndex();
+  if(idx<0)return false;
+  const entry=q[idx];
+  if(entry._server_pending||entry._steer_pending)return false;
+  const currentSid=S.session&&S.session.session_id;
+  const activeStreamId=S.activeStreamId||(S.session&&S.session.active_stream_id);
+  if(!S.busy||!activeStreamId||currentSid!==sid){
+    if(typeof showToast==='function')showToast('Steer is only available while this conversation is running',3200,'warning');
+    return false;
+  }
+  const text=String(entry.text||entry.message||entry.content||'').trim();
+  const files=Array.isArray(entry.files)?entry.files.filter(Boolean):[];
+  if(!text&&!files.length)return false;
+  entry._steer_pending=true;
+  delete _queueRenderKeys[sid];
+  updateQueueBadge(sid);
+  let steerText=text;
+  try{
+    if(files.length&&typeof _steerTextWithPendingFiles==='function'){
+      steerText=await _steerTextWithPendingFiles(text,sid,files);
+    }
+    const response=await fetch(new URL('api/chat/steer',document.baseURI||location.href).href,{
+      method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,text:steerText,queue_item_id:entry._server_queue_id||null}),
+    });
+    const result=await response.json().catch(()=>({accepted:false,fallback:'network_error'}));
+    if(!response.ok||!result||!result.accepted){
+      if(typeof showToast==='function')showToast('Could not steer this queued message; it remains queued',3500,'warning');
+      return false;
+    }
+    idx=findIndex();
+    if(idx>=0)q.splice(idx,1);
+    if(!q.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+    else _persistSessionQueueStorage(sid,q);
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
+    if(typeof _showSteerIndicator==='function')_showSteerIndicator(typeof _steerIndicatorText==='function'?_steerIndicatorText(text,files):text);
+    if(typeof showToast==='function')showToast('Queued message delivered as steer',2500,'success');
+    return true;
+  }catch(_){
+    if(typeof showToast==='function')showToast('Could not steer this queued message; it remains queued',3500,'warning');
+    return false;
+  }finally{
+    idx=findIndex();
+    if(idx>=0&&q[idx])delete q[idx]._steer_pending;
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
+  }
+}
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
 }
@@ -8113,6 +8192,7 @@ function _clearQueueCardDisplay(sid){
 }
 
 function _renderQueueChips(sid){
+  if(_queueSteerCapability===null)_ensureQueueSteerCapability();
   const card=document.getElementById('queueCard');
   const inner=document.getElementById('queueChips');
   if(!card||!inner) return;
@@ -8311,6 +8391,21 @@ function _renderQueueChips(sid){
       badges.appendChild(mb);
     }
     // Profile badge removed — drain cannot server-switch profiles so badge was misleading
+    let steerBtn=null;
+    if(_queueSteerCapability===true){
+      steerBtn=document.createElement('button');
+      steerBtn.className='queue-card-btn queue-card-steer-btn';
+      steerBtn.setAttribute('aria-label','Steer current run with this queued message');
+      steerBtn.setAttribute('draggable','false');
+      steerBtn.title=entry&&entry._server_pending?'Waiting for queue sync':'Steer current run now';
+      steerBtn.disabled=!!(entry&&(entry._server_pending||entry._steer_pending));
+      steerBtn.innerHTML=li('compass',12)+'<span>Steer</span>';
+      steerBtn.onclick=async()=>{
+        steerBtn.disabled=true;
+        await _steerQueuedEntry(sid,_queuedEntryKey(entry));
+        if(document.contains(steerBtn))steerBtn.disabled=!!(entry&&(entry._server_pending||entry._steer_pending));
+      };
+    }
     // Delete button
     const delBtn=document.createElement('button');
     delBtn.className='queue-card-icon-btn';
@@ -8339,6 +8434,7 @@ function _renderQueueChips(sid){
     row.appendChild(drag);
     row.appendChild(msgSpan);
     if(badges.childNodes.length) row.appendChild(badges);
+    if(steerBtn) row.appendChild(steerBtn);
     row.appendChild(delBtn);
     inner.appendChild(row);
   });
