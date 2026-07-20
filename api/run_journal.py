@@ -34,7 +34,7 @@ _SEQ_CACHE_LOCK = threading.Lock()
 # cache is keyed by a complete stat identity, so it is never used after an
 # atomic replacement, append, truncate, or same-path file recreation.
 _SUMMARY_CACHE_MAX_ENTRIES = 128
-_SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], dict]] = OrderedDict()
+_SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
 _SUMMARY_CACHE_LOCK = threading.Lock()
 _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
@@ -80,13 +80,24 @@ def _lock_for(path: Path) -> threading.Lock:
         return lock
 
 
-def _summary_cache_signature(path: Path) -> tuple[int, int, int, int] | None:
-    """Return the complete filesystem identity used for summary-cache validity."""
+def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return the complete filesystem identity used for summary-cache validity.
+
+    Includes ``st_ctime_ns`` so a same-inode, same-size rewrite that restores the
+    original ``mtime_ns`` (e.g. an atomic replace) still invalidates the cache —
+    ctime advances on any metadata/content change and cannot be forged back.
+    """
     try:
         stat = path.stat()
     except OSError:
         return None
-    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
 
 
 def _get_cached_summary(path: Path) -> dict | None:
@@ -110,7 +121,7 @@ def _cache_summary(
     path: Path,
     summary: dict,
     *,
-    expected_signature: tuple[int, int, int, int] | None = None,
+    expected_signature: tuple[int, int, int, int, int] | None = None,
 ) -> None:
     signature = _summary_cache_signature(path)
     # The pre-read signature is an enforced TOCTOU precondition. In particular,
