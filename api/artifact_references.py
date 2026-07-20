@@ -195,9 +195,16 @@ def derive_file_artifact_references(
         raw_paths = _target_paths(name, args)
     references = []
     seen = set()
-    tid = str(tool_call_id or '').strip()
-    if tid and _utf8_size(tid) > _MAX_TOOL_CALL_ID_BYTES:
-        return []
+    tid = None
+    if tool_call_id is not None:
+        if (
+            not isinstance(tool_call_id, str)
+            or not tool_call_id
+            or tool_call_id != tool_call_id.strip()
+            or _utf8_size(tool_call_id) > _MAX_TOOL_CALL_ID_BYTES
+        ):
+            return []
+        tid = tool_call_id
     if not _raw_paths_within_limits(raw_paths):
         return []
     total_path_bytes = 0

@@ -7527,28 +7527,50 @@ def _run_agent_streaming(
     _anchor_artifact_events: list[dict] = []
     _anchor_run_id = [stream_id]
 
-    def _record_anchor_artifact_reference(artifact_reference, event_id=None):
+    def _anchor_artifact_event_from_reference(artifact_reference, event_id=None, *, reserve_event_id=False):
         event_run_id, event_seq = _parse_run_journal_event_id(event_id)
         if event_run_id:
             _anchor_run_id[0] = event_run_id
         if event_seq is None:
             event_seq = len(_anchor_artifact_events) + 1
         active_run_id = event_run_id or _anchor_run_id[0] or stream_id
-        event = anchor_artifact_event_from_payload(
+        anchor_event_id = event_id
+        if reserve_event_id and not anchor_event_id:
+            suffix = f":{event_seq}"
+            anchor_event_id = ("x" * max(0, 512 - len(suffix))) + suffix
+        return anchor_artifact_event_from_payload(
             artifact_reference,
             session_id=session_id,
             run_id=active_run_id,
             stream_id=stream_id,
-            event_id=event_id,
+            event_id=anchor_event_id,
             seq=event_seq,
             created_at=time.time(),
         )
+
+    def _anchor_artifact_reference_within_stream_budget(artifact_reference):
+        event = _anchor_artifact_event_from_reference(
+            artifact_reference,
+            reserve_event_id=True,
+        )
+        if not event:
+            return False
+        bounded = bound_anchor_artifact_events(
+            [*_anchor_artifact_events, event],
+            session_id=session_id,
+            run_id=event.get('run_id') or _anchor_run_id[0] or stream_id,
+            stream_id=stream_id,
+        )
+        return any(item.get('event_id') == event.get('event_id') for item in bounded)
+
+    def _record_anchor_artifact_reference(artifact_reference, event_id=None):
+        event = _anchor_artifact_event_from_reference(artifact_reference, event_id)
         if not event:
             return
         _anchor_artifact_events[:] = bound_anchor_artifact_events(
             [*_anchor_artifact_events, event],
             session_id=session_id,
-            run_id=active_run_id,
+            run_id=event.get('run_id') or _anchor_run_id[0] or stream_id,
             stream_id=stream_id,
         )
 
@@ -8359,6 +8381,8 @@ def _run_agent_streaming(
                             s.workspace,
                         )
                         for artifact_reference in artifact_references:
+                            if not _anchor_artifact_reference_within_stream_budget(artifact_reference):
+                                break
                             artifact_event_id = put('artifact_reference', artifact_reference)
                             _record_anchor_artifact_reference(artifact_reference, artifact_event_id)
                     except Exception:
@@ -8470,6 +8494,8 @@ def _run_agent_streaming(
                                 tool_call_id=tool_call_id,
                             )
                             for artifact_reference in artifact_references:
+                                if not _anchor_artifact_reference_within_stream_budget(artifact_reference):
+                                    break
                                 artifact_event_id = put('artifact_reference', artifact_reference)
                                 _record_anchor_artifact_reference(artifact_reference, artifact_event_id)
                         except Exception:

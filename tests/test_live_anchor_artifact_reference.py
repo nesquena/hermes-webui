@@ -177,6 +177,19 @@ def test_artifact_derivation_limits_fail_closed_on_overflow(tmp_path):
         workspace,
         tool_call_id="t" * 257,
     ) == []
+    for bad_tool_call_id in (
+        " call-ok",
+        "call-ok ",
+        (" " * 300_000) + "call-ok",
+        123,
+    ):
+        assert derive_file_artifact_references(
+            "write_file",
+            {"path": str(workspace / "tool-id.md")},
+            json.dumps({"bytes_written": 1, "resolved_path": str(workspace / "tool-id.md")}),
+            workspace,
+            tool_call_id=bad_tool_call_id,
+        ) == []
 
     patch = "\n".join(
         ["*** Begin Patch"]
@@ -901,11 +914,14 @@ def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_pat
         def interrupt(self, _message):
             return None
 
+    journaled_events = []
+
     class DurableRunJournal:
         def __init__(self):
             self.seq = 0
 
-        def append_sse_event(self, _event, _data):
+        def append_sse_event(self, event, data):
+            journaled_events.append((event, data))
             self.seq += 1
             return {"event_id": f"run-many-artifacts:{self.seq}"}
 
@@ -921,7 +937,9 @@ def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_pat
     monkeypatch.setattr(streaming, "unregister_active_run", lambda *args, **kwargs: None)
     monkeypatch.setattr(streaming, "unregister_stream_owner", lambda *args, **kwargs: None)
 
-    streaming.STREAMS[stream_id] = queue.Queue()
+    event_queue = queue.Queue()
+    queued_items = []
+    streaming.STREAMS[stream_id] = event_queue
     try:
         streaming._run_agent_streaming(
             session_id=session.session_id,
@@ -930,6 +948,7 @@ def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_pat
             workspace=str(workspace),
             stream_id=stream_id,
         )
+        queued_items = list(event_queue.queue)
     finally:
         streaming.STREAMS.pop(stream_id, None)
 
@@ -947,6 +966,12 @@ def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_pat
     assert 0 < len(artifacts) <= MAX_ANCHOR_ARTIFACT_REFERENCES
     assert len(artifacts) < 96
     assert len(encoded) <= MAX_ANCHOR_ARTIFACT_BYTES
+    journaled_artifacts = [event for event, _data in journaled_events if event == "artifact_reference"]
+    queued_artifacts = [item for item in queued_items if item and item[0] == "artifact_reference"]
+    assert len(journaled_artifacts) == len(artifacts)
+    assert len(queued_artifacts) == len(artifacts)
+    assert len(journaled_artifacts) < 96
+    assert len(queued_artifacts) < 96
     assert artifacts[0]["run_id"] == "run-many-artifacts"
     assert artifacts[0]["stream_id"] == stream_id
     assert artifacts[0]["payload"]["path"] == "reports/000-artifact.md"
