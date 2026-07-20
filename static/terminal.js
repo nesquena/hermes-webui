@@ -18,6 +18,8 @@ const TERMINAL_UI={
   lastAppliedTheme:null,
   lastAppliedFontFamily:null,
   fontFitFrame:null,
+  fontLoadGeneration:0,
+  fontLoadRequest:null,
 };
 
 const TERMINAL_HEIGHT_DEFAULT=260;
@@ -141,7 +143,37 @@ function _scheduleTerminalFontFit(term){
   });
 }
 
-function syncComposerTerminalAppearance(){
+function _watchTerminalFontLoad(term,fontFamily){
+  const request={
+    generation:TERMINAL_UI.fontLoadGeneration+1,
+    term,
+    fontFamily,
+  };
+  TERMINAL_UI.fontLoadGeneration=request.generation;
+  TERMINAL_UI.fontLoadRequest=request;
+  const fontSet=document.fonts;
+  if(!fontSet||typeof fontSet.load!=='function')return;
+  const fontSize=Number(term.options&&term.options.fontSize);
+  const fontShorthand=(Number.isFinite(fontSize)&&fontSize>0?fontSize:13)+'px '+fontFamily;
+  let load;
+  try{
+    load=document.fonts.load(fontShorthand);
+  }catch(_){
+    return;
+  }
+  Promise.resolve(load).then(fontFaces=>{
+    if(!fontFaces||fontFaces.length===0)return;
+    if(TERMINAL_UI.fontLoadRequest!==request
+      ||TERMINAL_UI.fontLoadGeneration!==request.generation
+      ||TERMINAL_UI.term!==term
+      ||!TERMINAL_UI.open
+      ||TERMINAL_UI.collapsed
+      ||TERMINAL_UI.lastAppliedFontFamily!==fontFamily)return;
+    _scheduleTerminalFontFit(term);
+  },()=>{});
+}
+
+function syncComposerTerminalAppearance(forceFontLoad=false){
   if(!TERMINAL_UI.term)return;
   const term=TERMINAL_UI.term;
   const theme=_terminalTheme();
@@ -150,10 +182,14 @@ function syncComposerTerminalAppearance(){
     term.options.theme=theme;
     TERMINAL_UI.lastAppliedTheme={...theme};
   }
-  if(TERMINAL_UI.lastAppliedFontFamily!==fontFamily){
+  const fontFamilyChanged=TERMINAL_UI.lastAppliedFontFamily!==fontFamily;
+  if(fontFamilyChanged){
     term.options.fontFamily=fontFamily;
     TERMINAL_UI.lastAppliedFontFamily=fontFamily;
     _scheduleTerminalFontFit(term);
+  }
+  if(fontFamilyChanged||forceFontLoad){
+    _watchTerminalFontLoad(term,fontFamily);
   }
 }
 
@@ -206,6 +242,7 @@ function _ensureXterm(){
   TERMINAL_UI.lastAppliedTheme={...theme};
   TERMINAL_UI.lastAppliedFontFamily=fontFamily;
   _fitTerminal();
+  _watchTerminalFontLoad(term,fontFamily);
   return term;
 }
 
@@ -614,6 +651,8 @@ function expandComposerTerminal(opts){
 }
 
 function _disposeXterm(){
+  TERMINAL_UI.fontLoadGeneration+=1;
+  TERMINAL_UI.fontLoadRequest=null;
   if(TERMINAL_UI.fontFitFrame!==null){
     if(typeof cancelAnimationFrame==='function')cancelAnimationFrame(TERMINAL_UI.fontFitFrame);
     TERMINAL_UI.fontFitFrame=null;
@@ -745,7 +784,7 @@ window.addEventListener('resize',()=>{
 });
 
 if(window.MutationObserver){
-  new MutationObserver(syncComposerTerminalAppearance).observe(document.documentElement,{
+  new MutationObserver(()=>syncComposerTerminalAppearance()).observe(document.documentElement,{
     attributes:true,
     attributeFilter:['class','data-skin','style'],
   });
@@ -759,10 +798,10 @@ if(window.MutationObserver){
         ? target.getAttribute('rel')
         : target.rel;
       if(!String(rel||'').toLowerCase().split(/\s+/).includes('stylesheet'))return;
-      syncComposerTerminalAppearance();
+      syncComposerTerminalAppearance(true);
     };
     terminalHead.addEventListener('load',terminalHeadStylesheetLoadListener,true);
-    new MutationObserver(syncComposerTerminalAppearance).observe(terminalHead,{
+    new MutationObserver(()=>syncComposerTerminalAppearance(true)).observe(terminalHead,{
       attributes:true,
       attributeFilter:['href','media','disabled'],
       childList:true,
