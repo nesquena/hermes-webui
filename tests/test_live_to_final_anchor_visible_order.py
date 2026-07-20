@@ -891,7 +891,8 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")
     msg_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
 
-    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, options);" in attach
+    assert "const attachOptions=(typeof options==='object'&&options)?options:{};" in attach
+    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, attachOptions);" in attach
     assert "api('/api/session/anchor-scene'" in persist
     assert "session_id:activeSid" in persist
     assert "stream_id:streamId" in persist
@@ -927,7 +928,7 @@ def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     reasoning_text = _function_body(MESSAGES_JS, "_anchorSceneMessageReasoningText")
 
-    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene,options);" in attach
+    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene,attachOptions);" in attach
     assert "for(let idx=lastAsstIndex-1;idx>=0;idx-=1)" in complete
     assert "messages.slice(turnStart+1,lastAsstIndex+1)" in complete
     assert "message.reasoning||message._reasoning||message.reasoning_content||message.thinking" in reasoning_text
