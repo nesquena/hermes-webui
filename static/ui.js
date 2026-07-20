@@ -16017,8 +16017,15 @@ function renderMessages(options){
       // (lastTextPartIdx === -1, e.g. tool-only turns), the notice
       // was never inserted inside the loop. Stamp it on the first
       // rendered segment so the notice survives even on textless turns.
-      if(lastTextPartIdx === -1 && fallbackNoticeHtml && firstSeg){
-        firstSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+      // If firstSeg is still null (pure tool/structured turn with no
+      // text segments), insert the notice directly into blocks.
+      if(lastTextPartIdx === -1 && fallbackNoticeHtml){
+        if(firstSeg){
+          firstSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+        }else if(blocks.firstChild){
+          // Tool-only turn: prepend notice before the first tool row
+          blocks.firstChild.insertAdjacentHTML('beforebegin', `<div class="assistant-segment fallback-notice-only">${fallbackNoticeHtml}</div>`);
+        }
       }
       assistantSegments.set(rawIdx, firstSeg||null);
       continue;

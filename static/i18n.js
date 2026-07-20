@@ -17366,7 +17366,7 @@ const LOCALES = {
     settings_label_fade_text_effect: 'Effet de fondu du texte',
     settings_desc_fade_text_effect: 'Affiche progressivement les nouveaux mots diffusés pendant que l’assistant répond. Similaire à OpenWebUI ; désactivé par défaut pour des performances maximales.',
     settings_label_fallback_notices: 'Afficher les avis de repli',
-    settings_desc_fallback_notices: 'Affiche un avis persistant dans le chat lorsqu'un repli de modèle se produit, indiquant quel modèle a servi la réponse. Activé par défaut.',
+    settings_desc_fallback_notices: 'Affiche un avis persistant dans le chat lorsqu\u2019un repli de modèle se produit, indiquant quel modèle a servi la réponse. Activé par défaut.',
     settings_label_max_tokens: 'Nombre maximal de jetons en sortie',
     settings_desc_max_tokens: 'Limite la longueur des nouvelles réponses en streaming. Laissez vide pour utiliser la valeur de repli du profil actif.',
     settings_placeholder_max_tokens_none: 'Aucune surcharge',
