@@ -38,6 +38,7 @@ _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS = {
     'run_id': 512,
     'stream_id': 512,
 }
+_INVALID_OWNER_CLAIM = object()
 
 
 def _utf8_size(value: str) -> int:
@@ -348,11 +349,18 @@ def _artifact_dedupe_key(event: dict) -> tuple:
     )
 
 
-def _anchor_owner_claim(raw: dict, identity: dict, key: str) -> tuple[str | None, str | None]:
+def _owner_claim_value(container: dict, key: str):
     limit = _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS.get(key, 512)
+    if not isinstance(container, dict) or key not in container or container.get(key) is None:
+        return None
+    value = _bounded_clean_string(container.get(key), limit)
+    return value if value else _INVALID_OWNER_CLAIM
+
+
+def _anchor_owner_claim(raw: dict, identity: dict, key: str):
     return (
-        _bounded_clean_string(raw.get(key), limit),
-        _bounded_clean_string(identity.get(key), limit),
+        _owner_claim_value(raw, key),
+        _owner_claim_value(identity, key),
     )
 
 
@@ -381,12 +389,16 @@ def anchor_artifact_owner_mismatch(
         _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS['stream_id'],
     )
     raw_session_id, identity_session_id = _anchor_owner_claim(raw, identity, 'session_id')
+    if raw_session_id is _INVALID_OWNER_CLAIM or identity_session_id is _INVALID_OWNER_CLAIM:
+        return 'session_id'
     if raw_session_id and identity_session_id and raw_session_id != identity_session_id:
         return 'session_id'
     explicit_session_id = raw_session_id or identity_session_id
     if explicit_session_id and expected_session_id and explicit_session_id != expected_session_id:
         return 'session_id'
     raw_run_id, identity_run_id = _anchor_owner_claim(raw, identity, 'run_id')
+    if raw_run_id is _INVALID_OWNER_CLAIM or identity_run_id is _INVALID_OWNER_CLAIM:
+        return 'run_id'
     if raw_run_id and identity_run_id and raw_run_id != identity_run_id:
         return 'run_id'
     explicit_run_id = raw_run_id or identity_run_id
@@ -395,6 +407,8 @@ def anchor_artifact_owner_mismatch(
     if explicit_run_id and expected_run_id and explicit_run_id != expected_run_id:
         return 'run_id'
     raw_stream_id, identity_stream_id = _anchor_owner_claim(raw, identity, 'stream_id')
+    if raw_stream_id is _INVALID_OWNER_CLAIM or identity_stream_id is _INVALID_OWNER_CLAIM:
+        return 'stream_id'
     if raw_stream_id and identity_stream_id and raw_stream_id != identity_stream_id:
         return 'stream_id'
     explicit_stream_id = raw_stream_id or identity_stream_id
@@ -428,16 +442,18 @@ def anchor_activity_scene_owner_mismatch(
     if not isinstance(scene, dict):
         return None
     identity = scene.get('identity') if isinstance(scene.get('identity'), dict) else {}
+    artifacts = scene.get('artifacts') if isinstance(scene.get('artifacts'), list) else []
     if identity:
         mismatch = anchor_artifact_owner_mismatch(
             {'identity': identity},
             session_id=session_id,
             run_id=run_id,
             stream_id=stream_id,
+            require_owner_authority=require_artifact_owner_authority and bool(artifacts),
         )
         if mismatch:
             return f'identity.{mismatch}'
-    for raw in scene.get('artifacts') if isinstance(scene.get('artifacts'), list) else []:
+    for raw in artifacts:
         mismatch = anchor_artifact_owner_mismatch(
             raw,
             session_id=session_id,

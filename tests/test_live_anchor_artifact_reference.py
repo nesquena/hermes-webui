@@ -783,12 +783,20 @@ def test_returned_apperror_settles_tool_artifact_before_terminal_save(tmp_path, 
         def interrupt(self, _message):
             return None
 
+    class DurableRunJournal:
+        def __init__(self):
+            self.seq = 0
+
+        def append_sse_event(self, _event, _data):
+            self.seq += 1
+            return {"event_id": f"run-returned-error:{self.seq}"}
+
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: ReturnedErrorAgent)
     monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
     monkeypatch.setattr(streaming, "get_config", lambda: {})
     monkeypatch.setattr(config, "get_config", lambda: {})
     monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
-    monkeypatch.setattr(streaming, "RunJournalWriter", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "RunJournalWriter", lambda *args, **kwargs: DurableRunJournal())
     monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *args, **kwargs: None)
     monkeypatch.setattr(streaming, "register_active_run", lambda *args, **kwargs: None)
     monkeypatch.setattr(streaming, "update_active_run", lambda *args, **kwargs: None)
@@ -810,10 +818,16 @@ def test_returned_apperror_settles_tool_artifact_before_terminal_save(tmp_path, 
     raw = json.loads((session_dir / "artifact-returned-error.json").read_text(encoding="utf-8"))
     assert raw["messages"][-1]["_error"] is True
     assert raw["messages"][-1]["_anchor_stream_id"] == stream_id
+    assert raw["messages"][-1]["_anchor_run_id"] == "run-returned-error"
     record = next(iter(raw["anchor_activity_scenes"].values()))
     assert record["message_index"] == len(raw["messages"]) - 1
+    assert record["run_id"] == "run-returned-error"
     assert record["stream_id"] == stream_id
+    assert record["scene"]["identity"]["run_id"] == "run-returned-error"
+    assert record["scene"]["identity"]["stream_id"] == stream_id
     assert record["scene"]["terminal_state"] == "error"
+    assert record["scene"]["artifacts"][0]["run_id"] == "run-returned-error"
+    assert record["scene"]["artifacts"][0]["stream_id"] == stream_id
     assert record["scene"]["artifacts"][0]["payload"]["path"] == "reports/returned-error.md"
 
 
@@ -887,12 +901,20 @@ def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_pat
         def interrupt(self, _message):
             return None
 
+    class DurableRunJournal:
+        def __init__(self):
+            self.seq = 0
+
+        def append_sse_event(self, _event, _data):
+            self.seq += 1
+            return {"event_id": f"run-many-artifacts:{self.seq}"}
+
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: ManyArtifactsAgent)
     monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
     monkeypatch.setattr(streaming, "get_config", lambda: {})
     monkeypatch.setattr(config, "get_config", lambda: {})
     monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
-    monkeypatch.setattr(streaming, "RunJournalWriter", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "RunJournalWriter", lambda *args, **kwargs: DurableRunJournal())
     monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *args, **kwargs: None)
     monkeypatch.setattr(streaming, "register_active_run", lambda *args, **kwargs: None)
     monkeypatch.setattr(streaming, "update_active_run", lambda *args, **kwargs: None)
@@ -916,8 +938,16 @@ def test_repeated_tool_complete_ingress_persists_bounded_artifact_prefix(tmp_pat
     artifacts = record["scene"]["artifacts"]
     encoded = json.dumps(artifacts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
+    assert raw["messages"][-1]["_anchor_run_id"] == "run-many-artifacts"
+    assert raw["messages"][-1]["_anchor_stream_id"] == stream_id
+    assert record["run_id"] == "run-many-artifacts"
+    assert record["stream_id"] == stream_id
+    assert record["scene"]["identity"]["run_id"] == "run-many-artifacts"
+    assert record["scene"]["identity"]["stream_id"] == stream_id
     assert 0 < len(artifacts) <= MAX_ANCHOR_ARTIFACT_REFERENCES
     assert len(artifacts) < 96
     assert len(encoded) <= MAX_ANCHOR_ARTIFACT_BYTES
+    assert artifacts[0]["run_id"] == "run-many-artifacts"
+    assert artifacts[0]["stream_id"] == stream_id
     assert artifacts[0]["payload"]["path"] == "reports/000-artifact.md"
     assert artifacts[-1]["payload"]["path"] < "reports/096-artifact.md"

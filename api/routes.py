@@ -5009,15 +5009,26 @@ def _handle_session_anchor_scene(handler, body):
         existing_record = records.get(key) if isinstance(records.get(key), dict) else {}
         existing_scene = existing_record.get("scene") if isinstance(existing_record.get("scene"), dict) else {}
         existing_identity = existing_scene.get("identity") if isinstance(existing_scene.get("identity"), dict) else {}
+        existing_authoritative = str(existing_record.get("owner_authority") or "") == "server"
+        raw_artifacts = raw_scene.get("artifacts") if isinstance(raw_scene, dict) else None
+        incoming_has_artifacts = isinstance(raw_artifacts, list) and bool(raw_artifacts)
         request_stream_id = str(body.get("stream_id") or "").strip()
         message_stream_id = str(message.get("_anchor_stream_id") or "").strip() if isinstance(message, dict) else ""
         message_run_id = str(message.get("_anchor_run_id") or "").strip() if isinstance(message, dict) else ""
-        existing_stream_id = str(
-            existing_identity.get("stream_id") or existing_record.get("stream_id") or ""
-        ).strip()
-        existing_run_id = str(existing_identity.get("run_id") or existing_record.get("run_id") or "").strip()
+        existing_stream_id = (
+            str(existing_identity.get("stream_id") or existing_record.get("stream_id") or "").strip()
+            if existing_authoritative
+            else ""
+        )
+        existing_run_id = (
+            str(existing_identity.get("run_id") or existing_record.get("run_id") or "").strip()
+            if existing_authoritative
+            else ""
+        )
         trusted_stream_id = message_stream_id or existing_stream_id
         trusted_run_id = message_run_id or existing_run_id or (trusted_stream_id if trusted_stream_id else "")
+        if incoming_has_artifacts and (not trusted_run_id or not trusted_stream_id):
+            return bad(handler, "scene artifacts require server-owned stream identity", 400)
         stream_id = trusted_stream_id or request_stream_id
         run_id = trusted_run_id or (stream_id if stream_id else "")
         if trusted_stream_id and request_stream_id and trusted_stream_id != request_stream_id:
@@ -5041,7 +5052,7 @@ def _handle_session_anchor_scene(handler, body):
             scene = _sanitize_anchor_activity_scene(scene)
         except ValueError as exc:
             return bad(handler, str(exc), 400)
-        records[ref or f"index:{idx}"] = {
+        record = {
             "version": "anchor_activity_scene_record_v1",
             "message_index": idx,
             "message_ref": ref,
@@ -5050,6 +5061,9 @@ def _handle_session_anchor_scene(handler, body):
             "scene": scene,
             "updated_at": time.time(),
         }
+        if trusted_run_id and trusted_stream_id:
+            record["owner_authority"] = "server"
+        records[ref or f"index:{idx}"] = record
         if len(records) > 256:
             ordered = sorted(
                 records.items(),
