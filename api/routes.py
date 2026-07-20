@@ -1867,6 +1867,7 @@ _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
+_session_list_cache_get_with_reason = _route_session_list_cache._session_list_cache_get_with_reason
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -2175,31 +2176,6 @@ def _build_session_list_cache_payload(
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
 
-    def _session_has_server_visible_messages(session: dict) -> bool:
-        """Return True when a non-active sidebar row has a visibility signal.
-
-        Keep this mirror of the non-active server filter narrow and local to
-        route behavior so model-layer behavior remains unchanged.
-        """
-        if not isinstance(session, dict):
-            return False
-        if _numeric_count(session.get("message_count")) > 0:
-            return True
-
-        attention = session.get("attention")
-        if not (isinstance(attention, dict) and attention.get("kind")):
-            attention = _session_attention_summary(str(session.get("session_id") or ""))
-        if isinstance(attention, dict) and attention.get("kind"):
-            if _numeric_count(attention.get("count")) > 0:
-                return True
-
-        return bool(
-            session.get("is_streaming")
-            or session.get("active_stream_id")
-            or session.get("pending_user_message")
-            or session.get("has_pending_user_message")
-        )
-
     def _all_sessions_for_sidebar():
         if _callable_accepts_kwarg(all_sessions, "include_lineage_metadata"):
             return all_sessions(diag=diag, include_lineage_metadata=False)
@@ -2422,11 +2398,23 @@ def _build_session_list_cache_payload(
         archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
         visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
     if visible_only:
+        scope_args = {
+            "active_profile": active_profile,
+            "all_profiles": all_profiles,
+            "show_cli_sessions": show_cli_sessions,
+            "show_claude_code_sessions": show_claude_code_sessions,
+            "show_cron_sessions": show_cron_sessions,
+            "show_webhook_sessions": show_webhook_sessions,
+            "visible_only": True,
+            "exclude_hidden": exclude_hidden,
+            "source_filter": source_filter,
+            "sidebar_source": sidebar_source or "webui",
+        }
         archived_scoped = [
-            s for s in archived_scoped if _session_has_server_visible_messages(s)
+            s for s in archived_scoped if _sidebar_row_matches_scope(s, **scope_args)
         ]
         visible_scoped = [
-            s for s in visible_scoped if _session_has_server_visible_messages(s)
+            s for s in visible_scoped if _sidebar_row_matches_scope(s, **scope_args)
         ]
     if exclude_hidden:
         archived_scoped = [s for s in archived_scoped if not s.get("default_hidden")]
@@ -2648,7 +2636,10 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
+    cached, is_fresh, stale_reason = _session_list_cache_get_with_reason(
+        key,
+        allow_stale=True,
+    )
     if cached is not None and is_fresh:
         if diag is not None:
             try:
@@ -2658,7 +2649,6 @@ def _get_cached_session_list_payload(
         return cached
 
     stale = cached  # now actually a stale payload when one exists, else None
-    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
     if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
@@ -9084,6 +9074,87 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
     return normalized
 
 
+def _session_has_server_visible_messages(session: dict) -> bool:
+    if not isinstance(session, dict):
+        return False
+    if _numeric_count(session.get("message_count")) > 0:
+        return True
+    attention = session.get("attention")
+    if not (isinstance(attention, dict) and attention.get("kind")):
+        attention = _session_attention_summary(str(session.get("session_id") or ""))
+    if isinstance(attention, dict) and _numeric_count(attention.get("count")) > 0:
+        return True
+    return bool(
+        session.get("is_streaming")
+        or session.get("active_stream_id")
+        or session.get("pending_user_message")
+        or session.get("has_pending_user_message")
+    )
+
+
+def _sidebar_row_matches_scope(
+    row: dict,
+    *,
+    active_profile: str,
+    all_profiles: bool,
+    show_cli_sessions: bool,
+    show_claude_code_sessions: bool,
+    show_cron_sessions: bool,
+    show_webhook_sessions: bool,
+    visible_only: bool,
+    exclude_hidden: bool,
+    source_filter: str | None,
+    sidebar_source: str,
+    project_id=None,
+) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not all_profiles and not _profiles_match(row.get("profile"), active_profile):
+        return False
+    normalized = _normalize_sidebar_source_flags(row)
+    source_values = {
+        _normalized_source_marker(normalized.get(key))
+        for key in ("source", "source_tag", "raw_source", "session_source", "source_label")
+    }
+    is_cli = _is_cli_session_for_settings(normalized)
+    if is_cli and not show_cli_sessions:
+        return False
+    if not show_claude_code_sessions and "claude_code" in source_values:
+        return False
+    if source_filter:
+        requested = _normalized_source_marker(source_filter)
+        if requested == "claude_code":
+            requested = "claude_code"
+        if is_cli and requested not in source_values:
+            return False
+    if sidebar_source == "webui" and is_cli or sidebar_source == "cli" and not is_cli:
+        return False
+    if not is_cli or is_cli_session_row_visible(normalized):
+        pass
+    else:
+        return False
+    if _hide_from_default_sidebar(
+        normalized,
+        show_cron=show_cron_sessions,
+        show_webhook=show_webhook_sessions,
+    ) and not (
+        normalized.get("project_id")
+        and _numeric_count(normalized.get("message_count")) > 0
+    ):
+        return False
+    if visible_only and not _session_has_server_visible_messages(normalized):
+        return False
+    if exclude_hidden and normalized.get("default_hidden"):
+        return False
+    if project_id is not None:
+        if project_id == "__none__":
+            if normalized.get("project_id"):
+                return False
+        elif normalized.get("project_id") != project_id:
+            return False
+    return True
+
+
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
     """Return a /api/session payload whose source flags match state.db truth.
 
@@ -11495,7 +11566,11 @@ def _active_run_visibility_snapshot(
     show_cron_sessions = bool(settings.get("show_cron_sessions"))
     show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
     agent_session_source_filter = settings.get("agent_session_source_filter")
+    candidates = sorted(
+        visible.items(), key=lambda pair: (pair[1]["started_at"], pair[0])
+    )[:100]
     scoped_session_ids = None
+    cache_requires_metadata = True
     key = _session_list_cache_key(
         active_profile=active_profile,
         all_profiles=all_profiles,
@@ -11510,8 +11585,12 @@ def _active_run_visibility_snapshot(
         source_filter=agent_session_source_filter,
         sidebar_source=source,
     )
-    cached_payload, _is_fresh = _session_list_cache_get(key, allow_stale=True)
-    if isinstance(cached_payload, dict):
+    cached_payload, _is_fresh, stale_reason = _session_list_cache_get_with_reason(
+        key,
+        allow_stale=True,
+    )
+    if isinstance(cached_payload, dict) and stale_reason != "source":
+        cache_requires_metadata = False
         scoped_session_ids = set()
         for session in (cached_payload.get("sessions") or []):
             if not isinstance(session, dict):
@@ -11527,8 +11606,52 @@ def _active_run_visibility_snapshot(
                     continue
             scoped_session_ids.add(sid)
 
+    metadata_visible_ids = None
+    if cache_requires_metadata:
+        metadata_rows = []
+        for sid, _item in candidates:
+            session = get_session(sid, metadata_only=True)
+            if session is None:
+                continue
+            row = {
+                field: _session_field(session, field)
+                for field in (
+                    "session_id", "profile", "project_id", "source", "source_tag",
+                    "raw_source", "session_source", "source_label", "is_cli_session",
+                    "message_count", "actual_message_count", "user_message_count",
+                    "actual_user_message_count", "ended_at", "end_reason",
+                    "default_hidden", "pre_compression_snapshot", "_show_pre_compression_snapshot",
+                    "active_stream_id", "pending_user_message", "has_pending_user_message",
+                    "is_streaming", "attention",
+                )
+            }
+            row["session_id"] = row.get("session_id") or sid
+            metadata_rows.append(row)
+        metadata_rows = _keep_latest_messaging_session_per_source(
+            metadata_rows,
+            show_previous_messaging_sessions=show_previous_messaging_sessions,
+        )
+        metadata_visible_ids = {
+            str(row.get("session_id") or "")
+            for row in metadata_rows
+            if _sidebar_row_matches_scope(
+                row,
+                active_profile=active_profile,
+                all_profiles=all_profiles,
+                show_cli_sessions=show_cli_sessions,
+                show_claude_code_sessions=show_claude_code_sessions,
+                show_cron_sessions=show_cron_sessions,
+                show_webhook_sessions=show_webhook_sessions,
+                visible_only=True,
+                exclude_hidden=exclude_hidden,
+                source_filter=agent_session_source_filter,
+                sidebar_source=source,
+                project_id=project_id,
+            )
+        }
+
     runs = []
-    for sid, item in sorted(visible.items(), key=lambda pair: (pair[1]["started_at"], pair[0])):
+    for sid, item in candidates:
         if scoped_session_ids is not None:
             if sid not in scoped_session_ids:
                 continue
@@ -11536,27 +11659,8 @@ def _active_run_visibility_snapshot(
             if len(runs) >= 100:
                 break
             continue
-        session = get_session(sid, metadata_only=True)
-        if session is None:
-            continue
-        try:
-            normalized = _normalize_sidebar_source_flags(session.compact())
-        except Exception:
-            continue
-        if not all_profiles and not _profiles_match(normalized.get("profile"), active_profile):
-            continue
-        is_cli = _is_cli_session_for_settings(normalized)
-        if source == "webui" and is_cli or source == "cli" and not is_cli:
-            continue
-        if project_id is not None:
-            if project_id == "__none__":
-                if normalized.get("project_id"):
-                    continue
-            elif normalized.get("project_id") != project_id:
-                continue
-        runs.append(item)
-        if len(runs) >= 100:
-            break
+        if metadata_visible_ids is not None and sid in metadata_visible_ids:
+            runs.append(item)
 
     return {
         "active_runs": len(runs),

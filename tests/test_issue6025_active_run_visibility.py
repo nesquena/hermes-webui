@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static/ui.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static/sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static/panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static/index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static/style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static/i18n.js").read_text(encoding="utf-8")
@@ -102,7 +104,10 @@ def test_activity_ui_uses_sidebar_scope_query_and_stable_tray_nodes():
     assert "t('active_run_open_conversation')" in UI_JS
     assert "t('active_run_visibility_label'" in UI_JS
     assert "activeRunPill" in INDEX_HTML and "activeRunTray" in INDEX_HTML
-    assert 'aria-haspopup="true"' in INDEX_HTML
+    pill_markup = INDEX_HTML[INDEX_HTML.index('id="activeRunPill"'):INDEX_HTML.index('id="activeRunPill"') + 220]
+    assert 'aria-haspopup="true"' not in pill_markup
+    assert 'aria-expanded="false"' in INDEX_HTML
+    assert 'aria-controls="activeRunTray"' in INDEX_HTML
     assert 'role="list"' in INDEX_HTML
     assert ".active-run-visibility" in STYLE_CSS and "-webkit-app-region:no-drag;" in STYLE_CSS
     assert "active_run_visibility_label" in I18N_JS
@@ -280,6 +285,251 @@ main().catch(err => {{
     }
 
 
+def test_active_run_locale_keys_are_present_in_every_locale_block():
+    keys = {
+        "active_run_conversation_fallback",
+        "active_run_open_conversation",
+        "active_run_visibility_label",
+    }
+    blocks = re.findall(r"^  ([\w-]+): \{(.*?)(?=^  [\w-]+: \{|\Z)", I18N_JS, re.MULTILINE | re.DOTALL)
+    assert blocks
+    for locale, block in blocks:
+        assert keys <= set(re.findall(r"^\s+(active_run_[a-z_]+):", block, re.MULTILINE)), locale
+
+
+def test_active_run_delayed_response_cannot_repaint_a_new_scope():
+    source = f"""
+{_extract_js_function(UI_JS, '_activeRunScopeQuery')}
+{_extract_js_function(UI_JS, '_renderActiveRunVisibility')}
+{_extract_js_function(UI_JS, 'refreshActiveRunVisibility')}
+{_extract_js_function(UI_JS, '_invalidateActiveRunVisibilityScope')}
+let _activeRunSnapshot = {{runs: []}};
+let _activeRunSnapshotInflight = null;
+let _activeRunSnapshotRefreshQueued = false;
+let _activeRunSnapshotRequestSeq = 0;
+let _activeRunSnapshotFreshAt = 0;
+const ACTIVE_RUN_SNAPSHOT_STALE_MS = 15000;
+global.$ = () => null;
+global._activeProject = 'old-project';
+global._showAllProfiles = false;
+global._requestedSessionSidebarSource = () => 'webui';
+global._sessionListExcludeHiddenEnabled = () => false;
+const requests = [];
+global.api = (url) => new Promise(resolve => requests.push({{url, resolve}}));
+
+async function main() {{
+  const oldRequest = refreshActiveRunVisibility();
+  _activeProject = 'new-project';
+  _invalidateActiveRunVisibilityScope();
+  requests[0].resolve({{runs: [{{session_id: 'old-run'}}]}});
+  await oldRequest;
+  await Promise.resolve();
+  const newRequest = requests[1];
+  newRequest.resolve({{runs: [{{session_id: 'new-run'}}]}});
+  await newRequest;
+  console.log(JSON.stringify({{
+    requestUrls: requests.map(request => request.url),
+    sessionIds: _activeRunSnapshot.runs.map(run => run.session_id),
+  }}));
+}}
+main().catch(error => {{ console.error(error.stack || error); process.exit(1); }});
+"""
+    assert _run_node(source) == {
+        "requestUrls": [
+            "/api/activity/active-runs?sidebar_source=webui&project_id=old-project",
+            "/api/activity/active-runs?sidebar_source=webui&project_id=new-project",
+        ],
+        "sessionIds": ["new-run"],
+    }
+
+
+def test_active_run_scope_mutators_clear_old_projection_and_queue_latest_scope():
+    source = f"""
+{_extract_js_function(UI_JS, '_activeRunScopeQuery')}
+{_extract_js_function(UI_JS, '_renderActiveRunVisibility')}
+{_extract_js_function(UI_JS, 'refreshActiveRunVisibility')}
+{_extract_js_function(UI_JS, '_invalidateActiveRunVisibilityScope')}
+{_extract_js_function(SESSIONS_JS, '_requestedSessionSidebarSource')}
+{_extract_js_function(SESSIONS_JS, '_sessionListExcludeHiddenEnabled')}
+{_extract_js_function(SESSIONS_JS, '_setActiveProjectFilter')}
+{_extract_js_function(SESSIONS_JS, '_setSessionSourceFilter')}
+{_extract_js_block(SESSIONS_JS, 'async function _handleShowAllProfilesStorageEvent(')}
+{_extract_js_function(PANELS_JS, '_applySavedSettingsUi')}
+const NO_PROJECT_FILTER = '__none__';
+const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
+let _activeRunSnapshot = {{runs: []}};
+let _activeRunSnapshotInflight = null;
+let _activeRunSnapshotRefreshQueued = false;
+let _activeRunSnapshotRequestSeq = 0;
+let _activeRunSnapshotFreshAt = 0;
+const ACTIVE_RUN_SNAPSHOT_STALE_MS = 15000;
+global.window = global;
+global.document = {{documentElement: {{dataset: {{}}}}}};
+global.$ = () => null;
+global.URLSearchParams = URLSearchParams;
+global.localStorage = {{setItem() {{}}, getItem() {{ return null; }}}};
+global._selectedSessions = new Set();
+global._sessionSelectMode = false;
+global._showArchived = false;
+global._activeProject = 'project-1';
+global._showAllProfiles = false;
+global._sessionSourceFilter = 'cli';
+global._showCliSessions = true;
+global._showTokenUsage = false;
+global._showQuotaChip = false;
+global._showConversationOutline = false;
+global._showBusyPlaceholderHint = false;
+global._showTps = false;
+global._fadeTextEffect = false;
+global.renderSessionListFromCache = () => {{}};
+global.renderSessionList = async () => {{}};
+global.refreshSessionList = async () => {{}};
+global._syncChatActivityDisplayModeControl = () => {{}};
+global._syncTransparentEventTimestampsControl = () => {{}};
+global._applyWorkspaceTodosTabVisibility = () => {{}};
+global._applySessionNavigationPrefs = () => {{}};
+global._persistDefaultMessageMode = value => value;
+global._applyStructuredCodeViewSettings = () => {{}};
+global.applyBotName = () => {{}};
+global.setLocale = () => {{}};
+global.applyLocaleToDOM = () => {{}};
+global._ensureComposerControlVisibilityState = () => {{}};
+global._renderComposerControlChips = () => {{}};
+global._renderComposerSituationalControlChips = () => {{}};
+global._applyComposerFooterVisibilitySettings = () => {{}};
+global._applyComposerControlOrder = () => {{}};
+global._setComposerControlOrder = value => value;
+global.startGatewaySSE = () => {{}};
+global.stopGatewaySSE = () => {{}};
+global._syncSettingsMaxTokensPlaceholder = () => {{}};
+global._invalidateComposerReasoningContext = () => {{}};
+global._setSettingsAuthButtonsVisible = () => {{}};
+global.clearMessageRenderCache = () => {{}};
+global.renderMessages = () => {{}};
+global.syncTopbar = () => {{}};
+global._settingsHermesDefaultModelOnOpen = '';
+global._settingsHermesDefaultModelProviderOnOpen = null;
+const requests = [];
+global.api = (url) => {{
+  let resolve;
+  const promise = new Promise(r => {{ resolve = r; }});
+  requests.push({{url, resolve, promise}});
+  return promise;
+}};
+
+async function runMutation(label, mutate) {{
+  requests.length = 0;
+  _activeProject = 'project-1';
+  _showAllProfiles = false;
+  _sessionSourceFilter = 'cli';
+  window._showCliSessions = true;
+  _activeRunSnapshot = {{runs: [{{session_id: 'persisted'}}]}};
+  _activeRunSnapshotFreshAt = 1;
+  _activeRunSnapshotInflight = null;
+  _activeRunSnapshotRefreshQueued = false;
+  _activeRunSnapshotRequestSeq = 0;
+  const oldRequest = refreshActiveRunVisibility();
+  await Promise.resolve();
+  await mutate();
+  const cleared = Array.isArray(_activeRunSnapshot.runs) && _activeRunSnapshot.runs.length === 0;
+  requests[0].resolve({{runs: [{{session_id: 'stale'}}]}});
+  await oldRequest;
+  await Promise.resolve();
+  requests[1].resolve({{runs: [{{session_id: label}}]}});
+  await requests[1].promise;
+  await Promise.resolve();
+  return {{
+    urls: requests.map(request => request.url),
+    cleared,
+    sessionIds: _activeRunSnapshot.runs.map(run => run.session_id),
+  }};
+}}
+
+async function main() {{
+  const results = {{
+    project: await runMutation('project-run', () => _setActiveProjectFilter('project-2')),
+    source: await runMutation('source-run', () => _setSessionSourceFilter('webui')),
+    allProfiles: await runMutation('all-profiles-run', () => _handleShowAllProfilesStorageEvent({{
+      key: 'hermes-show-all-profiles',
+      newValue: 'true',
+    }})),
+    cliSetting: await runMutation('cli-setting-run', () => _applySavedSettingsUi(
+      {{}},
+      {{
+        show_previous_messaging_sessions: false,
+        sound_enabled: false,
+        notifications_enabled: false,
+        whats_new_summary_enabled: false,
+        show_thinking: true,
+        chat_activity_display_mode: null,
+        transparent_stream_event_timestamps: false,
+        terminal_auto_expand_on_output: false,
+        workspace_todos_tab: false,
+        session_jump_buttons: false,
+        default_message_mode: 'steer',
+        session_endless_scroll: false,
+        auto_scroll_follow: true,
+        large_text_paste_as_attachment: true,
+        project_quick_create_buttons: false,
+        bot_name: 'Hermes',
+      }},
+      {{
+        sendKey: 'enter',
+        showTokenUsage: false,
+        showQuotaChip: false,
+        showConversationOutline: false,
+        showBusyPlaceholderHint: false,
+        showTps: false,
+        fadeTextEffect: false,
+        showCliSessions: false,
+        theme: 'dark',
+        skin: 'default',
+        language: 'en',
+        sidebarDensity: 'compact',
+        fontSize: '14',
+      }},
+    )),
+  }};
+  console.log(JSON.stringify(results));
+}}
+main().catch(error => {{ console.error(error.stack || error); process.exit(1); }});
+"""
+    assert _run_node(source) == {
+        "project": {
+            "urls": [
+                "/api/activity/active-runs?sidebar_source=cli&project_id=project-1",
+                "/api/activity/active-runs?sidebar_source=cli&project_id=project-2",
+            ],
+            "cleared": True,
+            "sessionIds": ["project-run"],
+        },
+        "source": {
+            "urls": [
+                "/api/activity/active-runs?sidebar_source=cli&project_id=project-1",
+                "/api/activity/active-runs?sidebar_source=webui&exclude_hidden=1",
+            ],
+            "cleared": True,
+            "sessionIds": ["source-run"],
+        },
+        "allProfiles": {
+            "urls": [
+                "/api/activity/active-runs?sidebar_source=cli&project_id=project-1",
+                "/api/activity/active-runs?sidebar_source=cli&project_id=project-1&all_profiles=1",
+            ],
+            "cleared": True,
+            "sessionIds": ["all-profiles-run"],
+        },
+        "cliSetting": {
+            "urls": [
+                "/api/activity/active-runs?sidebar_source=cli&project_id=project-1",
+                "/api/activity/active-runs?sidebar_source=webui&project_id=project-1",
+            ],
+            "cleared": True,
+            "sessionIds": ["cli-setting-run"],
+        },
+    }
+
+
 def test_active_run_visibility_document_handlers_close_tray_on_outside_click_and_escape():
     source = f"""
 {_extract_js_function(UI_JS, '_hideActiveRunTray')}
@@ -363,6 +613,12 @@ async function main() {{
   for (const handler of documentListeners.keydown || []) {{
     handler({{key: 'Escape'}});
   }}
+  const focusRestoredAfterEscape = elements.activeRunPill.focused === true;
+
+  elements.activeRunPill.focused = false;
+  for (const handler of documentListeners.keydown || []) {{
+    handler({{key: 'Escape'}});
+  }}
 
   console.log(JSON.stringify({{
     refreshCalls,
@@ -370,7 +626,8 @@ async function main() {{
     trayHiddenAfterOutside,
     expandedAfterOutside,
     trayHiddenAfterEscape: elements.activeRunTray.hidden,
-    focusRestoredAfterEscape: elements.activeRunPill.focused === true,
+    focusRestoredAfterEscape,
+    focusPreservedWhenAlreadyClosed: elements.activeRunPill.focused === false,
   }}));
 }}
 
@@ -386,7 +643,17 @@ main().catch(err => {{
         "expandedAfterOutside": "false",
         "trayHiddenAfterEscape": True,
         "focusRestoredAfterEscape": True,
+        "focusPreservedWhenAlreadyClosed": True,
     }
+
+
+def test_active_run_profile_and_source_coercion_paths_call_scope_invalidator():
+    switch_profile_for_load = _extract_js_function(SESSIONS_JS, "_switchProfileForSessionLoad")
+    switch_to_profile = _extract_js_function(PANELS_JS, "switchToProfile")
+    assert "_invalidateActiveRunVisibilityScope()" in switch_profile_for_load
+    assert "_invalidateActiveRunVisibilityScope()" in switch_to_profile
+    assert "if(_sessionSourceFilter==='cli'){" in SESSIONS_JS
+    assert "if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();" in SESSIONS_JS
 
 
 def test_active_run_lights_only_existing_sidebar_ring():

@@ -13773,6 +13773,9 @@ const LOCALES = {
   },
 
   pt: {
+    active_run_conversation_fallback: 'Conversa ativa',
+    active_run_open_conversation: 'Abrir conversa',
+    active_run_visibility_label: (count, duration) => `${count} ativas · ${duration}`,
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',

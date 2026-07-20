@@ -10621,11 +10621,13 @@ function _hideActiveRunTray(opts={}) {
   const pill = $('activeRunPill');
   const tray = $('activeRunTray');
   if (!pill || !tray) return;
+  const wasOpen = !tray.hidden;
   tray.hidden = true;
   pill.setAttribute('aria-expanded', 'false');
-  if (opts && opts.restoreFocus && typeof pill.focus === 'function') {
+  if (wasOpen && opts && opts.restoreFocus && typeof pill.focus === 'function') {
     try { pill.focus(); } catch (_e) {}
   }
+  return wasOpen;
 }
 
 function _syncActiveRunTray(runs) {
@@ -10699,15 +10701,16 @@ async function refreshActiveRunVisibility() {
     return _activeRunSnapshotInflight;
   }
   const requestSeq = ++_activeRunSnapshotRequestSeq;
+  const scopeQuery = _activeRunScopeQuery();
   _activeRunSnapshotInflight = (async () => {
     try {
-      const result = await api(`/api/activity/active-runs${_activeRunScopeQuery()}`, {timeoutMs: 10000, timeoutToast: false});
-      if (requestSeq !== _activeRunSnapshotRequestSeq) return;
+      const result = await api(`/api/activity/active-runs${scopeQuery}`, {timeoutMs: 10000, timeoutToast: false});
+      if (requestSeq !== _activeRunSnapshotRequestSeq || scopeQuery !== _activeRunScopeQuery()) return;
       _activeRunSnapshot = result && Array.isArray(result.runs) ? result : {runs: []};
       _activeRunSnapshotFreshAt = Date.now();
       _renderActiveRunVisibility();
     } catch (_e) {
-      if (requestSeq !== _activeRunSnapshotRequestSeq) return;
+      if (requestSeq !== _activeRunSnapshotRequestSeq || scopeQuery !== _activeRunScopeQuery()) return;
       if (_activeRunSnapshotFreshAt && Date.now() - _activeRunSnapshotFreshAt < ACTIVE_RUN_SNAPSHOT_STALE_MS) return;
       _activeRunSnapshot = {runs: []};
       _activeRunSnapshotFreshAt = 0;
@@ -10721,6 +10724,18 @@ async function refreshActiveRunVisibility() {
     }
   })();
   return _activeRunSnapshotInflight;
+}
+
+function _invalidateActiveRunVisibilityScope() {
+  _activeRunSnapshotRequestSeq += 1;
+  _activeRunSnapshot = {runs: []};
+  _activeRunSnapshotFreshAt = 0;
+  _renderActiveRunVisibility();
+  if (_activeRunSnapshotInflight) {
+    _activeRunSnapshotRefreshQueued = true;
+  } else {
+    void refreshActiveRunVisibility();
+  }
 }
 
 function _toggleActiveRunTray() {

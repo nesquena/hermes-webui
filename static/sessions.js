@@ -1493,7 +1493,10 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    if(_sessionSourceFilter==='cli'){
+      _sessionSourceFilter='webui';
+      if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
+    }
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
@@ -1642,6 +1645,7 @@ async function _switchProfileForSessionLoad(profile){
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
+    if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
@@ -2587,6 +2591,7 @@ function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
   if (_activeProject === next) return;
   _activeProject = next;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -2596,6 +2601,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -3904,7 +3910,10 @@ function _restoreShowAllProfiles(){
 }
 
 function _setShowAllProfiles(enabled){
-  _showAllProfiles=!!enabled;
+  const next=!!enabled;
+  if(_showAllProfiles===next) return;
+  _showAllProfiles=next;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   try{ localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY,_showAllProfiles?'1':'0'); }catch(_e){}
 }
 
@@ -7432,6 +7441,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   }
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
+    if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   }
   const showCliOnly=_sessionSourceFilter==='cli';
   const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
@@ -8884,6 +8894,7 @@ async function _handleShowAllProfilesStorageEvent(e){
   const next=e.newValue==='1'||e.newValue==='true';
   if(_showAllProfiles===next) return;
   _showAllProfiles=next;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }
 
@@ -9341,7 +9352,10 @@ async function _confirmDeleteProject(proj){
   if(!ok){return;}
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
-    if(_activeProject===proj.project_id) _activeProject=null;
+    if(_activeProject===proj.project_id) {
+      _activeProject=null;
+      if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
+    }
     await renderSessionList();
     showToast('Project deleted');
   } catch(e) {
