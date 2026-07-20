@@ -15387,7 +15387,7 @@ function _processWakeupCardHtml(info, rawText, extras){
     chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
   }
   const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
-  const outText=info.output!=null?String(info.output).trim():String(rawText||'');
+  const outText=info.output!=null?String(info.output).trim():String(rawText||'').trim();
   const outHtml=outText?`<pre class="process-wakeup-text">${esc(outText)}</pre>`:'';
   const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
   const supHtml=info.suppressed?`<div class="process-wakeup-suppressed">${esc(t('process_wakeup_suppressed',info.suppressed))}</div>`:'';

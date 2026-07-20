@@ -136,6 +136,22 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
+def stamp_message_source(msg: Any, source: Any) -> None:
+    """Stamp ``_source`` and any display metadata on a materialized user turn.
+
+    Single choke point for every path that persists a non-``webui`` user turn
+    (result merges, eager checkpoint, and the pending-turn recovery paths) so a
+    future source-bearing recovery site cannot silently skip the ``_wakeup_meta``
+    stamp — the gap #6350 review flagged in ``_append_recovered_pending_turn``
+    and the cancel outer-finally recovery. ``webui`` turns are left untouched to
+    preserve the existing "``_source`` omitted for the default source" contract.
+    """
+    if not isinstance(msg, dict) or not source or source == "webui":
+        return
+    msg["_source"] = source
+    attach_wakeup_display_meta(msg, source)
+
+
 def _claim_bounded_local(delegation_id: str) -> bool:
     with _LEGACY_ASYNC_DELIVERY_LOCK:
         if delegation_id in _LEGACY_ASYNC_DELIVERY_IDS:
