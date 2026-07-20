@@ -397,26 +397,94 @@ def test_merge_display_backfill_does_not_reintroduce_compression_markers():
     ), "Normal user turn from context should be backfilled"
 
 
-def test_deduplicate_context_messages_adjacent_dup_collapsed_regardless_of_id():
-    """Accidental adjacent duplicates with distinct ids are collapsed (backstop #1).
+def test_deduplicate_context_messages_adjacent_dup_collapsed_same_id():
+    """Accidental adjacent duplicates with the same id are collapsed (backstop #1).
 
-    When two adjacent rows have the same content identity but different minted
-    ids, the adjacent-backstop collapses them. Legitimate #6310 repeats are
-    always separated by interleaved turns, never adjacent.
+    When two adjacent rows have the same content identity AND the same stable
+    id, they are true duplicates and get collapsed. Different ids (even with
+    the same content) represent distinct turns and are preserved to avoid
+    no-assistant-turn errors in hide_all_activity mode.
     """
     from api.streaming import _deduplicate_context_messages
 
     messages = [
         {"role": "assistant", "content": "ok", "id": 100},
-        {"role": "assistant", "content": "ok", "id": 101},  # adjacent duplicate, diff id
+        {"role": "assistant", "content": "ok", "id": 100},  # exact duplicate
         {"role": "user", "content": "next", "id": 102},
     ]
 
     result = _deduplicate_context_messages(messages)
-    # Adjacent duplicate collapsed → only 2 rows
+    # Exact duplicate collapsed → only 2 rows
     assert len(result) == 2
     assert result[0]["id"] == 100
     assert result[1]["id"] == 102
+
+
+def test_deduplicate_context_messages_adjacent_dup_preserved_diff_id():
+    """Adjacent same-content rows with distinct stable ids are preserved.
+
+    In hide_all_activity mode a _partial marker (no id) sits adjacent to the
+    settled final message (has id). The same pattern arises when two distinct
+    turns accidentally share the same text. Backstop 1 must not collapse them.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "ok", "id": 100},
+        {"role": "assistant", "content": "ok", "id": 101},  # diff id → distinct turn
+        {"role": "user", "content": "next", "id": 102},
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    # Distinct ids → both rows kept
+    assert len(result) == 3
+    assert result[0]["id"] == 100
+    assert result[1]["id"] == 101
+    assert result[2]["id"] == 102
+
+
+def test_deduplicate_context_messages_adjacent_dup_collapsed_no_id():
+    """Adjacent same-content rows without stable ids are collapsed (backstop #1).
+
+    Pre-id rows that are genuinely duplicated should still be collapsed.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "ok"},
+        {"role": "assistant", "content": "ok"},  # no id, adjacent dup
+        {"role": "user", "content": "next", "id": 102},
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    # Both lack ids → collapsed
+    assert len(result) == 2
+    assert result[0]["role"] == "assistant"
+    assert result[1]["id"] == 102
+
+
+def test_deduplicate_context_messages_partial_then_settled_preserved():
+    """Adjacent _partial (no id) followed by settled (has id) with same content.
+
+    This is the exact hide_all_activity scenario: a live-stream _partial
+    marker sits adjacent to the final settled message. They have the same
+    content identity but different stable-id status — Backstop 1 must preserve
+    the settled message to avoid no-assistant-turn on switch-away/back.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "Hello", "_partial": True},
+        {"role": "assistant", "content": "Hello", "id": 50},
+        {"role": "user", "content": "next", "id": 102},
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    # Both rows kept (no id vs has id → distinct)
+    assert len(result) == 3
+    assert result[0].get("_partial") is True
+    assert result[1]["id"] == 50
+    assert result[2]["id"] == 102
 
 
 def test_deduplicate_context_messages_idful_then_idless_content_dup_collapsed():

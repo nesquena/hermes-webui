@@ -4668,11 +4668,27 @@ def _deduplicate_context_messages(messages):
             continue
         content_key = _message_identity(msg)
 
-        # Backstop 1: collapse adjacent duplicates regardless of id.
-        # Legitimate #6310 repeats (same text, distinct turns) are always
-        # separated by interleaved turns, never adjacent.
+        # Backstop 1: collapse adjacent content-duplicates only when both
+        # carry the same stable id or both lack one. In hide_all_activity
+        # mode a live-stream _partial marker (no id) sits adjacent to the
+        # settled final message (has id) — they share content identity but
+        # are distinct turns; dropping the final causes no-assistant-turn.
         if deduped and content_key is not None and content_key == _message_identity(deduped[-1]):
-            continue
+            prev_id = deduped[-1].get('id') if isinstance(deduped[-1], dict) else None
+            if isinstance(prev_id, bool):
+                prev_id = None
+            if not isinstance(prev_id, int) or prev_id < 0:
+                prev_id = None
+            cur_id = msg.get('id') if isinstance(msg, dict) else None
+            if isinstance(cur_id, bool):
+                cur_id = None
+            if not isinstance(cur_id, int) or cur_id < 0:
+                cur_id = None
+            if prev_id == cur_id:
+                # Same stable id or both None → genuine duplicate, collapse
+                continue
+            # Different or mismatched ids → distinct turns, fall through to
+            # the primary id-aware key below
 
         # Backstop 2: drop id-less rows whose content identity is already seen.
         # The merge at L8803 joins context_messages + state.db without stable
@@ -8341,7 +8357,7 @@ def _run_agent_streaming(
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
-                        'preview': preview,
+                        'preview': _strip_base64_data_urls(preview) if preview else preview,
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
