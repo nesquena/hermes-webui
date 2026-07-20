@@ -6967,7 +6967,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # metadata-only entries in config.yaml (e.g.
                 # ``openai-api: {name: "OpenAI API"}``) would still render
                 # in the model selector after the API key is removed (#6335).
-                _already_credentialed = _canonical in detected_providers
+                # Resolve provider aliases on both sides so an alias-named
+                # config key (e.g. ``x-ai`` in providers, ``google`` in
+                # config.yaml) matches credential evidence reported under the
+                # agent's canonical alias (``xai``, ``gemini``) (#6338).
+                _already_credentialed = (
+                    _resolve_provider_alias(_canonical) in detected_providers
+                    or _canonical in detected_providers
+                )
                 _admit_as_known = _is_known_provider and _already_credentialed
                 if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
