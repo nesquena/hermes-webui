@@ -245,13 +245,22 @@ extraction under `attachments/`; changing `HERMES_WEBUI_ATTACHMENT_DIR` does not
 move or change private-media authority. A deployment that moves WebUI state must
 move the complete `STATE_DIR` together.
 
-Private-media reads and writes are anchored to opened directory handles, reject
-symlink components, verify extension/MIME, raster magic, and SHA-256, and publish
-only fully synced files. New-session lineage operations clone all referenced
-blobs transactionally before publishing the new session id. Model requests and
-portable exports must hydrate every reference through the strict reader and
-must reject any private URI that remains; plain JSON imports containing private
-URIs are rejected. Legacy files under
+On platforms with `dir_fd` support, private-media reads and writes are anchored
+to opened directory handles and reject symlink components. Native Windows uses
+a capability-selected pathname backend with the same content verification,
+atomic publication, clone rollback, and removal contract. Both backends verify
+extension/MIME, raster magic, and SHA-256 before a reference can be retained.
+`Session.save()` and session deletion share a per-session publication lock:
+save verifies every retained reference immediately before JSON replacement,
+while deletion tombstones publication before removing JSON and media. A stale
+worker therefore cannot recreate a deleted session or publish a dangling ref.
+
+New-session lineage operations clone all referenced blobs transactionally
+before publishing the new session id. Ephemeral `/btw` sessions retire JSON,
+cache, stream ownership, tracking, and private media on success, cancellation,
+or startup failure. Model requests and portable exports must hydrate every
+reference through the strict reader and must reject any private URI that
+remains; plain JSON imports containing private URIs are rejected. Legacy files under
 `attachments/<session_id>/session-media` are verified and migrated into the
 state-owned store on first read. Session deletion removes both upload and
 private-media namespaces.

@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 import secrets
+import shutil
 import stat
 import threading
 from contextlib import contextmanager
@@ -47,6 +48,10 @@ _EXTENSION_MIMES = {
 }
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIR_FD_OK = all(
+    function in getattr(os, "supports_dir_fd", set())
+    for function in (os.open, os.mkdir, os.stat, os.unlink, os.rmdir, os.link)
+)
 _MEDIA_IO_LOCK = threading.RLock()
 
 
@@ -78,6 +83,131 @@ def _attachment_root() -> Path:
 def _session_media_dir(session_id: str) -> Path:
     """Return the state-owned private media path (diagnostics/tests only)."""
     return _state_root() / _PRIVATE_ROOT_NAME / _validated_session_id(session_id)
+
+
+def _ensure_path_directory(session_id: str, *, create: bool) -> tuple[Path, bool]:
+    """Return a safe pathname-backend directory for platforms without dir_fd."""
+    sid = _validated_session_id(session_id)
+    root = _state_root()
+    media_root = root / _PRIVATE_ROOT_NAME
+    session_root = media_root / sid
+    created_session = False
+    for candidate in (media_root, session_root):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise
+            candidate.mkdir(mode=0o700)
+            if candidate == session_root:
+                created_session = True
+            info = candidate.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise SessionMediaIntegrityError("Private media path is not a safe directory")
+        try:
+            candidate.resolve().relative_to(root)
+        except ValueError as exc:
+            raise SessionMediaIntegrityError("Private media path escaped state root") from exc
+    return session_root, created_session
+
+
+def _fsync_path_directory(path: Path) -> None:
+    """Sync a pathname directory where the platform exposes directory handles."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | _O_DIRECTORY)
+    except OSError:
+        # Native Windows cannot open directories this way. File flush+fsync and
+        # atomic replace still provide the strongest available local contract.
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        if os.name != "nt":
+            raise
+    finally:
+        os.close(fd)
+
+
+def _read_and_verify_path(directory: Path, filename: str) -> tuple[str, bytes]:
+    target = directory / filename
+    before = target.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise SessionMediaIntegrityError("Stored session image is not a regular file")
+    with open(target, "rb") as handle:
+        held = os.fstat(handle.fileno())
+        raw = handle.read()
+    after = target.lstat()
+    if (held.st_dev, held.st_ino) != (before.st_dev, before.st_ino) or (
+        held.st_dev,
+        held.st_ino,
+    ) != (after.st_dev, after.st_ino):
+        raise SessionMediaIntegrityError("Stored session image changed during read")
+    return _verify_media_bytes(filename, raw)
+
+
+def _write_media_path(session_id: str, mime: str, raw: bytes, filename: str) -> str:
+    with _MEDIA_IO_LOCK:
+        directory, session_created = _ensure_path_directory(session_id, create=True)
+        target = directory / filename
+        temp = directory / _new_temp_name(filename)
+        published = False
+        try:
+            try:
+                _read_and_verify_path(directory, filename)
+                return _MEDIA_SCHEME + filename
+            except FileNotFoundError:
+                pass
+            except SessionMediaIntegrityError:
+                pass
+            with open(temp, "xb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, target)
+            published = True
+            _fsync_path_directory(directory)
+            _read_and_verify_path(directory, filename)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            if published:
+                target.unlink(missing_ok=True)
+                _fsync_path_directory(directory)
+            if session_created:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise
+        finally:
+            temp.unlink(missing_ok=True)
+    return _MEDIA_SCHEME + filename
+
+
+def _read_verified_media_reference_path(
+    session_id: str,
+    filename: str,
+) -> tuple[str, bytes]:
+    try:
+        directory, _ = _ensure_path_directory(session_id, create=False)
+        return _read_and_verify_path(directory, filename)
+    except FileNotFoundError as private_missing:
+        for legacy_path in _legacy_session_media_dirs(session_id):
+            try:
+                info = legacy_path.lstat()
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    continue
+                mime, raw = _read_and_verify_path(legacy_path, filename)
+                _write_media(session_id, mime, raw)
+                return mime, raw
+            except FileNotFoundError:
+                continue
+        raise SessionMediaIntegrityError(
+            f"Stored session image is missing: {filename}. Restore it or re-attach the image."
+        ) from private_missing
+    except OSError as exc:
+        raise SessionMediaIntegrityError(
+            f"Stored session image could not be read safely: {filename}. Restore it or re-attach the image."
+        ) from exc
 
 
 def _legacy_session_media_dirs(session_id: str) -> list[Path]:
@@ -160,7 +290,6 @@ def _open_private_session(session_id: str, *, create: bool):
         media_fd, _ = _open_child_dir(state_fd, _PRIVATE_ROOT_NAME, create=create)
         session_fd, session_created = _open_child_dir(media_fd, sid, create=create)
         yield state_fd, media_fd, session_fd, session_created
-        _assert_private_handles(state_fd, media_fd, session_fd, sid)
     finally:
         for fd in (session_fd, media_fd, state_fd):
             if fd is not None:
@@ -309,6 +438,8 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
         raise SessionMediaIntegrityError("Refusing to store unverified session media")
     digest = hashlib.sha256(raw).hexdigest()
     filename = f"{digest}.{_MIME_EXTENSIONS[mime]}"
+    if not _DIR_FD_OK:
+        return _write_media_path(session_id, mime, raw, filename)
     temp_name = None
     published = False
     with _MEDIA_IO_LOCK:
@@ -322,13 +453,20 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
             try:
                 try:
                     _read_and_verify_at(directory_fd, filename)
-                    return _MEDIA_SCHEME + filename
                 except FileNotFoundError:
                     pass
                 except SessionMediaIntegrityError:
                     # A corrupt same-name target is replaced only after the new
                     # bytes are fully written and synced.
                     pass
+                else:
+                    _assert_private_handles(
+                        state_fd,
+                        media_fd,
+                        directory_fd,
+                        sid,
+                    )
+                    return _MEDIA_SCHEME + filename
                 temp_name = _write_temp_at(directory_fd, filename, raw)
                 os.replace(
                     temp_name,
@@ -373,9 +511,23 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
 def _read_verified_media_reference(session_id: str, filename: str) -> tuple[str, bytes]:
     """Read through one anchored handle and verify type, magic and digest."""
     _reference_filename(_MEDIA_SCHEME + filename)
+    if not _DIR_FD_OK:
+        return _read_verified_media_reference_path(session_id, filename)
     try:
-        with _open_private_session(session_id, create=False) as (_, _, directory_fd, _):
-            return _read_and_verify_at(directory_fd, filename)
+        with _open_private_session(session_id, create=False) as (
+            state_fd,
+            media_fd,
+            directory_fd,
+            _,
+        ):
+            result = _read_and_verify_at(directory_fd, filename)
+            _assert_private_handles(
+                state_fd,
+                media_fd,
+                directory_fd,
+                _validated_session_id(session_id),
+            )
+            return result
     except FileNotFoundError as private_missing:
         for legacy_path in _legacy_session_media_dirs(session_id):
             try:
@@ -427,6 +579,14 @@ def _collect_reference_filenames(value) -> list[str]:
     return sorted(filenames)
 
 
+def verify_session_media_references(value, session_id: str) -> int:
+    """Fail closed unless every retained private reference is owned and intact."""
+    filenames = _collect_reference_filenames(value)
+    for filename in filenames:
+        _read_verified_media_reference(session_id, filename)
+    return len(filenames)
+
+
 def clone_session_media_references(value, source_session_id: str, destination_session_id: str) -> int:
     """Transactionally give a new session verified ownership of all references."""
     if source_session_id == destination_session_id:
@@ -441,6 +601,12 @@ def clone_session_media_references(value, source_session_id: str, destination_se
         filename: _read_verified_media_reference(source_session_id, filename)
         for filename in filenames
     }
+    if not _DIR_FD_OK:
+        return _clone_session_media_references_path(
+            filenames,
+            payloads,
+            destination_session_id,
+        )
     staged = {}
     created = []
     with _MEDIA_IO_LOCK:
@@ -452,6 +618,12 @@ def clone_session_media_references(value, source_session_id: str, destination_se
             session_created,
         ):
             try:
+                _assert_private_handles(
+                    state_fd,
+                    media_fd,
+                    directory_fd,
+                    destination_sid,
+                )
                 for filename, (mime, raw) in payloads.items():
                     expected = f"{hashlib.sha256(raw).hexdigest()}.{_MIME_EXTENSIONS[mime]}"
                     if expected != filename:
@@ -515,6 +687,67 @@ def clone_session_media_references(value, source_session_id: str, destination_se
                     except OSError:
                         pass
                 raise
+    return len(filenames)
+
+
+def _clone_session_media_references_path(
+    filenames: list[str],
+    payloads: dict[str, tuple[str, bytes]],
+    destination_session_id: str,
+) -> int:
+    """Transactional clone fallback for platforms without directory-fd APIs."""
+    staged: dict[str, Path] = {}
+    created: list[Path] = []
+    with _MEDIA_IO_LOCK:
+        directory, session_created = _ensure_path_directory(
+            destination_session_id,
+            create=True,
+        )
+        try:
+            for filename, (mime, raw) in payloads.items():
+                expected = f"{hashlib.sha256(raw).hexdigest()}.{_MIME_EXTENSIONS[mime]}"
+                if expected != filename:
+                    raise SessionMediaIntegrityError("Session media identity changed while cloning")
+                try:
+                    _read_and_verify_path(directory, filename)
+                    continue
+                except FileNotFoundError:
+                    pass
+                except SessionMediaIntegrityError as exc:
+                    raise SessionMediaIntegrityError(
+                        f"Destination already contains corrupt session media: {filename}"
+                    ) from exc
+                temp = directory / _new_temp_name(filename)
+                with open(temp, "xb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                staged[filename] = temp
+
+            for filename, temp in staged.items():
+                target = directory / filename
+                if target.exists():
+                    _read_and_verify_path(directory, filename)
+                    temp.unlink(missing_ok=True)
+                    continue
+                os.replace(temp, target)
+                created.append(target)
+            staged.clear()
+            _fsync_path_directory(directory)
+            for filename in filenames:
+                _read_and_verify_path(directory, filename)
+        except BaseException:
+            for target in reversed(created):
+                target.unlink(missing_ok=True)
+            for temp in staged.values():
+                temp.unlink(missing_ok=True)
+            _fsync_path_directory(directory)
+            if session_created:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise
     return len(filenames)
 
 
@@ -625,6 +858,23 @@ def _remove_tree_at(parent_fd: int, name: str) -> None:
 def remove_session_media(session_id: str) -> None:
     """Delete the state-owned private media namespace for one session."""
     sid = _validated_session_id(session_id)
+    if not _DIR_FD_OK:
+        with _MEDIA_IO_LOCK:
+            media_root = _state_root() / _PRIVATE_ROOT_NAME
+            session_root = media_root / sid
+            try:
+                info = session_root.lstat()
+            except FileNotFoundError:
+                return
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise SessionMediaIntegrityError("Private media path is not a safe directory")
+            try:
+                session_root.resolve().relative_to(_state_root())
+            except ValueError as exc:
+                raise SessionMediaIntegrityError("Private media path escaped state root") from exc
+            shutil.rmtree(session_root)
+            _fsync_path_directory(media_root)
+        return
     try:
         state_fd = _open_root_fd(_state_root())
         try:

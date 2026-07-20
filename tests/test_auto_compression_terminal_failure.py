@@ -4,7 +4,6 @@ import base64
 import copy
 import json
 import queue
-import shutil
 import sys
 import types
 from pathlib import Path
@@ -193,7 +192,7 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     destination_files = list(session_media._session_media_dir(new_sid).iterdir())
     assert len(destination_files) == 1
     assert destination_files[0].read_bytes() == image_raw
-    shutil.rmtree(session_media._session_media_dir(old_sid).parent)
+    session_media.remove_session_media(old_sid)
     continuation = Session.load(new_sid)
     hydrated_messages = session_media.hydrate_session_media_urls(continuation.messages, new_sid)
     assert image_data_url in json.dumps(hydrated_messages)
