@@ -2401,14 +2401,13 @@ def _build_session_list_cache_payload(
         scope_args = {
             "active_profile": active_profile,
             "all_profiles": all_profiles,
-            "show_cli_sessions": show_cli_sessions,
             "show_claude_code_sessions": show_claude_code_sessions,
             "show_cron_sessions": show_cron_sessions,
             "show_webhook_sessions": show_webhook_sessions,
             "visible_only": True,
             "exclude_hidden": exclude_hidden,
             "source_filter": source_filter,
-            "sidebar_source": sidebar_source or "webui",
+            "sidebar_source": None,
         }
         archived_scoped = [
             s for s in archived_scoped if _sidebar_row_matches_scope(s, **scope_args)
@@ -9097,7 +9096,6 @@ def _sidebar_row_matches_scope(
     *,
     active_profile: str,
     all_profiles: bool,
-    show_cli_sessions: bool,
     show_claude_code_sessions: bool,
     show_cron_sessions: bool,
     show_webhook_sessions: bool,
@@ -9117,8 +9115,6 @@ def _sidebar_row_matches_scope(
         for key in ("source", "source_tag", "raw_source", "session_source", "source_label")
     }
     is_cli = _is_cli_session_for_settings(normalized)
-    if is_cli and not show_cli_sessions:
-        return False
     if not show_claude_code_sessions and "claude_code" in source_values:
         return False
     if source_filter:
@@ -11634,11 +11630,10 @@ def _active_run_visibility_snapshot(
         metadata_visible_ids = {
             str(row.get("session_id") or "")
             for row in metadata_rows
-            if _sidebar_row_matches_scope(
+            if (show_cli_sessions or not _is_cli_session_for_settings(row)) and _sidebar_row_matches_scope(
                 row,
                 active_profile=active_profile,
                 all_profiles=all_profiles,
-                show_cli_sessions=show_cli_sessions,
                 show_claude_code_sessions=show_claude_code_sessions,
                 show_cron_sessions=show_cron_sessions,
                 show_webhook_sessions=show_webhook_sessions,
