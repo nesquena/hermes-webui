@@ -40,8 +40,11 @@ def _run_search(query):
         captured["status"] = status
         captured["payload"] = payload
 
+    # The content search reads through get_session_for_scan (the LRU-transparent
+    # scan accessor), not get_session — patching the wrong one here would make
+    # the depth assertions pass vacuously on an empty result set.
     with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
-        "api.routes.get_session", return_value=session
+        "api.routes.get_session_for_scan", return_value=session
     ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
         "api.routes.j", side_effect=fake_j
     ):
