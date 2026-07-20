@@ -285,17 +285,17 @@ def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attr
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_terminal_appearance_sync_is_behaviorally_idempotent_and_lifecycle_safe():
-    script = f"""
-const terminalSource={json.dumps(TERMINAL_JS)};
-const styles={{
+    script = (
+        """
+const styles={
   '--font-mono':'"Active Mono",monospace',
   '--code-bg':'#111111',
-}};
-const rootInline={{}};
+};
+const rootInline={};
 let dark=false;
-let observerCallbacks={{}};
+let observerCallbacks={};
 let observedTargets=[];
-let observedOptions={{}};
+let observedOptions={};
 let fitCalls=0;
 let resizeSchedules=0;
 let terminalHeadLoadListener=null;
@@ -304,100 +304,101 @@ let nextAnimationFrameId=1;
 const animationFrames=new Map();
 const writes=[];
 const createdAppearances=[];
-const surface={{textContent:''}};
+const surface={textContent:''};
 
-function pendingAnimationFrames(){{
+function pendingAnimationFrames(){
   return animationFrames.size;
-}}
+}
 
-function flushAnimationFrames(){{
+function flushAnimationFrames(){
   const pending=[...animationFrames.values()];
   animationFrames.clear();
   pending.forEach(callback=>callback());
-}}
+}
 
-class FakeMutationObserver {{
-  constructor(callback){{ this.callback=callback; }}
-  observe(target,options){{
+class FakeMutationObserver {
+  constructor(callback){ this.callback=callback; }
+  observe(target,options){
     const targetName = target===document.documentElement ? 'documentElement' : target===document.head ? 'head' : 'other';
     observedTargets.push(targetName);
     observedOptions[targetName]=options;
     observerCallbacks[targetName]=this.callback;
-  }}
-}}
+  }
+}
 
-class FakeTerminal {{
-  constructor(options){{
-    createdAppearances.push({{
+class FakeTerminal {
+  constructor(options){
+    createdAppearances.push({
       fontFamily:options.fontFamily,
-      theme:{{...options.theme}},
-    }});
-    const current={{
+      theme:{...options.theme},
+    });
+    const current={
       fontFamily:options.fontFamily,
       theme:options.theme,
-    }};
-    this.options=new Proxy(current,{{
-      set(target,key,value){{
+    };
+    this.options=new Proxy(current,{
+      set(target,key,value){
         writes.push(String(key));
         target[key]=value;
         return true;
-      }},
-    }});
+      },
+    });
     this.cols=80;
     this.rows=24;
-  }}
-  loadAddon(){{}}
-  open(){{}}
-  onData(){{}}
-  dispose(){{}}
-}}
+  }
+  loadAddon(){}
+  open(){}
+  onData(){}
+  dispose(){}
+}
 
-class FakeFitAddon {{
-  fit(){{ fitCalls+=1; }}
-}}
+class FakeFitAddon {
+  fit(){ fitCalls+=1; }
+}
 
-const root={{
-  classList:{{contains(name){{ return name==='dark'&&dark; }}}},
-  style:{{setProperty(name,value){{ rootInline[name]=value; }}}},
-}};
-global.window={{
-  addEventListener(){{}},
+const root={
+  classList:{contains(name){ return name==='dark'&&dark; }},
+  style:{setProperty(name,value){ rootInline[name]=value; }},
+};
+global.window={
+  addEventListener(){},
   MutationObserver:FakeMutationObserver,
   Terminal:FakeTerminal,
-  FitAddon:{{FitAddon:FakeFitAddon}},
-}};
+  FitAddon:{FitAddon:FakeFitAddon},
+};
 global.MutationObserver=FakeMutationObserver;
-global.document={{
+global.document={
   documentElement:root,
-  head:{{
-    addEventListener(type,listener,options){{
-      if(type==='load'){{
+  head:{
+    addEventListener(type,listener,options){
+      if(type==='load'){
         terminalHeadLoadListener=listener;
         terminalHeadLoadListenerOptions=options;
-      }}
-    }},
-    removeEventListener(){{
-    }},
-  }},
-  getElementById(){{ return null; }},
-}};
-global.getComputedStyle=()=>({{
-  getPropertyValue(name){{ return styles[name]||rootInline[name]||''; }},
-}});
+      }
+    },
+    removeEventListener(){
+    },
+  },
+  getElementById(){ return null; },
+};
+global.getComputedStyle=()=>({
+  getPropertyValue(name){ return styles[name]||rootInline[name]||''; },
+});
 global.$=(id)=>id==='terminalSurface'?surface:null;
-global.requestAnimationFrame=(callback)=>{{
+global.requestAnimationFrame=(callback)=>{
   const id=nextAnimationFrameId++;
   animationFrames.set(id,callback);
   return id;
-}};
+};
 global.cancelAnimationFrame=(id)=>animationFrames.delete(id);
-global.setTimeout=(_callback,delay)=>{{
+global.setTimeout=(_callback,delay)=>{
   if(delay===120)resizeSchedules+=1;
   return 1;
-}};
-global.clearTimeout=()=>{{}};
-
-eval(terminalSource+String.raw`
+};
+global.clearTimeout=()=>{};
+"""
+        + TERMINAL_JS
+        + """
 const first=_ensureXterm();
 TERMINAL_UI.open=true;
 TERMINAL_UI.sessionId='session-1';
@@ -414,7 +415,7 @@ const unchangedPendingFrames=pendingAnimationFrames();
 writes.length=0;
 const fitsBeforeUnrelated=fitCalls;
 document.documentElement.style.setProperty('--unrelated-outline-offset','3px');
-observerCallbacks.documentElement([{{attributeName:'style'}}]);
+observerCallbacks.documentElement([{attributeName:'style'}]);
 const unrelatedStyleWrites=[...writes];
 const unrelatedFitDelta=fitCalls-fitsBeforeUnrelated;
 const unrelatedPendingFrames=pendingAnimationFrames();
@@ -422,7 +423,7 @@ const unrelatedPendingFrames=pendingAnimationFrames();
 writes.length=0;
 const fitsBeforeTheme=fitCalls;
 styles['--code-bg']='#222222';
-observerCallbacks.documentElement([{{attributeName:'style'}}]);
+observerCallbacks.documentElement([{attributeName:'style'}]);
 const themeOnlyWrites=[...writes];
 const backgroundAfterChange=first.options.theme.background;
 const themeOnlyFitDelta=fitCalls-fitsBeforeTheme;
@@ -432,8 +433,8 @@ writes.length=0;
 resizeSchedules=0;
 const fitsBeforeFont=fitCalls;
 styles['--font-mono']='"Extension Mono",monospace';
-observerCallbacks.head([{{type:'childList'}}]);
-observerCallbacks.head([{{type:'characterData'}}]);
+observerCallbacks.head([{type:'childList'}]);
+observerCallbacks.head([{type:'characterData'}]);
 const fontOnlyWrites=[...writes];
 const fontAfterChange=first.options.fontFamily;
 const fontFitDeltaBeforeFrame=fitCalls-fitsBeforeFont;
@@ -446,10 +447,10 @@ writes.length=0;
 resizeSchedules=0;
 const fitsBeforeNonStylesheetLoad=fitCalls;
 styles['--font-mono']='\"Non Stylesheet Mono\",monospace';
- terminalHeadLoadListener&&terminalHeadLoadListener({{target:{{
+ terminalHeadLoadListener&&terminalHeadLoadListener({target:{
   tagName:'SCRIPT',
   getAttribute:()=>null,
-}}}});
+}});
 const nonStylesheetLoadWrites=[...writes];
 const nonStylesheetLoadFitDelta=fitCalls-fitsBeforeNonStylesheetLoad;
 const nonStylesheetLoadPendingFrames=pendingAnimationFrames();
@@ -457,10 +458,10 @@ const nonStylesheetLoadPendingFrames=pendingAnimationFrames();
 writes.length=0;
 const fitsBeforeStylesheetLoad=fitCalls;
 styles['--font-mono']='\"Stylesheet Load Mono\",monospace';
-terminalHeadLoadListener&&terminalHeadLoadListener({{target:{{
+terminalHeadLoadListener&&terminalHeadLoadListener({target:{
   tagName:'LINK',
-  getAttribute(name){{ return name==='rel'?'stylesheet':null; }},
-}}}});
+  getAttribute(name){ return name==='rel'?'stylesheet':null; },
+}});
 const stylesheetLoadWrites=[...writes];
 const stylesheetLoadFontAfterChange=first.options.fontFamily;
 const stylesheetLoadFitDeltaBeforeFrame=fitCalls-fitsBeforeStylesheetLoad;
@@ -470,7 +471,7 @@ const stylesheetLoadFitDeltaAfterFrame=fitCalls-fitsBeforeStylesheetLoad;
 const stylesheetLoadResizeSchedules=resizeSchedules;
 
 styles['--font-mono']='"Disposed Mono",monospace';
-observerCallbacks.documentElement([{{attributeName:'style'}}]);
+observerCallbacks.documentElement([{attributeName:'style'}]);
 const pendingFitBeforeDispose=pendingAnimationFrames();
 _disposeXterm();
 const pendingFitAfterDispose=pendingAnimationFrames();
@@ -484,7 +485,7 @@ const recreatePendingFrames=pendingAnimationFrames();
 flushAnimationFrames();
 const recreateFitDeltaAfterFlush=fitCalls-fitsBeforeRecreate;
 
-process.stdout.write(JSON.stringify({{
+process.stdout.write(JSON.stringify({
   initial:createdAppearances[0],
   initialFitCalls,
   unchangedWrites,
@@ -524,9 +525,8 @@ process.stdout.write(JSON.stringify({{
   recreateFitDelta,
   recreatePendingFrames,
   recreateFitDeltaAfterFlush,
-}}));
-`);
-"""
+}));
+""")
     result = subprocess.run(
         [NODE, "-e", script],
         cwd=REPO,
