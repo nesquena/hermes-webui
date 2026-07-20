@@ -468,7 +468,12 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
                     "total_offline_dropped_events": 0,
                     "per_stream_offline_buffer_cap": 8192,
                 },
-                "models_cache": {"loaded": False, "provider_groups": 0, "total_models": 0},
+                "models_cache": {
+                    "loaded": False,
+                    "provider_groups": 0,
+                    "total_models": 0,
+                    "age_seconds": None,
+                },
             },
             "errors": [],
         },

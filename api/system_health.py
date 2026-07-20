@@ -240,10 +240,7 @@ def _models_cache_stats(snapshot: Any, cache_ts: Any, validator) -> dict[str, An
 
 def _webui_runtime_payload() -> dict[str, Any]:
     payload = _zero_webui_runtime_payload()
-    try:
-        sources = _webui_runtime_sources()
-    except Exception:
-        raise
+    sources = _webui_runtime_sources()
 
     sessions = sources.get("sessions")
     sessions_lock = sources.get("sessions_lock")
