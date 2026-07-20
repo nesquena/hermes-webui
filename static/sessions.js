@@ -1049,7 +1049,11 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=!!(anchorActivityScene&&(
+    (Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length)
+    || (Array.isArray(anchorActivityScene.artifacts)&&anchorActivityScene.artifacts.length)
+    || (Array.isArray(anchorActivityScene.side_effects)&&anchorActivityScene.side_effects.length)
+  ));
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     streamId:String(snapshot.stream_id||snapshot.streamId||''),

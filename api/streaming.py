@@ -8075,12 +8075,6 @@ def _run_agent_streaming(
                         if cb_kwargs.get('result') is not None
                         else preview
                     )
-                    artifact_references = derive_file_artifact_references(
-                        name,
-                        args,
-                        mutation_result,
-                        s.workspace,
-                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -8110,8 +8104,17 @@ def _run_agent_streaming(
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
                     })
-                    for artifact_reference in artifact_references:
-                        put('artifact_reference', artifact_reference)
+                    try:
+                        artifact_references = derive_file_artifact_references(
+                            name,
+                            args,
+                            mutation_result,
+                            s.workspace,
+                        )
+                        for artifact_reference in artifact_references:
+                            put('artifact_reference', artifact_reference)
+                    except Exception:
+                        logger.debug('Failed to derive live artifact references', exc_info=True)
                     # Mirror the todo tool's in-memory state into a
                     # dedicated SSE event so the Todos panel can update
                     # in real-time without waiting for the turn to
@@ -8186,13 +8189,6 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
-                        artifact_references = derive_file_artifact_references(
-                            name,
-                            args,
-                            function_result,
-                            s.workspace,
-                            tool_call_id=tool_call_id,
-                        )
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
@@ -8217,8 +8213,18 @@ def _run_agent_streaming(
                             'tid': tool_call_id,
                             'is_error': False,
                         })
-                        for artifact_reference in artifact_references:
-                            put('artifact_reference', artifact_reference)
+                        try:
+                            artifact_references = derive_file_artifact_references(
+                                name,
+                                args,
+                                function_result,
+                                s.workspace,
+                                tool_call_id=tool_call_id,
+                            )
+                            for artifact_reference in artifact_references:
+                                put('artifact_reference', artifact_reference)
+                        except Exception:
+                            logger.debug('Failed to derive live artifact references', exc_info=True)
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
                         # update in real-time without waiting for the

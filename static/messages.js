@@ -3998,18 +3998,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
-    if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    const artifacts=Array.isArray(scene&&scene.artifacts)?scene.artifacts:[];
+    if(!scene||scene.version!=='activity_scene_v1'||(!rows.length&&!artifacts.length)) return false;
     const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
     const sceneStreamId=sceneIdentity.stream_id||streamId;
     const sceneRunId=sceneIdentity.run_id||sceneStreamId;
     const sceneKey=[
       sceneRunId||'',
       sceneStreamId||'',
-      scene.activity_rows.length,
-      scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
+      rows.length,
+      rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
+      artifacts.length,
+      artifacts.map(item=>item&&item.event_id||item&&item.local_id||(item&&item.payload&&item.payload.path)||'').join('|'),
     ].join(':');
     if(_anchorRegistry._hydrated_activity_scene_key===sceneKey) return true;
-    const rows=scene.activity_rows;
+    const applySnapshotEvent=(sourceEvent)=>{
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
+      }catch(err){
+        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+          _anchorShadowWarned=true;
+          console.warn('assistant turn anchor snapshot hydration failed',err);
+        }
+        return false;
+      }
+      return true;
+    };
     for(let i=0;i<rows.length;i+=1){
       const row=rows[i];
       if(!row||typeof row!=='object') continue;
@@ -4048,15 +4063,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // (payload may not carry created_at even when the row does). (#5739 gate.)
         created_at:payload.created_at??row.created_at??undefined,
       };
-      try{
-        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
-      }catch(err){
-        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
-          _anchorShadowWarned=true;
-          console.warn('assistant turn anchor snapshot hydration failed',err);
-        }
-        return false;
-      }
+      if(!applySnapshotEvent(sourceEvent)) return false;
+    }
+    for(let i=0;i<artifacts.length;i+=1){
+      const artifact=artifacts[i];
+      if(!artifact||typeof artifact!=='object') continue;
+      const sourceType=artifact.source_event_type||'artifact_reference';
+      if(sourceType!=='artifact_reference') continue;
+      const payload={
+        ...((artifact.payload&&typeof artifact.payload==='object')?artifact.payload:{}),
+      };
+      const artifactIdentity=(artifact.identity&&typeof artifact.identity==='object')?artifact.identity:{};
+      const sourceEvent={
+        ...payload,
+        source_event_type:sourceType,
+        local_id:artifact.local_id||payload.local_id||artifact.event_id||`snapshot-artifact:${sceneStreamId}:${i}`,
+        event_id:artifact.event_id||null,
+        seq:artifact.seq??undefined,
+        status:artifact.status||undefined,
+        stream_id:artifact.stream_id||artifactIdentity.stream_id||sceneStreamId,
+        run_id:artifact.run_id||artifactIdentity.run_id||sceneRunId,
+        created_at:payload.created_at??artifact.created_at??undefined,
+      };
+      if(!applySnapshotEvent(sourceEvent)) return false;
     }
     _anchorRegistry._hydrated_activity_scene_key=sceneKey;
     return true;

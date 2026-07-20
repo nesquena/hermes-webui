@@ -3068,6 +3068,14 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
 
 
 _RUN_JOURNAL_TOOL_ID_KEYS = ("tid", "id", "tool_call_id", "tool_use_id", "call_id")
+_RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACTS = 64
+_RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACT_BYTES = 32 * 1024
+_RUN_JOURNAL_ARTIFACT_STRING_LIMITS = {
+    "kind": 64,
+    "path": 4096,
+    "source_tool": 128,
+    "tool_call_id": 256,
+}
 
 
 def _run_journal_snapshot_tool_id(payload: dict | None) -> str:
@@ -3205,6 +3213,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    artifact_references: list[dict] = []
+    artifact_reference_bytes = 0
+    artifact_reference_overflow = False
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3273,6 +3284,75 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call["activityBurstId"] = current_activity_burst_id
             call["activitySegmentSeq"] = current_activity_burst_id
         tool_calls.append(call)
+
+    def append_artifact_reference(event: dict, payload: dict) -> None:
+        nonlocal artifact_reference_bytes, artifact_reference_overflow
+        if artifact_reference_overflow or not isinstance(payload, dict):
+            return
+        if len(artifact_references) >= _RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACTS:
+            artifact_references.clear()
+            artifact_reference_overflow = True
+            return
+        artifact_payload: dict = {}
+        for key, limit in _RUN_JOURNAL_ARTIFACT_STRING_LIMITS.items():
+            value = payload.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                value = str(value)
+            if not value or value != value.strip():
+                return
+            if len(value.encode("utf-8", "surrogatepass")) > limit:
+                return
+            artifact_payload[key] = value
+        path = artifact_payload.get("path")
+        if not path:
+            return
+        artifact_payload.setdefault("kind", "workspace_file")
+        try:
+            event_seq = int(event.get("seq") or 0)
+        except (TypeError, ValueError):
+            event_seq = 0
+        event_id = (
+            _run_journal_snapshot_event_id_for_run(event, run_id, event_seq)
+            or str(event.get("event_id") or "").strip()
+            or None
+        )
+        local_id = (
+            (f"artifact:{event_id}" if event_id else "")
+            or f"artifact:{stream_id}:{len(artifact_references) + 1}"
+        )
+        artifact = {
+            "event_id": event_id,
+            "local_id": local_id,
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "seq": event_seq or None,
+            "kind": "artifact_reference",
+            "source_event_type": "artifact_reference",
+            "created_at": event.get("created_at"),
+            "status": None,
+            "identity": {
+                "event_id": event_id,
+                "local_id": local_id,
+                "run_id": run_id,
+                "stream_id": stream_id,
+                "seq": event_seq or None,
+            },
+            "payload": artifact_payload,
+        }
+        encoded = json.dumps(
+            artifact,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        if artifact_reference_bytes + len(encoded) > _RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACT_BYTES:
+            artifact_references.clear()
+            artifact_reference_overflow = True
+            return
+        artifact_reference_bytes += len(encoded)
+        artifact_references.append(artifact)
 
     def reasoning_echo_tail_matches(text: str) -> bool:
         candidate = _compact_for_echo_compare(text)
@@ -3347,6 +3427,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name == "artifact_reference":
+            append_artifact_reference(event, payload)
+            fresh_segment = True
+            continue
 
     if assistant_text or reasoning_text:
         message = {
@@ -3717,6 +3802,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "artifacts": artifact_references,
+            "side_effects": [],
         },
     }
 
