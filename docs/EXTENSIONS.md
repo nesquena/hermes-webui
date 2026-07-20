@@ -202,14 +202,15 @@ direct one. The `proxy_auth` field closes that gap:
 - Any **other** value fails closed (the sidecar declaration is rejected).
 
 **Auth-off posture:** WebUI authentication is optional and off by default. Because
-the consent endpoint itself is unauthenticated in that mode, a `token-v1` sidecar is
-proxied with auth off **only** when its origin is provably loopback
-(`127.0.0.1`/`localhost`/`::1`); any non-loopback `token-v1` origin returns `503`
-until a password/passkey is configured. The extensions panel surfaces
-`auth_required` so the operator is told to enable authentication before wiring up a
-sidecar. The token protects against other-UID and sandboxed local callers; it does
-**not** defend against arbitrary same-UID code (which can read the token file, WebUI's
-own signing key, or run the sidecar's tool directly).
+the consent endpoint and proxy route are unauthenticated in that mode, `token-v1`
+fails closed regardless of whether the sidecar origin is loopback: consent and proxy
+resolution return `403` until WebUI authentication is configured. Otherwise, any
+caller that can reach WebUI could ask core to inject the token and use it as a
+forwarding oracle. The extensions panel exposes the `local_unprotected` posture so
+the operator is told to enable authentication before granting consent. The token
+protects against other-UID and sandboxed local callers; it does **not** defend against
+arbitrary same-UID code (which can read the token file, WebUI's own signing key, or
+run the sidecar's tool directly).
 
 Extension entries may declare browser-local settings when they also request
 extension-owned storage:

@@ -811,16 +811,6 @@ def _normalize_loopback_sidecar_origin(value: object) -> Optional[str]:
     return f"{parsed.scheme}://{display_host}{':' + str(port) if port is not None else ''}"
 
 
-def _sidecar_origin_is_loopback(origin: object) -> bool:
-    """True only when the origin host is a canonical loopback address. Used to
-    gate the auth-off token-v1 posture: with WebUI auth off we proxy a token-v1
-    sidecar ONLY when its origin is provably loopback (127.0.0.1/localhost/::1)."""
-    if not isinstance(origin, str):
-        return False
-    parsed = urlsplit(origin)
-    return (parsed.hostname or "").lower() in _LOOPBACK_SIDECAR_HOSTS
-
-
 def _normalize_sidecar_health_path(value: object) -> Optional[str]:
     """Return a safe sidecar health path, or None when unsafe.
 

@@ -1130,7 +1130,7 @@ def test_unknown_proxy_auth_value_rejects_sidecar(tmp_path, monkeypatch):
         set_extension_sidecar_proxy_consent("templates", True)
 
 
-def test_status_payload_flags_auth_required_when_auth_off(tmp_path, monkeypatch):
+def test_status_payload_flags_local_unprotected_when_auth_off(tmp_path, monkeypatch):
     _token_v1_manifest(monkeypatch, tmp_path)
     from api.extensions import get_extension_status
 
@@ -1173,6 +1173,11 @@ def test_token_module_persists_and_rotates(tmp_path, monkeypatch):
     assert (token_dir / "templates.token").exists()
     assert sc.current_token("never") is None            # fail closed
     assert sc.ensure_token("../evil") is None            # path-escape rejected
+    # IDs are filename components. Reject rather than silently trim whitespace so
+    # validation and _token_path() always operate on the exact same string.
+    for invalid_id in ("templates\n", " templates", "templates "):
+        assert sc.ensure_token(invalid_id) is None
+        assert not (token_dir / f"{invalid_id}.token").exists()
     # canonical (wider) id grammar is honored: uppercase/dot ids work
     assert sc.ensure_token("RSS.Feeds") is not None
     new = sc.reset_token("templates")

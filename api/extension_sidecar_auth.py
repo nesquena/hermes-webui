@@ -27,9 +27,10 @@ Design notes (from the reviewed design doc, §9.2):
   * The token is re-read from disk per request (fingerprint-cached on
     inode/mtime/ctime/size) so rotation / deletion takes effect with no restart,
     and a stale cached token can't keep validating after the file changes.
-  * Cross-process mint uses an O_CREAT|O_EXCL no-clobber claim so concurrent
-    first-mint across processes converges on a single winning file; losers
-    re-read the winner rather than clobbering it.
+  * Cross-process mint writes a unique temporary file, then publishes it with
+    an atomic ``os.link`` create-or-fail operation. Concurrent first-mints
+    converge on a single winning file; losers re-read the winner rather than
+    clobbering it.
 """
 from __future__ import annotations
 
@@ -75,9 +76,9 @@ def _valid_ext_id(ext_id: object) -> bool:
     # Python's ``re`` a ``$`` anchor also matches just before a final ``\n``,
     # so ``match`` would accept ``"templates\n"`` and _token_path would build a
     # filename containing a literal newline. fullmatch anchors truly to the end.
-    # Kept identical to ``_valid_extension_id`` in api/extensions.py (fullmatch
-    # + strip) so the two validators cannot diverge.
-    return isinstance(ext_id, str) and bool(_EXT_ID_RE.fullmatch(ext_id.strip()))
+    # Validate the exact value that _token_path() uses. Trimming only for the
+    # check would accept one ID but construct a filename from a different one.
+    return isinstance(ext_id, str) and bool(_EXT_ID_RE.fullmatch(ext_id))
 
 
 def _fingerprint(path: Path) -> Optional[Tuple]:
@@ -127,9 +128,9 @@ def ensure_token(ext_id: str) -> Optional[str]:
     hand back an ephemeral token a sidecar could never read.
 
     Idempotent + atomic across processes: the token is written to a unique temp
-    file then atomically renamed into place, so the final path is only ever
-    visible fully-written. Concurrent writers each rename their own temp; the
-    last rename wins and all callers then read the same complete file.
+    file, then published with an atomic hard-link create-or-fail operation, so
+    the final path is only ever visible fully written and is never clobbered.
+    One concurrent writer wins; every loser reads that persisted winner.
     """
     if not _valid_ext_id(ext_id):
         return None
