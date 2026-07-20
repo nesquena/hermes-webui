@@ -9431,7 +9431,6 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
     "simplified_tool_calling",
-    "show_fallback_notices",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
@@ -9516,6 +9515,7 @@ _SETTINGS_BOOL_KEYS = {
     "hide_composer_status",
     "hide_composer_context",
     "hide_composer_bg_badge",
+    "show_fallback_notices",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
