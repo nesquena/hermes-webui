@@ -695,6 +695,43 @@ def _settle_gateway_terminal_payload(
         return payload
 
 
+def _settle_gateway_terminal_event_payload(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    event,
+    data,
+):
+    if event == "apperror" and isinstance(data, dict):
+        data = data.copy()
+        data.setdefault("session_id", session_id)
+    if event not in {"cancel", "error", "apperror"}:
+        return data
+    payload = data if isinstance(data, dict) else {}
+    if isinstance(payload.get("session"), dict):
+        return payload
+    if event == "cancel":
+        payload = dict(payload)
+        payload.setdefault("label", "Task cancelled")
+        payload.setdefault("type", "cancelled")
+        payload.setdefault("message", "Cancelled by user")
+    try:
+        settled_payload = _settle_gateway_terminal_payload(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            payload,
+        )
+    except Exception:
+        logger.debug("Failed to settle gateway terminal payload", exc_info=True)
+        return data
+    return settled_payload if settled_payload is not None else data
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -777,31 +814,15 @@ def _run_gateway_chat_streaming(
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
-        if event == "apperror" and isinstance(data, dict):
-            data = data.copy()
-            data.setdefault("session_id", session_id)
-        if event in {"cancel", "error", "apperror"}:
-            payload = data if isinstance(data, dict) else {}
-            if not isinstance(payload.get("session"), dict):
-                if event == "cancel":
-                    payload = dict(payload)
-                    payload.setdefault("label", "Task cancelled")
-                    payload.setdefault("type", "cancelled")
-                    payload.setdefault("message", "Cancelled by user")
-                try:
-                    settled_payload = _settle_gateway_terminal_payload(
-                        session_id,
-                        stream_id,
-                        workspace,
-                        model,
-                        model_provider,
-                        payload,
-                    )
-                except Exception:
-                    settled_payload = None
-                    logger.debug("Failed to settle gateway terminal payload", exc_info=True)
-                if settled_payload is not None:
-                    data = settled_payload
+        data = _settle_gateway_terminal_event_payload(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            event,
+            data,
+        )
         event_id = None
         if run_journal is not None:
             try:
