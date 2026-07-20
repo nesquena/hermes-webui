@@ -104,6 +104,81 @@ def test_latest_summary_and_find_run_summary_classify_terminal_state(tmp_path):
     assert found["terminal_state"] == "interrupted-by-user"
 
 
+def test_latest_summary_reuses_unchanged_journal_summary_without_reparsing(tmp_path, monkeypatch):
+    append_run_event("session_1", "run_1", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
+
+    first = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
+
+    monkeypatch.setattr(
+        "api.run_journal._read_jsonl",
+        lambda _path: (_ for _ in ()).throw(AssertionError("unchanged journal was reparsed")),
+    )
+    repeated = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
+
+    assert repeated == first
+
+
+def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tmp_path, monkeypatch):
+    append_run_event("session_1", "run_1", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
+
+    import api.run_journal as run_journal
+
+    original_read = run_journal._read_jsonl
+
+    def append_after_read(path):
+        events, malformed = original_read(path)
+        append_run_event(
+            "session_1",
+            "run_1",
+            "cancel",
+            {"message": "Cancelled by user"},
+            session_dir=tmp_path,
+        )
+        return events, malformed
+
+    monkeypatch.setattr(run_journal, "_read_jsonl", append_after_read)
+
+    first = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
+    second = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
+
+    assert first["terminal_state"] == "completed"
+    assert second["terminal_state"] == "interrupted-by-user"
+
+
+
+def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_path, monkeypatch):
+    import api.run_journal as run_journal
+
+    original_read = run_journal._read_jsonl
+    appended = False
+
+    def append_after_missing_read(path):
+        nonlocal appended
+        events, malformed = original_read(path)
+        if not appended:
+            appended = True
+            append_run_event(
+                "session_1",
+                "run_first_append",
+                "done",
+                {"session": {}},
+                session_dir=tmp_path,
+            )
+        return events, malformed
+
+    monkeypatch.setattr(run_journal, "_read_jsonl", append_after_missing_read)
+
+    raced = latest_run_summary("session_1", "run_first_append", session_dir=tmp_path)
+    refreshed = latest_run_summary("session_1", "run_first_append", session_dir=tmp_path)
+
+    assert raced["terminal_state"] == "unknown"
+    assert refreshed["terminal_state"] == "completed"
+    assert refreshed["last_seq"] == 1
+    assert refreshed["last_event_id"] == "run_first_append:1"
+
+
 def test_terminal_state_classification_distinguishes_crash_from_user_cancel(tmp_path):
     append_run_event("session_1", "run_cancelled", "cancel", {"message": "Cancelled by user"}, session_dir=tmp_path)
     append_run_event("session_1", "run_crashed", "apperror", {"type": "interrupted"}, session_dir=tmp_path)
