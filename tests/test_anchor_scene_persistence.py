@@ -351,6 +351,100 @@ def test_anchor_scene_persistence_rejects_invalid_scene(tmp_path, monkeypatch):
     assert "activity_scene_v1" in captured["error"]
 
 
+def test_anchor_scene_persistence_trims_artifact_budget_instead_of_rejecting_scene(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import (
+        MAX_ANCHOR_ARTIFACT_BYTES,
+        MAX_ANCHOR_ARTIFACT_REFERENCES,
+        anchor_artifact_event_from_payload,
+    )
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    Session(
+        session_id="artifact-budget",
+        messages=[
+            {"role": "user", "content": "write many files"},
+            {"role": "assistant", "content": "done", "timestamp": 10},
+        ],
+    ).save(skip_index=True)
+
+    artifacts = [
+        anchor_artifact_event_from_payload(
+            {
+                "kind": "workspace_file",
+                "path": f"reports/{idx:03d}-{'x' * 160}.md",
+                "source_tool": "write_file",
+                "tool_call_id": f"call-{idx:03d}",
+            },
+            session_id="artifact-budget",
+            run_id="stream-budget",
+            stream_id="stream-budget",
+            event_id=f"stream-budget:{idx + 1}",
+            seq=idx + 1,
+        )
+        for idx in range(160)
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+        "artifacts": artifacts,
+        "side_effects": [],
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "session_id": "artifact-budget",
+            "stream_id": "stream-budget",
+            "message_index": 1,
+            "scene": scene,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        ) or True,
+    )
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    assert captured["status"] == 200
+
+    raw = json.loads((session_dir / "artifact-budget.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    sanitized = record["scene"]
+    encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    assert sanitized["activity_rows"] == [{"row_id": "tool-1", "role": "tool"}]
+    assert 0 < len(sanitized["artifacts"]) <= MAX_ANCHOR_ARTIFACT_REFERENCES
+    artifact_bytes = len(
+        json.dumps(
+            sanitized["artifacts"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    assert artifact_bytes <= MAX_ANCHOR_ARTIFACT_BYTES
+    assert len(encoded) < routes._ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+    assert sanitized["artifacts"][0]["payload"]["path"].startswith("reports/000-")
+
+
 def test_anchor_scene_persistence_prefers_unique_ref_over_stale_index(tmp_path, monkeypatch):
     from api import models, routes
     from api.models import Session

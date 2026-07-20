@@ -112,6 +112,8 @@
     'transport',
     'excluded',
   ]);
+  const ANCHOR_ARTIFACT_MAX_COUNT=64;
+  const ANCHOR_ARTIFACT_MAX_BYTES=32*1024;
 
   const TERMINAL_STATES=Object.freeze({
     completed:'completed',
@@ -176,6 +178,49 @@
 
   function _cleanString(value){
     return typeof value==='string'?value.trim():'';
+  }
+
+  function _utf8ByteSize(value){
+    const text=String(value||'');
+    if(typeof TextEncoder!=='undefined'){
+      try{ return new TextEncoder().encode(text).length; }catch(_){}
+    }
+    return unescape(encodeURIComponent(text)).length;
+  }
+
+  function _anchorArtifactDedupeKey(event){
+    if(!event||typeof event!=='object') return '';
+    const eventId=_cleanString(_own(event,'event_id'));
+    if(eventId) return `event_id:${eventId}`;
+    const runId=_cleanString(_own(event,'run_id'));
+    const seq=_own(event,'seq');
+    if(runId&&seq!==undefined&&seq!==null&&seq!=='') return `run_seq:${runId}:${seq}`;
+    const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+    return ['payload',payload.path||'',payload.source_tool||'',payload.tool_call_id||''].join(':');
+  }
+
+  function _boundedAnchorArtifactEvents(events){
+    const source=Array.isArray(events)?events:[];
+    const out=[];
+    const seen=new Set();
+    let total=0;
+    for(const event of source){
+      if(!event||typeof event!=='object') continue;
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      if(!_cleanString(payload.path)) continue;
+      const key=_anchorArtifactDedupeKey(event);
+      if(key&&seen.has(key)) continue;
+      const size=_utf8ByteSize(JSON.stringify(event));
+      if(out.length>=ANCHOR_ARTIFACT_MAX_COUNT||total+size>ANCHOR_ARTIFACT_MAX_BYTES) break;
+      if(key) seen.add(key);
+      total+=size;
+      out.push(event);
+    }
+    return out;
+  }
+
+  function _appendBoundedAnchorArtifact(anchor,event){
+    anchor.artifacts=_boundedAnchorArtifactEvents([...(Array.isArray(anchor.artifacts)?anchor.artifacts:[]),event]);
   }
 
   function _activityDisplayMode(value){
@@ -604,7 +649,7 @@
       anchor.activity_events.push(event);
       _updateLifecycleFromEvent(anchor,event);
     }else if(classification==='artifact'){
-      anchor.artifacts.push(event);
+      _appendBoundedAnchorArtifact(anchor,event);
     }else if(classification==='side_effect'){
       anchor.side_effects.push(event);
     }else if(classification==='metadata'){
@@ -1038,6 +1083,7 @@
       .map((event,index)=>_activitySceneRow(event,index,mode));
     const lifecycle=_copyObject(anchor.lifecycle);
     const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
+    const boundedArtifacts=_boundedAnchorArtifactEvents(Array.isArray(anchor.artifacts)?anchor.artifacts:[]);
     return Object.freeze({
       version:'activity_scene_v1',
       mode,
@@ -1047,7 +1093,7 @@
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
       terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
       activity_rows:Object.freeze(rows),
-      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(event=>Object.freeze({
+      artifacts:Object.freeze(boundedArtifacts.map(event=>Object.freeze({
         ..._copyObject(event),
         payload:Object.freeze(_copyObject(_own(event,'payload'))),
       }))),

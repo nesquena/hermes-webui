@@ -21,6 +21,22 @@ _MAX_REFERENCES = 32
 _MAX_PATH_BYTES = 4096
 _MAX_TOTAL_PATH_BYTES = 16 * 1024
 _MAX_TOOL_CALL_ID_BYTES = 256
+MAX_ANCHOR_ARTIFACT_REFERENCES = 64
+MAX_ANCHOR_ARTIFACT_BYTES = 32 * 1024
+_ANCHOR_ARTIFACT_STRING_LIMITS = {
+    'kind': 64,
+    'path': _MAX_PATH_BYTES,
+    'source_tool': 128,
+    'tool_call_id': _MAX_TOOL_CALL_ID_BYTES,
+}
+_ANCHOR_ARTIFACT_EVENT_STRING_LIMITS = {
+    'event_id': 512,
+    'local_id': 512,
+    'session_id': 512,
+    'turn_id': 512,
+    'run_id': 512,
+    'stream_id': 512,
+}
 
 
 def _utf8_size(value: str) -> int:
@@ -31,6 +47,18 @@ def _raw_path_string(value) -> str | None:
     if isinstance(value, os.PathLike):
         value = os.fspath(value)
     return value if isinstance(value, str) else None
+
+
+def _bounded_clean_string(value, limit: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    if not value or value != value.strip():
+        return None
+    if _utf8_size(value) > limit:
+        return None
+    return value
 
 
 def _raw_paths_within_limits(paths) -> bool:
@@ -190,3 +218,178 @@ def derive_file_artifact_references(
             reference['tool_call_id'] = tid
         references.append(reference)
     return references
+
+
+def sanitize_anchor_artifact_payload(payload) -> dict | None:
+    """Return the path-only artifact payload allowed in persisted Anchor scenes."""
+    if not isinstance(payload, dict):
+        return None
+    path = _bounded_clean_string(payload.get('path'), _MAX_PATH_BYTES)
+    if not path:
+        return None
+    out = {
+        'kind': (
+            _bounded_clean_string(payload.get('kind'), _ANCHOR_ARTIFACT_STRING_LIMITS['kind'])
+            or 'workspace_file'
+        ),
+        'path': path,
+    }
+    for key in ('source_tool', 'tool_call_id'):
+        value = _bounded_clean_string(payload.get(key), _ANCHOR_ARTIFACT_STRING_LIMITS[key])
+        if value:
+            out[key] = value
+    return out
+
+
+def _bounded_event_string(value, key: str) -> str | None:
+    return _bounded_clean_string(value, _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS[key])
+
+
+def _coerce_positive_seq(value):
+    try:
+        seq = int(value)
+    except (TypeError, ValueError):
+        return None
+    return seq if seq > 0 else None
+
+
+def anchor_artifact_event_from_payload(
+    payload,
+    *,
+    session_id=None,
+    turn_id=None,
+    run_id=None,
+    stream_id=None,
+    event_id=None,
+    seq=None,
+    created_at=None,
+    local_id=None,
+) -> dict | None:
+    """Build a bounded Anchor artifact event from a path-only payload."""
+    clean_payload = sanitize_anchor_artifact_payload(payload)
+    if not clean_payload:
+        return None
+    clean_event_id = _bounded_event_string(event_id, 'event_id')
+    clean_session_id = _bounded_event_string(session_id, 'session_id')
+    clean_turn_id = _bounded_event_string(turn_id, 'turn_id')
+    clean_run_id = _bounded_event_string(run_id, 'run_id')
+    clean_stream_id = _bounded_event_string(stream_id, 'stream_id')
+    clean_seq = _coerce_positive_seq(seq)
+    clean_local_id = (
+        _bounded_event_string(local_id, 'local_id')
+        or (f'artifact:{clean_event_id}' if clean_event_id else None)
+        or (
+            f'artifact:{clean_stream_id}:{clean_seq}'
+            if clean_stream_id and clean_seq is not None
+            else None
+        )
+        or f'artifact:{clean_payload["path"]}'
+    )
+    artifact = {
+        'event_id': clean_event_id,
+        'local_id': clean_local_id,
+        'session_id': clean_session_id,
+        'turn_id': clean_turn_id,
+        'run_id': clean_run_id,
+        'stream_id': clean_stream_id,
+        'seq': clean_seq,
+        'kind': 'artifact_reference',
+        'source_event_type': 'artifact_reference',
+        'created_at': created_at,
+        'status': None,
+        'identity': {
+            'event_id': clean_event_id,
+            'local_id': clean_local_id,
+            'session_id': clean_session_id,
+            'turn_id': clean_turn_id,
+            'run_id': clean_run_id,
+            'stream_id': clean_stream_id,
+            'seq': clean_seq,
+        },
+        'payload': clean_payload,
+    }
+    return artifact
+
+
+def anchor_artifact_event_from_raw(raw, *, session_id=None, run_id=None, stream_id=None) -> dict | None:
+    """Normalize an existing persisted/live artifact object into the bounded event shape."""
+    if not isinstance(raw, dict):
+        return None
+    payload = raw.get('payload') if isinstance(raw.get('payload'), dict) else raw
+    identity = raw.get('identity') if isinstance(raw.get('identity'), dict) else {}
+    return anchor_artifact_event_from_payload(
+        payload,
+        session_id=raw.get('session_id') or identity.get('session_id') or session_id,
+        turn_id=raw.get('turn_id') or identity.get('turn_id'),
+        run_id=raw.get('run_id') or identity.get('run_id') or run_id,
+        stream_id=raw.get('stream_id') or identity.get('stream_id') or stream_id,
+        event_id=raw.get('event_id') or identity.get('event_id'),
+        seq=raw.get('seq') if raw.get('seq') is not None else identity.get('seq'),
+        created_at=raw.get('created_at'),
+        local_id=raw.get('local_id') or identity.get('local_id'),
+    )
+
+
+def _artifact_dedupe_key(event: dict) -> tuple:
+    event_id = event.get('event_id')
+    if event_id:
+        return ('event_id', event_id)
+    run_id = event.get('run_id')
+    seq = event.get('seq')
+    if run_id and seq is not None:
+        return ('run_seq', run_id, str(seq))
+    payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+    return (
+        'payload',
+        payload.get('path'),
+        payload.get('source_tool'),
+        payload.get('tool_call_id'),
+    )
+
+
+def bound_anchor_artifact_events(
+    events,
+    *,
+    session_id=None,
+    run_id=None,
+    stream_id=None,
+    max_count: int = MAX_ANCHOR_ARTIFACT_REFERENCES,
+    max_bytes: int = MAX_ANCHOR_ARTIFACT_BYTES,
+) -> list[dict]:
+    """Return a deterministic bounded prefix of valid Anchor artifact events."""
+    out: list[dict] = []
+    seen = set()
+    total = 0
+    for raw in events if isinstance(events, list) else []:
+        event = anchor_artifact_event_from_raw(
+            raw,
+            session_id=session_id,
+            run_id=run_id,
+            stream_id=stream_id,
+        )
+        if not event:
+            continue
+        key = _artifact_dedupe_key(event)
+        if key in seen:
+            continue
+        encoded = json.dumps(
+            event,
+            ensure_ascii=False,
+            separators=(',', ':'),
+            default=str,
+        ).encode('utf-8')
+        if len(out) >= max_count or total + len(encoded) > max_bytes:
+            break
+        seen.add(key)
+        total += len(encoded)
+        out.append(event)
+    return out
+
+
+def bound_anchor_activity_scene_artifacts(scene):
+    """Defensively cap scene artifacts without rejecting the whole Anchor scene."""
+    if not isinstance(scene, dict):
+        return scene
+    next_scene = dict(scene)
+    next_scene['artifacts'] = bound_anchor_artifact_events(scene.get('artifacts') or [])
+    return next_scene

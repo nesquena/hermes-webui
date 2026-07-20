@@ -3639,6 +3639,48 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Number.isFinite(idx)||idx<0) return messageIndex;
     return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
   }
+  const ANCHOR_SCENE_ARTIFACT_MAX_COUNT=64;
+  const ANCHOR_SCENE_ARTIFACT_MAX_BYTES=32*1024;
+  function _anchorSceneUtf8ByteSize(value){
+    const text=String(value||'');
+    if(typeof TextEncoder!=='undefined'){
+      try{ return new TextEncoder().encode(text).length; }catch(_){}
+    }
+    return unescape(encodeURIComponent(text)).length;
+  }
+  function _anchorSceneArtifactDedupeKey(event){
+    if(!event||typeof event!=='object') return '';
+    if(event.event_id) return `event_id:${String(event.event_id)}`;
+    if(event.run_id&&event.seq!==undefined&&event.seq!==null&&event.seq!=='') return `run_seq:${String(event.run_id)}:${String(event.seq)}`;
+    const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+    return ['payload',payload.path||'',payload.source_tool||'',payload.tool_call_id||''].join(':');
+  }
+  function _boundedAnchorSceneArtifacts(artifacts){
+    const source=Array.isArray(artifacts)?artifacts:[];
+    const out=[];
+    const seen=new Set();
+    let total=0;
+    for(const event of source){
+      if(!event||typeof event!=='object') continue;
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      if(!String(payload.path||'').trim()) continue;
+      const key=_anchorSceneArtifactDedupeKey(event);
+      if(key&&seen.has(key)) continue;
+      const size=_anchorSceneUtf8ByteSize(JSON.stringify(event));
+      if(out.length>=ANCHOR_SCENE_ARTIFACT_MAX_COUNT||total+size>ANCHOR_SCENE_ARTIFACT_MAX_BYTES) break;
+      if(key) seen.add(key);
+      total+=size;
+      out.push(event);
+    }
+    return out;
+  }
+  function _boundedAnchorSceneForPersistence(scene){
+    if(!scene||typeof scene!=='object') return scene;
+    return {
+      ...scene,
+      artifacts:_boundedAnchorSceneArtifacts(scene.artifacts),
+    };
+  }
   function _persistSettledAnchorScene(message, scene, messageIndex){
     if(!activeSid||!message||!scene||typeof api!=='function') return;
     try{
@@ -3654,7 +3696,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           message_window_index:messageIndex,
           message_offset:messageOffset,
           message_ref:_anchorSceneMessageRef(message),
-          scene,
+          scene:_boundedAnchorSceneForPersistence(scene),
         }),
       }).catch(err=>{
         if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){

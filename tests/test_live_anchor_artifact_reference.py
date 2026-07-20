@@ -426,3 +426,169 @@ if(item.event.run_id!=='run-artifact-snapshot') throw new Error('run identity lo
 if(item.context.stream_id!==streamId) throw new Error('stream context lost');
 """
     subprocess.run([NODE, "-e", script], check=True)
+
+
+def test_server_terminal_reconciliation_persists_artifact_only_scene_without_browser(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
+    from api import models, routes, streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="artifact-bg",
+        messages=[
+            {"role": "user", "content": "write a file", "timestamp": 1},
+            {"role": "assistant", "content": "done", "timestamp": 2},
+        ],
+    )
+    event = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/background.md",
+            "source_tool": "write_file",
+            "tool_call_id": "call-bg",
+        },
+        session_id=session.session_id,
+        run_id="stream-bg",
+        stream_id="stream-bg",
+        event_id="stream-bg:7",
+        seq=7,
+    )
+
+    assert streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-bg",
+        [event],
+        terminal_state="completed",
+        message_index=1,
+    )
+    session.save(skip_index=True)
+
+    raw = json.loads((session_dir / "artifact-bg.json").read_text(encoding="utf-8"))
+    assert "_anchor_activity_scene" not in raw["messages"][1]
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    assert record["message_index"] == 1
+    assert record["stream_id"] == "stream-bg"
+    assert record["scene"]["activity_rows"] == []
+    assert record["scene"]["artifacts"][0]["payload"]["path"] == "reports/background.md"
+
+    loaded = Session.load("artifact-bg")
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        loaded.messages,
+        loaded.anchor_activity_scenes,
+    )
+    assert hydrated[1]["_anchor_activity_scene"]["artifacts"][0]["payload"]["path"] == "reports/background.md"
+
+
+def test_late_cancel_artifact_reconciles_onto_cancelled_message_once(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
+    from api import models, routes, streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="artifact-cancel",
+        messages=[{"role": "user", "content": "write then cancel", "timestamp": 1}],
+    )
+    streaming._persist_cancelled_turn(session, stream_id="stream-cancel")
+    session.save(skip_index=True)
+
+    event = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/cancelled.md",
+            "source_tool": "write_file",
+            "tool_call_id": "call-cancel",
+        },
+        session_id=session.session_id,
+        run_id="stream-cancel",
+        stream_id="stream-cancel",
+        event_id="stream-cancel:9",
+        seq=9,
+    )
+    assert streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-cancel",
+        [event],
+        terminal_state="cancelled",
+    )
+    assert streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-cancel",
+        [event],
+        terminal_state="cancelled",
+    )
+    session.save(skip_index=True)
+
+    raw = json.loads((session_dir / "artifact-cancel.json").read_text(encoding="utf-8"))
+    marker = raw["messages"][-1]
+    assert marker["_anchor_stream_id"] == "stream-cancel"
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    artifacts = record["scene"]["artifacts"]
+    assert len(artifacts) == 1
+    assert artifacts[0]["payload"]["path"] == "reports/cancelled.md"
+    assert record["scene"]["terminal_state"] == "cancelled"
+
+
+def test_terminal_reconciliation_rejects_foreign_stream_owner(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
+    from api import models, routes, streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="artifact-foreign",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 1},
+            {
+                "role": "assistant",
+                "content": "newer answer",
+                "timestamp": 2,
+                "_anchor_stream_id": "stream-new",
+            },
+        ],
+    )
+    event = anchor_artifact_event_from_payload(
+        {"kind": "workspace_file", "path": "reports/old.md", "source_tool": "write_file"},
+        session_id=session.session_id,
+        run_id="stream-old",
+        stream_id="stream-old",
+        event_id="stream-old:3",
+        seq=3,
+    )
+
+    assert not streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-old",
+        [event],
+        terminal_state="completed",
+        message_index=1,
+    )
+    assert not session.anchor_activity_scenes

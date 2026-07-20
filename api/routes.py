@@ -61,6 +61,11 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.artifact_references import (
+    anchor_artifact_event_from_payload,
+    bound_anchor_activity_scene_artifacts,
+    bound_anchor_artifact_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3068,14 +3073,6 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
 
 
 _RUN_JOURNAL_TOOL_ID_KEYS = ("tid", "id", "tool_call_id", "tool_use_id", "call_id")
-_RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACTS = 64
-_RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACT_BYTES = 32 * 1024
-_RUN_JOURNAL_ARTIFACT_STRING_LIMITS = {
-    "kind": 64,
-    "path": 4096,
-    "source_tool": 128,
-    "tool_call_id": 256,
-}
 
 
 def _run_journal_snapshot_tool_id(payload: dict | None) -> str:
@@ -3214,8 +3211,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     messages: list[dict] = []
     tool_calls: list[dict] = []
     artifact_references: list[dict] = []
-    artifact_reference_bytes = 0
-    artifact_reference_overflow = False
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3286,29 +3281,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         tool_calls.append(call)
 
     def append_artifact_reference(event: dict, payload: dict) -> None:
-        nonlocal artifact_reference_bytes, artifact_reference_overflow
-        if artifact_reference_overflow or not isinstance(payload, dict):
+        nonlocal artifact_references
+        if not isinstance(payload, dict):
             return
-        if len(artifact_references) >= _RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACTS:
-            artifact_references.clear()
-            artifact_reference_overflow = True
-            return
-        artifact_payload: dict = {}
-        for key, limit in _RUN_JOURNAL_ARTIFACT_STRING_LIMITS.items():
-            value = payload.get(key)
-            if value is None:
-                continue
-            if not isinstance(value, str):
-                value = str(value)
-            if not value or value != value.strip():
-                return
-            if len(value.encode("utf-8", "surrogatepass")) > limit:
-                return
-            artifact_payload[key] = value
-        path = artifact_payload.get("path")
-        if not path:
-            return
-        artifact_payload.setdefault("kind", "workspace_file")
         try:
             event_seq = int(event.get("seq") or 0)
         except (TypeError, ValueError):
@@ -3318,41 +3293,22 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             or str(event.get("event_id") or "").strip()
             or None
         )
-        local_id = (
-            (f"artifact:{event_id}" if event_id else "")
-            or f"artifact:{stream_id}:{len(artifact_references) + 1}"
+        artifact = anchor_artifact_event_from_payload(
+            payload,
+            session_id=session_id,
+            run_id=run_id,
+            stream_id=stream_id,
+            event_id=event_id,
+            seq=event_seq,
+            created_at=event.get("created_at"),
+            local_id=(
+                (f"artifact:{event_id}" if event_id else "")
+                or f"artifact:{stream_id}:{len(artifact_references) + 1}"
+            ),
         )
-        artifact = {
-            "event_id": event_id,
-            "local_id": local_id,
-            "run_id": run_id,
-            "stream_id": stream_id,
-            "seq": event_seq or None,
-            "kind": "artifact_reference",
-            "source_event_type": "artifact_reference",
-            "created_at": event.get("created_at"),
-            "status": None,
-            "identity": {
-                "event_id": event_id,
-                "local_id": local_id,
-                "run_id": run_id,
-                "stream_id": stream_id,
-                "seq": event_seq or None,
-            },
-            "payload": artifact_payload,
-        }
-        encoded = json.dumps(
-            artifact,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-        if artifact_reference_bytes + len(encoded) > _RUN_JOURNAL_SNAPSHOT_MAX_ARTIFACT_BYTES:
-            artifact_references.clear()
-            artifact_reference_overflow = True
+        if not artifact:
             return
-        artifact_reference_bytes += len(encoded)
-        artifact_references.append(artifact)
+        artifact_references = bound_anchor_artifact_events([*artifact_references, artifact])
 
     def reasoning_echo_tail_matches(text: str) -> bool:
         candidate = _compact_for_echo_compare(text)
@@ -3875,7 +3831,7 @@ def _sanitize_anchor_activity_scene(scene):
         raise ValueError("scene.activity_rows must be a list")
     if len(rows) > _ANCHOR_ACTIVITY_SCENE_MAX_ROWS:
         raise ValueError("scene.activity_rows is too large")
-    scene_copy = copy.deepcopy(scene)
+    scene_copy = bound_anchor_activity_scene_artifacts(copy.deepcopy(scene))
     encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
