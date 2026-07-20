@@ -27,6 +27,14 @@ _MIME_EXTENSIONS = {
     "image/webp": "webp",
     "image/bmp": "bmp",
 }
+_EXTENSION_MIMES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+}
 
 
 def _attachment_root() -> Path:
@@ -95,7 +103,17 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
     root = _session_media_dir(session_id)
     root.mkdir(parents=True, exist_ok=True)
     target = root / filename
-    if not target.exists():
+    target_is_verified = False
+    try:
+        if target.is_file():
+            existing = target.read_bytes()
+            target_is_verified = (
+                hashlib.sha256(existing).hexdigest() == digest
+                and _is_expected_raster_bytes(mime, existing)
+            )
+    except OSError:
+        target_is_verified = False
+    if not target_is_verified:
         tmp = root / f".{filename}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             with open(tmp, "wb") as handle:
@@ -111,6 +129,63 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
             except OSError:
                 pass
     return _MEDIA_SCHEME + filename
+
+
+def _read_verified_media_reference(session_id: str, filename: str) -> tuple[str, bytes]:
+    """Read one reference and verify its type and content-addressed name."""
+    match = _REF_RE.fullmatch(_MEDIA_SCHEME + filename)
+    if not match:
+        raise ValueError("Invalid session media reference")
+    root = _session_media_dir(session_id)
+    path = (root / match.group(1)).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("Invalid session media path")
+    raw = path.read_bytes()
+    mime = _EXTENSION_MIMES.get(path.suffix.lower().lstrip("."))
+    if not mime or not _is_expected_raster_bytes(mime, raw):
+        raise ValueError(f"Session media type verification failed for {filename}")
+    expected_digest = filename.split(".", 1)[0]
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        raise ValueError(f"Session media digest verification failed for {filename}")
+    return mime, raw
+
+
+def clone_session_media_references(value, source_session_id: str, destination_session_id: str) -> int:
+    """Give *destination_session_id* verified ownership of compact references.
+
+    The structured value is not mutated. Callers must invoke this before
+    committing copied history under a different session id so every persisted
+    ``webui-media://`` reference resolves independently of the source session.
+    """
+    if source_session_id == destination_session_id:
+        return 0
+    filenames = set()
+
+    def visit(node):
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
+        image = node.get("image_url")
+        if node.get("type") == "image_url" and isinstance(image, dict):
+            url = image.get("url")
+            match = _REF_RE.fullmatch(url) if isinstance(url, str) else None
+            if match:
+                filenames.add(match.group(1))
+                return
+        for child in node.values():
+            visit(child)
+
+    visit(value)
+    for filename in sorted(filenames):
+        mime, raw = _read_verified_media_reference(source_session_id, filename)
+        cloned_reference = _write_media(destination_session_id, mime, raw)
+        if cloned_reference != _MEDIA_SCHEME + filename:
+            raise ValueError(f"Session media reference changed while cloning {filename}")
+        _read_verified_media_reference(destination_session_id, filename)
+    return len(filenames)
 
 
 def externalize_large_session_media(value, session_id: str, *, min_bytes: int = _MIN_EXTERNALIZED_BYTES) -> int:
@@ -169,10 +244,7 @@ def hydrate_session_media_urls(value, session_id: str):
                 try:
                     if path.is_relative_to(root) and path.is_file():
                         raw = path.read_bytes()
-                        mime = {
-                            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                            ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
-                        }.get(path.suffix.lower())
+                        mime = _EXTENSION_MIMES.get(path.suffix.lower().lstrip("."))
                         if mime and _is_expected_raster_bytes(mime, raw):
                             image["url"] = "data:%s;base64,%s" % (
                                 mime, base64.b64encode(raw).decode("ascii")

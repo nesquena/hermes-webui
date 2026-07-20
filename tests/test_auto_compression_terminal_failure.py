@@ -1,13 +1,15 @@
 """Regression coverage for compression-exhausted stream finalization."""
 
+import base64
 import copy
 import json
 import queue
+import shutil
 import sys
 import types
 from pathlib import Path
 
-from api import models, streaming
+from api import models, session_media, streaming
 from api.models import Session
 from api.streaming import (
     _agent_result_terminal_failure,
@@ -28,7 +30,9 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.delenv("HERMES_WEBUI_ATTACHMENT_DIR", raising=False)
     models.SESSIONS.clear()
     streaming.SESSIONS.clear()
     streaming.STREAMS.clear()
@@ -37,13 +41,22 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     old_sid = "old_sid"
     new_sid = "new_sid"
     stream_id = "stream-compression-exhausted"
+    image_raw = b"\x89PNG\r\n\x1a\n" + (b"\0" * (70 * 1024))
+    image_data_url = "data:image/png;base64," + base64.b64encode(image_raw).decode("ascii")
+    image_message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "historical image"},
+            {"type": "image_url", "image_url": {"url": image_data_url}},
+        ],
+    }
     session = Session(
         session_id=old_sid,
         title="Compression test",
         workspace=str(tmp_path),
         model="gpt-4o",
-        messages=[],
-        context_messages=[],
+        messages=[copy.deepcopy(image_message)],
+        context_messages=[copy.deepcopy(image_message)],
     )
     session.active_stream_id = stream_id
     session.pending_user_message = "Do the long task."
@@ -152,6 +165,16 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert new_payload["messages"][-1]["_error"] is True
     assert new_payload["messages"][-1]["_compressionRecovery"]["recommended_action"] == "start_focused_continuation"
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
+    assert "webui-media://" in json.dumps(new_payload["messages"])
+    destination_files = list(session_media._session_media_dir(new_sid).iterdir())
+    assert len(destination_files) == 1
+    assert destination_files[0].read_bytes() == image_raw
+    shutil.rmtree(session_media._session_media_dir(old_sid).parent)
+    continuation = Session.load(new_sid)
+    hydrated_messages = session_media.hydrate_session_media_urls(continuation.messages, new_sid)
+    assert image_data_url in json.dumps(hydrated_messages)
+    hydrated_context = session_media.hydrate_session_media_urls(continuation.context_messages, new_sid)
+    assert image_data_url in json.dumps(hydrated_context)
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
 
