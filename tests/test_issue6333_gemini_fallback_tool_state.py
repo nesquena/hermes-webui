@@ -31,6 +31,35 @@ def _boundary_marker_key():
     return _GEMINI_REQUEST_BOUNDARY_MARKER
 
 
+def _boundary_wrapper_type():
+    from api.streaming import _GeminiRequestBoundaryMessage
+
+    return _GeminiRequestBoundaryMessage
+
+
+def _assert_no_materialized_boundary_marker(messages):
+    marker = _boundary_marker_key()
+    assert not any(
+        marker in message
+        for message in messages
+        if isinstance(message, dict)
+    )
+
+
+def _assert_no_boundary_wrapper_instances(messages):
+    wrapper_type = _boundary_wrapper_type()
+    assert not any(
+        isinstance(message, wrapper_type)
+        for message in messages
+        if isinstance(message, dict)
+    )
+
+
+def _assert_no_boundary_artifacts(messages):
+    _assert_no_materialized_boundary_marker(messages)
+    _assert_no_boundary_wrapper_instances(messages)
+
+
 def _import_real_conversation_loop():
     original_agent_modules = {
         name: module
@@ -331,6 +360,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 
     primary_success_calls = []
     fallback_primary_calls = []
+    writeback_primary_calls = []
     fallback_calls = []
     fallback_resolution_calls = []
     captured_results = {}
@@ -363,6 +393,12 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
         fallback_calls.append(copy.deepcopy(kwargs))
         return _assistant_response("fallback recovered")
 
+    def _writeback_primary_create(*_args, **kwargs):
+        writeback_primary_calls.append(copy.deepcopy(kwargs))
+        if len(writeback_primary_calls) == 1:
+            return _assistant_response("Checking the next order.", [active_tool_call])
+        return _assistant_response("primary stayed primary")
+
     scenarios = {
         "issue6333-primary": {
             "primary_client": _make_client(
@@ -374,6 +410,12 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             "primary_client": _make_client(
                 "https://integrate.api.nvidia.com/v1",
                 _fallback_primary_create,
+            ),
+        },
+        "issue6333-writeback": {
+            "primary_client": _make_client(
+                "https://integrate.api.nvidia.com/v1",
+                _writeback_primary_create,
             ),
         },
     }
@@ -407,6 +449,17 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 
         def run_conversation(self, **kwargs):
             result = super().run_conversation(**kwargs)
+            if self.session_id == "issue6333-writeback":
+                dirty_result = copy.deepcopy(result)
+                for message in dirty_result.get("messages") or []:
+                    if (
+                        isinstance(message, dict)
+                        and message.get("role") == "user"
+                        and str(message.get("content") or "").endswith("continue after dirty copied result")
+                    ):
+                        message[streaming._GEMINI_REQUEST_BOUNDARY_MARKER] = True
+                        break
+                result = dirty_result
             captured_results[self.session_id] = copy.deepcopy(result)
             return result
 
@@ -583,6 +636,11 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             stream_id="stream-6333-fallback",
             msg_text="continue with fallback",
         )
+        writeback_saved = _run_stream(
+            session_id="issue6333-writeback",
+            stream_id="stream-6333-writeback",
+            msg_text="continue after dirty copied result",
+        )
     finally:
         restore_agent_modules()
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
@@ -630,14 +688,17 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
         "name": "lookup",
         "content": "order 2: pending",
     }
-    assert tool_executions == [expected_tool_row, expected_tool_row]
+    assert tool_executions == [expected_tool_row, expected_tool_row, expected_tool_row]
     primary_messages = primary_success_calls[1]["messages"]
     _assert_canonical_current_turn(primary_messages)
     primary_result = captured_results["issue6333-primary"]
     _assert_canonical_current_turn(primary_result["messages"])
+    _assert_no_materialized_boundary_marker(primary_result["messages"])
     assert primary_saved is not None
     _assert_canonical_current_turn(primary_saved.context_messages)
     _assert_canonical_current_turn(primary_saved.messages)
+    _assert_no_materialized_boundary_marker(primary_saved.context_messages)
+    _assert_no_materialized_boundary_marker(primary_saved.messages)
     assert primary_result["messages"][-1]["content"] == "primary stayed primary"
     assert primary_saved.messages[-1]["content"] == "primary stayed primary"
 
@@ -659,6 +720,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 
     fallback_result = captured_results["issue6333-fallback"]
     _assert_canonical_current_turn(fallback_result["messages"])
+    _assert_no_materialized_boundary_marker(fallback_result["messages"])
     fallback_messages = fallback_calls[0]["messages"]
     current_assistant = next(
         m
@@ -675,8 +737,21 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     assert fallback_saved is not None
     _assert_canonical_current_turn(fallback_saved.context_messages)
     _assert_canonical_current_turn(fallback_saved.messages)
+    _assert_no_materialized_boundary_marker(fallback_saved.context_messages)
+    _assert_no_materialized_boundary_marker(fallback_saved.messages)
     assert fallback_result["messages"][-1]["content"] == "fallback recovered"
     assert fallback_saved.messages[-1]["content"] == "fallback recovered"
+    writeback_result = captured_results["issue6333-writeback"]
+    assert any(
+        _boundary_marker_key() in message
+        for message in writeback_result["messages"]
+        if isinstance(message, dict)
+    ), "the integration must inject a dirty copied marker or the writeback assertion is vacuous"
+    assert writeback_saved is not None
+    _assert_canonical_current_turn(writeback_saved.context_messages)
+    _assert_canonical_current_turn(writeback_saved.messages)
+    _assert_no_materialized_boundary_marker(writeback_saved.context_messages)
+    _assert_no_materialized_boundary_marker(writeback_saved.messages)
 
     from api.streaming import _GEMINI_REQUEST_BOUNDARY_MARKER
     for call in primary_success_calls + fallback_primary_calls + fallback_calls:
@@ -764,7 +839,10 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
 
 def test_boundary_wrapper_reanchors_rebuilt_message_list_and_strips_marker():
     import api.streaming as streaming
-    from api.streaming import _install_gemini_request_boundary_wrapper
+    from api.streaming import (
+        _GeminiRequestBoundaryMessage,
+        _install_gemini_request_boundary_wrapper,
+    )
     conversation_loop, restore_agent_modules = _import_real_conversation_loop()
 
     original_reanchor = conversation_loop.reanchor_current_turn_user_idx
@@ -782,9 +860,11 @@ def test_boundary_wrapper_reanchors_rebuilt_message_list_and_strips_marker():
         rebuilt = [
             {"role": "user", "content": "old"},
             {"role": "assistant", "content": "summary"},
-            {"role": "user", "content": "current"},
+            _GeminiRequestBoundaryMessage({"role": "user", "content": "current"}).copy(),
         ]
+        assert rebuilt[2].get(streaming._GEMINI_REQUEST_BOUNDARY_MARKER) is True
         assert conversation_loop.reanchor_current_turn_user_idx(rebuilt, "current") == 2
+        _assert_no_materialized_boundary_marker(rebuilt)
         outbound = rebuilt[2].copy()
         assert outbound.pop(streaming._GEMINI_REQUEST_BOUNDARY_MARKER) is True
         assert rebuilt[2] == {"role": "user", "content": "current"}
@@ -907,3 +987,211 @@ def test_transport_wrapper_rewraps_replaced_real_chat_transport():
         conversation_loop.build_turn_context = original_build_turn_context
         conversation_loop.reanchor_current_turn_user_idx = original_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag
+
+
+def test_build_turn_wrapper_cleans_stale_marker_before_second_turn_and_keeps_single_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    from api.streaming import (
+        _GeminiRequestBoundaryMessage,
+        _install_gemini_request_boundary_wrapper,
+    )
+    import api.models as models
+    import api.streaming as streaming
+    from api.models import Session
+    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+    ChatCompletionsTransport = pytest.importorskip(
+        "agent.transports.chat_completions",
+        reason="hermes-agent transport modules not importable",
+    ).ChatCompletionsTransport
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
+    original_build_kwargs = ChatCompletionsTransport.build_kwargs
+    original_build_turn_context = conversation_loop.build_turn_context
+    original_reanchor = conversation_loop.reanchor_current_turn_user_idx
+    baseline_build_kwargs = getattr(
+        original_build_kwargs,
+        "_webui_original_build_kwargs",
+        original_build_kwargs,
+    )
+    baseline_build_turn_context = getattr(
+        original_build_turn_context,
+        "_webui_original_build_turn_context",
+        original_build_turn_context,
+    )
+    baseline_reanchor = getattr(
+        original_reanchor,
+        "_webui_original_reanchor",
+        original_reanchor,
+    )
+    try:
+        ChatCompletionsTransport.build_kwargs = baseline_build_kwargs
+        conversation_loop.build_turn_context = baseline_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = baseline_reanchor
+        streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
+
+        _install_gemini_request_boundary_wrapper()
+        rebuilt_history = [
+            {"role": "user", "content": "look up the first order"},
+            {
+                "role": "assistant",
+                "content": "Found it.",
+                "tool_calls": [{
+                    "id": "call_prior",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"id":"1"}'},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_prior",
+                "name": "lookup",
+                "content": "order 1: shipped",
+            },
+            _GeminiRequestBoundaryMessage({"role": "user", "content": "now check the next one"}).copy(),
+        ]
+        assert rebuilt_history[3].get(streaming._GEMINI_REQUEST_BOUNDARY_MARKER) is True
+        assert conversation_loop.reanchor_current_turn_user_idx(rebuilt_history, "now check the next one") == 3
+        assert isinstance(rebuilt_history[3], _GeminiRequestBoundaryMessage)
+
+        def replacement_build_turn_context(*args, **kwargs):
+            return types.SimpleNamespace(
+                messages=list(rebuilt_history) + [
+                    {"role": "user", "content": "and then check the last one"},
+                    {
+                        "role": "assistant",
+                        "content": "Checking the last order.",
+                        "tool_calls": [{
+                            "id": "call_current",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"id":"3"}'},
+                        }],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_current",
+                        "name": "lookup",
+                        "content": "order 3: pending",
+                    },
+                ],
+                current_turn_user_idx=4,
+            )
+
+        conversation_loop.build_turn_context = replacement_build_turn_context
+        streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
+        _install_gemini_request_boundary_wrapper()
+
+        ctx = conversation_loop.build_turn_context()
+        _assert_no_materialized_boundary_marker(ctx.messages)
+        assert sum(
+            1
+            for message in ctx.messages
+            if isinstance(message, _GeminiRequestBoundaryMessage)
+        ) == 1
+        assert isinstance(ctx.messages[4], _GeminiRequestBoundaryMessage)
+
+        request_copies = [
+            message.copy()
+            for message in ctx.messages
+            if isinstance(message, dict)
+        ]
+        boundary_count = sum(
+            1
+            for message in request_copies
+            if message.get(streaming._GEMINI_REQUEST_BOUNDARY_MARKER) is True
+        )
+        assert boundary_count == 1
+
+        fallback_kwargs = ChatCompletionsTransport().build_kwargs(
+            model="gemini-3-flash",
+            messages=request_copies,
+            tools=None,
+            base_url=GOOGLE_OPENAI_BASE,
+        )
+        result = fallback_kwargs["messages"]
+        _assert_no_materialized_boundary_marker(ctx.messages)
+        assert any(
+            m.get("role") == "tool" and m.get("tool_call_id") == "call_prior"
+            for m in result
+        )
+        assert not any(
+            m.get("role") == "tool" and m.get("tool_call_id") == "call_current"
+            for m in result
+        ), "the rebuilt-history second turn must still repair the current-turn unsigned group"
+
+        canonical_ctx_messages = copy.deepcopy(ctx.messages)
+        streaming._sanitize_materialized_gemini_request_boundary_history(canonical_ctx_messages)
+        _assert_no_boundary_artifacts(canonical_ctx_messages)
+        _assert_no_boundary_artifacts(result)
+
+        session = Session(session_id="issue6333-second-turn-history", title="Gemini fallback")
+        session.messages = copy.deepcopy(result)
+        session.context_messages = copy.deepcopy(canonical_ctx_messages)
+        session.save()
+
+        saved = Session.load("issue6333-second-turn-history")
+        assert saved is not None
+        _assert_no_boundary_artifacts(saved.messages)
+        _assert_no_boundary_artifacts(saved.context_messages)
+    finally:
+        restore_agent_modules()
+        ChatCompletionsTransport.build_kwargs = original_build_kwargs
+        conversation_loop.build_turn_context = original_build_turn_context
+        conversation_loop.reanchor_current_turn_user_idx = original_reanchor
+        streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag
+
+
+def test_compression_copied_boundary_marker_is_stripped_before_session_save(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+    import api.streaming as streaming
+    from api.models import Session
+    from api.streaming import _GeminiRequestBoundaryMessage
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    canonical_messages = [
+        {"role": "user", "content": "look up the first order"},
+        _GeminiRequestBoundaryMessage({"role": "user", "content": "now check the next one"}),
+        {
+            "role": "assistant",
+            "content": "Checking the next order.",
+            "tool_calls": [{
+                "id": "call_current",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"id":"2"}'},
+            }],
+        },
+    ]
+    compression_copied_history = [
+        message.copy()
+        for message in canonical_messages
+        if isinstance(message, dict)
+    ]
+    assert compression_copied_history[1].get(_boundary_marker_key()) is True
+
+    streaming._sanitize_materialized_gemini_request_boundary_history(
+        compression_copied_history
+    )
+    _assert_no_boundary_artifacts(compression_copied_history)
+
+    session = Session(session_id="issue6333-compression-copy", title="Gemini fallback")
+    session.messages = copy.deepcopy(compression_copied_history)
+    session.context_messages = copy.deepcopy(compression_copied_history)
+    session.save()
+
+    saved = Session.load("issue6333-compression-copy")
+    assert saved is not None
+    _assert_no_boundary_artifacts(saved.messages)
+    _assert_no_boundary_artifacts(saved.context_messages)

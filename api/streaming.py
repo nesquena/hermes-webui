@@ -439,6 +439,47 @@ class _GeminiRequestBoundaryMessage(dict):
         return copied
 
 
+def _strip_materialized_gemini_request_boundary_marker(message):
+    if not isinstance(message, dict):
+        return message
+    cleaned = dict(message)
+    cleaned.pop(_GEMINI_REQUEST_BOUNDARY_MARKER, None)
+    return cleaned
+
+
+def _normalize_canonical_gemini_request_boundary_message(message):
+    if not isinstance(message, dict):
+        return message
+    if type(message) is dict and _GEMINI_REQUEST_BOUNDARY_MARKER not in message:
+        return message
+    return _strip_materialized_gemini_request_boundary_marker(message)
+
+
+def _clear_materialized_gemini_request_boundary_markers(messages):
+    if not isinstance(messages, list):
+        return
+    for idx, message in enumerate(messages):
+        normalized = _normalize_canonical_gemini_request_boundary_message(message)
+        if normalized is not message:
+            messages[idx] = normalized
+
+
+def _sanitize_materialized_gemini_request_boundary_history(messages):
+    _clear_materialized_gemini_request_boundary_markers(messages)
+    return messages
+
+
+def _replace_message_with_boundary_marker(messages, idx):
+    if not isinstance(messages, list) or not (0 <= idx < len(messages)):
+        return
+    message = messages[idx]
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return
+    messages[idx] = _GeminiRequestBoundaryMessage(
+        _strip_materialized_gemini_request_boundary_marker(message)
+    )
+
+
 def _stream_writeback_diag_threshold_seconds(environ=None):
     if environ is None:
         environ = os.environ
@@ -820,10 +861,9 @@ def _install_gemini_request_boundary_wrapper() -> None:
                     ctx = original_build_turn_context(*args, **kwargs)
                     idx = getattr(ctx, "current_turn_user_idx", -1)
                     messages = getattr(ctx, "messages", None)
-                    if isinstance(messages, list) and 0 <= idx < len(messages):
-                        message = messages[idx]
-                        if isinstance(message, dict) and message.get('role') == 'user':
-                            messages[idx] = _GeminiRequestBoundaryMessage(message)
+                    if isinstance(messages, list):
+                        _clear_materialized_gemini_request_boundary_markers(messages)
+                        _replace_message_with_boundary_marker(messages, idx)
                     return ctx
 
                 _wrapped_build_turn_context.__dict__["_webui_gemini_request_boundary_wrapper"] = True
@@ -836,10 +876,9 @@ def _install_gemini_request_boundary_wrapper() -> None:
 
                 def _wrapped_reanchor(messages, user_message):
                     idx = original_reanchor(messages, user_message)
-                    if 0 <= idx < len(messages):
-                        message = messages[idx]
-                        if isinstance(message, dict) and message.get('role') == 'user':
-                            messages[idx] = _GeminiRequestBoundaryMessage(message)
+                    if isinstance(messages, list):
+                        _clear_materialized_gemini_request_boundary_markers(messages)
+                        _replace_message_with_boundary_marker(messages, idx)
                     return idx
 
                 _wrapped_reanchor.__dict__["_webui_gemini_request_boundary_wrapper"] = True
@@ -16542,6 +16581,9 @@ def _run_agent_streaming(
                     _result_messages = result.get('messages')
                     if _result_messages is None:
                         _result_messages = _previous_context_messages
+                    _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        _result_messages
+                    )
                     _result_messages = _drop_synthetic_max_iteration_summary_requests(
                         _result_messages,
                         enabled=_tool_limit_reached,
@@ -16590,6 +16632,10 @@ def _run_agent_streaming(
                         _active_turn_identity,
                         _run_conversation_projected_history,
                         compression_authorized=_compressed_this_turn,
+                    )
+                    s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
+                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        s.context_messages
                     )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -17016,6 +17062,9 @@ def _run_agent_streaming(
                                 _result_messages = result.get('messages')
                                 if _result_messages is None:
                                     _result_messages = _previous_context_messages
+                                _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _result_messages
+                                )
                                 _result_messages = _drop_synthetic_max_iteration_summary_requests(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
@@ -17042,6 +17091,10 @@ def _run_agent_streaming(
                                     compression_authorized=_producer_committed_compression(
                                         agent, session_id
                                     ),
+                                )
+                                s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
+                                s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    s.context_messages
                                 )
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -17219,6 +17272,9 @@ def _run_agent_streaming(
                             "(active engine: %s)",
                             type(getattr(agent, 'context_compressor', None)).__name__,
                         )
+                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        s.context_messages
+                    )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,
@@ -18496,6 +18552,9 @@ def _run_agent_streaming(
                                     _result_messages = _heal_result.get('messages')
                                     if _result_messages is None:
                                         _result_messages = _previous_context_messages
+                                    _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                        _result_messages
+                                    )
                                     _result_messages = _settle_result_messages(
                                         s,
                                         _previous_messages,
@@ -18520,6 +18579,12 @@ def _run_agent_streaming(
                                         compression_authorized=_producer_committed_compression(
                                             _heal_agent, session_id
                                         ),
+                                    )
+                                    s.messages = _sanitize_materialized_gemini_request_boundary_history(
+                                        s.messages
+                                    )
+                                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                        s.context_messages
                                     )
                                     # Terminal self-heal success must finalize the
                                     # turn exactly once: clear the pending markers
