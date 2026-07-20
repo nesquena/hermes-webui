@@ -28,6 +28,7 @@ ARTIFACT_CASES = [
     {"path": "src//users.py", "source": "gap", "display": "src//users.py", "name": "users.py", "head": "src/", "tail": "/"},
     {"path": "src/lastIndexOf/users.py", "source": "literal", "display": "src/lastIndexOf/users.py", "name": "users.py", "head": "src/", "tail": "lastIndexOf/"},
     {"path": "/workspace/über/<unsafe>/routes/quote&.py", "source": "<source>&", "display": "über/<unsafe>/routes/quote&.py", "name": "quote&.py", "head": "über/<unsafe>/", "tail": "routes/"},
+    {"path": "2026-07-20-quarterly-revenue-analysis-with-regional-breakdown-and-confidence-intervals/summary.json", "source": "", "display": "2026-07-20-quarterly-revenue-analysis-with-regional-breakdown-and-confidence-intervals/summary.json", "name": "summary.json", "head": "", "tail": "2026-07-20-quarterly-revenue-analysis-with-regional-breakdown-and-confidence-intervals/"},
 ]
 
 
@@ -206,10 +207,10 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
         buttons = page.locator(".workspace-artifact-item")
         assert buttons.count() == len(ARTIFACT_CASES)
         assert page.locator(".workspace-artifact-meta").all_text_contents() == [
-            "patch", "tool", "single", "session", "root", "trail", "empty", "gap", "literal", "<source>&"
+            "patch", "tool", "single", "session", "root", "trail", "empty", "gap", "literal", "<source>&", "session"
         ]
         if EXPECT_VISIBLE:
-            assert page.locator(".workspace-artifact-meta[data-i18n='workspace_artifact_source_session']").count() == 1
+            assert page.locator(".workspace-artifact-meta[data-i18n='workspace_artifact_source_session']").count() == 2
             for index, case in enumerate(ARTIFACT_CASES):
                 button = buttons.nth(index)
                 assert button.get_attribute("data-artifact-path") == case["path"]
@@ -248,6 +249,24 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
                 clipped_path = buttons.nth(1).locator(".workspace-artifact-path")
                 assert not _path_suffix_visible(clipped_path, "users.py")
             assert_layout_sane(page, "#workspaceArtifacts", checks=["overlap", "container-escape", "degenerate", "raw-string"])
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.locator(".issue6067-proof-panel").evaluate(
+            "node => { node.style.width = '300px'; node.classList.add('mobile-open'); }"
+        )
+        page.locator("#workspaceArtifacts").evaluate("node => node.style.removeProperty('width')")
+        long_row = buttons.nth(10)
+        long_tail = long_row.locator(".workspace-artifact-directory-tail")
+        for selector in ("#workspaceArtifacts", ".workspace-artifact-item"):
+            assert page.locator(selector).nth(10 if selector != "#workspaceArtifacts" else 0).evaluate(
+                "node => node.scrollWidth === node.clientWidth"
+            )
+        assert long_row.locator(".workspace-artifact-filename").inner_text() == "summary.json"
+        assert _filename_visible(long_row.locator(".workspace-artifact-filename"))
+        assert long_tail.evaluate(
+            "node => node.scrollWidth > node.clientWidth && getComputedStyle(node).textOverflow === 'ellipsis'"
+        )
+        assert_layout_sane(page, "#workspaceArtifacts", checks=["overlap", "clip", "container-escape", "degenerate", "raw-string"])
 
         for index in range(buttons.count()):
             buttons.nth(index).focus()
