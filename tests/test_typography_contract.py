@@ -255,7 +255,7 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
 
 def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attributes():
     block_match = re.search(
-        r"function\s+syncComposerTerminalAppearance\(\)\s*\{.*?\n\}\s*\n\s*function\s+_xtermReady\(\)",
+        r"function\s+syncComposerTerminalAppearance\([^)]*\)\s*\{.*?\n\}\s*\n\s*function\s+_xtermReady\(\)",
         TERMINAL_JS,
         re.S,
     )
@@ -265,7 +265,7 @@ def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attr
     assert "lastAppliedTheme" in sync_block
     assert "lastAppliedFontFamily" in sync_block
     assert re.search(
-        r"new\s+MutationObserver\(syncComposerTerminalAppearance\)\.observe\(document\.documentElement,\{.*?attributeFilter:\s*\[\s*['\"]class['\"],\s*['\"]data-skin['\"],\s*['\"]style['\"],?\s*\]",
+        r"new\s+MutationObserver\(\(\)\s*=>\s*syncComposerTerminalAppearance\(\)\)\.observe\(document\.documentElement,\{.*?attributeFilter:\s*\[\s*['\"]class['\"],\s*['\"]data-skin['\"],\s*['\"]style['\"],?\s*\]",
         TERMINAL_JS,
         re.S,
     )
@@ -273,14 +273,14 @@ def test_terminal_sync_tracks_applied_appearance_and_observes_relevant_root_attr
     assert "if(terminalHead){" in TERMINAL_JS
     assert "terminalHeadStylesheetLoadListener" in TERMINAL_JS
     assert re.search(
-        r"new\s+MutationObserver\(syncComposerTerminalAppearance\)\.observe\(terminalHead,\{\s*attributes:\s*true,\s*attributeFilter:\s*\[\s*['\"]href['\"],\s*['\"]media['\"],\s*['\"]disabled['\"]\s*\],\s*childList:\s*true,\s*subtree:\s*true,\s*characterData:\s*true,\s*\}\)",
+        r"new\s+MutationObserver\(\(\)\s*=>\s*syncComposerTerminalAppearance\(true\)\)\.observe\(terminalHead,\{\s*attributes:\s*true,\s*attributeFilter:\s*\[\s*['\"]href['\"],\s*['\"]media['\"],\s*['\"]disabled['\"]\s*\],\s*childList:\s*true,\s*subtree:\s*true,\s*characterData:\s*true,\s*\}\)",
         TERMINAL_JS,
         re.S,
     )
     head_decl=TERMINAL_JS.index("const terminalHead=document.head")
     head_guard=TERMINAL_JS.index("if(terminalHead){")
     head_load_listener=TERMINAL_JS.index("terminalHead.addEventListener('load',terminalHeadStylesheetLoadListener,true)")
-    head_observer=TERMINAL_JS.index("new MutationObserver(syncComposerTerminalAppearance).observe(terminalHead,{")
+    head_observer=TERMINAL_JS.index("new MutationObserver(()=>syncComposerTerminalAppearance(true)).observe(terminalHead,{")
     assert head_decl < head_guard < head_load_listener < head_observer
     assert re.search(
         r"terminalHead\.addEventListener\(\s*['\"]load['\"],\s*terminalHeadStylesheetLoadListener,\s*true\s*\)",
@@ -306,11 +306,31 @@ let fitCalls=0;
 let resizeSchedules=0;
 let terminalHeadLoadListener=null;
 let terminalHeadLoadListenerOptions=null;
+let unhandledFontLoadRejections=0;
 let nextAnimationFrameId=1;
 const animationFrames=new Map();
 const writes=[];
 const createdAppearances=[];
+const fontLoadCalls=[];
+const pendingFontLoads=[];
 const surface={textContent:''};
+
+process.on('unhandledRejection',()=>{unhandledFontLoadRejections+=1;});
+
+const terminalFonts={
+  load(shorthand){
+    let resolve;
+    let reject;
+    const promise=new Promise((resolvePromise,rejectPromise)=>{
+      resolve=resolvePromise;
+      reject=rejectPromise;
+    });
+    const request={shorthand,resolve,reject};
+    fontLoadCalls.push(shorthand);
+    pendingFontLoads.push(request);
+    return promise;
+  },
+};
 
 function pendingAnimationFrames(){
   return animationFrames.size;
@@ -336,10 +356,12 @@ class FakeTerminal {
   constructor(options){
     createdAppearances.push({
       fontFamily:options.fontFamily,
+      fontSize:options.fontSize,
       theme:{...options.theme},
     });
     const current={
       fontFamily:options.fontFamily,
+      fontSize:options.fontSize,
       theme:options.theme,
     };
     this.options=new Proxy(current,{
@@ -375,6 +397,7 @@ global.window={
 global.MutationObserver=FakeMutationObserver;
 global.document={
   documentElement:root,
+  fonts:terminalFonts,
   head:{
     addEventListener(type,listener,options){
       if(type==='load'){
@@ -405,95 +428,255 @@ global.clearTimeout=()=>{};
 """
         + TERMINAL_JS
         + """
-const first=_ensureXterm();
-TERMINAL_UI.open=true;
-TERMINAL_UI.sessionId='session-1';
-const initialFitCalls=fitCalls;
-resizeSchedules=0;
+async function settleFontLoad(){
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
-writes.length=0;
-const fitsBeforeUnchanged=fitCalls;
-syncComposerTerminalAppearance();
-const unchangedWrites=[...writes];
-const unchangedFitDelta=fitCalls-fitsBeforeUnchanged;
-const unchangedPendingFrames=pendingAnimationFrames();
+(async()=>{
+  const first=_ensureXterm();
+  const initialFontLoad=pendingFontLoads[0];
+  TERMINAL_UI.open=true;
+  TERMINAL_UI.sessionId='session-1';
+  const initialFitCalls=fitCalls;
+  resizeSchedules=0;
+  initialFontLoad.resolve([]);
+  await settleFontLoad();
+  const initialDelayedPendingFrames=pendingAnimationFrames();
+  flushAnimationFrames();
+  const initialDelayedFitDelta=fitCalls-initialFitCalls;
+  const initialDelayedResizeSchedules=resizeSchedules;
 
-writes.length=0;
-const fitsBeforeUnrelated=fitCalls;
-document.documentElement.style.setProperty('--unrelated-outline-offset','3px');
-observerCallbacks.documentElement([{attributeName:'style'}]);
-const unrelatedStyleWrites=[...writes];
-const unrelatedFitDelta=fitCalls-fitsBeforeUnrelated;
-const unrelatedPendingFrames=pendingAnimationFrames();
+  writes.length=0;
+  resizeSchedules=0;
+  const fitsBeforeLateSameFamily=fitCalls;
+  const fontLoadsBeforeLateSameFamily=fontLoadCalls.length;
+  observerCallbacks.head([{type:'childList'},{type:'characterData'}]);
+  const lateSameFamilyFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const lateSameFamilyWrites=[...writes];
+  const lateSameFamilyLoadCount=fontLoadCalls.length-fontLoadsBeforeLateSameFamily;
+  const lateSameFamilyPendingFramesBeforeCompletion=pendingAnimationFrames();
+  flushAnimationFrames();
+  const lateSameFamilyFitDeltaBeforeCompletion=fitCalls-fitsBeforeLateSameFamily;
+  lateSameFamilyFontLoad.resolve([{}]);
+  await settleFontLoad();
+  const lateSameFamilyPendingFramesAfterLoad=pendingAnimationFrames();
+  const fitsBeforeLateSameFamilyFit=fitCalls;
+  flushAnimationFrames();
+  const lateSameFamilyFitDelta=fitCalls-fitsBeforeLateSameFamilyFit;
+  const lateSameFamilyResizeSchedules=resizeSchedules;
 
-writes.length=0;
-const fitsBeforeTheme=fitCalls;
-styles['--code-bg']='#222222';
-observerCallbacks.documentElement([{attributeName:'style'}]);
-const themeOnlyWrites=[...writes];
-const backgroundAfterChange=first.options.theme.background;
-const themeOnlyFitDelta=fitCalls-fitsBeforeTheme;
-const themeOnlyPendingFrames=pendingAnimationFrames();
+  writes.length=0;
+  const fitsBeforeLateStylesheetLoad=fitCalls;
+  const fontLoadsBeforeLateStylesheetLoad=fontLoadCalls.length;
+  terminalHeadLoadListener&&terminalHeadLoadListener({target:{
+    tagName:'LINK',
+    getAttribute(name){ return name==='rel'?'stylesheet':null; },
+  }});
+  const lateStylesheetFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const lateStylesheetLoadWrites=[...writes];
+  const lateStylesheetLoadCount=fontLoadCalls.length-fontLoadsBeforeLateStylesheetLoad;
+  const lateStylesheetPendingFrames=pendingAnimationFrames();
+  flushAnimationFrames();
+  lateStylesheetFontLoad.resolve([]);
+  await settleFontLoad();
+  const lateStylesheetFitDelta=fitCalls-fitsBeforeLateStylesheetLoad;
+  const lateStylesheetPendingFramesAfterLoad=pendingAnimationFrames();
 
-writes.length=0;
-resizeSchedules=0;
-const fitsBeforeFont=fitCalls;
-styles['--font-mono']='"Extension Mono",monospace';
-observerCallbacks.head([{type:'childList'}]);
-observerCallbacks.head([{type:'characterData'}]);
-const fontOnlyWrites=[...writes];
-const fontAfterChange=first.options.fontFamily;
-const fontFitDeltaBeforeFrame=fitCalls-fitsBeforeFont;
-const fontPendingFramesBeforeFlush=pendingAnimationFrames();
-flushAnimationFrames();
-const fontFitDeltaAfterFrame=fitCalls-fitsBeforeFont;
-const fontResizeSchedules=resizeSchedules;
+  writes.length=0;
+  const fitsBeforeUnchanged=fitCalls;
+  syncComposerTerminalAppearance();
+  const unchangedWrites=[...writes];
+  const unchangedFitDelta=fitCalls-fitsBeforeUnchanged;
+  const unchangedPendingFrames=pendingAnimationFrames();
 
-writes.length=0;
-resizeSchedules=0;
-const fitsBeforeNonStylesheetLoad=fitCalls;
-styles['--font-mono']='\"Non Stylesheet Mono\",monospace';
- terminalHeadLoadListener&&terminalHeadLoadListener({target:{
-  tagName:'SCRIPT',
-  getAttribute:()=>null,
-}});
-const nonStylesheetLoadWrites=[...writes];
-const nonStylesheetLoadFitDelta=fitCalls-fitsBeforeNonStylesheetLoad;
-const nonStylesheetLoadPendingFrames=pendingAnimationFrames();
+  writes.length=0;
+  const fitsBeforeUnrelated=fitCalls;
+  document.documentElement.style.setProperty('--unrelated-outline-offset','3px');
+  observerCallbacks.documentElement([{attributeName:'style'}]);
+  const unrelatedStyleWrites=[...writes];
+  const unrelatedFitDelta=fitCalls-fitsBeforeUnrelated;
+  const unrelatedPendingFrames=pendingAnimationFrames();
 
-writes.length=0;
-const fitsBeforeStylesheetLoad=fitCalls;
-styles['--font-mono']='\"Stylesheet Load Mono\",monospace';
-terminalHeadLoadListener&&terminalHeadLoadListener({target:{
-  tagName:'LINK',
-  getAttribute(name){ return name==='rel'?'stylesheet':null; },
-}});
-const stylesheetLoadWrites=[...writes];
-const stylesheetLoadFontAfterChange=first.options.fontFamily;
-const stylesheetLoadFitDeltaBeforeFrame=fitCalls-fitsBeforeStylesheetLoad;
-const stylesheetLoadPendingFramesBeforeFlush=pendingAnimationFrames();
-flushAnimationFrames();
-const stylesheetLoadFitDeltaAfterFrame=fitCalls-fitsBeforeStylesheetLoad;
-const stylesheetLoadResizeSchedules=resizeSchedules;
+  writes.length=0;
+  const fitsBeforeTheme=fitCalls;
+  styles['--code-bg']='#222222';
+  observerCallbacks.documentElement([{attributeName:'style'}]);
+  const themeOnlyWrites=[...writes];
+  const backgroundAfterChange=first.options.theme.background;
+  const themeOnlyFitDelta=fitCalls-fitsBeforeTheme;
+  const themeOnlyPendingFrames=pendingAnimationFrames();
 
-styles['--font-mono']='"Disposed Mono",monospace';
-observerCallbacks.documentElement([{attributeName:'style'}]);
-const pendingFitBeforeDispose=pendingAnimationFrames();
-_disposeXterm();
-const pendingFitAfterDispose=pendingAnimationFrames();
-const cacheReset=TERMINAL_UI.lastAppliedTheme===null&&TERMINAL_UI.lastAppliedFontFamily===null&&TERMINAL_UI.fontFitFrame===null;
-styles['--font-mono']='"Recreated Mono",monospace';
-styles['--code-bg']='#333333';
-const fitsBeforeRecreate=fitCalls;
-_ensureXterm();
-const recreateFitDelta=fitCalls-fitsBeforeRecreate;
-const recreatePendingFrames=pendingAnimationFrames();
-flushAnimationFrames();
-const recreateFitDeltaAfterFlush=fitCalls-fitsBeforeRecreate;
+  writes.length=0;
+  resizeSchedules=0;
+  const fitsBeforeFont=fitCalls;
+  const fontLoadsBeforeExtension=fontLoadCalls.length;
+  styles['--font-mono']='"Extension Mono",monospace';
+  observerCallbacks.head([{type:'childList'},{type:'characterData'}]);
+  const extensionFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const extensionFontLoadCount=fontLoadCalls.length-fontLoadsBeforeExtension;
+  const fontOnlyWrites=[...writes];
+  const fontAfterChange=first.options.fontFamily;
+  const fontFitDeltaBeforeFrame=fitCalls-fitsBeforeFont;
+  const fontPendingFramesBeforeFlush=pendingAnimationFrames();
+  flushAnimationFrames();
+  const fontFitDeltaAfterFrame=fitCalls-fitsBeforeFont;
+  const fontResizeSchedules=resizeSchedules;
+  extensionFontLoad.resolve([{}]);
+  await settleFontLoad();
+  const fontPendingFramesAfterLoad=pendingAnimationFrames();
+  const fitsBeforeDelayedFontFit=fitCalls;
+  flushAnimationFrames();
+  const fontFitDeltaAfterLoad=fitCalls-fitsBeforeDelayedFontFit;
+  const fontResizeSchedulesAfterLoad=resizeSchedules;
+
+  writes.length=0;
+  resizeSchedules=0;
+  const fitsBeforeNonStylesheetLoad=fitCalls;
+  styles['--font-mono']='\"Non Stylesheet Mono\",monospace';
+  terminalHeadLoadListener&&terminalHeadLoadListener({target:{
+    tagName:'SCRIPT',
+    getAttribute:()=>null,
+  }});
+  const nonStylesheetLoadWrites=[...writes];
+  const nonStylesheetLoadFitDelta=fitCalls-fitsBeforeNonStylesheetLoad;
+  const nonStylesheetLoadPendingFrames=pendingAnimationFrames();
+
+  writes.length=0;
+  resizeSchedules=0;
+  const fitsBeforeEmptyFont=fitCalls;
+  styles['--font-mono']='ui-monospace,monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const emptyFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const emptyFontWrites=[...writes];
+  const emptyFontPendingFramesBeforeFlush=pendingAnimationFrames();
+  flushAnimationFrames();
+  const emptyFontImmediateFitDelta=fitCalls-fitsBeforeEmptyFont;
+  const emptyFontResizeSchedules=resizeSchedules;
+  const fitsBeforeEmptyFontCompletion=fitCalls;
+  emptyFontLoad.resolve([]);
+  await settleFontLoad();
+  const emptyFontPendingFramesAfterLoad=pendingAnimationFrames();
+  const emptyFontDelayedFitDelta=fitCalls-fitsBeforeEmptyFontCompletion;
+
+  writes.length=0;
+  resizeSchedules=0;
+  const fitsBeforeStylesheetLoad=fitCalls;
+  styles['--font-mono']='\"Stylesheet Load Mono\",monospace';
+  terminalHeadLoadListener&&terminalHeadLoadListener({target:{
+    tagName:'LINK',
+    getAttribute(name){ return name==='rel'?'stylesheet':null; },
+  }});
+  const stylesheetFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const stylesheetLoadWrites=[...writes];
+  const stylesheetLoadFontAfterChange=first.options.fontFamily;
+  const stylesheetLoadFitDeltaBeforeFrame=fitCalls-fitsBeforeStylesheetLoad;
+  const stylesheetLoadPendingFramesBeforeFlush=pendingAnimationFrames();
+  flushAnimationFrames();
+  const stylesheetLoadFitDeltaAfterFrame=fitCalls-fitsBeforeStylesheetLoad;
+  const stylesheetLoadResizeSchedules=resizeSchedules;
+  stylesheetFontLoad.resolve([]);
+  await settleFontLoad();
+
+  resizeSchedules=0;
+  styles['--font-mono']='"Stale Prior Mono",monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const staleFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  flushAnimationFrames();
+  styles['--font-mono']='"Replacement Mono",monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const replacementFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  flushAnimationFrames();
+  const fitsBeforeStaleCompletion=fitCalls;
+  staleFontLoad.resolve([{}]);
+  await settleFontLoad();
+  const staleCompletionFitDelta=fitCalls-fitsBeforeStaleCompletion;
+  const staleCompletionPendingFrames=pendingAnimationFrames();
+  replacementFontLoad.resolve([]);
+  await settleFontLoad();
+
+  styles['--font-mono']='"Rejecting Mono",monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const rejectedFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  flushAnimationFrames();
+  const fitsBeforeRejectedCompletion=fitCalls;
+  rejectedFontLoad.reject(new Error('optional font failed'));
+  await settleFontLoad();
+  const rejectedCompletionFitDelta=fitCalls-fitsBeforeRejectedCompletion;
+  const rejectedCompletionPendingFrames=pendingAnimationFrames();
+
+  styles['--font-mono']='"Disposed Mono",monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const disposedFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const oldTerm=TERMINAL_UI.term;
+  const generationBeforeDispose=TERMINAL_UI.fontLoadGeneration;
+  const pendingFitBeforeDispose=pendingAnimationFrames();
+  _disposeXterm();
+  const pendingFitAfterDispose=pendingAnimationFrames();
+  const cacheReset=TERMINAL_UI.lastAppliedTheme===null
+    &&TERMINAL_UI.lastAppliedFontFamily===null
+    &&TERMINAL_UI.fontFitFrame===null
+    &&TERMINAL_UI.fontLoadRequest===null
+    &&TERMINAL_UI.fontLoadGeneration===generationBeforeDispose+1;
+  styles['--font-mono']='"Recreated Mono",monospace';
+  styles['--code-bg']='#333333';
+  const fitsBeforeRecreate=fitCalls;
+  const recreated=_ensureXterm();
+  const recreatedFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  const recreateFitDelta=fitCalls-fitsBeforeRecreate;
+  const recreatePendingFrames=pendingAnimationFrames();
+  const fitsBeforeDisposedCompletion=fitCalls;
+  disposedFontLoad.resolve([{}]);
+  await settleFontLoad();
+  const disposedCompletionFitDelta=fitCalls-fitsBeforeDisposedCompletion;
+  const disposedCompletionPendingFrames=pendingAnimationFrames();
+  recreatedFontLoad.resolve([]);
+  await settleFontLoad();
+
+  TERMINAL_UI.open=true;
+  styles['--font-mono']='"Closed Terminal Mono",monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const closedFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  flushAnimationFrames();
+  const fitsBeforeClosedCompletion=fitCalls;
+  TERMINAL_UI.open=false;
+  closedFontLoad.resolve([{}]);
+  await settleFontLoad();
+  const closedCompletionFitDelta=fitCalls-fitsBeforeClosedCompletion;
+  const closedCompletionPendingFrames=pendingAnimationFrames();
+  TERMINAL_UI.open=true;
+
+  styles['--font-mono']='"Collapsed Terminal Mono",monospace';
+  observerCallbacks.head([{type:'childList'}]);
+  const collapsedFontLoad=pendingFontLoads[pendingFontLoads.length-1];
+  flushAnimationFrames();
+  const fitsBeforeCollapsedCompletion=fitCalls;
+  TERMINAL_UI.collapsed=true;
+  collapsedFontLoad.resolve([{}]);
+  await settleFontLoad();
+  const collapsedCompletionFitDelta=fitCalls-fitsBeforeCollapsedCompletion;
+  const collapsedCompletionPendingFrames=pendingAnimationFrames();
+  TERMINAL_UI.collapsed=false;
 
 process.stdout.write(JSON.stringify({
   initial:createdAppearances[0],
+  initialFontLoadShorthand:fontLoadCalls[0],
   initialFitCalls,
+  initialDelayedPendingFrames,
+  initialDelayedFitDelta,
+  initialDelayedResizeSchedules,
+  lateSameFamilyWrites,
+  lateSameFamilyLoadCount,
+  lateSameFamilyPendingFramesBeforeCompletion,
+  lateSameFamilyFitDeltaBeforeCompletion,
+  lateSameFamilyPendingFramesAfterLoad,
+  lateSameFamilyFitDelta,
+  lateSameFamilyResizeSchedules,
+  lateStylesheetLoadWrites,
+  lateStylesheetLoadCount,
+  lateStylesheetPendingFrames,
+  lateStylesheetFitDelta,
+  lateStylesheetPendingFramesAfterLoad,
   unchangedWrites,
   unchangedFitDelta,
   unchangedPendingFrames,
@@ -510,15 +693,30 @@ process.stdout.write(JSON.stringify({
   fontPendingFramesBeforeFlush,
   fontFitDeltaAfterFrame,
   fontResizeSchedules,
+  extensionFontLoadCount,
+  fontPendingFramesAfterLoad,
+  fontFitDeltaAfterLoad,
+  fontResizeSchedulesAfterLoad,
   nonStylesheetLoadWrites,
   nonStylesheetLoadFitDelta,
   nonStylesheetLoadPendingFrames,
+  emptyFontWrites,
+  emptyFontPendingFramesBeforeFlush,
+  emptyFontImmediateFitDelta,
+  emptyFontResizeSchedules,
+  emptyFontPendingFramesAfterLoad,
+  emptyFontDelayedFitDelta,
   stylesheetLoadWrites,
   stylesheetLoadFontAfterChange,
   stylesheetLoadFitDeltaBeforeFrame,
   stylesheetLoadPendingFramesBeforeFlush,
   stylesheetLoadFitDeltaAfterFrame,
   stylesheetLoadResizeSchedules,
+  staleCompletionFitDelta,
+  staleCompletionPendingFrames,
+  rejectedCompletionFitDelta,
+  rejectedCompletionPendingFrames,
+  unhandledFontLoadRejections,
   terminalHeadLoadListenerRegistered: typeof terminalHeadLoadListener === 'function',
   terminalHeadLoadListenerOptions,
   observerTargets:observedTargets,
@@ -527,11 +725,21 @@ process.stdout.write(JSON.stringify({
   pendingFitBeforeDispose,
   pendingFitAfterDispose,
   cacheReset,
+  oldTermIsReplaced:oldTerm!==recreated,
   recreated:createdAppearances[1],
   recreateFitDelta,
   recreatePendingFrames,
-  recreateFitDeltaAfterFlush,
+  disposedCompletionFitDelta,
+  disposedCompletionPendingFrames,
+  closedCompletionFitDelta,
+  closedCompletionPendingFrames,
+  collapsedCompletionFitDelta,
+  collapsedCompletionPendingFrames,
 }));
+})().catch((error)=>{
+  process.exitCode=1;
+  process.stderr.write((error&&error.stack?error.stack:String(error))+"\\n");
+});
 """)
     result = subprocess.run(
         [NODE, "-e", script],
@@ -544,8 +752,25 @@ process.stdout.write(JSON.stringify({
     observed = json.loads(result.stdout)
 
     assert observed["initial"]["fontFamily"] == '"Active Mono",monospace'
+    assert observed["initial"]["fontSize"] == 13
     assert observed["initial"]["theme"]["background"] == "#111111"
+    assert observed["initialFontLoadShorthand"] == '13px "Active Mono",monospace'
     assert observed["initialFitCalls"] == 1
+    assert observed["initialDelayedPendingFrames"] == 0
+    assert observed["initialDelayedFitDelta"] == 0
+    assert observed["initialDelayedResizeSchedules"] == 0
+    assert observed["lateSameFamilyWrites"] == []
+    assert observed["lateSameFamilyLoadCount"] == 1
+    assert observed["lateSameFamilyPendingFramesBeforeCompletion"] == 0
+    assert observed["lateSameFamilyFitDeltaBeforeCompletion"] == 0
+    assert observed["lateSameFamilyPendingFramesAfterLoad"] == 1
+    assert observed["lateSameFamilyFitDelta"] == 1
+    assert observed["lateSameFamilyResizeSchedules"] == 1
+    assert observed["lateStylesheetLoadWrites"] == []
+    assert observed["lateStylesheetLoadCount"] == 1
+    assert observed["lateStylesheetPendingFrames"] == 0
+    assert observed["lateStylesheetFitDelta"] == 0
+    assert observed["lateStylesheetPendingFramesAfterLoad"] == 0
     assert observed["unchangedWrites"] == []
     assert observed["unchangedFitDelta"] == 0
     assert observed["unchangedPendingFrames"] == 0
@@ -562,17 +787,32 @@ process.stdout.write(JSON.stringify({
     assert observed["fontPendingFramesBeforeFlush"] == 1
     assert observed["fontFitDeltaAfterFrame"] == 1
     assert observed["fontResizeSchedules"] == 1
+    assert observed["extensionFontLoadCount"] == 1
+    assert observed["fontPendingFramesAfterLoad"] == 1
+    assert observed["fontFitDeltaAfterLoad"] == 1
+    assert observed["fontResizeSchedulesAfterLoad"] == 2
     assert observed["terminalHeadLoadListenerRegistered"] is True
     assert observed["terminalHeadLoadListenerOptions"] is True
     assert observed["nonStylesheetLoadWrites"] == []
     assert observed["nonStylesheetLoadFitDelta"] == 0
     assert observed["nonStylesheetLoadPendingFrames"] == 0
+    assert observed["emptyFontWrites"] == ["fontFamily"]
+    assert observed["emptyFontPendingFramesBeforeFlush"] == 1
+    assert observed["emptyFontImmediateFitDelta"] == 1
+    assert observed["emptyFontResizeSchedules"] == 1
+    assert observed["emptyFontPendingFramesAfterLoad"] == 0
+    assert observed["emptyFontDelayedFitDelta"] == 0
     assert observed["stylesheetLoadWrites"] == ["fontFamily"]
     assert observed["stylesheetLoadFontAfterChange"] == '"Stylesheet Load Mono",monospace'
     assert observed["stylesheetLoadFitDeltaBeforeFrame"] == 0
     assert observed["stylesheetLoadPendingFramesBeforeFlush"] == 1
     assert observed["stylesheetLoadFitDeltaAfterFrame"] == 1
     assert observed["stylesheetLoadResizeSchedules"] == 1
+    assert observed["staleCompletionFitDelta"] == 0
+    assert observed["staleCompletionPendingFrames"] == 0
+    assert observed["rejectedCompletionFitDelta"] == 0
+    assert observed["rejectedCompletionPendingFrames"] == 0
+    assert observed["unhandledFontLoadRejections"] == 0
     assert observed["observerTargets"] == ["documentElement", "head"]
     assert observed["observerCallbacks"] == ["documentElement", "head"]
     assert observed["observedOptions"]["documentElement"] == {
@@ -589,11 +829,17 @@ process.stdout.write(JSON.stringify({
     assert observed["pendingFitBeforeDispose"] == 1
     assert observed["pendingFitAfterDispose"] == 0
     assert observed["cacheReset"] is True
+    assert observed["oldTermIsReplaced"] is True
     assert observed["recreated"]["fontFamily"] == '"Recreated Mono",monospace'
     assert observed["recreated"]["theme"]["background"] == "#333333"
     assert observed["recreateFitDelta"] == 1
     assert observed["recreatePendingFrames"] == 0
-    assert observed["recreateFitDeltaAfterFlush"] == 1
+    assert observed["disposedCompletionFitDelta"] == 0
+    assert observed["disposedCompletionPendingFrames"] == 0
+    assert observed["closedCompletionFitDelta"] == 0
+    assert observed["closedCompletionPendingFrames"] == 0
+    assert observed["collapsedCompletionFitDelta"] == 0
+    assert observed["collapsedCompletionPendingFrames"] == 0
 
 
 def test_first_party_technical_js_uses_font_mono_contract():
