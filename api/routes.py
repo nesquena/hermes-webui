@@ -3136,19 +3136,23 @@ def _run_journal_snapshot_merge_args(existing, incoming):
 
 def _run_journal_envelope_run_id_result(event: dict) -> tuple[str | None, bool]:
     raw_run_id = event.get("run_id")
+    raw_event_id = event.get("event_id")
+    event_id = str(raw_event_id or "").strip()
+    event_run_id = None
+    event_seq = None
+    if event_id:
+        event_run_id, event_seq = _shared_parse_run_journal_event_id(event_id)
+        if not event_run_id or event_seq is None:
+            return None, True
     if raw_run_id is None:
-        return None, False
+        return event_run_id, False
     if not isinstance(raw_run_id, str):
         return None, True
     run_id = raw_run_id.strip()
     if not run_id:
         return None, True
-    raw_event_id = event.get("event_id")
-    event_id = str(raw_event_id or "").strip()
-    if event_id:
-        event_run_id, event_seq = _shared_parse_run_journal_event_id(event_id)
-        if event_run_id and event_seq is not None and event_run_id != run_id:
-            return None, True
+    if event_run_id and event_run_id != run_id:
+        return None, True
     return run_id, False
 
 
@@ -3175,14 +3179,27 @@ def _terminal_anchor_scene_target_from_payload(
     if not isinstance(terminal_payload, dict):
         return None
     raw_target = terminal_payload.get("terminal_message_target")
-    if isinstance(raw_target, dict):
+    if "terminal_message_target" in terminal_payload:
+        if not isinstance(raw_target, dict):
+            return None
+        if raw_target.get("version") != "terminal_message_target_v1":
+            return None
+        raw_message_index = raw_target.get("message_index")
+        if not isinstance(raw_message_index, int) or isinstance(raw_message_index, bool) or raw_message_index < 0:
+            return None
+        target_session_id = str(raw_target.get("session_id") or "").strip()
+        target_run_id = str(raw_target.get("run_id") or "").strip()
+        target_stream_id = str(raw_target.get("stream_id") or "").strip()
+        target_message_ref = _normalize_anchor_scene_message_ref(raw_target.get("message_ref") or "")
+        if not target_session_id or not target_run_id or not target_stream_id or not target_message_ref:
+            return None
         return {
-            "version": str(raw_target.get("version") or "terminal_message_target_v1"),
-            "session_id": str(raw_target.get("session_id") or ""),
-            "run_id": str(raw_target.get("run_id") or ""),
-            "stream_id": str(raw_target.get("stream_id") or ""),
-            "message_index": raw_target.get("message_index"),
-            "message_ref": str(raw_target.get("message_ref") or ""),
+            "version": "terminal_message_target_v1",
+            "session_id": target_session_id,
+            "run_id": target_run_id,
+            "stream_id": target_stream_id,
+            "message_index": raw_message_index,
+            "message_ref": target_message_ref,
         }
     terminal_session = terminal_payload.get("session")
     if not isinstance(terminal_session, dict):
@@ -3215,6 +3232,41 @@ def _terminal_anchor_scene_target_from_payload(
     }
 
 
+def _terminal_anchor_scene_disposition_from_payload(
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+    terminal_payload: dict,
+) -> dict | None:
+    if not isinstance(terminal_payload, dict):
+        return None
+    raw = terminal_payload.get("terminal_disposition")
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("version") != "terminal_disposition_v1":
+        return None
+    kind = str(raw.get("kind") or "").strip()
+    if kind != "consumed_non_materializable":
+        return None
+    target_session_id = str(raw.get("session_id") or "").strip()
+    target_run_id = str(raw.get("run_id") or "").strip()
+    target_stream_id = str(raw.get("stream_id") or "").strip()
+    if (
+        target_session_id != session_id
+        or target_run_id != run_id
+        or target_stream_id != stream_id
+    ):
+        return None
+    return {
+        "version": "terminal_disposition_v1",
+        "kind": kind,
+        "reason": str(raw.get("reason") or "").strip(),
+        "session_id": target_session_id,
+        "run_id": target_run_id,
+        "stream_id": target_stream_id,
+    }
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: bool = False) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3243,14 +3295,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
             event_run_ids.add(event_run_id)
         if event_run_id_malformed:
             malformed_envelope_run_id = True
-    # The event envelope is the durable identity authority. Older summaries
-    # are keyed by the transport id, so only use that fallback when the journal
-    # does not provide one unambiguous run id.
-    run_id = (
-        next(iter(event_run_ids))
-        if not malformed_envelope_run_id and len(event_run_ids) == 1
-        else str(summary.get("run_id") or stream_id).strip()
-    )
     terminal_event = next(
         (
             event
@@ -3259,6 +3303,17 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
         ),
         next((event for event in reversed(events) if event.get("terminal")), None),
     )
+    if malformed_envelope_run_id or len(event_run_ids) > 1:
+        return None
+    summary_run_id = str(summary.get("run_id") or stream_id).strip()
+    if len(event_run_ids) == 1:
+        run_id = next(iter(event_run_ids))
+        if summary_run_id and summary_run_id != run_id:
+            return None
+    else:
+        if settled or terminal_event is not None:
+            return None
+        run_id = summary_run_id or stream_id
     terminal_payload = (
         terminal_event.get("payload")
         if isinstance(terminal_event, dict) and isinstance(terminal_event.get("payload"), dict)
@@ -3266,6 +3321,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
     )
     terminal_state = str(summary.get("terminal_state") or "").strip() if summary.get("terminal") else ""
     terminal_message_target = _terminal_anchor_scene_target_from_payload(
+        session_id,
+        stream_id,
+        run_id,
+        terminal_payload,
+    )
+    terminal_disposition = _terminal_anchor_scene_disposition_from_payload(
         session_id,
         stream_id,
         run_id,
@@ -3943,6 +4004,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
         "terminal_state": terminal_state or None,
         "terminal_message_index": terminal_message_index,
         "terminal_message_target": terminal_message_target,
+        "terminal_disposition": terminal_disposition,
         "event_count": len(events),
         "fresh_segment": fresh_segment,
         "messages": messages,
@@ -5311,13 +5373,13 @@ def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
     target = snapshot.get("terminal_message_target")
     if not isinstance(target, dict):
         return None
-    if str(target.get("version") or "terminal_message_target_v1") != "terminal_message_target_v1":
+    if target.get("version") != "terminal_message_target_v1":
         return None
     scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot.get("anchor_activity_scene"), dict) else {}
     identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
     expected_session_id = str(snapshot.get("session_id") or "").strip()
     expected_stream_id = str(snapshot.get("stream_id") or "").strip()
-    expected_run_id = str(identity.get("run_id") or expected_stream_id).strip()
+    expected_run_id = str(identity.get("run_id") or "").strip()
     target_session_id = str(target.get("session_id") or "").strip()
     target_stream_id = str(target.get("stream_id") or "").strip()
     target_run_id = str(target.get("run_id") or "").strip()
@@ -5325,31 +5387,41 @@ def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
         not target_session_id
         or not target_stream_id
         or not target_run_id
+        or not expected_run_id
         or target_session_id != expected_session_id
         or target_stream_id != expected_stream_id
         or target_run_id != expected_run_id
     ):
         return None
-    try:
-        terminal_index = int(target.get("message_index"))
-    except (TypeError, ValueError):
-        terminal_index = None
+    terminal_index = target.get("message_index")
+    if not isinstance(terminal_index, int) or isinstance(terminal_index, bool) or terminal_index < 0:
+        return None
+    if terminal_index >= len(messages):
+        return None
     message_ref = _normalize_anchor_scene_message_ref(target.get("message_ref") or "")
     if not message_ref:
         return None
-    matches = [
-        (idx, message)
-        for idx, message in enumerate(messages)
-        if isinstance(message, dict)
-        and message.get("role") == "assistant"
-        and _assistant_anchor_scene_message_ref(message) == message_ref
-    ]
-    if len(matches) != 1:
+    message = messages[terminal_index]
+    if (
+        not isinstance(message, dict)
+        or message.get("role") != "assistant"
+        or _assistant_anchor_scene_message_ref(message) != message_ref
+    ):
         return None
-    matched_index, _matched_message = matches[0]
-    if terminal_index is not None and terminal_index != matched_index:
+    return terminal_index
+
+
+def _terminal_anchor_scene_non_materializable_disposition(snapshot) -> dict | None:
+    if not isinstance(snapshot, dict):
         return None
-    return matched_index
+    disposition = snapshot.get("terminal_disposition")
+    if not isinstance(disposition, dict):
+        return None
+    if disposition.get("version") != "terminal_disposition_v1":
+        return None
+    if disposition.get("kind") != "consumed_non_materializable":
+        return None
+    return disposition
 
 
 def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, handler=None) -> bool:
@@ -5357,10 +5429,23 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
     sid = str(getattr(session, "session_id", "") or "").strip()
     if not sid or not isinstance(messages, list) or not messages:
         return False
-    summaries = terminal_run_summaries_for_session(sid, limit=16, max_candidates=64)
+    active_stream_ids = _active_stream_ids()
+    with _get_session_agent_lock(sid):
+        skip_stream_ids = {
+            str(record.get("stream_id") or "").strip()
+            for record in dict(_anchor_scene_records(session)).values()
+            if isinstance(record, dict) and str(record.get("stream_id") or "").strip()
+        }
+    skip_stream_ids.update(active_stream_ids)
+    summaries = terminal_run_summaries_for_session(
+        sid,
+        limit=16,
+        max_candidates=64,
+        skip_run_ids=skip_stream_ids,
+        scan_all_candidates=True,
+    )
     if not summaries:
         return False
-    active_stream_ids = _active_stream_ids()
     with _get_session_agent_lock(sid):
         records = dict(_anchor_scene_records(session))
         changed = False
@@ -5371,6 +5456,19 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             if _anchor_scene_record_exists_for_stream(records, stream_id):
                 continue
             snapshot = _run_journal_live_snapshot(stream_id, handler=handler, settled=True)
+            disposition = _terminal_anchor_scene_non_materializable_disposition(snapshot)
+            if disposition is not None:
+                records[f"stream:{stream_id}:non_materializable"] = {
+                    "version": "anchor_activity_scene_record_v1",
+                    "message_index": None,
+                    "message_ref": "",
+                    "stream_id": stream_id,
+                    "scene": None,
+                    "terminal_disposition": disposition,
+                    "updated_at": time.time(),
+                }
+                changed = True
+                continue
             scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
             rows = scene.get("activity_rows") if isinstance(scene, dict) else None
             if not isinstance(rows, list) or not rows:

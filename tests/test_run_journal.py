@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from api.run_journal import (
@@ -135,6 +136,41 @@ def test_terminal_run_summaries_for_session_returns_bounded_newest_terminals(tmp
         "interrupted-by-user",
         "completed",
     ]
+
+
+def test_terminal_run_summaries_can_scan_past_skipped_candidate_window(tmp_path):
+    append_run_event("session_1", "run_old", "token", {"text": "old"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_old", "done", {"session": {}}, session_dir=tmp_path)
+    old_path = tmp_path / "_run_journal" / "session_1" / "run_old.jsonl"
+    os.utime(old_path, (1.0, 1.0))
+
+    skipped_run_ids = set()
+    for idx in range(70):
+        run_id = f"run_{idx:03d}"
+        skipped_run_ids.add(run_id)
+        append_run_event("session_1", run_id, "token", {"text": "new"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+        path = tmp_path / "_run_journal" / "session_1" / f"{run_id}.jsonl"
+        os.utime(path, (10.0 + idx, 10.0 + idx))
+
+    bounded = terminal_run_summaries_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=64,
+        skip_run_ids=skipped_run_ids,
+    )
+    scanned = terminal_run_summaries_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=64,
+        skip_run_ids=skipped_run_ids,
+        scan_all_candidates=True,
+    )
+
+    assert bounded == []
+    assert [summary["run_id"] for summary in scanned] == ["run_old"]
 
 
 def test_latest_summary_reuses_unchanged_journal_summary_without_reparsing(tmp_path, monkeypatch):

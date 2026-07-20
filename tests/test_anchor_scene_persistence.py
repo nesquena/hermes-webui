@@ -2730,6 +2730,178 @@ def test_terminal_journal_rejects_mismatched_terminal_target(monkeypatch):
     assert session.save_calls == 0
 
 
+def test_terminal_target_rejects_missing_version_and_malformed_index():
+    from api import routes
+
+    stream_id = "stream-strict-terminal-target"
+    session_id = "session-strict-terminal-target"
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "owned assistant", "_ts": 2.0},
+    ]
+    message_ref = _client_anchor_scene_message_ref(messages[1])
+    base_target = {
+        "version": "terminal_message_target_v1",
+        "session_id": session_id,
+        "run_id": stream_id,
+        "stream_id": stream_id,
+        "message_index": 1,
+        "message_ref": message_ref,
+    }
+    base_snapshot = {
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "anchor_activity_scene": {
+            "identity": {
+                "session_id": session_id,
+                "run_id": stream_id,
+                "stream_id": stream_id,
+            }
+        },
+    }
+
+    invalid_targets = []
+    missing_version = dict(base_target)
+    missing_version.pop("version")
+    invalid_targets.append(missing_version)
+    invalid_targets.append({**base_target, "message_index": "1"})
+    invalid_targets.append({**base_target, "message_index": True})
+    invalid_targets.append({**base_target, "message_index": -1})
+    invalid_targets.append({**base_target, "message_index": 2})
+
+    for target in invalid_targets:
+        snapshot = {**base_snapshot, "terminal_message_target": target}
+        assert routes._terminal_anchor_scene_message_index(messages, snapshot) is None
+        if target.get("message_index") != 2:
+            assert routes._terminal_anchor_scene_target_from_payload(
+                session_id,
+                stream_id,
+                stream_id,
+                {"terminal_message_target": target},
+            ) is None
+
+
+def test_run_journal_live_snapshot_rejects_conflicting_run_envelope(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-conflicting-envelope"
+    events = [
+        {
+            "event": "token",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "run_id": stream_id,
+            "created_at": 1.0,
+            "payload": {"text": "partial"},
+        },
+        {
+            "event": "done",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "run_id": "different-run",
+            "created_at": 2.0,
+            "terminal": True,
+            "payload": {
+                "session": {
+                    "session_id": "session-conflicting-envelope",
+                    "message_count": 2,
+                    "messages": [
+                        {"role": "user", "content": "do work"},
+                        {"role": "assistant", "content": "partial", "_ts": 2.0},
+                    ],
+                },
+            },
+        },
+    ]
+    summary = {
+        "session_id": "session-conflicting-envelope",
+        "run_id": stream_id,
+        "last_seq": 2,
+        "last_event_id": f"{stream_id}:2",
+        "terminal": True,
+        "terminal_state": "completed",
+    }
+    monkeypatch.setattr(routes, "find_run_summary", lambda _stream_id: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda _session_id, _run_id: {"events": events})
+
+    assert routes._run_journal_live_snapshot(stream_id, settled=True) is None
+
+
+def test_terminal_journal_records_non_materializable_disposition_once(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    stream_id = "stream-non-materializable"
+    events = [
+        {
+            "event": "token",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "run_id": stream_id,
+            "created_at": 1.0,
+            "payload": {"text": "partial"},
+        },
+        {
+            "event": "cancel",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "run_id": stream_id,
+            "created_at": 2.0,
+            "terminal": True,
+            "payload": {
+                "message": "Cancelled by user",
+                "terminal_disposition": {
+                    "version": "terminal_disposition_v1",
+                    "kind": "consumed_non_materializable",
+                    "reason": "process_wakeup_success_cancel_rollback",
+                    "session_id": "session-non-materializable",
+                    "run_id": stream_id,
+                    "stream_id": stream_id,
+                },
+            },
+        },
+    ]
+    summary = {
+        "session_id": "session-non-materializable",
+        "run_id": stream_id,
+        "last_seq": 2,
+        "last_event_id": f"{stream_id}:2",
+        "terminal": True,
+        "terminal_state": "interrupted-by-user",
+    }
+    session = SessionStub(
+        session_id="session-non-materializable",
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "prior answer", "_ts": 1.0},
+    ]
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: [summary])
+    monkeypatch.setattr(routes, "find_run_summary", lambda _stream_id: summary)
+    monkeypatch.setattr(routes, "read_run_events", lambda _session_id, _run_id: {"events": events})
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+    assert session.save_calls == 1
+    assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
+    record = next(iter(session.anchor_activity_scenes.values()))
+    assert record["message_index"] is None
+    assert record["message_ref"] == ""
+    assert record["scene"] is None
+    assert record["stream_id"] == stream_id
+    assert record["terminal_disposition"]["kind"] == "consumed_non_materializable"
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
+    assert session.save_calls == 1
+
+
 def test_terminal_journal_materializes_older_unresolved_terminal_once(monkeypatch):
     from api import routes
 

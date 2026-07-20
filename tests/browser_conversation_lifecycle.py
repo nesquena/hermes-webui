@@ -46,6 +46,8 @@ SECOND_TOOL_NAME = "terminal"
 SECOND_TOOL_ID = "lifecycle-tool-2"
 SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+ERROR_SCENARIOS = {"terminal-error", "detached-terminal-error"}
+DETACHED_SCENARIOS = {"detached-terminal", "detached-terminal-error"}
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
@@ -472,7 +474,7 @@ class DeterministicGateway:
                         "event": "reasoning.available",
                         "text": REASONING_TEXT,
                     })
-                    if SCENARIO == "terminal-error":
+                    if SCENARIO in ERROR_SCENARIOS:
                         self._event("message.delta", {
                             "event": "message.delta",
                             "delta": TERMINAL_PROCESS_TEXT,
@@ -528,7 +530,7 @@ class DeterministicGateway:
                         owner.continuation_ready.set()
                     if not owner.release_final_prefix.wait(timeout=30):
                         return
-                    if SCENARIO == "terminal-error":
+                    if SCENARIO in ERROR_SCENARIOS:
                         owner.final_prefix_ready.set()
                         if not owner.release_terminal.wait(timeout=30):
                             return
@@ -825,7 +827,7 @@ def _assert_settled(snapshot: dict, *, reasoning_count: int, scenario: str) -> N
     assert any(THIRD_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
     if reasoning_count == 4:
         assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
-    if scenario == "terminal-error":
+    if scenario in ERROR_SCENARIOS:
         assert "terminal" in roles, snapshot
         terminal_rows = _terminal_rows(snapshot)
         assert terminal_rows, snapshot
@@ -843,7 +845,7 @@ def _assert_settled(snapshot: dict, *, reasoning_count: int, scenario: str) -> N
         assert snapshot["transcript"].count(FINAL_TEXT) == 1, snapshot
 
 
-def _semantic_activity(snapshot: dict) -> list[dict]:
+def _semantic_activity(snapshot: dict, *, include_identity: bool = False) -> list[dict]:
     """Canonical user-visible activity in renderer order."""
     semantic = []
     for row in snapshot["rows"]:
@@ -851,9 +853,15 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
             text = " ".join(row["text"].split())
             if text.startswith("Thinking "):
                 text = text[len("Thinking ") :]
-            semantic.append({"role": "thinking", "text": text})
+            entry = {"role": "thinking", "text": text}
         elif row["role"] == "tool":
-            semantic.append({"role": "tool", "tool": row["tool"]})
+            entry = {"role": "tool", "tool": row["tool"]}
+        else:
+            continue
+        if include_identity:
+            entry["rowId"] = row["rowId"]
+            entry["localId"] = row["localId"]
+        semantic.append(entry)
     return semantic
 
 
@@ -907,7 +915,7 @@ def _assert_live_continuation(before: dict, after: dict) -> None:
         "before": before_semantic,
         "after": after_semantic,
     }
-    assert after_semantic[-1] == {
+    assert {key: after_semantic[-1][key] for key in ("role", "text")} == {
         "role": "thinking",
         "text": CONTINUATION_REASONING_TEXT,
     }, after_semantic
@@ -946,13 +954,13 @@ def _replace_runtime_reasoning_identity(route, session_id: str, bite_hits: list[
 
 
 def main() -> int:
-    if SCENARIO not in {"normal", "terminal-error", "session-reattach", "detached-terminal"}:
+    if SCENARIO not in {"normal", "terminal-error", "session-reattach", *DETACHED_SCENARIOS}:
         print(f"SETUP FAIL: unsupported LIFECYCLE_SCENARIO={SCENARIO!r}", file=sys.stderr)
         return 2
     if TEST_BITE not in {"", "drop-anchor-persistence", "drop-terminal-anchor-row", "replace-runtime-reasoning-id"}:
         print(f"SETUP FAIL: unsupported LIFECYCLE_TEST_BITE={TEST_BITE!r}", file=sys.stderr)
         return 2
-    if TEST_BITE == "drop-terminal-anchor-row" and SCENARIO != "terminal-error":
+    if TEST_BITE == "drop-terminal-anchor-row" and SCENARIO not in ERROR_SCENARIOS:
         print("SETUP FAIL: drop-terminal-anchor-row requires terminal-error", file=sys.stderr)
         return 2
     if TEST_BITE == "replace-runtime-reasoning-id" and SCENARIO != "session-reattach":
@@ -1067,7 +1075,7 @@ def main() -> int:
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         seed_session_id = None
-        if SCENARIO in {"session-reattach", "detached-terminal"}:
+        if SCENARIO in {"session-reattach", *DETACHED_SCENARIOS}:
             page.locator("#msg").fill(SEED_PROMPT)
             page.locator("#btnSend").click()
             page.wait_for_function(
@@ -1119,7 +1127,7 @@ def main() -> int:
         )
         live_snapshot = _activity_snapshot(page)
         _assert_live_activity(live_snapshot)
-        if SCENARIO == "terminal-error":
+        if SCENARIO in ERROR_SCENARIOS:
             _assert_process_row_present(live_snapshot)
             print("OK  live activity: terminal-error run keeps process + reasoning + completed tool activity")
         else:
@@ -1216,6 +1224,7 @@ def main() -> int:
         gateway.release_final_prefix.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
+        terminal_text = TERMINAL_ERROR_TEXT if SCENARIO in ERROR_SCENARIOS else FINAL_TEXT
         if SCENARIO in {"normal", "session-reattach"}:
             page.wait_for_function(
                 """text => {
@@ -1259,7 +1268,7 @@ def main() -> int:
                 timeout=15000,
             )
             page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
-        elif SCENARIO == "detached-terminal":
+        elif SCENARIO in DETACHED_SCENARIOS:
             assert seed_session_id, "seed session id missing for detached-terminal scenario"
             page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
             page.wait_for_function(
@@ -1286,13 +1295,12 @@ def main() -> int:
                 "({seedSid, finalText}) => S.session && S.session.session_id === seedSid && "
                 "!S.busy && !S.activeStreamId && "
                 "!((document.querySelector('#msgInner') || {}).innerText || '').includes(finalText)",
-                {"seedSid": seed_session_id, "finalText": FINAL_TEXT},
+                {"seedSid": seed_session_id, "finalText": terminal_text},
             )
             page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
         else:
             pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
             gateway.release_terminal.set()
-        terminal_text = TERMINAL_ERROR_TEXT if SCENARIO == "terminal-error" else FINAL_TEXT
         page.wait_for_function(
             """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
               !document.querySelector('#liveAssistantTurn') &&
@@ -1361,7 +1369,7 @@ def main() -> int:
                 anchor_scene_requests=anchor_scene_requests,
             )
             assert scene.get("version") == "activity_scene_v1", scene
-            if SCENARIO == "terminal-error":
+            if SCENARIO in ERROR_SCENARIOS:
                 scene_rows = scene.get("activity_rows") or []
                 assert any(
                     isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
@@ -1374,13 +1382,13 @@ def main() -> int:
         settled_snapshot = _activity_snapshot(page)
         settled_reasoning_count = 4 if SCENARIO == "session-reattach" else 3
         _assert_settled(settled_snapshot, reasoning_count=settled_reasoning_count, scenario=SCENARIO)
-        if SCENARIO == "terminal-error":
+        if SCENARIO in ERROR_SCENARIOS:
             _assert_process_row_present(settled_snapshot)
         assert _semantic_activity(settled_snapshot) == _semantic_activity(live_snapshot), {
             "live": _semantic_activity(live_snapshot),
             "settled": _semantic_activity(settled_snapshot),
         }
-        if SCENARIO == "terminal-error":
+        if SCENARIO in ERROR_SCENARIOS:
             print("OK  settled: terminal row and same activity survived terminal settlement")
         else:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
@@ -1398,13 +1406,20 @@ def main() -> int:
         )
         reloaded_snapshot = _activity_snapshot(page)
         _assert_settled(reloaded_snapshot, reasoning_count=settled_reasoning_count, scenario=SCENARIO)
-        if SCENARIO == "terminal-error":
+        if SCENARIO in ERROR_SCENARIOS:
             _assert_process_row_present(reloaded_snapshot)
         assert _semantic_activity(reloaded_snapshot) == _semantic_activity(settled_snapshot), {
             "settled": _semantic_activity(settled_snapshot),
             "reloaded": _semantic_activity(reloaded_snapshot),
         }
-        if SCENARIO == "terminal-error":
+        assert _semantic_activity(reloaded_snapshot, include_identity=True) == _semantic_activity(
+            settled_snapshot,
+            include_identity=True,
+        ), {
+            "settled": _semantic_activity(settled_snapshot, include_identity=True),
+            "reloaded": _semantic_activity(reloaded_snapshot, include_identity=True),
+        }
+        if SCENARIO in ERROR_SCENARIOS:
             settled_terminal = _terminal_rows(settled_snapshot)
             reloaded_terminal = _terminal_rows(reloaded_snapshot)
             settled_process = _process_rows(settled_snapshot)
@@ -1429,7 +1444,7 @@ def main() -> int:
 
         expected_inputs = (
             [SEED_PROMPT, PROMPT]
-            if SCENARIO in {"session-reattach", "detached-terminal"}
+            if SCENARIO in {"session-reattach", *DETACHED_SCENARIOS}
             else [PROMPT]
         )
         actual_inputs = [request.get("input") for request in gateway.request_bodies]

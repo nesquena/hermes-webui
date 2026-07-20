@@ -1973,9 +1973,114 @@ def test_gateway_cancel_during_completion_save_restores_process_wakeup_pause(tmp
     assert saved.process_wakeup_pause == previous_pause
     assert saved.messages == previous_messages
     assert saved.context_messages == previous_messages
-    queued_events = [item[0] for item in list(stream_queue.queue)]
+    queued_items = list(stream_queue.queue)
+    queued_events = [item[0] for item in queued_items]
     assert "cancel" in queued_events
     assert "done" not in queued_events
+    cancel_payload = next(payload for event, payload in queued_items if event == "cancel")
+    assert "session" not in cancel_payload
+    disposition = cancel_payload["terminal_disposition"]
+    assert disposition["version"] == "terminal_disposition_v1"
+    assert disposition["kind"] == "consumed_non_materializable"
+    assert disposition["session_id"] == session_id
+    assert disposition["run_id"] == stream_id
+    assert disposition["stream_id"] == stream_id
+
+
+def test_gateway_prewriteback_cancel_settles_under_existing_lock(tmp_path, monkeypatch):
+    stream_id = "gateway-prewriteback-cancel-stream"
+    session_id = "gateway_prewriteback_cancel"
+    stream_queue = queue.Queue()
+    config.STREAMS[stream_id] = stream_queue
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gateway.test"})
+
+    class _GatewayResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def __iter__(self):
+            payload = {"choices": [{"delta": {"content": "Gateway reply"}}]}
+            return iter([
+                ("data: " + json.dumps(payload) + "\n").encode("utf-8"),
+                b"data: [DONE]\n",
+            ])
+
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _GatewayResponse(),
+    )
+
+    session = Session(
+        session_id=session_id,
+        workspace=str(tmp_path),
+        model="claude-sonnet-test",
+        model_provider="test-provider",
+        messages=[],
+        context_messages=[],
+        active_stream_id=stream_id,
+        pending_user_message="wake up",
+        pending_user_source="process_wakeup",
+    )
+    session.save()
+    models.SESSIONS[session_id] = session
+
+    class _NonReentrantSessionLock:
+        def __init__(self):
+            self.entered = False
+            self.entries = 0
+            self.reentries = 0
+
+        def __enter__(self):
+            if self.entered:
+                self.reentries += 1
+                raise AssertionError("Gateway terminal settlement re-entered the session lock")
+            self.entered = True
+            self.entries += 1
+            config.CANCEL_FLAGS[stream_id].set()
+            return self
+
+        def __exit__(self, *_exc):
+            self.entered = False
+            return False
+
+    sentinel_lock = _NonReentrantSessionLock()
+    monkeypatch.setattr(gateway_chat, "_get_session_agent_lock", lambda _session_id: sentinel_lock)
+
+    gateway_chat._run_gateway_chat_streaming(
+        session_id,
+        "wake up",
+        "claude-sonnet-test",
+        str(tmp_path),
+        stream_id,
+        model_provider="test-provider",
+    )
+
+    assert sentinel_lock.reentries == 0
+    saved = Session.load(session_id)
+    assert saved is not None
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+    assert [msg.get("role") for msg in saved.messages][0] == "user"
+    assert [msg.get("role") for msg in saved.messages][-1] == "assistant"
+    assert saved.messages[0]["_source"] == "process_wakeup"
+    assert saved.messages[-1]["_error"] is True
+    queued_items = list(stream_queue.queue)
+    queued_events = [event for event, _payload in queued_items]
+    assert "cancel" in queued_events
+    assert "done" not in queued_events
+    cancel_payload = next(payload for event, payload in queued_items if event == "cancel")
+    session_payload = cancel_payload["session"]
+    assert session_payload["session_id"] == session_id
+    assert session_payload["message_count"] == len(saved.messages)
+    assert [msg.get("role") for msg in session_payload["messages"]][0] == "user"
+    assert [msg.get("role") for msg in session_payload["messages"]][-1] == "assistant"
 
 
 def test_gateway_late_cancel_preserves_completed_webui_turn(tmp_path, monkeypatch):
@@ -2067,9 +2172,20 @@ def test_gateway_late_cancel_preserves_completed_webui_turn(tmp_path, monkeypatc
         "hello",
         "Gateway reply",
     ]
-    queued_events = [item[0] for item in list(stream_queue.queue)]
+    queued_items = list(stream_queue.queue)
+    queued_events = [item[0] for item in queued_items]
     assert "cancel" in queued_events
     assert "done" not in queued_events
+    cancel_payload = next(payload for event, payload in queued_items if event == "cancel")
+    session_payload = cancel_payload["session"]
+    assert "terminal_disposition" not in cancel_payload
+    assert session_payload["session_id"] == session_id
+    assert session_payload["message_count"] == 3
+    assert [msg.get("content") for msg in session_payload["messages"]] == [
+        "before",
+        "hello",
+        "Gateway reply",
+    ]
 
 
 def test_gateway_late_cancel_preserves_existing_pause_for_webui_recovery(tmp_path, monkeypatch):
@@ -2172,9 +2288,20 @@ def test_gateway_late_cancel_preserves_existing_pause_for_webui_recovery(tmp_pat
         "try recovery",
         "Gateway recovery reply",
     ]
-    queued_events = [item[0] for item in list(stream_queue.queue)]
+    queued_items = list(stream_queue.queue)
+    queued_events = [item[0] for item in queued_items]
     assert "cancel" in queued_events
     assert "done" not in queued_events
+    cancel_payload = next(payload for event, payload in queued_items if event == "cancel")
+    session_payload = cancel_payload["session"]
+    assert "terminal_disposition" not in cancel_payload
+    assert session_payload["session_id"] == session_id
+    assert session_payload["message_count"] == 3
+    assert [msg.get("content") for msg in session_payload["messages"]] == [
+        "before",
+        "try recovery",
+        "Gateway recovery reply",
+    ]
 
 
 def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monkeypatch):

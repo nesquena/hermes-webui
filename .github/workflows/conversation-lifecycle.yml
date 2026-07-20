@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [normal, terminal-error, session-reattach, detached-terminal]
+        scenario: [normal, terminal-error, session-reattach, detached-terminal, detached-terminal-error]
     steps:
       - uses: actions/checkout@v4
 
