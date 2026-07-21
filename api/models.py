@@ -318,6 +318,11 @@ class _SessionPublicationGeneration:
 _SESSION_PUBLICATION_GENERATIONS: weakref.WeakValueDictionary[
     str, _SessionPublicationGeneration
 ] = weakref.WeakValueDictionary()
+# Legacy sidecars predate durable incarnation tokens.  This tracks the exact
+# stat signature that a validated loader used to establish their process-local
+# lease, so concurrent validated readers can share it without letting a bare
+# constructor inherit authority.
+_SESSION_PUBLICATION_LEGACY_SIGNATURES: dict[str, tuple] = {}
 _SESSION_INCARNATION_TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 
 
@@ -354,6 +359,8 @@ def _session_publication_generation(
         if generation is None or (token is not None and generation.token != token):
             generation = _SessionPublicationGeneration(token)
             _SESSION_PUBLICATION_GENERATIONS[key] = generation
+        if token is not None:
+            _SESSION_PUBLICATION_LEGACY_SIGNATURES.pop(key, None)
         return generation
 
 
@@ -375,6 +382,30 @@ def _register_published_session_generation(session) -> None:
         if current is not None and current != generation:
             raise RuntimeError(f"Refusing to replace live session generation {sid!r}")
         _SESSION_PUBLICATION_GENERATIONS[key] = generation
+        _SESSION_PUBLICATION_LEGACY_SIGNATURES.pop(key, None)
+
+
+def _register_validated_legacy_session_generation(session, signature: tuple) -> None:
+    """Bind a verified tokenless sidecar to one process-local generation.
+
+    A legacy JSON file has no durable incarnation field.  Two full loaders can
+    therefore race while reading the same immutable sidecar; they must share a
+    lease, while a loader that observes a replacement must supersede the old
+    lease so its stale object cannot publish.  Bare constructors never call
+    this helper.
+    """
+    sid = str(getattr(session, "session_id", "") or "")
+    generation = getattr(session, "_publication_generation", None)
+    if generation is None:
+        raise RuntimeError(f"Missing publication generation for {sid!r}")
+    key = _session_publication_store_key(sid)
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        current = _SESSION_PUBLICATION_GENERATIONS.get(key)
+        if current is not None and _SESSION_PUBLICATION_LEGACY_SIGNATURES.get(key) == signature:
+            session._publication_generation = current
+            return
+        _SESSION_PUBLICATION_GENERATIONS[key] = generation
+        _SESSION_PUBLICATION_LEGACY_SIGNATURES[key] = signature
 
 
 def _activate_session_publication_generation(session) -> _SessionPublicationGeneration:
@@ -389,6 +420,7 @@ def _activate_session_publication_generation(session) -> _SessionPublicationGene
         generation = _SessionPublicationGeneration()
         with _SESSION_PUBLICATION_LOCKS_GUARD:
             _SESSION_PUBLICATION_GENERATIONS[key] = generation
+            _SESSION_PUBLICATION_LEGACY_SIGNATURES.pop(key, None)
             _SESSION_PUBLICATION_DELETED.discard(key)
         session._publication_generation = generation
         return generation
@@ -2422,13 +2454,7 @@ def _load_session_from_path(path: Path) -> "Session | None":
         logger.warning("Rejecting invalid or identity-mismatched session sidecar: %s", path)
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-    session = Session(**data)
-    if not data.get("publication_incarnation"):
-        # A legacy payload has no durable token. Register only after its path
-        # and embedded SID have been validated above, never from a constructor
-        # that merely names the same SID.
-        _register_published_session_generation(session)
-    return session
+    return Session(**data)
 
 
 def _lookup_index_message_count(session_id):
@@ -3032,6 +3058,13 @@ class Session:
         except (OSError, ValueError, json.JSONDecodeError):
             logger.warning("Rejecting invalid or identity-mismatched session sidecar for %s", sid)
             return None
+        # Do not attach a tokenless legacy lease to a sidecar that changed
+        # while it was being parsed. A caller can retry the complete validated
+        # load; accepting this snapshot would authorize an unknown replacement.
+        _post_read_sig = _sidecar_stat_signature(p)
+        if _pre_read_sig is None or _post_read_sig is None or _pre_read_sig != _post_read_sig:
+            logger.warning("Session sidecar changed during validated load for %s", sid)
+            return None
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if not data.get("publication_incarnation"):
@@ -3039,7 +3072,7 @@ class Session:
             # identity-validated load is the only safe way to establish their
             # in-process authority; a bare ``Session(session_id=sid)`` must
             # remain unable to adopt the same sidecar.
-            _register_published_session_generation(session)
+            _register_validated_legacy_session_generation(session, _post_read_sig)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
