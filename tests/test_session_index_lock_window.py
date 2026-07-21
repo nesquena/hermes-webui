@@ -33,8 +33,14 @@ def test_session_index_fast_path_keeps_json_work_outside_global_lock(monkeypatch
 
     old = models.Session(session_id="idx_old", title="Old", updated_at=1.0)
     updated = models.Session(session_id="idx_updated", title="Updated", updated_at=20.0)
-    (session_dir / "idx_old.json").write_text("{}", encoding="utf-8")
-    (session_dir / "idx_updated.json").write_text("{}", encoding="utf-8")
+    (session_dir / "idx_old.json").write_text(
+        json.dumps({"session_id": "idx_old"}),
+        encoding="utf-8",
+    )
+    (session_dir / "idx_updated.json").write_text(
+        json.dumps({"session_id": "idx_updated"}),
+        encoding="utf-8",
+    )
     index_file.write_text(
         json.dumps(
             [
