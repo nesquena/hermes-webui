@@ -860,6 +860,13 @@ def hydrate_session_media_urls(value, session_id: str):
     return hydrated
 
 
+def inline_legacy_session_media_urls(value, session_id: str):
+    """Migrate compact refs only when present, preserving ordinary object identity."""
+    if not _collect_reference_filenames(value):
+        return value
+    return hydrate_session_media_urls(value, session_id)
+
+
 def _remove_tree_at(parent_fd: int, name: str, *, expected_fd: int | None = None) -> None:
     """Remove exactly one held child tree without following replacements."""
     child_fd = expected_fd

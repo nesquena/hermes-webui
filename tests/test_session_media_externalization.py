@@ -2542,7 +2542,7 @@ def test_save_rejects_private_ref_in_non_image_transcript_path(tmp_path, monkeyp
 
     with pytest.raises(
         session_media.SessionMediaIntegrityError,
-        match="hydrated session history",
+        match="outside an image part",
     ):
         session.save(skip_index=True)
 

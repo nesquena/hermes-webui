@@ -14410,17 +14410,17 @@ def handle_post(handler, parsed) -> bool:
             try:
                 from api.session_media import (
                     clone_session_media_references,
-                    hydrate_session_media_urls,
+                    inline_legacy_session_media_urls,
                 )
 
                 # Older experimental sidecars may still contain compact refs.
                 # Copy their verified bytes into portable history before the
                 # new session is reserved; disabled externalization must never
                 # create destination private media.
-                copied_session.messages = hydrate_session_media_urls(
+                copied_session.messages = inline_legacy_session_media_urls(
                     copied_session.messages, session.session_id
                 )
-                copied_session.context_messages = hydrate_session_media_urls(
+                copied_session.context_messages = inline_legacy_session_media_urls(
                     copied_session.context_messages, session.session_id
                 )
 
@@ -15179,13 +15179,13 @@ def handle_post(handler, parsed) -> bool:
         try:
             from api.session_media import (
                 clone_session_media_references,
-                hydrate_session_media_urls,
+                inline_legacy_session_media_urls,
             )
 
-            branch.messages = hydrate_session_media_urls(
+            branch.messages = inline_legacy_session_media_urls(
                 branch.messages, source.session_id
             )
-            branch.context_messages = hydrate_session_media_urls(
+            branch.context_messages = inline_legacy_session_media_urls(
                 branch.context_messages, source.session_id
             )
 
@@ -20872,11 +20872,11 @@ def _handle_btw(handler, body):
     try:
         from api.session_media import (
             clone_session_media_references,
-            hydrate_session_media_urls,
+            inline_legacy_session_media_urls,
         )
 
-        ephemeral.messages = hydrate_session_media_urls(ephemeral.messages, s.session_id)
-        ephemeral.context_messages = hydrate_session_media_urls(
+        ephemeral.messages = inline_legacy_session_media_urls(ephemeral.messages, s.session_id)
+        ephemeral.context_messages = inline_legacy_session_media_urls(
             ephemeral.context_messages, s.session_id
         )
 
