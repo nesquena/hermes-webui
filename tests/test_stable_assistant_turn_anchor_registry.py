@@ -47,6 +47,34 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} body did not close")
 
 
+def _function_source(src: str, name: str) -> str:
+    start = src.find(f"function {name}")
+    assert start != -1, f"{name} not found"
+    params = src.find("(", start)
+    assert params != -1, f"{name} parameters not found"
+    depth = 0
+    close = -1
+    for idx in range(params, len(src)):
+        if src[idx] == "(":
+            depth += 1
+        elif src[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    assert close != -1, f"{name} parameters did not close"
+    brace = src.find("{", close)
+    depth = 0
+    for idx in range(brace, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"{name} body did not close")
+
+
 def _registry_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
     script = f"""
@@ -83,6 +111,7 @@ api.applyAssistantTurnAnchorSourceEvent(registry, {{
 console.log(JSON.stringify({{
   version:api.version,
   registry,
+  scene:api.projectAssistantTurnAnchorActivityScene(registry,{{mode:'compact_worklog'}}),
   isolated,
   results:results.map((item)=>({{applied:item.applied, reason:item.reason}})),
 }}));
@@ -723,6 +752,140 @@ def test_registry_routes_activity_artifacts_side_effects_metadata_and_transport(
     assert anchor["transport_events"][0]["source_event_type"] == "stream_end"
 
 
+def test_live_state_saved_listener_attaches_side_effect_to_anchor():
+    body = _event_listener_body(_read(MESSAGES_JS), "state_saved")
+
+    assert "_applyToAnchor('state_saved',d,e,null,{render:false});" in body
+
+
+def test_invisible_anchor_outcome_applies_without_repainting_live_scene():
+    assert NODE, "node is required for assistant-turn ownership tests"
+    apply_source = _function_source(_read(MESSAGES_JS), "_applyToAnchor")
+    script = f"""
+const activeSid='sid-owned-outcome';
+const streamId='stream-owned-outcome';
+const _anchorRegistry={{anchor:{{}}}};
+const applied=[];
+const _anchorApi={{
+  applyAssistantTurnAnchorSourceEvent(registry,event,context){{
+    applied.push({{registry,event,context}});
+    return {{applied:true}};
+  }},
+}};
+let _anchorShadowWarned=false;
+let _assistantSegmentSeq=3;
+let _currentActivityBurstId=4;
+let renderCount=0;
+function _renderAnchorLiveScene(){{ renderCount+=1; return true; }}
+{apply_source}
+const renderOutcome={{}};
+const result=_applyToAnchor(
+  'state_saved',
+  {{kind:'memory',name:'session-state'}},
+  {{lastEventId:'run-owned-outcome:7'}},
+  renderOutcome,
+  {{render:false}}
+);
+console.log(JSON.stringify({{result,applied,renderCount,renderOutcome}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["result"] == {"applied": True}
+    assert data["renderCount"] == 0
+    assert data["renderOutcome"] == {"rendered": False}
+    assert data["applied"][0]["event"]["source_event_type"] == "state_saved"
+    assert data["applied"][0]["event"]["event_id"] == "run-owned-outcome:7"
+    assert data["applied"][0]["context"] == {
+        "session_id": "sid-owned-outcome",
+        "stream_id": "stream-owned-outcome",
+    }
+
+
+def test_side_effect_owner_survives_scene_settlement_and_reload():
+    from api import routes
+
+    data = _registry_snapshot()
+    scene = routes._sanitize_anchor_activity_scene(data["scene"])
+    messages = [
+        {"role": "user", "content": "save this"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    message_ref = routes._assistant_anchor_scene_message_ref(messages[1])
+    records = {
+        message_ref: {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": 1,
+            "message_ref": message_ref,
+            "stream_id": "stream-1",
+            "scene": scene,
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+    settled_scene = hydrated[1]["_anchor_activity_scene"]
+
+    assert settled_scene["artifacts"] == scene["artifacts"]
+    assert settled_scene["artifacts"][0]["payload"] == {
+        "kind": "workspace_file",
+        "path": "answer.txt",
+    }
+    assert settled_scene["side_effects"] == scene["side_effects"]
+    assert settled_scene["side_effects"][0]["source_event_type"] == "state_saved"
+    assert settled_scene["side_effects"][0]["payload"] == {
+        "kind": "memory",
+        "name": "session-state",
+    }
+
+
+def test_side_effect_only_scene_is_persisted_without_creating_a_worklog():
+    assert NODE, "node is required for assistant-turn ownership tests"
+    messages_js = _read(MESSAGES_JS)
+    has_owned_outcomes = _function_body(messages_js, "_anchorSceneHasOwnedOutcomes")
+    attach_scene = _function_body(
+        messages_js, "_attachProjectedAnchorSceneToLastAssistant"
+    )
+    script = f"""
+const activeSid='sid-owned-outcome';
+const streamId='stream-owned-outcome';
+const _anchorRegistry={{}};
+let persisted=0;
+function _anchorSceneHasOwnedOutcomes(scene){{{has_owned_outcomes}}}
+function _anchorSceneHasWorklogWorthyRows(){{ return false; }}
+function _projectLiveAnchorActivityScene(){{
+  return {{
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[{{source_event_type:'state_saved',payload:{{kind:'memory'}}}}],
+  }};
+}}
+function _completeSettledAnchorSceneForTurn(messages,index,scene){{ return scene; }}
+function _persistSettledAnchorScene(){{ persisted+=1; }}
+function _attachProjectedAnchorSceneToLastAssistant(messages){{{attach_scene}}}
+const messages=[{{role:'assistant',content:'final answer'}}];
+const renderedWorklog=_attachProjectedAnchorSceneToLastAssistant(messages);
+console.log(JSON.stringify({{
+  renderedWorklog,
+  persisted,
+  attached:messages[0]._anchor_activity_scene,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["renderedWorklog"] is False
+    assert data["persisted"] == 1
+    assert data["attached"]["side_effects"][0]["source_event_type"] == "state_saved"
+
+
 def test_registry_updates_lifecycle_and_settled_final_projection():
     data = _registry_snapshot()
     anchor = data["registry"]["anchor"]
@@ -979,6 +1142,8 @@ def test_activity_scene_is_renderer_neutral_and_empty_safe():
         "final_message_ref": None,
         "terminal_state": None,
         "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
     }
 
 

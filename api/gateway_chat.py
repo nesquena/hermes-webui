@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.request
 from typing import Any
@@ -31,7 +32,7 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +315,9 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
         "preview": payload.get("label") or payload.get("preview"),
-        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "args": bound_run_journal_snapshot_args(payload.get("args"))
+        if isinstance(payload.get("args"), dict)
+        else {},
         "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
     if tid:
@@ -334,6 +337,8 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    if not approval_id:
+        approval_id = uuid.uuid4().hex
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
@@ -565,6 +570,14 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification["type"],
             error_classification.get("hint", ""),
         )
+        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
+        _turn_duration_seconds = 0.0
+        try:
+            _pending_ts = getattr(session, 'pending_started_at', None)
+            if _pending_ts:
+                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
+        except Exception:
+            pass
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         session.pending_user_message = None
@@ -583,6 +596,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
             "timestamp": int(time.time()),
             "_error": True,
+            "_turnDuration": round(_turn_duration_seconds, 3),
         }
         if error_payload.get("details"):
             error_message["provider_details"] = error_payload["details"]

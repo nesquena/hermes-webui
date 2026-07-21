@@ -152,6 +152,26 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
     assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
 
 
+def test_gateway_tool_progress_event_bounds_pathological_args():
+    long_command = "python -c " + repr("print('x')\n" * 24)
+    event_name, event_payload = _gateway_tool_progress_event(
+        {
+            "tool": "terminal",
+            "toolCallId": "call-huge",
+            "status": "running",
+            "args": {
+                "command": long_command,
+                "items": [{"index": i, "payload": "x" * 100} for i in range(50_000)],
+            },
+        }
+    )
+
+    assert event_name == "tool"
+    assert event_payload["args"]["command"] == long_command
+    assert len(event_payload["args"]["items"]) <= 64
+    assert len(json.dumps(event_payload["args"], sort_keys=True)) < 100_000
+
+
 def test_gateway_reasoning_delta_keeps_string_deltas_and_ignores_structured_payloads():
     assert _gateway_reasoning_delta({"text": " Let me"}) == " Let me"
     assert _gateway_reasoning_delta({"text": "   ", "preview": " think"}) == " think"
@@ -598,8 +618,9 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
     assert partial_message["_partial_tool_calls"] == [{
         "name": "terminal",
         "args": {},
-        "done": False,
+        "done": True,
         "tid": "call-1",
+        "_sealed_by_terminal_error": True,
     }]
     apperrors = [item[1] for item in events if item[0] == "apperror"]
     assert apperrors[-1]["session"]["messages"][-2]["reasoning"] == "Preview reasoning"

@@ -486,6 +486,25 @@ def get_config() -> dict:
     return _cfg_cache
 
 
+def get_config_snapshot() -> dict:
+    """Return a request-owned config snapshot captured under the cache lock."""
+    with _cfg_lock:
+        config_path = _get_config_path()
+        try:
+            current_mtime = config_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        path_changed = _cfg_path != config_path
+        mtime_stale = current_mtime != _cfg_mtime
+        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+            _refresh_config_cache(config_path)
+        try:
+            active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+        except NameError:
+            active_cfg = _cfg_cache
+        return copy.deepcopy(active_cfg)
+
+
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     """Return the validated first-turn session persistence mode.
 
@@ -3384,6 +3403,94 @@ def _nested_gateway_route_reasoning(model: str) -> bool:
     return False
 
 
+def _zai_glm_classification(model_id: str, provider_id: str) -> str | None:
+    """Classify a model on the native ``zai`` endpoint into a Z.AI capability tier.
+
+    Returns one of:
+
+    * ``"effort"``  — accepts the ``reasoning_effort`` intensity ladder
+      (GLM-5.2+; Z.AI's max/xhigh/high/medium/low/minimal values match
+      ``VALID_REASONING_EFFORTS`` exactly).
+    * ``"thinking"`` — does NOT accept the effort ladder but DOES accept the
+      ``thinking: {"type": "enabled"|"disabled"}`` on/off toggle (GLM-4.5,
+      4.5-air/flash, 4.6, 5, 5.1, 5-turbo, and other 4.5+ non-4.7 GLM models).
+    * ``"forced"``  — GLM-4.7 family: forced thinking, neither the toggle nor
+      the ladder is configurable.
+    * ``None``      — not a native-``zai`` GLM model (non-GLM id, non-zai
+      provider, or an aggregator/custom provider that routes through its own
+      router rather than Z.AI's per-model docs).
+
+    Scoped to the native ``zai`` endpoint (aliases ``glm``/``z-ai``/``z.ai``/
+    ``zhipu`` all resolve to ``zai`` via ``_resolve_provider_alias``). Per
+    docs.z.ai: ``thinking`` is supported by GLM-4.5+ (4.7 forces it on),
+    ``reasoning_effort`` is GLM-5.2+ exclusive.
+
+    Shared by ``_filter_reasoning_efforts_for_provider`` (UI dropdown options),
+    ``coerce_reasoning_effort_for_model`` (what is actually sent to Z.AI), and
+    ``get_reasoning_status`` (whether the composer renders an On/None toggle when
+    the effort ladder is empty) so all three surfaces agree.
+    """
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    if provider != "zai":
+        return None
+    bare = _strip_provider_hint_for_reasoning(str(model_id or "")).lower().rsplit("/", 1)[-1]
+    if "glm" not in bare:
+        return None
+    # GLM-4.7 family: forced thinking — reasoning is not configurable at all.
+    if bare.startswith("glm-4.7"):
+        return "forced"
+    m = re.search(r"glm-(\d+)(?:\D+(\d+))?", bare)
+    if m:
+        major = int(m.group(1))
+        minor = int(m.group(2)) if m.group(2) else 0
+        # GLM-5.2+ accepts the effort ladder.
+        if (major, minor) >= (5, 2):
+            return "effort"
+        # GLM-4.5+ (but below 5.2) accepts the thinking toggle only.
+        if (major, minor) >= (4, 5):
+            return "thinking"
+    # Pre-4.5 GLM (e.g. glm-4, glm-3): no thinking support documented by Z.AI.
+    return None
+
+
+def _zai_glm_reasoning_efforts_supported(model_id: str, provider_id: str) -> bool | None:
+    """Z.AI native-endpoint gate for the ``reasoning_effort`` intensity field.
+
+    Returns True if the model accepts the effort ladder (GLM-5.2+), False if it
+    is known NOT to (pre-5.2 GLM and the forced-thinking GLM-4.7 family), or None
+    if this is not a native-``zai`` GLM model (caller should defer to other rules).
+
+    Thin wrapper over ``_zai_glm_classification`` kept for the coercion path's
+    explicit True/False/None contract. A known-False result means "send no
+    ``reasoning_effort`` field" (distinct from the ambiguous empty list returned
+    for genuinely unknown models, which preserves the configured effort verbatim
+    per #3505).
+    """
+    cls = _zai_glm_classification(model_id, provider_id)
+    if cls is None:
+        return None
+    return cls == "effort"
+
+
+def _zai_glm_thinking_toggle_supported(model_id: str, provider_id: str) -> bool | None:
+    """Z.AI native-endpoint gate for the ``thinking`` on/off toggle.
+
+    Returns True if the model accepts the ``thinking: {"type": ...}`` toggle
+    (GLM-4.5+ except the forced-thinking GLM-4.7), False if it does not
+    (GLM-4.7 forced, or pre-4.5 GLM with no thinking support), or None if this
+    is not a native-``zai`` GLM model (caller should defer — the toggle's
+    availability is then governed by ``supported_efforts`` as before).
+
+    Drives the ``supports_thinking_toggle`` field in ``get_reasoning_status`` so
+    the composer can render an operable On/None control for GLM-4.5–5.1 models
+    that accept the thinking toggle but not the effort ladder.
+    """
+    cls = _zai_glm_classification(model_id, provider_id)
+    if cls is None:
+        return None
+    return cls in {"effort", "thinking"}
+
+
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
@@ -3421,6 +3528,14 @@ def _filter_reasoning_efforts_for_provider(
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff != "max"]
+    # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
+    # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
+    # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
+    zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
+    if zai_supports is True:
+        return normalized
+    if zai_supports is False:
+        return []
     return normalized
 
 
@@ -3754,6 +3869,12 @@ def resolve_model_reasoning_efforts(
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
         return raw
+    # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
+    # disabled, so the 'none' sentinel must NOT appear in their supported list —
+    # otherwise the UI offers an "off" option that has no effect and contradicts
+    # the forced-tier contract. (#6219 round-3)
+    if _zai_glm_classification(model_id, provider_id) == "forced":
+        return []
     # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
     # the ceiling filter only knows the reasoning LEVELS.
     had_none = "none" in raw
@@ -3887,6 +4008,13 @@ def coerce_reasoning_effort_for_model(
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
+    # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
+    # disabled at all — a stored 'none' must coerce to '' (provider default =
+    # thinking on) so streaming does not build disabled reasoning for a model
+    # that forces thinking on regardless. Checked BEFORE the generic 'none'
+    # early-return below so the forced-tier contract wins. (#6219 round-3)
+    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
+        return ""
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
@@ -3942,7 +4070,15 @@ def coerce_reasoning_effort_for_model(
     # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
     # filter above already stripped it for any KNOWN-capped model. All other
     # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
+    #
+    # EXCEPTION for the ZAI native-endpoint gate: a pre-5.2 GLM model (incl. the
+    # forced-thinking GLM-4.7) is KNOWN not to accept reasoning_effort at all, so
+    # any stored level must coerce to "" (send no field) — NOT be preserved
+    # verbatim, which Z.AI would silently ignore. This keeps the value actually
+    # sent in agreement with the UI (which offers no options for these models).
     if not supported:
+        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
+            return ""
         if raw == "max" and not _provider_known_reasoning_capable(provider_id):
             return "xhigh"
         return raw
@@ -4001,6 +4137,17 @@ def get_reasoning_status(
         provider_id=resolve_provider,
         base_url=resolve_base_url,
     )
+    # supports_thinking_toggle: can the user turn thinking on/off at all? An
+    # effort-capable model obviously can. The ZAI gate separately exposes the
+    # toggle for GLM-4.5–5.1 (which accept `thinking: {"type": ...}` but NOT the
+    # `reasoning_effort` ladder), so the composer still renders an On/None control
+    # when supported_efforts is empty. Without this, returning [] for those models
+    # would hide the entire reasoning chip and silently regress the working
+    # thinking on/off control (#6219 round-2 review).
+    zai_thinking = _zai_glm_thinking_toggle_supported(
+        resolve_model, resolve_provider
+    )
+    supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
@@ -4014,6 +4161,10 @@ def get_reasoning_status(
         ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
+        # Whether the composer should render ANY reasoning control. True for any
+        # effort-capable model OR a ZAI GLM model that accepts the thinking
+        # toggle but not the effort ladder. False hides the chip entirely.
+        "supports_thinking_toggle": supports_thinking_toggle,
     }
 
 
@@ -4125,12 +4276,18 @@ def set_reasoning_effort(
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
-    Raises ``ValueError`` on an unrecognised level so callers can return 400.
+
+    An empty string is accepted as "clear the override" — it removes the
+    ``agent.reasoning_effort`` key so the provider default takes effect. This is
+    the re-enable path for thinking-toggle-only models (GLM-4.5–5.1 on native
+    zai): the dropdown's "Default"/"On" option POSTs ``effort:''`` to switch
+    thinking back on after the user selected "None". Without this, the toggle
+    would be one-way (off-only) for those models. (#6219 round-3)
+
+    Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
     raw = str(effort or "").strip().lower()
-    if not raw:
-        raise ValueError("effort is required")
-    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
+    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
         raise ValueError(
             f"Unknown reasoning effort '{effort}'. "
             f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
@@ -4141,7 +4298,14 @@ def set_reasoning_effort(
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        agent_cfg["reasoning_effort"] = raw
+        if raw:
+            agent_cfg["reasoning_effort"] = raw
+        else:
+            # Clear the override so the provider default takes effect (the
+            # "Default"/"On" re-enable path for thinking-toggle-only models).
+            # Drop the key entirely rather than writing an empty string so the
+            # CLI's "is reasoning_effort configured?" check stays simple.
+            agent_cfg.pop("reasoning_effort", None)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
@@ -8340,16 +8504,18 @@ _INDEX_HTML_PATH = get_index_html_path()
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()
-# Max compact Session objects held in the in-memory LRU (issue #3506, #4765).
+# Max compact Session objects held in the in-memory LRU (issue #3506, #4765, #6351).
 # Lighter than the agent cache (no live agent runtime), but still bounded so a
 # long-running self-hosted install cannot accumulate every session it ever
 # touched in RAM and eventually segfault (the #4765/#2233/#4633 crash cluster).
+# The shipped default is tuned for the common single-user install; larger
+# deployments can keep raising it through config.yaml or the legacy env fallback.
 #
 # Precedence for the effective cap is resolved by get_sessions_cache_max():
 #   1. config.yaml  webui.sessions_cache_max   (preferred, no new env var)
 #   2. HERMES_WEBUI_SESSIONS_MAX env var        (legacy operator override)
 #   3. DEFAULT_SESSIONS_CACHE_MAX               (sane bounded default)
-DEFAULT_SESSIONS_CACHE_MAX = 300
+DEFAULT_SESSIONS_CACHE_MAX = 100
 SESSIONS_MAX = _env_int("HERMES_WEBUI_SESSIONS_MAX", DEFAULT_SESSIONS_CACHE_MAX)
 
 
@@ -8975,6 +9141,7 @@ _SETTINGS_DEFAULTS = {
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
     "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
+    "hide_empty_state_panel": False,  # hide the complete new-chat welcome panel
     "new_chat_on_workspace_switch": False,  # #5473 opt-in: switching to a DIFFERENT workspace starts a new chat (leaving the current conversation on its original workspace) instead of mutating the current session's workspace in place. Default OFF preserves the shipped in-place-switch behavior.
     "virtualize_transcript": False,  # #4343: virtualize long (>80 msg) transcripts. EXPERIMENTAL, opt-IN (default OFF). Was opt-out/default-on in #4325 but caused scroll-up flicker on long sessions with tall tool-call rows (variable-height anchor oscillation) — flipped off for everyone in #4343; re-enabling requires an explicit opt-in (see virtualize_transcript_optin migration in load_settings).
     "virtualize_transcript_optin": False,  # #4343 migration marker: True only once the user explicitly enables virtualize_transcript AFTER the default-off flip. A stored virtualize_transcript=True WITHOUT this marker is a stale pre-flip value and is reset to False on load (force-off-for-everyone migration).
@@ -9011,6 +9178,7 @@ _SETTINGS_DEFAULTS = {
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
+    "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "hide_composer_attach": False,  # hide attach button in composer footer
@@ -9368,6 +9536,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_conversation_outline",
     "show_busy_placeholder_hint",
     "hide_empty_state_suggestions",
+    "hide_empty_state_panel",
     "new_chat_on_workspace_switch",
     "virtualize_transcript",
     "virtualize_transcript_optin",
@@ -9399,6 +9568,7 @@ _SETTINGS_BOOL_KEYS = {
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",
     "session_endless_scroll",
+    "transparent_stream_event_timestamps",
     "auto_scroll_follow",
     "worklog_details_expanded_default",
     "auth_disabled_acknowledged",

@@ -10,8 +10,9 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -27,6 +28,14 @@ _WRITER_LOCKS_GUARD = threading.Lock()
 # ``_reserve_next_seq`` and ``delete_run_journal`` (which evicts stale entries).
 _SEQ_CACHE: dict[str, int] = {}
 _SEQ_CACHE_LOCK = threading.Lock()
+# Summary callers only need terminal state and the latest cursor. Re-parsing a
+# completed journal's full payload (which can include multi-megabyte tool or
+# session results) on every status/reconnect probe is needless. This process
+# cache is keyed by a complete stat identity, so it is never used after an
+# atomic replacement, append, truncate, or same-path file recreation.
+_SUMMARY_CACHE_MAX_ENTRIES = 128
+_SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
+_SUMMARY_CACHE_LOCK = threading.Lock()
 _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
@@ -34,6 +43,11 @@ _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_SNAPSHOT_ARGS_MAX_ITEMS = 64
+_SNAPSHOT_ARGS_MAX_DEPTH = 8
+_SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
+_SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
+_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
 
 
 def _default_session_dir() -> Path:
@@ -64,6 +78,68 @@ def _lock_for(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _WRITER_LOCKS[key] = lock
         return lock
+
+
+def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return the complete filesystem identity used for summary-cache validity.
+
+    Includes ``st_ctime_ns`` so a same-inode, same-size rewrite that restores the
+    original ``mtime_ns`` (e.g. an atomic replace) still invalidates the cache —
+    ctime advances on any metadata/content change and cannot be forged back.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _get_cached_summary(path: Path) -> dict | None:
+    signature = _summary_cache_signature(path)
+    if signature is None:
+        return None
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        cached = _SUMMARY_CACHE.get(key)
+        if cached is None:
+            return None
+        cached_signature, summary = cached
+        if cached_signature != signature:
+            _SUMMARY_CACHE.pop(key, None)
+            return None
+        _SUMMARY_CACHE.move_to_end(key)
+        return dict(summary)
+
+
+def _cache_summary(
+    path: Path,
+    summary: dict,
+    *,
+    expected_signature: tuple[int, int, int, int, int] | None = None,
+) -> None:
+    signature = _summary_cache_signature(path)
+    # The pre-read signature is an enforced TOCTOU precondition. In particular,
+    # a journal created after a missing-file read has ``None -> signature`` and
+    # must not cache the empty/unknown result under the new file's identity.
+    if signature is None or signature != expected_signature:
+        return
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[key] = (signature, dict(summary))
+        _SUMMARY_CACHE.move_to_end(key)
+        while len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ENTRIES:
+            _SUMMARY_CACHE.popitem(last=False)
+
+
+def _discard_cached_summary(path: Path) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.pop(str(path), None)
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
@@ -101,6 +177,65 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     except (TypeError, ValueError):
         return run_id or None, None
     return run_id or None, seq
+
+
+def _snapshot_args_take_budget(budget: dict[str, int], amount: int) -> int:
+    remaining = max(0, int(budget.get("remaining") or 0))
+    take = min(remaining, max(0, amount))
+    budget["remaining"] = remaining - take
+    return take
+
+
+def _bound_snapshot_args_string(value: str, budget: dict[str, int]) -> str:
+    max_chars = min(len(value), _SNAPSHOT_ARGS_MAX_STRING_CHARS)
+    take = _snapshot_args_take_budget(budget, max_chars)
+    out = value[:take]
+    if take < len(value):
+        suffix_take = _snapshot_args_take_budget(budget, len(_SNAPSHOT_ARGS_TRUNCATED_SUFFIX))
+        out += _SNAPSHOT_ARGS_TRUNCATED_SUFFIX[:suffix_take]
+    return out
+
+
+def _bound_run_journal_snapshot_value(value: Any, budget: dict[str, int], depth: int) -> Any:
+    if budget.get("remaining", 0) <= 0:
+        return None
+    if isinstance(value, str):
+        return _bound_snapshot_args_string(value, budget)
+    if isinstance(value, dict):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return {}
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _SNAPSHOT_ARGS_MAX_ITEMS or budget.get("remaining", 0) <= 0:
+                break
+            bounded_key = _bound_snapshot_args_string(str(key), budget)
+            if not bounded_key:
+                continue
+            out[bounded_key] = _bound_run_journal_snapshot_value(item, budget, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return []
+        return [
+            _bound_run_journal_snapshot_value(item, budget, depth + 1)
+            for item in value[:_SNAPSHOT_ARGS_MAX_ITEMS]
+            if budget.get("remaining", 0) > 0
+        ]
+    if isinstance(value, (bool, int, float)) or value is None:
+        try:
+            _snapshot_args_take_budget(budget, len(json.dumps(value)))
+        except (TypeError, ValueError):
+            return None
+        return value
+    return _bound_snapshot_args_string(str(value), budget)
+
+
+def bound_run_journal_snapshot_args(args: Any) -> Any:
+    """Return recovery tool args with realistic values intact and pathological payloads bounded."""
+    if args is None:
+        return {}
+    budget = {"remaining": _SNAPSHOT_ARGS_MAX_TOTAL_CHARS}
+    return _bound_run_journal_snapshot_value(args, budget, 0)
 
 
 def _next_seq(path: Path) -> int:
@@ -287,6 +422,7 @@ def append_run_event(
             fh.flush()
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
+        _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
         return event
@@ -363,8 +499,15 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
 
 
 def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
-    journal = read_run_events(session_id, run_id, session_dir=session_dir)
-    return _summary_from_events(session_id, run_id, journal.get("events") or [])
+    path = _run_path(session_id, run_id, session_dir=session_dir)
+    cached = _get_cached_summary(path)
+    if cached is not None:
+        return cached
+    pre_read_signature = _summary_cache_signature(path)
+    events, _malformed = _read_jsonl(path)
+    summary = _summary_from_events(session_id, run_id, events)
+    _cache_summary(path, summary, expected_signature=pre_read_signature)
+    return summary
 
 
 def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = None) -> tuple[int, float, int]:
@@ -407,8 +550,12 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     journal_root = root / RUN_JOURNAL_DIR_NAME
     for path in journal_root.glob(f"*/{rid}.jsonl"):
         session_id = path.parent.name
-        events, _malformed = _read_jsonl(path)
-        summary = _summary_from_events(session_id, rid, events)
+        summary = _get_cached_summary(path)
+        if summary is None:
+            pre_read_signature = _summary_cache_signature(path)
+            events, _malformed = _read_jsonl(path)
+            summary = _summary_from_events(session_id, rid, events)
+            _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
     return None
@@ -576,8 +723,11 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         # ``_note_assigned_seq`` take — so a concurrent append on another path
         # cannot mutate the dict mid-iteration (``dictionary changed size``).
         with _SEQ_CACHE_LOCK:
-            for key in [k for k in _SEQ_CACHE if str(Path(k).parent) == dir_key]:
-                del _SEQ_CACHE[key]
+            for cache_key in [entry for entry in _SEQ_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SEQ_CACHE[cache_key]
+        with _SUMMARY_CACHE_LOCK:
+            for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SUMMARY_CACHE[cache_key]
     return removed
 
 
