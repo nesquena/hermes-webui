@@ -6553,7 +6553,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _build_configured_model_badges() -> dict[str, dict[str, str]]:
             configured_entries: list[dict[str, str]] = []
-            if active_provider and default_model and default_model_has_explicit_source:
+            if active_provider and default_model:
                 configured_entries.append(
                     {
                         "provider": active_provider,
