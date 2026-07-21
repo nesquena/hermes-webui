@@ -4567,7 +4567,17 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     values = [row.get("row_id"), row.get("local_id"), row.get("event_id")]
     identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
     values.extend([identity.get("local_id"), identity.get("event_id")])
-    return any(str(value or "").startswith("live-") for value in values)
+    if any(str(value or "").startswith("live-") for value in values):
+        return True
+    group = row.get("group") if isinstance(row.get("group"), dict) else {}
+    has_stream_owner = bool(
+        row.get("stream_id")
+        or row.get("run_id")
+        or identity.get("stream_id")
+        or identity.get("run_id")
+    )
+    has_assistant_message_index = group.get("assistant_msg_idx") is not None
+    return has_stream_owner and not has_assistant_message_index
 
 
 def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
@@ -4584,6 +4594,14 @@ def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
         return None
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
+    payload = next_row.get("payload")
+    if isinstance(payload, dict):
+        payload["status"] = "completed"
+        if role == "tool":
+            payload["done"] = True
+    tool = next_row.get("tool")
+    if role == "tool" and isinstance(tool, dict):
+        tool["done"] = True
     return next_row
 
 
