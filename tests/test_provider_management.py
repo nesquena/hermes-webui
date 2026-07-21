@@ -5,7 +5,10 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import os
+import subprocess
 import threading
+import textwrap
 import time
 import sys
 import types
@@ -174,7 +177,9 @@ class TestGetProviders:
         assert ids == {"openai-codex", "xai-oauth", "nous"}
         assert barrier.broken is False
         assert set(started.keys()) == set(delays)
-        assert set(credential_threads) == {request_thread_id}
+        credential_thread_ids = set(credential_threads)
+        assert len(credential_thread_ids) == 1
+        assert request_thread_id not in credential_thread_ids
 
     def test_get_providers_bedrock_entry_uses_structural_credentials_without_live_probe(self, monkeypatch, tmp_path):
         """Bedrock card construction should use structural env signals, not live auth probes."""
@@ -394,6 +399,354 @@ class TestGetProviders:
         third = prov.get_providers()
         assert third["providers"] is not outputs["first"]["providers"]
 
+    def test_blocked_provider_build_times_out_wakes_follower_and_does_not_poison_next_key(
+        self, monkeypatch, tmp_path,
+    ):
+        """A stuck build is bounded, drops queued work, and cannot poison later builds."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        prov.invalidate_providers_cache()
+        provider_ids = [f"provider-{i:02d}" for i in range(12)]
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {pid: pid for pid in provider_ids})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {pid: [] for pid in provider_ids})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: False)
+        monkeypatch.setattr(prov, "_PROVIDERS_BUILD_TIMEOUT_SECONDS", 0.15, raising=False)
+        monkeypatch.setattr(prov, "_PROVIDERS_FOLLOWER_TIMEOUT_SECONDS", 0.5, raising=False)
+
+        mode = {"value": "blocked"}
+        monkeypatch.setattr(
+            prov,
+            "get_config",
+            lambda: {"model": {}, "providers": {}},
+        )
+
+        release = threading.Event()
+        eight_started = threading.Event()
+        follower_entered = threading.Event()
+        lock = threading.Lock()
+        started = []
+
+        def fake_build_entry(
+            pid,
+            initial_has_key,
+            providers_cfg,
+            active_profile_name,
+            request_thread_env,
+            request_block_process_env_fallback,
+        ):
+            marker = mode["value"]
+            with lock:
+                started.append((marker, str(pid)))
+                blocked_count = sum(1 for seen_marker, _ in started if seen_marker == "blocked")
+                if blocked_count >= prov._PROVIDERS_MAX_WORKERS:
+                    eight_started.set()
+            if marker == "blocked":
+                release.wait()
+            return {
+                "id": str(pid),
+                "display_name": str(pid),
+                "has_key": bool(initial_has_key),
+                "configurable": True,
+                "is_self_hosted": False,
+                "base_url": None,
+                "is_plugin_provider": False,
+                "is_oauth": False,
+                "key_source": "none",
+                "auth_error": None,
+                "models": [],
+                "models_total": 0,
+            }
+
+        monkeypatch.setattr(prov, "_build_provider_entry", fake_build_entry)
+        real_wait = prov._wait_provider_build
+
+        def spy_wait(state, cache_key):
+            follower_entered.set()
+            return real_wait(state, cache_key)
+
+        monkeypatch.setattr(prov, "_wait_provider_build", spy_wait)
+
+        outputs = {}
+        errors = {}
+
+        def call(label):
+            try:
+                outputs[label] = prov.get_providers()
+            except BaseException as exc:
+                errors[label] = exc
+
+        leader = threading.Thread(target=call, args=("leader",), daemon=True)
+        follower = threading.Thread(target=call, args=("follower",), daemon=True)
+        later = threading.Thread(target=call, args=("later",), daemon=True)
+
+        try:
+            leader.start()
+            assert eight_started.wait(2)
+            follower.start()
+            assert follower_entered.wait(2)
+
+            leader.join(1)
+            follower.join(1)
+            assert not leader.is_alive()
+            assert not follower.is_alive()
+            assert not errors
+            with prov._providers_cache_lock:
+                assert not prov._providers_cache
+
+            # The four jobs queued behind the blocked workers must not start
+            # after the build deadline expires.
+            time.sleep(0.1)
+            blocked_ids = {pid for marker, pid in started if marker == "blocked"}
+            assert blocked_ids == set(provider_ids[:prov._PROVIDERS_MAX_WORKERS])
+
+            # The timed-out partial payload is visible to its followers but is
+            # not cached.  The same key therefore gets fresh capacity while
+            # the old provider callbacks remain quarantined.
+            mode["value"] = "fast"
+            later.start()
+            later.join(1)
+            assert not later.is_alive()
+            assert not errors
+            assert {
+                entry["id"] for entry in outputs["later"]["providers"]
+            } == set(provider_ids[prov._PROVIDERS_MAX_WORKERS:])
+            with prov._providers_cache_lock:
+                assert not prov._providers_cache
+
+            # Releasing callbacks after the deadline must not drain the old
+            # runner's cancelled queue.  It should only clear quarantine keys.
+            release.set()
+            cleanup_deadline = time.monotonic() + 2
+            while time.monotonic() < cleanup_deadline:
+                with prov._providers_runner_lock:
+                    if not prov._providers_active_tasks:
+                        break
+                time.sleep(0.01)
+            with prov._providers_runner_lock:
+                assert not prov._providers_active_tasks
+            blocked_ids_after_release = {
+                pid for marker, pid in started if marker == "blocked"
+            }
+            assert blocked_ids_after_release == set(
+                provider_ids[:prov._PROVIDERS_MAX_WORKERS]
+            )
+
+            recovered = prov.get_providers()
+            assert {entry["id"] for entry in recovered["providers"]} == set(provider_ids)
+            with prov._providers_cache_lock:
+                assert prov._providers_cache
+        finally:
+            release.set()
+            leader.join(2)
+            follower.join(2)
+            if later.ident is not None:
+                later.join(2)
+            prov.invalidate_providers_cache()
+
+    def test_follower_timeout_does_not_abandon_leader_state(self, monkeypatch):
+        """A bounded follower may leave, but cannot invalidate its live leader."""
+        from api import providers as prov
+
+        cache_key = ("home", 0, 0, "cfg")
+        state = prov._ProvidersBuildInFlight(prov._providers_cache_generation)
+        monkeypatch.setattr(prov, "_PROVIDERS_FOLLOWER_TIMEOUT_SECONDS", 0.05)
+        with prov._providers_cache_lock:
+            prov._providers_build_inflight[cache_key] = state
+
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="provider discovery"):
+                prov._wait_provider_build(state, cache_key)
+            assert time.monotonic() - started < 0.5
+            with prov._providers_cache_lock:
+                assert prov._providers_build_inflight.get(cache_key) is state
+            assert not state.event.is_set()
+        finally:
+            with prov._providers_cache_lock:
+                if prov._providers_build_inflight.get(cache_key) is state:
+                    prov._providers_build_inflight.pop(cache_key, None)
+
+    def test_credential_preflight_uses_the_leader_deadline(
+        self, monkeypatch, tmp_path,
+    ):
+        """A blocked credential-pool read cannot extend the total build deadline."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        prov.invalidate_providers_cache()
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_PROVIDERS_BUILD_TIMEOUT_SECONDS", 0.15)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_has_key(_provider_id):
+            entered.set()
+            release.wait(5)
+            return False
+
+        monkeypatch.setattr(prov, "_provider_has_key", blocked_has_key)
+
+        try:
+            started = time.monotonic()
+            result = prov.get_providers()
+            elapsed = time.monotonic() - started
+
+            assert entered.is_set()
+            assert elapsed < 0.75
+            assert result["providers"] == []
+            with prov._providers_cache_lock:
+                assert not prov._providers_cache
+        finally:
+            release.set()
+            prov.invalidate_providers_cache()
+
+    def test_overlapping_healthy_build_waits_for_provider_admission(
+        self, monkeypatch, tmp_path,
+    ):
+        """Temporary overlap retries the provider instead of caching an omission."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        prov.invalidate_providers_cache()
+        monkeypatch.setattr(prov, "_PROVIDER_DISPLAY", {"openai": "OpenAI"})
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai": []})
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: False)
+        monkeypatch.setattr(prov, "_PROVIDERS_BUILD_TIMEOUT_SECONDS", 2.0)
+
+        marker = {"value": "old"}
+        monkeypatch.setattr(
+            prov,
+            "get_config",
+            lambda: {
+                "model": {},
+                "providers": {"openai": {"marker": marker["value"]}},
+            },
+        )
+
+        old_entered = threading.Event()
+        release_old = threading.Event()
+
+        def build_entry(pid, _has_key, providers_cfg, *_args):
+            value = providers_cfg["openai"]["marker"]
+            if value == "old":
+                old_entered.set()
+                release_old.wait(5)
+            return {
+                "id": pid,
+                "display_name": "OpenAI",
+                "has_key": False,
+                "configurable": True,
+                "is_self_hosted": False,
+                "is_plugin_provider": False,
+                "is_oauth": False,
+                "key_source": "none",
+                "auth_error": None,
+                "models": [],
+                "models_total": 0,
+                "marker": value,
+            }
+
+        monkeypatch.setattr(prov, "_build_provider_entry", build_entry)
+        outputs = {}
+        errors = []
+
+        def run(name):
+            try:
+                outputs[name] = prov.get_providers()
+            except BaseException as exc:
+                errors.append(exc)
+
+        old = threading.Thread(target=run, args=("old",))
+        newer = threading.Thread(target=run, args=("new",))
+        try:
+            old.start()
+            assert old_entered.wait(1)
+            marker["value"] = "new"
+            prov.invalidate_providers_cache()
+            newer.start()
+            time.sleep(0.1)
+            assert newer.is_alive()
+            assert "new" not in outputs
+
+            release_old.set()
+            old.join(2)
+            newer.join(2)
+
+            assert not old.is_alive()
+            assert not newer.is_alive()
+            assert not errors
+            assert len(outputs["new"]["providers"]) == 1
+            assert outputs["new"]["providers"][0]["marker"] == "new"
+        finally:
+            release_old.set()
+            if old.ident is not None:
+                old.join(2)
+            if newer.ident is not None:
+                newer.join(2)
+            prov.invalidate_providers_cache()
+
+    def test_stuck_provider_worker_does_not_block_process_exit(self):
+        """Provider work that never returns must not participate in interpreter joining."""
+        script = textwrap.dedent("""
+            import pathlib
+            import threading
+            from api import profiles
+            from api import providers as prov
+
+            home = pathlib.Path('/tmp/hermes-provider-exit-test')
+            profiles.get_active_hermes_home = lambda: home
+            prov._PROVIDER_DISPLAY = {'blocked': 'Blocked'}
+            prov._PROVIDER_MODELS = {'blocked': []}
+            prov._OAUTH_PROVIDERS = frozenset()
+            prov.plugin_model_provider_ids = lambda: set()
+            prov._provider_has_key = lambda _pid: False
+            prov.get_config = lambda: {'model': {}, 'providers': {}}
+            prov._PROVIDERS_BUILD_TIMEOUT_SECONDS = 30
+            prov._PROVIDERS_FOLLOWER_TIMEOUT_SECONDS = 0.3
+
+            started = threading.Event()
+            never = threading.Event()
+
+            def blocked(*_args, **_kwargs):
+                started.set()
+                never.wait()
+
+            prov._build_provider_entry = blocked
+            request = threading.Thread(target=prov.get_providers, daemon=True)
+            request.start()
+            assert started.wait(2)
+            prov.shutdown_provider_build_runners()
+            request.join(1)
+            assert not request.is_alive()
+        """)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(os.path.dirname(os.path.dirname(__file__)))
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert proc.returncode == 0, proc.stderr or proc.stdout
+
     def test_invalidate_during_blocked_build_starts_new_generation_and_ignores_stale_completion(
         self, monkeypatch, tmp_path,
     ):
@@ -423,6 +776,7 @@ class TestGetProviders:
             request_thread_env,
             request_block_process_env_fallback,
             providers_cfg,
+            deadline,
         ):
             with lock:
                 call_id = len(build_calls)
@@ -433,7 +787,7 @@ class TestGetProviders:
             else:
                 new_entered.set()
                 release_new.wait(2)
-            return {
+            return ({
                 "providers": [{
                     "id": "openai",
                     "display_name": "OpenAI",
@@ -443,7 +797,7 @@ class TestGetProviders:
                     "call_id": call_id,
                 }],
                 "active_provider": None,
-            }
+            }, True)
 
         monkeypatch.setattr(prov, "_build_providers_payload", fake_build)
 
@@ -514,11 +868,12 @@ class TestGetProviders:
             request_thread_env,
             request_block_process_env_fallback,
             providers_cfg,
+            deadline,
         ):
             attempt["value"] += 1
             if attempt["value"] == 1:
                 raise RuntimeError("simulated aggregate build failure")
-            return {
+            return ({
                 "providers": [{
                     "id": "openai",
                     "display_name": "OpenAI",
@@ -527,7 +882,7 @@ class TestGetProviders:
                     "key_source": "none",
                 }],
                 "active_provider": None,
-            }
+            }, True)
 
         monkeypatch.setattr(prov, "_build_providers_payload", flaky_build)
 
@@ -576,9 +931,10 @@ class TestGetProviders:
             request_thread_env,
             request_block_process_env_fallback,
             providers_cfg,
+            deadline,
         ):
             build_payload_calls["value"] += 1
-            return {
+            return ({
                 "providers": [{
                     "id": "openai",
                     "display_name": "OpenAI",
@@ -594,7 +950,7 @@ class TestGetProviders:
                     "models_total": 0,
                 }],
                 "active_provider": "openai",
-            }
+            }, True)
 
         monkeypatch.setattr(profiles, "get_active_profile_name", broken_active_profile_name)
         monkeypatch.setattr(prov, "_build_providers_payload", succeed_payload)
@@ -691,11 +1047,12 @@ class TestGetProviders:
             request_thread_env,
             request_block_process_env_fallback,
             providers_cfg,
+            deadline,
         ):
             build_calls["value"] += 1
             payload_begun.set()
             release.wait(2)
-            return {
+            return ({
                 "providers": [{
                     "id": "openai",
                     "display_name": "OpenAI",
@@ -711,7 +1068,7 @@ class TestGetProviders:
                     "models_total": 0,
                 }],
                 "active_provider": "openai",
-            }
+            }, True)
 
         monkeypatch.setattr(prov, "_build_providers_payload", flaky_build_payload)
 

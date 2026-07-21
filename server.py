@@ -724,6 +724,11 @@ def main() -> None:
         httpd.serve_forever()
     finally:
         httpd.server_close()
+        try:
+            from api.providers import shutdown_provider_build_runners
+            shutdown_provider_build_runners()
+        except Exception:
+            logger.debug("Failed to stop provider build runners during shutdown", exc_info=True)
         _log_shutdown_audit()
         try:
             from api.gateway_watcher import stop_watcher

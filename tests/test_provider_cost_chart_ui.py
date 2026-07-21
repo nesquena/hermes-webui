@@ -139,9 +139,11 @@ globalThis.esc = (value) => String(value || '');
 globalThis.t = (value) => String(value || '');
 globalThis._providerCardEls = new Map();
 globalThis._providersPanelLoadGeneration = 0;
-globalThis._buildProviderCard = () => {
+globalThis._buildProviderCard = (provider) => {
   if (providersPaintedAt === null) providersPaintedAt = toMs();
-  return makeElement('provider-card');
+  const node = makeElement('provider-card');
+  node.textContent = String((provider && provider.id) || '');
+  return node;
 };
 globalThis._buildProviderQuotaCard = (status) => {
   if (quotaPaintedAt === null) quotaPaintedAt = toMs();
@@ -153,39 +155,55 @@ globalThis._buildProviderQuotaCard = (status) => {
 globalThis.renderProviderCostChart = () => {};
 globalThis.api = async (url) => {
   if (url !== '/api/providers') return { providers: [] };
-  providersCalls += 1;
-  const delay = (scenario.providersDelays && scenario.providersDelays[providersCalls]) || scenario.providersDelay || 0;
+  const call = ++providersCalls;
+  const delay = (scenario.providersDelays && scenario.providersDelays[call]) || scenario.providersDelay || 0;
   await sleep(delay);
-  events.push({ type: 'providers-resolve', call: providersCalls, at: toMs() });
-  return { providers };
+  events.push({ type: 'providers-resolve', call, at: toMs() });
+  const selectedProviders = scenario.providersLists && scenario.providersLists[call]
+    ? scenario.providersLists[call]
+    : providers;
+  return { providers: selectedProviders };
 };
 globalThis._fetchProviderQuotaStatus = async () => {
-  quotaCalls += 1;
-  const delay = (scenario.quotaDelays && scenario.quotaDelays[quotaCalls]) || scenario.quotaDelay || 0;
+  const call = ++quotaCalls;
+  const delay = (scenario.quotaDelays && scenario.quotaDelays[call]) || scenario.quotaDelay || 0;
   await sleep(delay);
-  if (scenario.quotaRejects && scenario.quotaRejects[quotaCalls]) {
-    const message = scenario.quotaRejectMessages && scenario.quotaRejectMessages[quotaCalls]
-      ? scenario.quotaRejectMessages[quotaCalls]
-      : `quota-reject-${quotaCalls}`;
-    events.push({ type: 'quota-reject', call: quotaCalls, marker: message, at: toMs() });
+  if (scenario.quotaRejects && scenario.quotaRejects[call]) {
+    const message = scenario.quotaRejectMessages && scenario.quotaRejectMessages[call]
+      ? scenario.quotaRejectMessages[call]
+      : `quota-reject-${call}`;
+    events.push({ type: 'quota-reject', call, marker: message, at: toMs() });
     throw new Error(message);
   }
-  const marker = scenario.quotaMarkers && scenario.quotaMarkers[quotaCalls]
-    ? scenario.quotaMarkers[quotaCalls]
-    : `call-${quotaCalls}`;
-  events.push({ type: 'quota-resolve', call: quotaCalls, marker, at: toMs() });
+  const marker = scenario.quotaMarkers && scenario.quotaMarkers[call]
+    ? scenario.quotaMarkers[call]
+    : `call-${call}`;
+  events.push({ type: 'quota-resolve', call, marker, at: toMs() });
   return { ok: true, status: 'available', quotaMarker: marker };
 };
 
 eval(loadProvidersPanelSource);
 
 (async () => {
+  let firstAwaitSnapshot = null;
   if (scenario.doubleLoad) {
     const first = loadProvidersPanel();
     if (scenario.secondLoadOffsetMs) {
       await sleep(scenario.secondLoadOffsetMs);
     }
-    await Promise.all([first, loadProvidersPanel()]);
+    const second = loadProvidersPanel();
+    if (scenario.awaitOnlyFirst) {
+      await first;
+      const firstQuotaCards = list.children.filter((child) => child.className.includes('provider-quota-card'));
+      firstAwaitSnapshot = {
+        at: toMs(),
+        providerMarkers: list.children.filter((child) => child.className === 'provider-card').map((child) => child.textContent),
+        quotaMarker: firstQuotaCards.length ? firstQuotaCards[0].textContent : null,
+      };
+      await second;
+    } else {
+      await Promise.all([first, second]);
+    }
   } else {
     await loadProvidersPanel();
   }
@@ -200,6 +218,8 @@ eval(loadProvidersPanelSource);
     providerCards: providerCards.length,
     quotaCards: quotaCards.length,
     quotaMarker: quotaCards.length ? quotaCards[0].textContent : null,
+    providerMarkers: providerCards.map((child) => child.textContent),
+    firstAwaitSnapshot,
     events,
     listLength: list.children.length,
     listDisplay: list.style.display || '',
@@ -246,6 +266,27 @@ def test_load_providers_panel_avoids_stale_quota_updates_with_generation_guard()
     assert result["quotaMarker"] == "second-load"
     assert result["providersCalls"] >= 2
     assert result["quotaCalls"] >= 2
+
+
+def test_superseded_provider_load_awaits_winning_generation_before_settling():
+    """Awaiting stale load A must not resolve until winning load B has painted."""
+    result = _run_load_panel_harness({
+        "providersLists": {
+            1: [{"id": "provider-a", "configurable": True}],
+            2: [{"id": "provider-b", "configurable": True}],
+        },
+        "providersDelays": {1: 10, 2: 60},
+        "quotaDelays": {1: 5, 2: 80},
+        "quotaMarkers": {1: "quota-a", 2: "quota-b"},
+        "doubleLoad": True,
+        "awaitOnlyFirst": True,
+        "secondLoadOffsetMs": 1,
+    })
+
+    assert result["firstAwaitSnapshot"]["providerMarkers"] == ["provider-b"]
+    assert result["firstAwaitSnapshot"]["quotaMarker"] == "quota-b"
+    assert result["providerMarkers"] == ["provider-b"]
+    assert result["quotaMarker"] == "quota-b"
 
 
 def test_load_providers_panel_starts_providers_and_quota_requests_in_parallel():

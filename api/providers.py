@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -22,7 +23,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -145,7 +145,14 @@ _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
 _providers_cache_generation = 0
 _PROVIDERS_MAX_WORKERS = 8
-_providers_executor = ThreadPoolExecutor(max_workers=_PROVIDERS_MAX_WORKERS)
+_PROVIDERS_MAX_ACTIVE_TASKS = 64
+_PROVIDERS_BUILD_TIMEOUT_SECONDS = 15.0
+_PROVIDERS_FOLLOWER_TIMEOUT_SECONDS = 20.0
+_providers_runner_lock = threading.Lock()
+_providers_runner_condition = threading.Condition(_providers_runner_lock)
+_providers_active_runners: set["_ProvidersBuildRunner"] = set()
+_providers_active_tasks: dict[tuple[str, str], "_ProvidersBuildRunner"] = {}
+_providers_shutdown = threading.Event()
 
 # Per-home worker pool configuration for probe tail-latency reduction (#3787)
 _ACCOUNT_USAGE_WORKERS_PER_HOME = 2
@@ -157,6 +164,201 @@ class _ProvidersBuildInFlight:
         self.event = threading.Event()
         self.result: dict[str, Any] | None = None
         self.exception: BaseException | None = None
+
+
+class _ProvidersBuildRunner:
+    """Own one bounded provider build without reusable non-daemon workers.
+
+    Provider plugins and live catalog callbacks do not all expose a terminating
+    timeout.  Running them in a process-wide ``ThreadPoolExecutor`` therefore
+    lets one stuck callback permanently consume reusable capacity and makes the
+    interpreter join that worker at exit.  Each cold build instead owns up to
+    ``_PROVIDERS_MAX_WORKERS`` daemon workers and returns at a hard build
+    deadline.  A process-wide task registry prevents a timed-out
+    ``(Hermes home, provider)`` callback from being started again while the old
+    invocation is still alive, and the active-task cap bounds total detached
+    work across profiles.
+
+    Python cannot terminate an arbitrary running thread safely.  Timed-out
+    callbacks are therefore quarantined rather than falsely reported as
+    cancelled; queued work is dropped and cannot start after ``stop()``.
+    """
+
+    def __init__(
+        self,
+        home_key: str,
+        jobs: list[tuple[str, str, contextvars.Context, tuple[Any, ...]]],
+        worker_fn,
+    ):
+        self.home_key = home_key
+        self._jobs: queue.Queue[
+            tuple[str, str, contextvars.Context, tuple[Any, ...]]
+        ] = queue.Queue()
+        for job in jobs:
+            self._jobs.put(job)
+        self._worker_fn = worker_fn
+        self._stop = threading.Event()
+        self._done = threading.Event()
+        self._wake = threading.Event()
+        self._result_lock = threading.Lock()
+        self._remaining = len(jobs)
+        self._results: dict[str, Any] = {}
+        self._deadline = 0.0
+        self.timed_out = False
+        self.skipped_quarantined = False
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        # Synchronize with task admission so no queued callback can be claimed
+        # after stop() returns.
+        with _providers_runner_condition:
+            _providers_runner_condition.notify_all()
+        # Drop queued contexts immediately.  A stuck running callback retains
+        # only its own context instead of pinning every cancelled job forever.
+        while True:
+            try:
+                self._jobs.get_nowait()
+            except queue.Empty:
+                break
+            self._finish_job()
+
+    def _finish_job(self) -> None:
+        with self._result_lock:
+            self._remaining -= 1
+            if self._remaining <= 0:
+                self._done.set()
+                self._wake.set()
+
+    def _claim_task(
+        self,
+        active_id: str,
+    ) -> tuple[str, tuple[str, str] | None]:
+        task_key = (self.home_key, active_id)
+        with _providers_runner_condition:
+            if self._stop.is_set() or _providers_shutdown.is_set():
+                return "stop", None
+            if time.monotonic() >= self._deadline:
+                self.timed_out = True
+                _providers_runner_condition.notify_all()
+                return "deadline", None
+            owner = _providers_active_tasks.get(task_key)
+            if owner is not None:
+                if owner.timed_out:
+                    return "quarantined", None
+                return "retry", None
+            if len(_providers_active_tasks) >= _PROVIDERS_MAX_ACTIVE_TASKS:
+                return "retry", None
+            _providers_active_tasks[task_key] = self
+            return "claimed", task_key
+
+    def _release_task(self, task_key: tuple[str, str]) -> None:
+        with _providers_runner_condition:
+            if _providers_active_tasks.get(task_key) is self:
+                _providers_active_tasks.pop(task_key, None)
+            _providers_runner_condition.notify_all()
+
+    def _requeue_and_wait(
+        self,
+        job: tuple[str, str, contextvars.Context, tuple[Any, ...]],
+    ) -> bool:
+        with _providers_runner_condition:
+            if self._stop.is_set() or _providers_shutdown.is_set():
+                return False
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._jobs.put(job)
+            _providers_runner_condition.wait(timeout=min(remaining, 0.05))
+            return True
+
+    def _worker(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._jobs.get_nowait()
+            except queue.Empty:
+                return
+            result_id, active_id, context, args = job
+
+            task_key: tuple[str, str] | None = None
+            finish_job = True
+            try:
+                claim, task_key = self._claim_task(active_id)
+                if claim == "retry":
+                    if self._requeue_and_wait(job):
+                        finish_job = False
+                    continue
+                if claim == "quarantined":
+                    self.skipped_quarantined = True
+                    continue
+                if claim == "deadline":
+                    self.stop()
+                    continue
+                if claim != "claimed" or task_key is None:
+                    continue
+                entry = context.run(self._worker_fn, *args)
+                if isinstance(entry, dict) and not self._stop.is_set():
+                    with self._result_lock:
+                        if not self._stop.is_set():
+                            self._results[result_id] = entry
+            except BaseException:
+                logger.debug("Failed building provider work item %s", result_id, exc_info=True)
+            finally:
+                if task_key is not None:
+                    self._release_task(task_key)
+                if finish_job:
+                    self._finish_job()
+
+    def run(self, deadline: float) -> dict[str, Any]:
+        if self._remaining == 0:
+            return {}
+        self._deadline = deadline
+        if deadline <= time.monotonic():
+            with _providers_runner_condition:
+                self.timed_out = True
+                _providers_runner_condition.notify_all()
+            self.stop()
+            return {}
+        with _providers_runner_condition:
+            if _providers_shutdown.is_set():
+                return {}
+            _providers_active_runners.add(self)
+
+        worker_count = min(_PROVIDERS_MAX_WORKERS, self._remaining)
+        try:
+            for index in range(worker_count):
+                threading.Thread(
+                    target=self._worker,
+                    name=f"provider-build-{index + 1}",
+                    daemon=True,
+                ).start()
+            remaining = max(0.0, deadline - time.monotonic())
+            if not self._wake.wait(remaining):
+                with _providers_runner_condition:
+                    self.timed_out = True
+                    _providers_runner_condition.notify_all()
+                self.stop()
+            with self._result_lock:
+                return dict(self._results)
+        finally:
+            self.stop()
+            with _providers_runner_condition:
+                _providers_active_runners.discard(self)
+                _providers_runner_condition.notify_all()
+
+
+def shutdown_provider_build_runners() -> None:
+    """Stop admitting provider work during orderly server shutdown.
+
+    Running callbacks may be third-party code that Python cannot safely kill.
+    Runner threads are daemonized, so shutdown signals every active runner and
+    returns without joining callbacks that ignore cancellation.
+    """
+    _providers_shutdown.set()
+    with _providers_runner_lock:
+        runners = list(_providers_active_runners)
+    for runner in runners:
+        runner.stop()
 
 
 def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
@@ -1075,6 +1277,7 @@ def _complete_provider_build(
     payload: dict[str, Any] | None = None,
     *,
     error: BaseException | None = None,
+    cache_payload: bool = True,
 ) -> dict[str, Any] | None:
     completion_error: BaseException | None = error
     completed_result: dict[str, Any] | None = None
@@ -1092,6 +1295,7 @@ def _complete_provider_build(
         if (
             completion_error is None
             and state.result is not None
+            and cache_payload
         ):
             with _providers_cache_lock:
                 if state.generation == _providers_cache_generation:
@@ -1142,7 +1346,12 @@ def _complete_provider_build(
 
 
 def _wait_provider_build(state: _ProvidersBuildInFlight, cache_key: tuple[Any, ...]) -> dict[str, Any]:
-    state.event.wait()
+    if not state.event.wait(_PROVIDERS_FOLLOWER_TIMEOUT_SECONDS):
+        # Bound this caller without stealing ownership from the leader.  The
+        # leader may still publish a valid result; removing its state here
+        # would let a replacement build race and then be overwritten by that
+        # late completion.
+        raise TimeoutError("Timed out waiting for provider discovery")
     if state.exception is not None:
         raise state.exception
     if state.result is not None:
@@ -2103,12 +2312,7 @@ def _close_account_usage_probe_workers_async(*, provider_id: str | None = None) 
     thread.start()
 
 
-def _close_providers_executor() -> None:
-    _providers_executor.shutdown(wait=False)
-
-
 atexit.register(_close_account_usage_probe_workers)
-atexit.register(_close_providers_executor)
 
 
 def _account_usage_cache_key(provider: str, home: Path, api_key: str | None) -> tuple[str, str, str]:
@@ -3011,6 +3215,59 @@ def _build_provider_entry(
         profiles.clear_request_profile()
 
 
+def _scan_provider_has_keys(
+    provider_ids: list[str],
+    custom_provider_ids: list[str],
+    active_profile_name: str,
+    request_thread_env: dict[str, Any],
+    block_process_env_fallback: bool,
+) -> dict[str, bool]:
+    """Run serialized credential-pool discovery inside the build deadline."""
+    import api.config as config_module
+    import api.profiles as profiles
+
+    previous_thread_env = dict(getattr(config_module._thread_ctx, "env", {}))
+    previous_block = bool(
+        getattr(config_module._thread_ctx, "block_process_env_fallback", False)
+    )
+    try:
+        if active_profile_name:
+            profiles.set_request_profile(active_profile_name)
+        else:
+            profiles.clear_request_profile()
+        config_module._set_thread_env(**dict(request_thread_env or {}))
+        config_module._thread_ctx.block_process_env_fallback = block_process_env_fallback
+
+        results: dict[str, bool] = {}
+        custom_ids = set(custom_provider_ids)
+        for provider_id in provider_ids:
+            try:
+                if provider_id in custom_ids:
+                    from api.config import _has_explicit_pool_credentials
+
+                    has_key = _has_explicit_pool_credentials(provider_id)
+                else:
+                    has_key = _provider_has_key(provider_id)
+                if provider_id.lower() == "bedrock":
+                    has_key = has_key or _provider_has_structural_bedrock_credentials()
+                results[provider_id] = has_key
+            except Exception:
+                logger.debug(
+                    "Failed reading local provider credentials for %s",
+                    provider_id,
+                    exc_info=True,
+                )
+                results[provider_id] = False
+        return results
+    finally:
+        config_module._thread_ctx.block_process_env_fallback = previous_block
+        if previous_thread_env:
+            config_module._set_thread_env(**previous_thread_env)
+        else:
+            config_module._clear_thread_env()
+        profiles.clear_request_profile()
+
+
 def _build_providers_payload(
     cfg: dict[str, Any],
     sorted_known_ids: list[str],
@@ -3018,51 +3275,86 @@ def _build_providers_payload(
     request_thread_env: dict[str, Any],
     request_block_process_env_fallback: bool,
     providers_cfg: dict[str, Any],
-) -> dict[str, Any]:
+    deadline: float,
+) -> tuple[dict[str, Any], bool]:
     providers = []
 
-    # Credential-pool discovery uses a shared process cache that predates this
-    # endpoint's worker fan-out. Keep those reads on the request thread; the
-    # expensive independent auth/model enrichment below is what benefits from
-    # bounded parallelism.
-    initial_has_keys: dict[str, bool] = {}
-    for pid in sorted_known_ids:
-        provider_id = str(pid or "").strip()
-        try:
-            has_key = _provider_has_key(provider_id)
-            if provider_id.lower() == "bedrock":
-                has_key = has_key or _provider_has_structural_bedrock_credentials()
-            initial_has_keys[provider_id] = has_key
-        except Exception:
-            logger.debug("Failed reading local provider credentials for %s", pid, exc_info=True)
-            initial_has_keys[provider_id] = False
+    try:
+        home_key = str(_get_hermes_home().resolve())
+    except OSError:
+        home_key = str(_get_hermes_home())
 
-    provider_entries: dict[str, dict[str, Any]] = {}
-    # Bound parallel provider work to avoid a DNS/auth-probe stampede when many
-    # providers need live enrichment on the same cold request.
-    futures = {}
+    custom_providers_cfg = cfg.get("custom_providers", [])
+    custom_provider_ids = []
+    if isinstance(custom_providers_cfg, list):
+        custom_provider_ids = [
+            _custom_provider_slug_from_name(str(cp.get("name") or "").strip())
+            for cp in custom_providers_cfg
+            if isinstance(cp, dict) and cp.get("name")
+        ]
+    credential_scan_ids = list(dict.fromkeys([
+        *(str(pid or "").strip() for pid in sorted_known_ids),
+        *(pid for pid in custom_provider_ids if pid),
+    ]))
+
+    # Credential-pool discovery mutates a shared process cache, so it stays
+    # serialized as one work item while still sharing the leader's deadline.
+    preflight_runner = _ProvidersBuildRunner(
+        home_key,
+        [(
+            "credentials",
+            "__credential_preflight__",
+            contextvars.copy_context(),
+            (
+                credential_scan_ids,
+                custom_provider_ids,
+                active_profile_name,
+                request_thread_env,
+                request_block_process_env_fallback,
+            ),
+        )],
+        _scan_provider_has_keys,
+    )
+    preflight_results = preflight_runner.run(deadline)
+    initial_has_keys = preflight_results.get("credentials", {})
+    if not isinstance(initial_has_keys, dict):
+        initial_has_keys = {}
+    preflight_complete = (
+        "credentials" in preflight_results
+        and not preflight_runner.timed_out
+        and not preflight_runner.skipped_quarantined
+    )
+
+    # Potentially unbounded plugin/live callbacks run only in this build's
+    # daemonized runner.  A hard build deadline drops queued work, while the
+    # process-wide task registry quarantines any callback that remains stuck.
+    jobs = []
     for pid in sorted_known_ids:
         context = contextvars.copy_context()
-        future = _providers_executor.submit(
-            context.run,
-            _build_provider_entry,
-            pid,
-            initial_has_keys.get(str(pid or "").strip(), False),
-            providers_cfg,
-            active_profile_name,
-            request_thread_env,
-            request_block_process_env_fallback,
-        )
-        futures[future] = pid
+        provider_id = str(pid or "").strip()
+        jobs.append((
+            provider_id,
+            provider_id,
+            context,
+            (
+                pid,
+                initial_has_keys.get(provider_id, False),
+                providers_cfg,
+                active_profile_name,
+                request_thread_env,
+                request_block_process_env_fallback,
+            ),
+        ))
 
-    for future, pid in list(futures.items()):
-        try:
-            entry = future.result()
-        except Exception:
-            logger.debug("Failed building provider entry for %s", pid, exc_info=True)
-            entry = None
-        if isinstance(entry, dict):
-            provider_entries[pid] = entry
+    runner = _ProvidersBuildRunner(home_key, jobs, _build_provider_entry)
+    provider_entries = runner.run(deadline)
+    if runner.timed_out:
+        logger.warning(
+            "Provider discovery exceeded %.1fs; returning %d/%d completed entries",
+            _PROVIDERS_BUILD_TIMEOUT_SECONDS,
+            len(provider_entries),
+            len(jobs),
+        )
 
     for pid in sorted_known_ids:
         entry = provider_entries.get(pid)
@@ -3070,7 +3362,6 @@ def _build_providers_payload(
             providers.append(entry)
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
-    custom_providers_cfg = cfg.get("custom_providers", [])
     if isinstance(custom_providers_cfg, list):
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
@@ -3096,15 +3387,8 @@ def _build_providers_payload(
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(_thread_local_env_value(env_var).strip())
-            # Fallback: check credential pool (key added via hermes auth add)
-            if not cp_has_key:
-                try:
-                    from api.config import _has_explicit_pool_credentials
-
-                    if _has_explicit_pool_credentials(cp_id):
-                        cp_has_key = True
-                except ImportError:
-                    pass
+            # The serialized preflight includes credential-pool keys.
+            cp_has_key = cp_has_key or bool(initial_has_keys.get(cp_id, False))
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,
@@ -3134,10 +3418,15 @@ def _build_providers_payload(
         return (3, pid)
     providers.sort(key=_provider_sort_key)
 
-    return {
-        "providers": providers,
-        "active_provider": active_provider,
-    }
+    return (
+        {
+            "providers": providers,
+            "active_provider": active_provider,
+        },
+        preflight_complete
+        and not runner.timed_out
+        and not runner.skipped_quarantined,
+    )
 
 
 def get_providers() -> dict[str, Any]:
@@ -3168,6 +3457,7 @@ def get_providers() -> dict[str, Any]:
     if in_flight is None:
         raise RuntimeError("Failed to claim provider build state")
 
+    deadline = time.monotonic() + _PROVIDERS_BUILD_TIMEOUT_SECONDS
     try:
         providers_cfg: dict[str, Any] = cfg.get("providers") or {}
         if isinstance(providers_cfg, dict):
@@ -3186,18 +3476,27 @@ def get_providers() -> dict[str, Any]:
             getattr(config_module._thread_ctx, "block_process_env_fallback", False),
         )
 
-        result = _build_providers_payload(
+        result, cache_payload = _build_providers_payload(
             cfg=cfg,
             sorted_known_ids=sorted_known_ids,
             active_profile_name=active_profile_name,
             request_thread_env=request_thread_env,
             request_block_process_env_fallback=request_block_process_env_fallback,
             providers_cfg=providers_cfg,
+            deadline=deadline,
         )
     except BaseException as exc:
         _complete_provider_build(cache_key, in_flight, error=exc)
         raise
-    return _complete_provider_build(cache_key, in_flight, payload=result)
+    completed = _complete_provider_build(
+        cache_key,
+        in_flight,
+        payload=result,
+        cache_payload=cache_payload,
+    )
+    if completed is None:
+        raise RuntimeError("Provider build did not produce payload")
+    return completed
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
