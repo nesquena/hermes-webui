@@ -11170,6 +11170,19 @@ def cancel_stream(stream_id: str) -> bool:
             f"cancel_event flag set, will be checked on agent startup"
         )
 
+    # Re-snapshot the fallback notice AFTER agent.interrupt() returns.  No more
+    # _agent_status_callback calls fire after interrupt(), so any notice that
+    # was going to be published has been published by now.  If the worker's
+    # finally has already popped the entry, the worker's own error-path save
+    # persisted it (and _stream_writeback_is_current will make us skip below).
+    # If the worker hasn't unwound yet, this read catches the late publication
+    # that the pre-interrupt snapshot missed (greptile P1: snapshot race
+    # remains reachable — individually atomic read+write don't cover a notice
+    # published after the snapshot but before interrupt).
+    _post_interrupt_fb_notice = None
+    with streams_lock:
+        _post_interrupt_fb_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)
+
     # Clear any pending clarify prompt so the blocked tool call can unwind.
     try:
         from api.clarify import clear_pending as _clear_clarify_pending
@@ -11386,15 +11399,23 @@ def cancel_stream(stream_id: str) -> bool:
                 # Stamp any confirmed fallback notice onto the active turn's
                 # assistant message before save, so it survives reload even
                 # when the user cancels mid-stream (gate-certifier finding #2).
-                # Use the snapshot captured under streams_lock BEFORE
-                # agent.interrupt() — the worker's finally may have already
-                # popped _STREAM_FALLBACK_NOTICES by now (greptile P1: callback
-                # writes outside lock, cancel read after interrupt).
+                # Prefer the post-interrupt re-snapshot: it catches notices
+                # published between the initial pre-interrupt snapshot and
+                # agent.interrupt() returning (greptile P1: snapshot race
+                # remains reachable — the initial snapshot can be None while
+                # a notice is published before interrupt, then popped by the
+                # worker's finally before the unlocked read).
+                # Fall back to the pre-interrupt snapshot, then a best-effort
+                # live read for the detached (ACTIVE_RUNS-only) path.
                 # Only stamp the _partial message just inserted for THIS turn;
                 # never walk back to a prior turn's assistant message, which
                 # would misattribute the notice (greptile P1: notice targets a
                 # previous turn).
-                _cancel_fb_notice = _snap_fb_notice or _STREAM_FALLBACK_NOTICES.get(stream_id)
+                _cancel_fb_notice = (
+                    _post_interrupt_fb_notice
+                    or _snap_fb_notice
+                    or _STREAM_FALLBACK_NOTICES.get(stream_id)
+                )
                 if _cancel_fb_notice and _partial_msg is not None:
                     for _dm in reversed(_cs.messages):
                         if isinstance(_dm, dict) and _dm.get('_partial') and not _dm.get('_error'):

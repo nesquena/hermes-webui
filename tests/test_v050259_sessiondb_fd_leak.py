@@ -303,13 +303,18 @@ def test_stream_scoped_fallback_notices_dict_exists():
     )
 
     # 3. cancel_stream() reads and stamps it before _cs.save(), using the
-    # pre-interrupt snapshot (greptile P1: live read after interrupt can miss)
-    cancel_stamping = src.find("_cancel_fb_notice = _snap_fb_notice")
+    # post-interrupt re-snapshot (preferred) or pre-interrupt snapshot
+    # (greptile P1: live read after interrupt can miss, and a notice
+    # published after the pre-interrupt snapshot but before interrupt
+    # is lost without the post-interrupt re-snapshot).
+    cancel_stamping = src.find("_cancel_fb_notice = (\n                    _post_interrupt_fb_notice")
     assert cancel_stamping != -1, (
-        "cancel_stream() must read the fallback notice from the pre-interrupt "
-        "snapshot (_snap_fb_notice) before its s.save() so a mid-stream cancel "
-        "after a real fallback still persists the notice even when the worker's "
-        "finally has already popped the live map."
+        "cancel_stream() must read the fallback notice from the "
+        "post-interrupt re-snapshot (_post_interrupt_fb_notice, preferred) "
+        "or the pre-interrupt snapshot (_snap_fb_notice, fallback) before "
+        "its s.save() so a mid-stream cancel after a real fallback still "
+        "persists the notice even when the worker's finally has already "
+        "popped the live map."
     )
     # Verify the stamping only targets the active turn's _partial message
     stamping_block = src[cancel_stamping:cancel_stamping + 500]

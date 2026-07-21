@@ -4,6 +4,7 @@ Tests the integration between cancel_stream() and agent.interrupt().
 """
 import queue
 import threading
+from pathlib import Path
 from unittest.mock import Mock
 
 from api.streaming import cancel_stream
@@ -426,4 +427,85 @@ class TestCancelInterrupt:
         assert "_fallbackNotice" not in _prior_assistant, (
             "fallback notice was stamped on a prior turn's assistant message — "
             "the stamping must only target the active turn's _partial message"
+        )
+
+    def test_cancel_preserves_fallback_notice_published_after_pre_interrupt_snapshot(self):
+        """Regression (greptile P1 on #6405 — "snapshot race remains reachable"):
+        A confirmed fallback notice published AFTER the pre-interrupt snapshot
+        but BEFORE the worker's finally pops the map must still be stamped.
+
+        The race Greptile identified:
+          1. cancel_stream() snapshots _STREAM_FALLBACK_NOTICES under lock → None
+          2. Callback publishes confirmed notice (under lock, after snapshot)
+          3. cancel_stream() calls agent.interrupt()
+          4. Worker's finally pops the entry under lock
+          5. The stamping site's unlocked live read returns None → notice lost
+
+        The fix adds a post-interrupt re-snapshot under STREAMS_LOCK: it runs
+        after interrupt() returns (no more callbacks will fire) but BEFORE the
+        worker's finally can pop the entry (they both need STREAMS_LOCK, and
+        the re-snapshot acquires it first). The stamping site then prefers
+        this re-snapshot over the stale pre-interrupt snapshot and the racy
+        unlocked live read.
+
+        This is a source-level pin because the race is inherently about lock
+        ordering and thread timing — a behavioral test on a single thread
+        cannot reproduce it. The pin verifies the three required code
+        structures exist and are correctly ordered.
+        """
+        import re
+        src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
+
+        # 1. A post-interrupt re-snapshot must exist AFTER agent.interrupt()
+        #    and BEFORE the stamping block. Find the interrupt call, then the
+        #    re-snapshot, then the stamping.
+        interrupt_idx = src.find('agent.interrupt("Cancelled by user")')
+        assert interrupt_idx != -1, "agent.interrupt() call not found"
+
+        # The post-interrupt re-snapshot reads _STREAM_FALLBACK_NOTICES under
+        # streams_lock after interrupt returns.
+        re_snapshot_pattern = re.compile(
+            r'_post_interrupt_fb_notice\s*=\s*None\s*'
+            r'with\s+streams_lock:\s*'
+            r'_post_interrupt_fb_notice\s*=\s*_STREAM_FALLBACK_NOTICES\.get\(stream_id\)',
+            re.DOTALL,
+        )
+        re_snapshot_match = re_snapshot_pattern.search(src, interrupt_idx)
+        assert re_snapshot_match is not None, (
+            "Post-interrupt re-snapshot of _STREAM_FALLBACK_NOTICES under "
+            "streams_lock must exist after agent.interrupt() returns. Without "
+            "it, a notice published between the pre-interrupt snapshot and "
+            "interrupt is lost when the worker's finally pops the entry "
+            "before the stamping site's unlocked live read (greptile P1: "
+            "snapshot race remains reachable)."
+        )
+        re_snapshot_idx = re_snapshot_match.start()
+
+        # 2. The stamping site must prefer the post-interrupt re-snapshot.
+        stamping_idx = src.find('_cancel_fb_notice = (', re_snapshot_idx)
+        assert stamping_idx != -1, (
+            "The stamping site must use a parenthesized preference chain "
+            "that starts with _post_interrupt_fb_notice."
+        )
+        stamping_block = src[stamping_idx:stamping_idx + 300]
+        assert '_post_interrupt_fb_notice' in stamping_block, (
+            "The stamping site must prefer _post_interrupt_fb_notice "
+            "(the post-interrupt re-snapshot) over _snap_fb_notice "
+            "(the pre-interrupt snapshot) and the unlocked live read."
+        )
+        # Verify preference order: post-interrupt → pre-interrupt → live read
+        post_idx_in_block = stamping_block.find('_post_interrupt_fb_notice')
+        snap_idx_in_block = stamping_block.find('_snap_fb_notice')
+        live_idx_in_block = stamping_block.find('_STREAM_FALLBACK_NOTICES.get(stream_id)')
+        assert post_idx_in_block < snap_idx_in_block < live_idx_in_block, (
+            "Preference order must be: post-interrupt re-snapshot → "
+            "pre-interrupt snapshot → unlocked live read. The post-interrupt "
+            "re-snapshot must take priority because it catches notices "
+            "published after the pre-interrupt snapshot."
+        )
+
+        # 3. The re-snapshot must appear BEFORE the stamping block.
+        assert re_snapshot_idx < stamping_idx, (
+            "The post-interrupt re-snapshot must appear before the stamping "
+            "block so the captured value is available when stamping runs."
         )
