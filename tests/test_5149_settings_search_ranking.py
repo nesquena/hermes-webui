@@ -99,6 +99,7 @@ class FakeElement {
     this._text = '';
     this._innerHTML = '';
     this._className = '';
+    this._listeners = new Map();
     this.value = '';
   }
 
@@ -195,7 +196,23 @@ class FakeElement {
     return found[0] || null;
   }
 
-  addEventListener() {}
+  addEventListener(type, listener) {
+    const eventType = String(type || '');
+    if (!this._listeners.has(eventType)) this._listeners.set(eventType, []);
+    this._listeners.get(eventType).push(listener);
+  }
+
+  click() {
+    const event = {
+      type: 'click',
+      target: this,
+      currentTarget: this,
+      preventDefault() {},
+    };
+    for (const listener of this._listeners.get('click') || []) {
+      listener.call(this, event);
+    }
+  }
 }
 
 function allNodes(root) {
@@ -455,7 +472,7 @@ function setupDom(mode) {
     providerCard.appendChild(makeProviderField('provider', 'API Key', 'sk-test'));
     providers.appendChild(providerCard);
     plugins.appendChild(makePluginCard('Plugin Sample'));
-  } else if (mode === 'live-before-dynamic') {
+  } else if (mode === 'live-before-dynamic' || mode === 'click-before-dynamic') {
     conversation.appendChild(makeSettingsField({
       labelText: 'Theme',
       descriptionText: 'Choose the interface color theme',
@@ -505,8 +522,9 @@ function runScenario(command) {
       globalThis._settingsIndex = null;
       globalThis._settingsIndexPromise = null;
       globalThis._settingsSearchSeq = 0;
+      globalThis._navigateToSettingsField = () => undefined;
 
-      if (command === 'live-before-dynamic') {
+      if (command === 'live-before-dynamic' || command === 'click-before-dynamic') {
         let releaseProviderLoad;
         globalThis.loadProvidersPanel = () => new Promise((resolveLoad) => {
           releaseProviderLoad = resolveLoad;
@@ -522,6 +540,17 @@ function runScenario(command) {
           if (match) liveLabels.push(match[1]);
         }
         const liveDisplay = results.style.display;
+        if (command === 'click-before-dynamic') {
+          results.children[0].click();
+          releaseProviderLoad();
+          await searchPromise;
+          resolve({
+            inputValue: $('settingsSearch').value,
+            afterDisplay: results.style.display,
+            afterResultCount: results.children.length,
+          });
+          return;
+        }
         releaseProviderLoad();
         await searchPromise;
         resolve({ liveLabels, liveDisplay });
@@ -656,3 +685,10 @@ def test_provider_and_plugin_cards_remain_searchable(driver_file):
 def test_static_results_render_while_dynamic_panes_are_loading(driver_file):
     payload = _run_driver(driver_file, "live-before-dynamic")
     assert payload["liveLabels"] == ["Theme"]
+
+
+def test_clicking_static_result_does_not_reopen_after_dynamic_load(driver_file):
+    payload = _run_driver(driver_file, "click-before-dynamic")
+    assert payload["inputValue"] == ""
+    assert payload["afterDisplay"] == "none"
+    assert payload["afterResultCount"] == 0
