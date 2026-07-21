@@ -2805,7 +2805,7 @@ class Session:
         from api.session_media import (
             assert_no_session_media_references,
             externalize_large_session_media,
-            hydrate_session_media_urls,
+            inline_legacy_session_media_urls,
             verify_serialized_session_media_payload,
         )
 
@@ -2821,8 +2821,10 @@ class Session:
         # read only through the verifier, then written back as portable data
         # URLs.  New externalization is disabled until private entries can be
         # retired by immutable identity rather than mutable pathname.
-        hydrated_messages = hydrate_session_media_urls(self.messages, self.session_id)
-        hydrated_context_messages = hydrate_session_media_urls(
+        hydrated_messages = inline_legacy_session_media_urls(
+            self.messages, self.session_id
+        )
+        hydrated_context_messages = inline_legacy_session_media_urls(
             self.context_messages, self.session_id
         )
         self.messages = hydrated_messages
