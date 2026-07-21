@@ -1034,9 +1034,9 @@ def _current_turn_has_final_assistant(
         if is_context_compression_marker(next_msg):
             continue
         if role == 'assistant':
-            # Reject unfinished tool turns
+            # Skip past assistant tool-call rows — keep scanning for final answer
             if next_msg.get('tool_calls'):
-                return False
+                continue
             # Reject partial or error rows
             if next_msg.get('_partial') or next_msg.get('_error'):
                 return False
