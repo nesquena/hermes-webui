@@ -6248,10 +6248,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof showToast==='function') showToast(d.message||'Gateway offline',4000,'warning');
           return;
         }
-        // Show as a small inline notice, not a full error
+        if(d.type==='fallback'){
+          // The persistent notice is rendered from session-persisted metadata
+          // (_fallbackNotice on the assistant message) inside renderMessages().
+          // Here we just show a brief composer status flash for immediate feedback.
+          setComposerStatus(d.message||'Fallback activated');
+          setTimeout(()=>setComposerStatus(''),4000);
+          return;
+        }
+        // Generic warning: show in composer status
         setComposerStatus(`${d.message||'Warning'}`);
-        // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
       }catch(_){}
     });
 

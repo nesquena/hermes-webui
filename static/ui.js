@@ -14068,6 +14068,27 @@ function _compressionCardsNode(state){
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
+/**
+ * Build HTML for a session-persisted fallback notice.  The notice is stored
+ * as `_fallbackNotice` on the assistant message and rendered inside
+ * renderMessages(), so it survives DOM rebuilds, session switches, and page
+ * reloads — unlike an ad-hoc live-turn DOM node which is wiped on the next
+ * renderMessages() call.
+ * @param {Object} notice - `{message, to_model, to_provider}`
+ */
+function _fallbackNoticeHtml(notice){
+  if(!notice) return '';
+  const message=String(notice.message||'Fallback activated');
+  const toModel=String(notice.to_model||'');
+  const toProvider=String(notice.to_provider||'');
+  const modelLabel=toModel?(toProvider?`${toModel} (${toProvider})`:toModel):'';
+  return `<div class="fallback-notice" data-fallback-notice="1">`+
+    `<span class="fallback-notice-icon">⚠️</span>`+
+    `<span class="fallback-notice-text">${esc(message)}</span>`+
+    (modelLabel?`<span class="fallback-notice-model">${esc(modelLabel)}</span>`:'')+
+    `</div>`;
+}
+
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
   if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
@@ -14522,7 +14543,7 @@ function _messageRenderCacheSignature(){
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);add(m._fallbackNotice?JSON.stringify(m._fallbackNotice):'');
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -15800,6 +15821,7 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
+    const fallbackNoticeHtml = (!isUser&&m._fallbackNotice&&window._showFallbackNotices!==false) ? _fallbackNoticeHtml(m._fallbackNotice) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -15984,10 +16006,27 @@ function renderMessages(options){
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
+        if(isLastTextPart&&fallbackNoticeHtml){
+          orderedSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+        }
         orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
+      // Gate-certifier finding #3: when a turn has no text parts
+      // (lastTextPartIdx === -1, e.g. tool-only turns), the notice
+      // was never inserted inside the loop. Stamp it on the first
+      // rendered segment so the notice survives even on textless turns.
+      // If firstSeg is still null (pure tool/structured turn with no
+      // text segments), insert the notice directly into blocks.
+      if(lastTextPartIdx === -1 && fallbackNoticeHtml){
+        if(firstSeg){
+          firstSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+        }else if(blocks.firstChild){
+          // Tool-only turn: prepend notice before the first tool row
+          blocks.firstChild.insertAdjacentHTML('beforebegin', `<div class="assistant-segment fallback-notice-only">${fallbackNoticeHtml}</div>`);
+        }
+      }
       assistantSegments.set(rawIdx, firstSeg||null);
       continue;
     }
@@ -16041,7 +16080,10 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml||fallbackNoticeHtml);
+    if(fallbackNoticeHtml){
+      seg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+    }
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){

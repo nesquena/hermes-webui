@@ -456,14 +456,10 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert "or 'compressing' in _lower" not in block
     assert "or 'preflight compression' in _lower" not in block
 
-    # warning events with type:fallback for rate-limit/fallback lifecycle notices
+    # warning events with type:fallback for confirmed fallback lifecycle notices
     assert "put('warning'" in block
     assert "'type': 'fallback'" in block
-    assert "'rate limited'" in src
-    assert "'switching to fallback'" in src
-    assert "'falling back'" in src
-    assert "'fallback activated'" in src
-    assert "'trying fallback'" in src
+    assert "'switched to fallback'" in src
 
     # Verify callback is wired to agent
     assert "'status_callback' in _agent_params" in src
@@ -549,17 +545,28 @@ def test_agent_status_callback_wiring():
 
 
 def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
+    # Confirmed post-switch notices from the Agent (the ONLY path that persists)
     assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "🔄 Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Switched to fallback model: GLM-5.2-300K via custom:vllm-cwb101 → DeepSeek-V4-Flash-262K via custom:vllm-cwb101",
+    )
+    # Transient pre-switch notices must NOT match (they fire before the model
+    # changes, carry OLD model info, and may never complete the switch)
+    assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Rate limited — switching to fallback provider...",
     )
-    assert _is_fallback_lifecycle_message(
+    assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Non-retryable error (HTTP 500) — trying fallback...",
     )
     assert not _is_fallback_lifecycle_message(
         "tool",
-        "Rate limited — switching to fallback provider...",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
     )
     assert not _is_fallback_lifecycle_message(
         "lifecycle",
