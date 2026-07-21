@@ -1,6 +1,12 @@
 import json
 
-from api.session_recovery import audit_session_recovery, repair_safe_session_recovery
+from api.session_recovery import (
+    audit_session_recovery,
+    inspect_session_recovery_status,
+    recover_incomplete_compression_transactions,
+    recover_session,
+    repair_safe_session_recovery,
+)
 
 
 def _write_session(session_dir, sid, messages=1):
@@ -84,3 +90,92 @@ def test_recovery_audit_routes_are_registered():
     assert 'parsed.path == "/api/session/recovery/repair-safe"' in src
     assert "audit_session_recovery" in src
     assert "repair_safe_session_recovery" in src
+
+
+def test_foreign_backup_identity_is_rejected_before_recovery_replace(tmp_path):
+    live = _write_session(tmp_path, "identity-a", messages=1)
+    before = live.read_bytes()
+    foreign = {
+        "session_id": "identity-b",
+        "messages": [{"role": "user", "content": str(i)} for i in range(3)],
+    }
+    live.with_suffix(".json.bak").write_text(json.dumps(foreign), encoding="utf-8")
+
+    status = inspect_session_recovery_status(live)
+    result = recover_session(live)
+
+    assert status["bak_messages"] == -1
+    assert status["recommend"] == "no_action"
+    assert result["restored"] is False
+    assert live.read_bytes() == before
+
+
+def test_startup_finalizes_durable_published_compression_intent(tmp_path, monkeypatch):
+    import api.models as models
+
+    index = tmp_path / "_index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index)
+    session = models.Session(
+        session_id="compression-recover-published",
+        messages=[{"role": "user", "content": "durable"}],
+    )
+    session.save(skip_index=True)
+    token = session._publication_generation.token
+    intent_dir = tmp_path / "_compression_transactions"
+    intent_dir.mkdir()
+    intent = intent_dir / f"{session.session_id}.json"
+    intent.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "old_session_id": "compression-recover-old",
+                "new_session_id": session.session_id,
+                "incarnation_token": token,
+                "phase": "sidecar_published",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = recover_incomplete_compression_transactions(tmp_path)
+
+    assert result == {"finalized": 1, "rolled_back": 0, "residuals": []}
+    assert not intent.exists()
+    assert json.loads(index.read_text(encoding="utf-8"))[0]["session_id"] == session.session_id
+
+
+def test_startup_rolls_back_prepared_compression_claim_without_sidecar(
+    tmp_path, monkeypatch
+):
+    import api.models as models
+    import api.session_media as session_media
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(tmp_path / "attachments"))
+    sid = "compression-recover-prepared"
+    token = "a" * 32
+    models._persist_session_incarnation_claim(sid, token)
+    intent_dir = tmp_path / "_compression_transactions"
+    intent_dir.mkdir()
+    intent = intent_dir / f"{sid}.json"
+    intent.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "old_session_id": "compression-recover-old",
+                "new_session_id": sid,
+                "incarnation_token": token,
+                "phase": "prepared",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = recover_incomplete_compression_transactions(tmp_path)
+
+    assert result == {"finalized": 0, "rolled_back": 1, "residuals": []}
+    assert not intent.exists()
+    assert not models._session_incarnation_claim_file(sid).exists()

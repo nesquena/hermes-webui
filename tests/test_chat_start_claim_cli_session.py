@@ -733,7 +733,7 @@ def test_post_chat_start_returns_403_for_not_claimable(
     # The new arm sits between the bare-404 collapse and the synth.save()
     # call.  Locate it via the "not_claimable" string and the 403 marker.
     m = re.search(
-        r'if reason == "not_claimable":(.*?)(?=\n\s*try:\s*\n\s*synth\.save)',
+        r'if reason == "not_claimable":(.*?)(?=\n\s*try:\s*\n\s*with reserve_session_destination)',
         src, re.DOTALL,
     )
     assert m, "could not find the 'not_claimable' arm in _handle_chat_start"

@@ -257,23 +257,33 @@ check followed by a separately resolved write or destructive removal.
 The anchored backend verifies extension/MIME, raster magic, and SHA-256 before
 a reference can be retained. `Session.save()` and destructive session cleanup
 share a permanent per-SID cross-process file lock, an in-process publication
-lock, and a process-local incarnation lease. Session, index, tombstone, cleanup
-residual, and destructive directory-entry changes are not acknowledged until
-their containing-directory durability barrier succeeds.
+lock, and an incarnation token persisted in both the sidecar and any pre-save
+destination claim. Shared index and tombstone RMW operations and sharded
+cleanup-residual writes have their own cross-process file locks and random
+exclusive staging names. Session, index, tombstone, cleanup residual, and
+destructive directory-entry changes are not acknowledged until their
+containing-directory durability barrier succeeds.
 Deletion retires the active lease and tombstones publication before removing
 artifacts; an intentional same-SID recreation receives a new lease, so an old
-in-process `Session` remains stale even after the SID becomes valid again.
-Save verifies every retained reference immediately before JSON replacement.
-A stale worker therefore cannot recreate a deleted session or publish a
-dangling ref.
+`Session` in this or another process remains stale even after the SID becomes
+valid again. Save validates the complete final payload and verifies every
+private reference immediately before JSON replacement. Compact references are
+permitted only in canonical image parts below `messages` and
+`context_messages`; every other serialized field is private-reference-free. A
+stale worker therefore cannot recreate a deleted session, redirect ownership,
+or publish a dangling ref.
 
 New-session lineage operations exclusively reserve the destination SID and
 prove its sidecar, media, attachment, journal, index, cache, and runtime
 namespaces unowned before publishing. Duplicate, branch, `/btw`, portable JSON
 import, focused recovery, and compression continuation creation use this same
 publish-or-rollback transaction. Rollback removes only artifacts created while
-that reservation is held. Compression publishes the continuation JSON/index
-before moving cache or agent-lock ownership.
+that reservation is held. Compression records a durable transaction intent,
+publishes the continuation JSON/index, migrates cache, agent lock/cache, stream
+owner, active-run, and agent identity state while the reservation remains held,
+and commits only after every migration succeeds. Startup recovery finalizes a
+matching published incarnation or rolls back a prepared destination with no
+sidecar.
 
 Every destructive session path uses the same idempotent artifact cleanup. It
 verifies absence of JSON, backup and crashed-save temporaries, attachments,
@@ -307,15 +317,17 @@ state-owned store on first read. Session deletion removes both upload and
 private-media namespaces.
 
 Private-media deletion first atomically renames the exact held SID directory to
-a random quarantine entry, syncs the media parent, and deletes only that held
-quarantine identity. Truncate/retry/undo and backup restore prune blobs by
+a random quarantine entry under the cross-process SID authority, syncs the
+media parent, and recursively quarantines child entries before deleting only
+their held identities. Truncate/retry/undo and backup restore prune blobs by
 reachability across both the live sidecar and any recovery backup. A successful
-clear removes its stale backup before removing the complete private-media
-namespace; an already-empty session with no prior clear generation keeps an
-independently recoverable backup. Reachability pruning runs after the transcript
-and recovery authority are durably committed; a pruning error is logged and can
-be retried by the next pruning mutation without falsely reporting the committed
-transcript write as failed.
+clear always removes its stale backup and then removes or reachability-prunes
+the private-media namespace, including when the live transcript was already
+empty. Clear, prune, and focused recovery keep the per-SID process lock through
+retirement. Reachability cleanup runs after the transcript and recovery
+authority are durably committed; a failure persists an operation-typed cleanup
+residual that `/api/sessions/cleanup` can retry. A committed transcript response
+may remain successful only after that retry authority is durable.
 
 ### 4.3 SSE Streaming Engine
 

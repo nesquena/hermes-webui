@@ -123,6 +123,19 @@ def test_read_only_operations_do_not_mutate_files(session_dir):
     assert after_stat.st_size == before_stat.st_size
 
 
+def test_adapter_rejects_sidecar_whose_embedded_sid_claims_another_owner(session_dir):
+    _payload, path = _write_json_session(session_dir, sid="outer_sid")
+    foreign = json.loads(path.read_text(encoding="utf-8"))
+    foreign["session_id"] = "inner_sid"
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+    db = WebUIJsonSessionDB()
+
+    assert db.read_session("outer_sid") is None
+    assert db.list_sessions() == []
+    with pytest.raises(ValueError, match="Malformed session JSON"):
+        db.update_metadata("outer_sid", {"title": "No redirect"})
+
+
 def test_sort_timestamp_falls_back_past_missing_values():
     assert WebUIJsonSessionDB._sort_timestamp({"last_message_at": None, "updated_at": 25.0}) == 25.0
     assert WebUIJsonSessionDB._sort_timestamp({"last_message_at": "", "created_at": "15.5"}) == 15.5
