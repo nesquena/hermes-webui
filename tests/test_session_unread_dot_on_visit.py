@@ -50,16 +50,16 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
+    assert "function _markSessionUnread(session)" in SESSIONS_JS
 
 
 def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
     body = _function_block("_acknowledgeSessionVisit", "function _sessionVisitHasUnreadState")
-    # Clears viewed count (which clears the stale completion-unread marker, #3020),
-    # syncs the polling snapshot, and repaints the sidebar from cache.
-    assert "_setSessionViewedCount(sid, messageCount);" in body
+    # New behavior tags explicit visit acknowledgments in UI-driven sync paths.
+    assert "_setSessionViewedCount(sid, messageCount" in body
     assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);" in body
     assert "renderSessionListFromCache" in body
 
@@ -110,6 +110,12 @@ def test_same_session_reselect_clears_stale_unread():
         "re-selecting the already-open session must acknowledge the visit (clearing "
         "the stale dot) before returning"
     )
+
+
+def test_session_action_menu_exposes_mark_as_unread():
+    block = _function_block("_openSessionActionMenu", "document.addEventListener('click'")
+    assert "t('session_mark_unread')" in block
+    assert "_markSessionUnread(session);" in block
 
 
 def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
@@ -212,6 +218,191 @@ console.log(JSON.stringify({{before, after, repaints, viewed: _getSessionViewedC
     assert out["snap"] == {"message_count": 5, "last_message_at": 10}, (
         "polling snapshot must be synced so a deferred list poll cannot re-flag the session"
     )
+
+
+def test_mark_session_unread_sets_completion_marker_and_repaints():
+    mark_unread = _extract("_markSessionUnread")
+    mark_completion = _extract("_markSessionCompletionUnread")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+let _sessionCompletionUnread = null;
+const _allSessions = [];
+let S = {{ session: {{ session_id: 'open', message_count: 7 }} }};
+let repaints = 0;
+let toast = '';
+function renderSessionListFromCache() {{ repaints += 1; }}
+function showToast(msg) {{ toast = msg; }}
+function t(key) {{ return key; }}
+{get_unread}
+{save_unread}
+{mark_completion}
+{mark_unread}
+_markSessionUnread({{session_id: 'open'}});
+console.log(JSON.stringify({{marker: _getSessionCompletionUnread().open, repaints, toast}}));
+"""
+    out = _run_node(script)
+    assert out["marker"]["message_count"] == 7
+    assert out["marker"]["manual"] is True
+    assert out["repaints"] == 1
+    assert out["toast"] == "session_marked_unread"
+
+
+def test_manual_marked_unread_survives_active_session_visit_ack():
+    mark_completion = _extract("_markSessionCompletionUnread")
+    mark_unread = _extract("_markSessionUnread")
+    ack = _extract("_acknowledgeSessionVisit")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    clear_unread = _extract("_clearSessionCompletionUnread")
+    sync = _extract("_syncSessionListSnapshotOnVisit")
+    set_viewed = _extract("_setSessionViewedCount")
+    get_counts = _extract("_getSessionViewedCounts")
+    save_counts = _extract("_saveSessionViewedCounts")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+const SESSION_VIEWED_COUNTS_KEY = 'v';
+let _sessionCompletionUnread = null;
+let _sessionViewedCounts = null;
+let repaints = 0;
+let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
+const _sessionListSnapshotById = new Map();
+const _sessionStreamingById = new Map();
+
+function _forgetObservedStreamingSession() {{}}
+function renderSessionListFromCache() {{ repaints += 1; }}
+const document = {{
+  visibilityState: 'visible',
+  hasFocus: () => true,
+}};
+function _isSessionActivelyViewedForList(sid) {{
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (document.visibilityState !== 'visible') return false;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}}
+function t(key) {{ return key; }}
+function showToast() {{}}
+{get_counts}
+{save_counts}
+{get_unread}
+{save_unread}
+{clear_unread}
+{mark_completion}
+{set_viewed}
+{sync}
+{ack}
+{mark_unread}
+
+_markSessionUnread({{session_id: 'open', message_count: 9}});
+
+// First active reconcile (non-explicit visit) flips the manual_pending flag but keeps marker.
+_acknowledgeSessionVisit('open', 9, 123, false);
+let markerAfterFirstAck = _getSessionCompletionUnread().open;
+
+// A second active-reconcile from polling should not consume manual intent.
+_setSessionViewedCount('open', 9);
+const markerAfterPassiveReconcile = _getSessionCompletionUnread().open;
+
+// An explicit visit acknowledgement on the same active session should consume
+// the remaining manual marker.
+_acknowledgeSessionVisit('open', 9, 123);
+const markerAfterSecondAck = _getSessionCompletionUnread().open;
+const counts = _getSessionViewedCounts();
+
+console.log(JSON.stringify({{
+  marker_present: !!markerAfterFirstAck,
+  marker_manual: markerAfterFirstAck && markerAfterFirstAck.manual,
+  marker_manual_pending: markerAfterFirstAck && markerAfterFirstAck.manual_pending,
+  marker_after_passive: markerAfterPassiveReconcile && markerAfterPassiveReconcile.manual,
+  marker_after_second_ack: !!markerAfterSecondAck,
+  viewed: counts.open,
+  repaints,
+}}));
+"""
+
+    out = _run_node(script)
+    assert out["marker_present"] is True
+    assert out["marker_manual"] is True
+    assert out["marker_manual_pending"] is False
+    assert out["marker_after_passive"] is True
+    assert out["marker_after_second_ack"] is False
+    assert out["viewed"] == 9
+    assert out["repaints"] >= 1
+
+
+def test_manual_marked_unread_passive_active_polls_do_not_clear_before_visit():
+    mark_completion = _extract("_markSessionCompletionUnread")
+    mark_unread = _extract("_markSessionUnread")
+    set_viewed = _extract("_setSessionViewedCount")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    get_counts = _extract("_getSessionViewedCounts")
+    save_counts = _extract("_saveSessionViewedCounts")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+const SESSION_VIEWED_COUNTS_KEY = 'v';
+let _sessionCompletionUnread = null;
+let _sessionViewedCounts = null;
+let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
+const _sessionStreamingById = new Map();
+function _forgetObservedStreamingSession() {{}}
+
+const document = {{
+  visibilityState: 'visible',
+  hasFocus: () => true,
+}};
+function _isSessionActivelyViewedForList(sid) {{
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (document.visibilityState !== 'visible') return false;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}}
+{get_counts}
+{save_counts}
+{get_unread}
+{save_unread}
+{mark_completion}
+{set_viewed}
+{mark_unread}
+
+_markSessionUnread({{session_id: 'open', message_count: 9}});
+// First implicit active reconcile from polling.
+_setSessionViewedCount('open', 9);
+// A second background tick should keep the manual unread marker alive.
+_setSessionViewedCount('open', 9);
+const unreadAfterPolls = _getSessionCompletionUnread();
+console.log(JSON.stringify({{
+  unread_present: !!unreadAfterPolls.open,
+  marker: unreadAfterPolls.open,
+  viewed: _getSessionViewedCounts()['open'],
+}}));
+"""
+
+    out = _run_node(script)
+    assert out["unread_present"] is True
+    assert out["marker"]["manual"] is True
+    assert out["marker"]["manual_pending"] is False
+    assert out["viewed"] == 9
 
 
 def test_visit_snapshot_prevents_deferred_poll_from_reflagging():

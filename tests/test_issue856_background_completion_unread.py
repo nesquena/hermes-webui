@@ -87,6 +87,16 @@ def test_background_done_uses_rotated_session_id_for_completion_unread():
     )
 
 
+def test_manual_completion_state_is_preserved_on_later_completion_mark():
+    """Manual markers are not downgraded to regular completion markers when a later
+    completion event updates the same session while the user keeps a manual intent."""
+    block = _sessions_function_block("_markSessionCompletionUnread", "_markSessionCompletionUnreadIfBackground")
+    assert "const existing = unread[sid]" in block
+    assert "const hasManual = Boolean(existing" in block
+    assert "else if (hasManual)" in block
+    assert "entry.manual = true" in block
+
+
 def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     done_block = _done_block()
 
@@ -508,10 +518,11 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
 
     assert "if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;" in return_block
     assert "_markSessionViewed(S.session.session_id" in return_block
-    assert "_clearSessionCompletionUnread(S.session.session_id)" in return_block, (
-        "returning to a visible/focused tab must clear the explicit unread marker "
-        "for the active session the user is now viewing"
-    )
+    assert "_markSessionViewed(S.session.session_id" in return_block
+    assert "_clearSessionCompletionUnread(S.session.session_id)" not in return_block
+    # Returning to a visible/focused tab now clears via _markSessionViewed(...)
+    # (which routes through _setSessionViewedCount and respects manual-unread guard
+    # semantics).
     assert "renderSessionListFromCache()" in return_block
     assert "document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
     assert "window.addEventListener('focus', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
@@ -544,10 +555,10 @@ def test_completion_unread_clears_only_when_session_is_opened():
     )
     # The acknowledge helper is what clears completion unread on visit, via
     # _setSessionViewedCount (#3020 stale-marker clear).
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true)" in SESSIONS_JS
     ack_body_start = SESSIONS_JS.find("function _acknowledgeSessionVisit(")
     ack_body = SESSIONS_JS[ack_body_start:SESSIONS_JS.find("function _sessionVisitHasUnreadState", ack_body_start)]
-    assert "_setSessionViewedCount(sid, messageCount);" in ack_body
+    assert "_setSessionViewedCount(sid, messageCount, consumeManualOnVisit);" in ack_body
 
 
 def test_historical_sessions_are_not_marked_unread_on_list_render():

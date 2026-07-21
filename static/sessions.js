@@ -6,6 +6,7 @@ const ICONS={
   folder:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4.5h4l1.5 1.5H14v7H2z"/></svg>',
   archive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><line x1="6" y1="8.5" x2="10" y2="8.5"/></svg>',
   unarchive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><polyline points="6.5,7 8,5.5 9.5,7"/></svg>',
+  unread:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="4.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
   dup:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.5" y="4.5" width="8.5" height="8.5" rx="1.5"/><path d="M3 11.5V3h8.5"/></svg>',
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
@@ -475,12 +476,46 @@ function _saveSessionViewedCounts() {
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, consumeManualOnVisit = false) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
   counts[sid] = next;
   _saveSessionViewedCounts();
+
+  const completionUnread = _getSessionCompletionUnread();
+  const existingMarker = completionUnread[sid];
+  const isManualUnread =
+    existingMarker &&
+    typeof existingMarker === 'object' &&
+    !Array.isArray(existingMarker) &&
+    existingMarker.manual;
+  const isVisitAcknowledgment = !!(_setSessionViewedCount._inVisitDepth > 0);
+
+  if (
+    isManualUnread &&
+    typeof _isSessionActivelyViewedForList === 'function' &&
+    _isSessionActivelyViewedForList(sid)
+  ) {
+    // Keep explicit manual-unread markers for the first active-session reconcile
+    // after the user marks unread.
+    if (existingMarker.manual_pending === true) {
+      existingMarker.manual_pending = false;
+      _saveSessionCompletionUnread();
+      return;
+    }
+
+    // Only an explicit visit acknowledgement should clear a manual marker after
+    // the first protective pass. A same-session re-select should not consume the
+    // unread intent immediately; it will be cleared on a later explicit visit.
+    // `consumeManualOnVisit` is set by _acknowledgeSessionVisit() callers that
+    // represent explicit read acknowledgements.
+    if (isVisitAcknowledgment && consumeManualOnVisit) {
+      _clearSessionCompletionUnread(sid);
+    }
+    return;
+  }
+
   // If the viewed count is now current, any prior completion-unread marker is
   // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
   _clearSessionCompletionUnread(sid);
@@ -510,12 +545,28 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
   const entry = {message_count: count, completed_at: Date.now()};
+  const existing = unread[sid];
+  const hasManual = Boolean(existing && typeof existing === 'object' && !Array.isArray(existing) && existing.manual);
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    if (meta.manual) {
+      entry.manual = true;
+      entry.manual_pending = true;
+    } else if (hasManual) {
+      entry.manual = true;
+      if (Object.prototype.hasOwnProperty.call(existing, 'manual_pending')) {
+        entry.manual_pending = existing.manual_pending;
+      }
+    }
     if (meta.source) entry.source = String(meta.source);
     if (typeof meta.profile === 'string' && meta.profile.trim()) {
       entry.profile = meta.profile.trim();
+    }
+  } else if (hasManual) {
+    entry.manual = true;
+    if (Object.prototype.hasOwnProperty.call(existing, 'manual_pending')) {
+      entry.manual_pending = existing.manual_pending;
     }
   }
   unread[sid] = entry;
@@ -539,6 +590,22 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   _markSessionCompletionUnread(sid, count, meta);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
+}
+
+function _markSessionUnread(session) {
+  const sid = session && session.session_id;
+  if (!sid) return;
+  let count = Number(session.message_count);
+  if (!Number.isFinite(count) && Array.isArray(_allSessions)) {
+    const cached = _allSessions.find(s => s && s.session_id === sid);
+    count = Number(cached && cached.message_count);
+  }
+  if (!Number.isFinite(count) && S.session && S.session.session_id === sid) {
+    count = Number(S.session.message_count);
+  }
+  _markSessionCompletionUnread(sid, Number.isFinite(count) ? count : 0, {manual: true});
+  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if (typeof showToast === 'function') showToast(t('session_marked_unread'));
 }
 
 function _clearSessionCompletionUnread(sid) {
@@ -775,9 +842,14 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
 // aggregated unread state (own + children) authoritatively, so a lineage
 // PARENT keeps its own / other children's unread dot instead of being stripped
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
-function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
+function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true) {
   if (!sid) return;
-  _setSessionViewedCount(sid, messageCount);
+  _setSessionViewedCount._inVisitDepth = (_setSessionViewedCount._inVisitDepth || 0) + 1;
+  try {
+    _setSessionViewedCount(sid, messageCount, consumeManualOnVisit);
+  } finally {
+    _setSessionViewedCount._inVisitDepth = Math.max((_setSessionViewedCount._inVisitDepth || 1) - 1, 0);
+  }
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
 }
@@ -1705,7 +1777,8 @@ async function loadSession(sid){
       _acknowledgeSessionVisit(
         sid,
         Number(S.session.message_count || 0),
-        Number(S.session.last_message_at || S.session.updated_at || 0)
+        Number(S.session.last_message_at || S.session.updated_at || 0),
+        false
       );
     }
     return;
@@ -4803,6 +4876,15 @@ function _openSessionActionMenu(session, anchorEl){
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
   _appendSessionCopyLinkAction(menu, session);
+  menu.appendChild(_buildSessionAction(
+    t('session_mark_unread'),
+    t('session_mark_unread_desc'),
+    ICONS.unread,
+    ()=>{
+      closeSessionActionMenu();
+      _markSessionUnread(session);
+    }
+  ));
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
@@ -4959,10 +5041,6 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.trash,
       async()=>{
         closeSessionActionMenu();
-        // Menu Delete has no swipe/removal animation to wait for. Pass an
-        // immediate beforeDelete hook so deleteSession() removes the sidebar row
-        // optimistically while slow backend cleanup (/api/session/delete,
-        // state.db/FTS/journal cleanup) continues.
         await deleteSession(session.session_id,()=>Promise.resolve());
       },
       'danger'
