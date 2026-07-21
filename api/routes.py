@@ -5576,13 +5576,39 @@ def _terminal_anchor_reconciliation_stream_ids(session) -> set[str]:
 def _terminal_anchor_reconciliation_generation(raw: object) -> dict | None:
     if not isinstance(raw, dict):
         return None
-    generation: dict[str, int] = {}
+    generation: dict[str, int | str | dict] = {}
     for key in ("dev", "ino", "size", "mtime_ns", "ctime_ns"):
         try:
             generation[key] = int(raw.get(key))
         except (TypeError, ValueError):
             return None
-    generation["size"] = max(0, generation["size"])
+    generation["size"] = max(0, int(generation["size"]))
+    raw_digest = raw.get("digest")
+    if raw_digest is not None:
+        digest = str(raw_digest or "").strip().lower()
+        if len(digest) != 32 or any(char not in "0123456789abcdef" for char in digest):
+            return None
+        generation["digest"] = digest
+    raw_authority = raw.get("authority")
+    if raw_authority is not None:
+        if not isinstance(raw_authority, dict):
+            return None
+        epoch = str(raw_authority.get("epoch") or "").strip()
+        try:
+            mutation_seq = int(raw_authority.get("mutation_seq"))
+        except (TypeError, ValueError):
+            return None
+        if (
+            raw_authority.get("version") != TERMINAL_RUN_INDEX_AUTHORITY_VERSION
+            or not epoch
+            or mutation_seq < 0
+        ):
+            return None
+        generation["authority"] = {
+            "version": TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
+            "epoch": epoch,
+            "mutation_seq": mutation_seq,
+        }
     return generation
 
 
@@ -10690,6 +10716,7 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
     bound_run_journal_snapshot_args,
     compact_terminal_run_index_for_session,
     find_run_summary,

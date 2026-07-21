@@ -6,11 +6,13 @@ the existing in-process streaming path without changing execution ownership.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +29,8 @@ except ImportError:  # pragma: no cover
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 TERMINAL_RUN_INDEX_NAME = "_terminal_runs.jsonl"
+TERMINAL_RUN_INDEX_AUTHORITY_NAME = "_terminal_runs.authority.json"
+TERMINAL_RUN_INDEX_AUTHORITY_VERSION = "terminal_index_authority_v1"
 TERMINAL_RUN_INDEX_COMPACTED_MARKER_VERSION = "terminal_index_compacted_v1"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
@@ -61,6 +65,7 @@ _RUN_EVENTS_MAX_ROWS = 2048
 _TERMINAL_INDEX_MAX_BYTES = 512 * 1024
 _TERMINAL_INDEX_MAX_ROWS = 1024
 _TERMINAL_INDEX_COMPACT_TRIGGER_BYTES = _TERMINAL_INDEX_MAX_BYTES * 2
+_TERMINAL_INDEX_DIGEST_SAMPLE_BYTES = 16 * 1024
 _SNAPSHOT_ARGS_MAX_ITEMS = 64
 _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
@@ -92,6 +97,10 @@ def _terminal_index_path(session_id: str, session_dir: Path | None = None) -> Pa
     sid = _validate_id(session_id, "session_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     return root / RUN_JOURNAL_DIR_NAME / sid / TERMINAL_RUN_INDEX_NAME
+
+
+def _terminal_index_authority_path(index_path: Path) -> Path:
+    return index_path.with_name(TERMINAL_RUN_INDEX_AUTHORITY_NAME)
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -425,6 +434,112 @@ def _fsync_parent_dir(path: Path) -> None:
         pass
 
 
+def _terminal_index_authority_from_raw(raw: object) -> dict | None:
+    if not isinstance(raw, dict) or raw.get("version") != TERMINAL_RUN_INDEX_AUTHORITY_VERSION:
+        return None
+    epoch = str(raw.get("epoch") or "").strip()
+    if not epoch:
+        return None
+    try:
+        mutation_seq = int(raw.get("mutation_seq"))
+    except (TypeError, ValueError):
+        return None
+    if mutation_seq < 0:
+        return None
+    return {
+        "version": TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
+        "epoch": epoch,
+        "mutation_seq": mutation_seq,
+    }
+
+
+def _terminal_index_new_authority() -> dict:
+    return {
+        "version": TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
+        "epoch": uuid.uuid4().hex,
+        "mutation_seq": 0,
+    }
+
+
+def _terminal_index_read_authority_locked(path: Path) -> dict | None:
+    try:
+        raw = json.loads(_terminal_index_authority_path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return _terminal_index_authority_from_raw(raw)
+
+
+def _terminal_index_write_authority_locked(path: Path, authority: dict) -> None:
+    tmp_path = path.with_name(f".{TERMINAL_RUN_INDEX_AUTHORITY_NAME}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        json.dump(authority, fh, ensure_ascii=False, separators=(",", ":"))
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, _terminal_index_authority_path(path))
+    _fsync_parent_dir(path)
+
+
+def _terminal_index_current_authority_locked(path: Path, *, create_missing: bool = True) -> dict:
+    authority = _terminal_index_read_authority_locked(path)
+    if authority is not None:
+        return authority
+    authority = _terminal_index_new_authority()
+    if create_missing:
+        _terminal_index_write_authority_locked(path, authority)
+    return authority
+
+
+def _terminal_index_next_authority(authority: dict | None) -> dict:
+    current = _terminal_index_authority_from_raw(authority) or _terminal_index_new_authority()
+    return {
+        "version": TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
+        "epoch": current["epoch"],
+        "mutation_seq": int(current["mutation_seq"]) + 1,
+    }
+
+
+def _terminal_index_digest_for_open_file(fh, size: int) -> str:
+    hasher = hashlib.blake2b(digest_size=16)
+    bounded_size = max(0, int(size))
+    hasher.update(str(bounded_size).encode("ascii"))
+    if bounded_size <= 0:
+        return hasher.hexdigest()
+    sample = max(1, int(_TERMINAL_INDEX_DIGEST_SAMPLE_BYTES))
+    ranges = [(0, min(sample, bounded_size))]
+    tail_start = max(0, bounded_size - sample)
+    if tail_start > ranges[0][1]:
+        ranges.append((tail_start, bounded_size))
+    original_pos = fh.tell()
+    try:
+        for start, end in ranges:
+            fh.seek(start)
+            hasher.update(fh.read(end - start))
+    finally:
+        fh.seek(original_pos)
+    return hasher.hexdigest()
+
+
+def _terminal_index_generation_from_open_file(fh, *, authority: dict | None = None) -> dict[str, int | str | dict]:
+    stat_result = os.fstat(fh.fileno())
+    size = max(0, int(stat_result.st_size))
+    return _terminal_index_generation_from_stat(
+        stat_result,
+        authority=authority,
+        digest=_terminal_index_digest_for_open_file(fh, size),
+    )
+
+
+def _terminal_index_offset_is_boundary(src, end_offset: int) -> bool:
+    if end_offset <= 0:
+        return True
+    try:
+        src.seek(end_offset - 1)
+        return src.read(1) == b"\n"
+    except OSError:
+        return False
+
+
 def _append_terminal_run_index(
     session_id: str,
     run_id: str,
@@ -450,6 +565,7 @@ def _append_terminal_run_index(
     created_file = False
     with _lock_for(path):
         with _terminal_index_process_lock(path):
+            authority = _terminal_index_current_authority_locked(path, create_missing=False)
             created_file = not path.exists()
             needs_separator = False
             try:
@@ -469,6 +585,7 @@ def _append_terminal_run_index(
                 fh.write(line)
                 fh.flush()
                 os.fsync(fh.fileno())
+            _terminal_index_write_authority_locked(path, _terminal_index_next_authority(authority))
     if created_file:
         _fsync_parent_dir(path)
 
@@ -488,29 +605,53 @@ def terminal_run_index_size_for_session(
         return 0
 
 
-def _terminal_index_generation_from_stat(stat_result) -> dict[str, int]:
-    return {
+def _terminal_index_generation_from_stat(
+    stat_result,
+    *,
+    authority: dict | None = None,
+    digest: str | None = None,
+) -> dict[str, int | str | dict]:
+    generation: dict[str, int | str | dict] = {
         "dev": int(stat_result.st_dev),
         "ino": int(stat_result.st_ino),
         "size": max(0, int(stat_result.st_size)),
         "mtime_ns": int(stat_result.st_mtime_ns),
         "ctime_ns": int(stat_result.st_ctime_ns),
     }
+    clean_digest = str(digest or "").strip().lower()
+    if clean_digest:
+        generation["digest"] = clean_digest
+    clean_authority = _terminal_index_authority_from_raw(authority)
+    if clean_authority is not None:
+        generation["authority"] = clean_authority
+    return generation
 
 
-def _terminal_index_generation_from_cursor(cursor: dict | None) -> dict[str, int] | None:
+def _terminal_index_generation_from_cursor(cursor: dict | None) -> dict[str, int | str | dict] | None:
     if not isinstance(cursor, dict):
         return None
     raw = cursor.get("generation")
     if not isinstance(raw, dict):
         return None
-    generation: dict[str, int] = {}
+    generation: dict[str, int | str | dict] = {}
     for key in ("dev", "ino", "size", "mtime_ns", "ctime_ns"):
         try:
             generation[key] = int(raw.get(key))
         except (TypeError, ValueError):
             return None
-    generation["size"] = max(0, generation["size"])
+    generation["size"] = max(0, int(generation["size"]))
+    raw_digest = raw.get("digest")
+    if raw_digest is not None:
+        digest = str(raw_digest or "").strip().lower()
+        if len(digest) != 32 or any(char not in "0123456789abcdef" for char in digest):
+            return None
+        generation["digest"] = digest
+    raw_authority = raw.get("authority")
+    if raw_authority is not None:
+        authority = _terminal_index_authority_from_raw(raw_authority)
+        if authority is None:
+            return None
+        generation["authority"] = authority
     return generation
 
 
@@ -531,42 +672,45 @@ def _terminal_index_window(
     end_offset: int | None = None,
     index_cursor: dict | None = None,
 ) -> dict | None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return None
-    with os.fdopen(fd, "rb", closefd=True) as fh:
-        try:
-            generation = _terminal_index_generation_from_stat(os.fstat(fh.fileno()))
-        except OSError:
-            return None
-        size = generation["size"]
-        cursor_generation = _terminal_index_generation_from_cursor(index_cursor)
-        if cursor_generation is not None and cursor_generation == generation:
-            cursor_end = _terminal_index_cursor_end_offset(index_cursor, size)
-            end = size if cursor_end is None else cursor_end
-        else:
+    with _lock_for(path):
+        with _terminal_index_process_lock(path):
             try:
-                end = size if end_offset is None else max(0, min(int(end_offset), int(size)))
-            except (TypeError, ValueError):
-                end = size
-        if end <= 0:
-            return {
-                "data_start": 0,
-                "read_end": 0,
-                "data": b"",
-                "index_generation": generation,
-                "index_size": size,
-                "next_end_offset": None,
-                "exhausted": True,
-            }
-        byte_limit = max(0, int(max_bytes))
-        start = max(0, end - byte_limit)
-        try:
-            fh.seek(start)
-            data = fh.read(end - start)
-        except OSError:
-            return None
+                fd = os.open(path, os.O_RDONLY)
+            except OSError:
+                return None
+            with os.fdopen(fd, "rb", closefd=True) as fh:
+                try:
+                    authority = _terminal_index_current_authority_locked(path)
+                    generation = _terminal_index_generation_from_open_file(fh, authority=authority)
+                except OSError:
+                    return None
+                size = int(generation["size"])
+                cursor_generation = _terminal_index_generation_from_cursor(index_cursor)
+                if cursor_generation is not None and cursor_generation == generation:
+                    cursor_end = _terminal_index_cursor_end_offset(index_cursor, size)
+                    end = size if cursor_end is None else cursor_end
+                else:
+                    try:
+                        end = size if end_offset is None else max(0, min(int(end_offset), int(size)))
+                    except (TypeError, ValueError):
+                        end = size
+                if end <= 0:
+                    return {
+                        "data_start": 0,
+                        "read_end": 0,
+                        "data": b"",
+                        "index_generation": generation,
+                        "index_size": size,
+                        "next_end_offset": None,
+                        "exhausted": True,
+                    }
+                byte_limit = max(0, int(max_bytes))
+                start = max(0, end - byte_limit)
+                try:
+                    fh.seek(start)
+                    data = fh.read(end - start)
+                except OSError:
+                    return None
     if start and data:
         newline = data.find(b"\n")
         if newline < 0:
@@ -1042,7 +1186,8 @@ def compact_terminal_run_index_for_session(
                 return False
             with os.fdopen(read_fd, "rb", closefd=True) as src:
                 try:
-                    current_generation = _terminal_index_generation_from_stat(os.fstat(src.fileno()))
+                    authority = _terminal_index_current_authority_locked(path)
+                    current_generation = _terminal_index_generation_from_open_file(src, authority=authority)
                 except OSError:
                     return False
                 current_size = int(current_generation.get("size") or 0)
@@ -1052,6 +1197,8 @@ def compact_terminal_run_index_for_session(
                     return False
                 end_offset = max(0, min(current_size, cursor_end_offset))
                 if end_offset >= current_size:
+                    return False
+                if not _terminal_index_offset_is_boundary(src, end_offset):
                     return False
                 tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
                 try:
@@ -1070,6 +1217,7 @@ def compact_terminal_run_index_for_session(
                         dst.flush()
                         os.fsync(dst.fileno())
                     os.replace(tmp_path, path)
+                    _terminal_index_write_authority_locked(path, _terminal_index_next_authority(authority))
                     _fsync_parent_dir(path)
                 except OSError:
                     try:

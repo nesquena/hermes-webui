@@ -3709,6 +3709,76 @@ def test_terminal_reconciliation_cursor_publish_requires_expected_cursor_or_mono
     assert not routes._terminal_anchor_reconciliation_cursor_publish_allowed(current, expected, replacement)
 
 
+def test_terminal_reconciliation_real_two_reconciler_cursor_publication(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.run_journal import append_run_event
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    session_id = "session-terminal-two-reconcilers"
+    for idx in range(3):
+        stream_id = f"stream-terminal-two-reconcilers-{idx}"
+        append_run_event(
+            session_id,
+            stream_id,
+            "done",
+            {"message": "missing target"},
+            session_dir=tmp_path,
+            created_at=float(idx),
+        )
+
+    first_page = routes.terminal_run_summary_page_for_session(
+        session_id,
+        limit=1,
+        max_candidates=1,
+    )
+    first_cursor = routes._terminal_anchor_reconciliation_page_cursor(first_page)
+    assert first_cursor is not None
+    assert "digest" in first_cursor["generation"]
+    assert "authority" in first_cursor["generation"]
+    second_page = routes.terminal_run_summary_page_for_session(
+        session_id,
+        limit=1,
+        max_candidates=1,
+        index_cursor=first_cursor,
+    )
+    second_cursor = routes._terminal_anchor_reconciliation_page_cursor(second_page)
+    assert second_cursor is not None
+    assert second_cursor["end_offset"] < first_cursor["end_offset"]
+
+    progress = {
+        "version": routes._TERMINAL_ANCHOR_RECONCILIATION_VERSION,
+        "recent_stream_ids": [],
+        "index_cursor": first_cursor,
+    }
+    assert routes._terminal_anchor_reconciliation_cursor_publish_allowed(
+        routes._terminal_anchor_reconciliation_cursor(progress),
+        first_cursor,
+        second_cursor,
+    )
+    assert routes._terminal_anchor_reconciliation_set_cursor(
+        progress,
+        index_size=second_cursor["index_size"],
+        index_generation=second_cursor["generation"],
+        end_offset=second_cursor["end_offset"],
+    )
+
+    assert not routes._terminal_anchor_reconciliation_cursor_publish_allowed(
+        routes._terminal_anchor_reconciliation_cursor(progress),
+        None,
+        first_cursor,
+    )
+    assert not routes._terminal_anchor_reconciliation_set_cursor(
+        progress,
+        index_size=first_cursor["index_size"],
+        index_generation=first_cursor["generation"],
+        end_offset=first_cursor["end_offset"],
+    )
+    assert progress["index_cursor"]["end_offset"] == second_cursor["end_offset"]
+
+
 def test_terminal_reconciliation_retries_compaction_without_scene_mutation(
     tmp_path,
     monkeypatch,

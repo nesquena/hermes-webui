@@ -96,9 +96,9 @@ def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
 
     append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
 
-    # Terminal events also update the durable terminal-run index used by
-    # unresolved Worklog reconciliation.
-    assert len(fsync_calls) == 3
+    # Terminal events also update the durable terminal-run index and its
+    # writer-owned cursor authority used by unresolved Worklog reconciliation.
+    assert len(fsync_calls) == 5
 
 
 def test_run_journal_eager_fsync_mode_fsyncs_non_terminal_events(tmp_path, monkeypatch):
@@ -346,6 +346,8 @@ def test_terminal_run_summary_page_cursor_invalidates_same_size_replacement(tmp_
         max_candidates=1,
     )
     assert [summary["run_id"] for summary in first["summaries"]] == ["run_001"]
+    assert "digest" in first["index_generation"]
+    assert "authority" in first["index_generation"]
     cursor = _terminal_page_cursor(first)
 
     index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
@@ -355,6 +357,68 @@ def test_terminal_run_summary_page_cursor_invalidates_same_size_replacement(tmp_
     replacement_path = index_path.with_name("replacement-terminal-index.jsonl")
     replacement_path.write_bytes(replacement)
     os.replace(replacement_path, index_path)
+
+    second = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+        index_cursor=cursor,
+    )
+
+    assert [summary["run_id"] for summary in second["summaries"]] == ["run_002"]
+
+
+def test_terminal_run_summary_page_cursor_rejects_same_metadata_truncate_regrow(
+    tmp_path,
+    monkeypatch,
+):
+    append_run_event("session_1", "run_001", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_001", "done", {"session": {}}, session_dir=tmp_path)
+    first = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+    )
+    assert [summary["run_id"] for summary in first["summaries"]] == ["run_001"]
+    cursor = _terminal_page_cursor(first)
+
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    original_stat = index_path.stat()
+    original_bytes = index_path.read_bytes()
+    replacement = original_bytes.replace(b"run_001", b"run_002")
+    assert len(replacement) == len(original_bytes)
+    with index_path.open("r+b") as fh:
+        fh.truncate(0)
+        fh.write(replacement)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.utime(index_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    real_fstat = run_journal.os.fstat
+
+    class AliasedIndexStat:
+        st_dev = original_stat.st_dev
+        st_ino = original_stat.st_ino
+        st_size = original_stat.st_size
+        st_mtime_ns = original_stat.st_mtime_ns
+        st_ctime_ns = original_stat.st_ctime_ns
+
+    def aliased_fstat(fd):
+        stat_result = real_fstat(fd)
+        try:
+            fd_target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            try:
+                fd_target = os.readlink(f"/dev/fd/{fd}")
+            except OSError:
+                fd_target = ""
+        if Path(fd_target) == index_path:
+            return AliasedIndexStat()
+        return stat_result
+
+    monkeypatch.setattr(run_journal.os, "fstat", aliased_fstat)
 
     second = terminal_run_summary_page_for_session(
         "session_1",
@@ -523,6 +587,7 @@ def test_terminal_run_index_compaction_holds_process_barrier_against_append(
 
     repo_root = Path(__file__).resolve().parents[1]
     ready_path = tmp_path / "child-ready"
+    done_path = tmp_path / "child-done"
     child_code = (
         "import pathlib, sys\n"
         "from api.run_journal import append_run_event\n"
@@ -530,13 +595,17 @@ def test_terminal_run_index_compaction_holds_process_barrier_against_append(
         "pathlib.Path(sys.argv[2]).write_text('ready', encoding='utf-8')\n"
         "append_run_event('session_1', 'run_child', 'token', {'text': 'ok'}, session_dir=session_dir)\n"
         "append_run_event('session_1', 'run_child', 'done', {'session': {}}, session_dir=session_dir)\n"
+        "pathlib.Path(sys.argv[3]).write_text('done', encoding='utf-8')\n"
     )
     processes = []
     original_replace = os.replace
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
 
     def replace_after_child_blocks(src, dst):
+        if Path(dst) != index_path:
+            return original_replace(src, dst)
         process = subprocess.Popen(
-            [sys.executable, "-c", child_code, str(tmp_path), str(ready_path)],
+            [sys.executable, "-c", child_code, str(tmp_path), str(ready_path), str(done_path)],
             cwd=str(repo_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -547,6 +616,11 @@ def test_terminal_run_index_compaction_holds_process_barrier_against_append(
         while not ready_path.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert ready_path.exists(), "child append process did not reach the append barrier"
+        blocked_until = time.monotonic() + 0.25
+        while time.monotonic() < blocked_until:
+            assert not done_path.exists(), "child append completed inside the contested process lock"
+            assert process.poll() is None, "child append process exited before the parent released the lock"
+            time.sleep(0.01)
         return original_replace(src, dst)
 
     monkeypatch.setattr(run_journal.os, "replace", replace_after_child_blocks)
