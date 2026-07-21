@@ -2,11 +2,35 @@
 
 import json
 from pathlib import Path
+import re
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
+WALLPAPER_I18N_KEYS = (
+    "settings_wallpaper_title",
+    "settings_wallpaper_description",
+    "settings_wallpaper_choose",
+    "settings_wallpaper_drop",
+    "settings_wallpaper_preview_alt",
+    "settings_wallpaper_saved_file",
+    "settings_wallpaper_opacity",
+    "settings_wallpaper_scope",
+    "settings_wallpaper_scope_chat",
+    "settings_wallpaper_scope_app",
+    "settings_wallpaper_save",
+    "settings_wallpaper_clear",
+    "settings_wallpaper_saving",
+    "settings_wallpaper_saved",
+    "settings_wallpaper_cleared",
+    "settings_wallpaper_confirm_clear",
+    "settings_wallpaper_invalid_type",
+    "settings_wallpaper_invalid_size",
+    "settings_wallpaper_unavailable",
+    "settings_wallpaper_reconciliation",
+    "settings_wallpaper_failed",
+)
 
 
 def _node(script: str) -> dict:
@@ -45,20 +69,47 @@ def test_wallpaper_dom_controls_and_boot_bridge_exist() -> None:
 
 def test_wallpaper_i18n_and_service_worker_contracts() -> None:
     i18n = (STATIC / "i18n.js").read_text(encoding="utf-8")
-    for key in (
-        "settings_wallpaper_title", "settings_wallpaper_description",
-        "settings_wallpaper_choose", "settings_wallpaper_opacity",
-        "settings_wallpaper_scope", "settings_wallpaper_scope_chat",
-        "settings_wallpaper_scope_app", "settings_wallpaper_save",
-        "settings_wallpaper_clear", "settings_wallpaper_saving",
-        "settings_wallpaper_saved", "settings_wallpaper_cleared",
-        "settings_wallpaper_confirm_clear", "settings_wallpaper_invalid_type",
-        "settings_wallpaper_invalid_size", "settings_wallpaper_failed",
-    ):
+    for key in WALLPAPER_I18N_KEYS:
         assert f"{key}:" in i18n
     sw = (STATIC / "sw.js").read_text(encoding="utf-8")
     assert "'./static/wallpaper.js' + VQ" in sw
     assert "url.pathname.includes('/api/')" in sw
+
+
+def test_wallpaper_i18n_keys_are_english_fallback_owned() -> None:
+    i18n = (STATIC / "i18n.js").read_text(encoding="utf-8")
+    locale_starts = list(
+        re.finditer(
+            r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", i18n, re.MULTILINE
+        )
+    )
+    end = i18n.index("\n};", locale_starts[-1].start())
+    blocks = {
+        match.group(1).strip("'"): i18n[
+            match.start() : locale_starts[index + 1].start()
+            if index + 1 < len(locale_starts)
+            else end
+        ]
+        for index, match in enumerate(locale_starts)
+    }
+
+    for key in WALLPAPER_I18N_KEYS:
+        assert f"{key}:" in blocks["en"]
+    assert any(
+        f"{key}:" not in block
+        for locale, block in blocks.items()
+        if locale != "en"
+        for key in WALLPAPER_I18N_KEYS
+    )
+    assert "_locale[key] ?? LOCALES.en[key]" in i18n
+
+
+def test_wallpaper_clear_uses_shared_app_confirmation_dialog() -> None:
+    source = (STATIC / "wallpaper.js").read_text(encoding="utf-8")
+    assert "global.confirm(" not in source
+    assert "await global.showConfirmDialog({" in source
+    assert "danger:true" in source
+    assert "focusCancel:true" in source
 
 
 def test_wallpaper_controller_cache_subpath_and_request_contract() -> None:

@@ -134,11 +134,13 @@ function enqueueMutation(kind,file,opacity,scope,owner){
   mutationTail=mutationTail.then(run,run);return mutationTail;
 }
 function saveDraft(){if(requestRunning||!dirty())return;draftOpacity=Number(el('wallpaperOpacity').value)/100;draftScope=currentScope();enqueueMutation(draftFile?'post':'patch',draftFile,draftOpacity,draftScope,paneGeneration)}
-function clearDraft(){
+async function clearDraft(){
   if(requestRunning)return;
   if(!saved.has_wallpaper){discardDraft();setStatus(text('settings_wallpaper_cleared','Wallpaper cleared.'));return}
-  if(!global.confirm(text('settings_wallpaper_confirm_clear','Clear the saved wallpaper?')))return;
-  enqueueMutation('delete',null,0.8,'chat',paneGeneration);
+  const owner=paneGeneration,target=saved.image_version,revision=draftRevision;
+  const confirmed=await global.showConfirmDialog({title:text('settings_wallpaper_confirm_clear','Clear the saved wallpaper?'),message:'',confirmLabel:text('settings_wallpaper_clear','Clear'),danger:true,focusCancel:true});
+  if(!confirmed||requestRunning||!appearanceActive||owner!==paneGeneration||target!==saved.image_version||revision!==draftRevision)return;
+  enqueueMutation('delete',null,0.8,'chat',owner);
 }
 function bindControls(){
   if(bound)return;bound=true;

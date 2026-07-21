@@ -1,10 +1,11 @@
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.test_wallpaper_frontend import WALLPAPER_I18N_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
-PROFILE_CONCEPT_FALLBACK_KEYS = set(PROFILE_CONCEPT_KEYS)
+PROFILE_CONCEPT_FALLBACK_KEYS = {*PROFILE_CONCEPT_KEYS, *WALLPAPER_I18N_KEYS}
 
 
 def read(path: Path) -> str:

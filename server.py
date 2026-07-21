@@ -92,10 +92,6 @@ if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true"
     socket.socket.connect = _blocked_socket_connect
 
 
-try:
-    import resource
-except ImportError:  # pragma: no cover - resource is Unix-only
-    resource = None
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -110,7 +106,7 @@ from api.helpers import (
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
-from api.startup import auto_install_agent_deps, fix_credential_permissions
+from api.startup import _raise_fd_soft_limit, auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
@@ -457,27 +453,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         self._handle_write(handle_delete)
-
-
-def _raise_fd_soft_limit(target: int = 4096) -> dict:
-    """Best-effort raise of RLIMIT_NOFILE for persistent WebUI hosts."""
-    if resource is None:
-        return {"status": "unsupported"}
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-
-    desired = int(target)
-    if hard not in (-1, getattr(resource, "RLIM_INFINITY", object())):
-        desired = min(desired, int(hard))
-    if soft >= desired:
-        return {"status": "unchanged", "soft": soft, "hard": hard}
-    try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
-    except Exception as exc:
-        return {"status": "error", "soft": soft, "hard": hard, "error": str(exc)}
-    return {"status": "raised", "soft": desired, "hard": hard, "previous_soft": soft}
 
 
 _SHUTDOWN_AUDIT_LOGGED = False

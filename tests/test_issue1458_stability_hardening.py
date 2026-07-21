@@ -42,7 +42,7 @@ def test_deep_health_exercises_session_project_and_sqlite_paths():
 
 
 def test_server_raises_fd_soft_limit_when_resource_allows(monkeypatch):
-    import server
+    import api.startup as startup
 
     calls = []
 
@@ -57,9 +57,9 @@ def test_server_raises_fd_soft_limit_when_resource_allows(monkeypatch):
         def setrlimit(which, limits):
             calls.append((which, limits))
 
-    monkeypatch.setattr(server, "resource", FakeResource, raising=False)
+    monkeypatch.setattr(startup, "resource", FakeResource, raising=False)
 
-    result = server._raise_fd_soft_limit(target=4096)
+    result = startup._raise_fd_soft_limit(target=4096)
 
     assert result["status"] == "raised"
     assert result["soft"] == 4096
