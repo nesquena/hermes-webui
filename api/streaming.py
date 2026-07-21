@@ -11292,6 +11292,9 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_partial_text = None
     _snap_reasoning = None
     _snap_tool_calls = None
+    _snap_fallback_notice = None  # Snapshot under streams_lock so cancel's save reads
+    # the notice even after the worker's finally pops _STREAM_FALLBACK_NOTICES
+    # via agent.interrupt() (gate-certifier re-gate finding).
     _snap_flag = None
     _snap_agent = None
     _cancel_session_payload = None
@@ -11320,6 +11323,10 @@ def cancel_stream(stream_id: str) -> bool:
             _live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
             if _live_tools is not STREAM_LIVE_TOOL_CALLS:
                 _snap_tool_calls = list(_live_tools.get(stream_id, []) or [])
+        # Snapshot the fallback notice under the same lock, so cancel's save
+        # path still sees it even if the worker's finally pops
+        # _STREAM_FALLBACK_NOTICES via agent.interrupt().
+        _snap_fallback_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)
         if stream_present:
             q = streams.get(stream_id)
         else:
@@ -11598,8 +11605,11 @@ def cancel_stream(stream_id: str) -> bool:
                 # assistant message before save, so it survives reload even
                 # when the user cancels mid-stream (gate-certifier finding #2).
                 # Skip the _error cancel marker itself — stamp the partial or
-                # prior assistant turn that carried actual content.
-                _cancel_fb_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                # prior assistant turn that carried actual content. Use the
+                # under-lock snapshot so the notice survives even when the
+                # worker's finally popped _STREAM_FALLBACK_NOTICES via
+                # agent.interrupt() (gate-certifier re-gate finding).
+                _cancel_fb_notice = _snap_fallback_notice or _STREAM_FALLBACK_NOTICES.get(stream_id)
                 if _cancel_fb_notice:
                     for _dm in reversed(_cs.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant' and not _dm.get('_error'):

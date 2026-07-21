@@ -289,3 +289,141 @@ class TestCancelInterrupt:
             "detached-path cancel lost its partial text — the under-lock snapshot "
             "must cover the ACTIVE_RUNS-only path too, not just STREAMS-present"
         )
+
+    def test_cancel_preserves_fallback_notice_when_interrupt_pops_fallback_map(self):
+        """Regression (gate-certifier re-gate on #5755): the fallback-notice map
+        must be snapshotted UNDER streams_lock BEFORE agent.interrupt() runs,
+        alongside partial text / reasoning / tool calls. Otherwise the worker's
+        finally block pops _STREAM_FALLBACK_NOTICES (it does so under
+        STREAMS_LOCK) the instant the interrupt wakes it, and the cancelled
+        turn silently loses the confirmed fallback notice.
+
+        We simulate that race deterministically: the mock agent's interrupt()
+        clears the live _STREAM_FALLBACK_NOTICES map, mimicking the worker
+        finally. The fix must still persist the fallback notice captured before
+        the interrupt.
+        """
+        from unittest.mock import patch
+        from api.config import STREAM_PARTIAL_TEXT
+        from api.streaming import _STREAM_FALLBACK_NOTICES
+
+        stream_id = "race_stream_fallback"
+        session_id = "sess_race_fallback"
+        expected_notice = {
+            "message": "Model switched to gpt-4o",
+            "to_model": "gpt-4o",
+            "to_provider": "openai",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
+        _STREAM_FALLBACK_NOTICES[stream_id] = expected_notice
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+
+        def _interrupt(_msg):
+            # Mimic the worker's finally block popping the fallback notice map
+            # the moment the interrupt wakes it.
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+
+        mock_agent.interrupt = Mock(side_effect=_interrupt)
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+        mock_agent.interrupt.assert_called_once_with("Cancelled by user")
+        # The saved assistant turn must carry the _fallbackNotice that was live
+        # BEFORE the interrupt popped the map. Find it on the last non-error
+        # assistant message.
+        fb_messages = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(fb_messages) == 1, (
+            "Expected exactly one assistant message with _fallbackNotice, "
+            f"got {len(fb_messages)}"
+        )
+        assert fb_messages[0]["_fallbackNotice"] == expected_notice, (
+            "Cancelled turn lost the fallback notice — the under-lock snapshot "
+            "must capture _STREAM_FALLBACK_NOTICES before agent.interrupt()"
+        )
+
+    def test_cancel_preserves_fallback_notice_on_detached_active_run_path(self):
+        """Same regression as above but for the STREAMS-absent / ACTIVE_RUNS-
+        present path. When the SSE has detached but the worker is still live,
+        cancel must still capture the fallback notice under the lock before
+        agent.interrupt() pops the map.
+        """
+        from unittest.mock import patch
+        from api.config import STREAM_PARTIAL_TEXT
+        from api.streaming import _STREAM_FALLBACK_NOTICES
+
+        stream_id = "detached_race_fallback"
+        session_id = "sess_detached_fallback"
+        expected_notice = {
+            "message": "Model switched to claude-3-opus",
+            "to_model": "claude-3-opus",
+            "to_provider": "anthropic",
+        }
+
+        # NOTE: deliberately NO STREAMS entry — this is the detached path.
+        STREAM_PARTIAL_TEXT[stream_id] = "detached partial"
+        _STREAM_FALLBACK_NOTICES[stream_id] = expected_notice
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+
+        def _interrupt(_msg):
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+
+        mock_agent.interrupt = Mock(side_effect=_interrupt)
+
+        ACTIVE_RUNS[stream_id] = {
+            "session_id": session_id,
+            "started_at": 1.0,
+            "phase": "running",
+        }
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[session_id] = (mock_agent, "sig")
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session), \
+                patch("api.streaming._cached_agent_matches_session", return_value=True):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+        mock_agent.interrupt.assert_called_once_with("Cancelled by user")
+        fb_messages = [
+            m for m in mock_session.messages
+            if isinstance(m, dict) and m.get("_fallbackNotice")
+        ]
+        assert len(fb_messages) == 1, (
+            "Expected exactly one assistant message with _fallbackNotice on "
+            f"detached path, got {len(fb_messages)}"
+        )
+        assert fb_messages[0]["_fallbackNotice"] == expected_notice, (
+            "Detached-path cancel lost the fallback notice — the under-lock "
+            "snapshot must capture _STREAM_FALLBACK_NOTICES before interrupt"
+        )
