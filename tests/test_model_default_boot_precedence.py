@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from api import config as config_api
+
 
 REPO = Path(__file__).resolve().parents[1]
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
@@ -24,28 +26,29 @@ NODE = shutil.which("node")
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
+const boot = fs.readFileSync(process.argv[3], 'utf8');
 
-function extractFunc(name) {
+function extractFunc(name, source = ui) {
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const start = ui.search(re);
+  const start = source.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let openParen = ui.indexOf('(', start);
+  let openParen = source.indexOf('(', start);
   let i = openParen + 1;
   let parenDepth = 1;
-  while (parenDepth > 0 && i < ui.length) {
-    if (ui[i] === '(') parenDepth++;
-    else if (ui[i] === ')') parenDepth--;
+  while (parenDepth > 0 && i < source.length) {
+    if (source[i] === '(') parenDepth++;
+    else if (source[i] === ')') parenDepth--;
     i++;
   }
-  i = ui.indexOf('{', i);
+  i = source.indexOf('{', i);
   let depth = 1;
   i++;
-  while (depth > 0 && i < ui.length) {
-    if (ui[i] === '{') depth++;
-    else if (ui[i] === '}') depth--;
+  while (depth > 0 && i < source.length) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
     i++;
   }
-  return ui.slice(start, i);
+  return source.slice(start, i);
 }
 
 const calls = {syncModelChip: 0, renderModelDropdown: 0, positionModelDropdown: 0, liveFetches: []};
@@ -71,10 +74,25 @@ function makeSelect(options, initialValue) {
     }
   });
   sel.querySelector = function(_selector) { return this.options[0] || null; };
+  sel.querySelectorAll = function(selector) {
+    if (selector === 'option[data-custom]') {
+      return this.options.filter(o => o.dataset && o.dataset.custom);
+    }
+    return [];
+  };
   sel.appendChild = function(node) {
     const incoming = node && node.tagName === 'OPTGROUP' ? node.children : [node];
     for (const opt of incoming || []) {
       opt.parentElement = opt.parentElement || node;
+      opt.remove = opt.remove || (() => {
+        const optIndex = this.options.indexOf(opt);
+        if (optIndex >= 0) this.options.splice(optIndex, 1);
+        const children = opt.parentElement && opt.parentElement.children;
+        if (Array.isArray(children)) {
+          const childIndex = children.indexOf(opt);
+          if (childIndex >= 0) children.splice(childIndex, 1);
+        }
+      });
       this.options.push(opt);
       if (this.selectedIndex < 0) this.value = opt.value;
       else if (this._value === opt.value) this.value = opt.value;
@@ -134,11 +152,18 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+for (const name of ['_settingsDefaultModelHasExplicitSource', '_hydrateBootDefaultModelFromSettings']) {
+  eval(extractFunc(name, boot));
+}
 
-const args = JSON.parse(process.argv[3]);
+const args = JSON.parse(process.argv[4]);
 apiModels = args.apiModels;
 modelSelect = makeSelect(args.initialOptions, args.initialValue);
 var S = {session: args.session || null};
+
+if (args.settings) {
+  _hydrateBootDefaultModelFromSettings(args.settings);
+}
 
 fetch = async function(url) {
   const href = String(url);
@@ -156,6 +181,7 @@ populateModelDropdown(args.opts || {}).then(() => {
     defaultModel: window._defaultModel,
     defaultModelHasExplicitSource: window._defaultModelHasExplicitSource,
     defaultModelEligibleForFreshBoot: window._defaultModelEligibleForFreshBoot,
+    badgeKeys: Object.keys(window._configuredModelBadges || {}),
     activeProvider: window._activeProvider,
     calls,
   }));
@@ -175,7 +201,7 @@ def populate_driver_path(tmp_path_factory):
 
 def test_boot_settings_applies_default_without_deleting_browser_model_state():
     snippet = _boot_default_apply_snippet()
-    assert "Fresh page boot must prefer the profile/server default" in snippet
+    assert "Fresh page boot must prefer an explicit profile/server default" in snippet
     assert "if(sel&&typeof _applyModelToDropdown==='function')" in snippet
     assert "if(sel&&!savedState&&typeof _applyModelToDropdown==='function')" not in BOOT_JS
     assert "_clearPersistedModelState" not in snippet
@@ -185,9 +211,51 @@ def test_boot_settings_applies_default_without_deleting_browser_model_state():
 
 def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
     assert "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({" in BOOT_JS
+    assert "_hydrateBootDefaultModelFromSettings(s);" in BOOT_JS
+    assert "_settingsDefaultModelHasExplicitSource(s)" in BOOT_JS
     assert "preferProfileDefaultOnFreshBoot:true" in BOOT_JS
     assert "const defaultWinsFreshBoot=!!window._defaultModel&&window._defaultModelEligibleForFreshBoot!==false;" in BOOT_JS
     assert "const stateToApply=sessionModelState||(!defaultWinsFreshBoot?savedState:null);" in BOOT_JS
+
+
+@pytest.mark.parametrize(
+    ("config_data", "env_model", "expected_model", "expected_provider", "expected_explicit"),
+    [
+        ({"model": {"provider": "safe"}}, None, config_api.DEFAULT_MODEL, "safe", False),
+        ({"model": "legacy-explicit-model"}, None, "legacy-explicit-model", None, True),
+        (
+            {"model": {"provider": "safe", "default": "dict-explicit-model"}},
+            None,
+            "dict-explicit-model",
+            "safe",
+            True,
+        ),
+        ({"model": {"provider": "safe"}}, "env-explicit-model", "env-explicit-model", "safe", True),
+    ],
+)
+def test_load_settings_exposes_default_model_explicit_source(
+    monkeypatch,
+    config_data,
+    env_model,
+    expected_model,
+    expected_provider,
+    expected_explicit,
+):
+    monkeypatch.setattr(config_api, "cfg", dict(config_data), raising=False)
+    monkeypatch.setattr(config_api, "_read_raw_settings_file", lambda: {})
+    for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    if env_model:
+        monkeypatch.setenv("HERMES_MODEL", env_model)
+
+    settings = config_api.load_settings()
+
+    assert settings["default_model"] == expected_model
+    assert settings["default_model_has_explicit_source"] is expected_explicit
+    if expected_provider:
+        assert settings["default_model_provider"] == expected_provider
+    else:
+        assert "default_model_provider" not in settings
 
 
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
@@ -264,6 +332,87 @@ def test_boot_model_refresh_does_not_synthesize_nonexplicit_fallback_when_catalo
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settings_boot_then_model_refresh_does_not_recreate_nonexplicit_provider_fallback(
+    populate_driver_path,
+):
+    fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value="",
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        settings={
+            "default_model": fallback_model,
+            "default_model_provider": "safe",
+            "default_model_has_explicit_source": False,
+        },
+        api_default_model=fallback_model,
+        api_default_model_has_explicit_source=False,
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
+        ],
+        initial_options=[],
+    )
+
+    assert got["selectValue"] == "@safe:gpt-4o-mini"
+    assert got["selectedProvider"] == "safe"
+    assert fallback_model not in got["optionValues"]
+    assert f"@safe:{fallback_model}" not in got["optionValues"]
+    assert all(fallback_model not in key for key in got["badgeKeys"])
+    assert got["defaultModelHasExplicitSource"] is False
+    assert got["defaultModelEligibleForFreshBoot"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    ("settings", "explicit_model"),
+    [
+        ({"default_model": "legacy-explicit-model", "default_model_has_explicit_source": True}, "legacy-explicit-model"),
+        (
+            {
+                "default_model": "dict-explicit-model",
+                "default_model_provider": "safe",
+                "default_model_has_explicit_source": True,
+            },
+            "dict-explicit-model",
+        ),
+        (
+            {
+                "default_model": "env-explicit-model",
+                "default_model_provider": "safe",
+                "default_model_has_explicit_source": True,
+            },
+            "env-explicit-model",
+        ),
+        ({"default_model": "absent-provenance-model", "default_model_provider": "safe"}, "absent-provenance-model"),
+    ],
+)
+def test_settings_boot_still_seeds_explicit_and_legacy_absent_defaults(
+    populate_driver_path,
+    settings,
+    explicit_model,
+):
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value="",
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        settings=settings,
+        api_default_model=explicit_model,
+        api_default_model_has_explicit_source=True,
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": explicit_model, "label": explicit_model}]},
+        ],
+        initial_options=[],
+    )
+
+    assert got["selectValue"] == explicit_model
+    assert explicit_model in got["optionValues"]
+    assert got["defaultModelHasExplicitSource"] is True
+    assert got["defaultModelEligibleForFreshBoot"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_boot_model_refresh_keeps_emergency_fallback_when_catalog_has_no_provider_models(
     populate_driver_path,
 ):
@@ -273,6 +422,11 @@ def test_boot_model_refresh_keeps_emergency_fallback_when_catalog_has_no_provide
         initial_value="@expensive:gpt-5.5",
         opts={"preferProfileDefaultOnFreshBoot": True},
         session=None,
+        settings={
+            "default_model": fallback_model,
+            "default_model_provider": "safe",
+            "default_model_has_explicit_source": False,
+        },
         api_default_model=fallback_model,
         api_default_model_has_explicit_source=False,
         api_active_provider="safe",
@@ -333,6 +487,7 @@ def _run_populate_driver(
     api_active_provider: str = "safe",
     api_groups: list[dict] | None = None,
     initial_options: list[dict] | None = None,
+    settings: dict | None = None,
 ):
     groups = api_groups if api_groups is not None else [
         {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
@@ -357,10 +512,11 @@ def _run_populate_driver(
         },
         "opts": opts,
         "session": session,
+        "settings": settings,
     }
     assert NODE is not None
     result = subprocess.run(
-        [NODE, driver_path, str(REPO / "static" / "ui.js"), json.dumps(payload)],
+        [NODE, driver_path, str(REPO / "static" / "ui.js"), str(REPO / "static" / "boot.js"), json.dumps(payload)],
         capture_output=True,
         text=True,
         timeout=30,
@@ -371,7 +527,7 @@ def _run_populate_driver(
 
 
 def _boot_default_apply_snippet() -> str:
-    marker = "// Fresh page boot must prefer the profile/server default"
+    marker = "// Fresh page boot must prefer an explicit profile/server default"
     start = BOOT_JS.index(marker)
     return BOOT_JS[start - 120 : start + 700]
 

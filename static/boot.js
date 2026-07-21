@@ -3210,6 +3210,42 @@ function _mirrorSpeechSettingsFromServer(s){
 }
 window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 
+function _settingsDefaultModelHasExplicitSource(s){
+  if(!s||!Object.prototype.hasOwnProperty.call(s,'default_model_has_explicit_source')) return true;
+  return s.default_model_has_explicit_source===true;
+}
+function _hydrateBootDefaultModelFromSettings(s){
+  if(!s) return;
+  if(s.default_model_provider) window._activeProvider=s.default_model_provider;
+  const defaultModel=String(s.default_model||'');
+  if(!defaultModel) return;
+  const hasExplicitSource=_settingsDefaultModelHasExplicitSource(s);
+  window._defaultModel=defaultModel;
+  window._defaultModelHasExplicitSource=hasExplicitSource;
+  window._defaultModelEligibleForFreshBoot=hasExplicitSource;
+  if(!hasExplicitSource) return;
+  const sel=$('modelSelect');
+  if(sel&&typeof _applyModelToDropdown==='function'){
+    // Fresh page boot must prefer an explicit profile/server default over
+    // stale browser-persisted model state. Non-explicit fallback defaults
+    // wait for /api/models so a real provider catalog can suppress them.
+    const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===defaultModel);
+    if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
+      existingDefaultOpt.dataset.provider=window._activeProvider;
+    }
+    if(!existingDefaultOpt){
+      const opt=document.createElement('option');
+      opt.value=defaultModel;
+      opt.textContent=typeof getModelLabel==='function'?getModelLabel(defaultModel):defaultModel;
+      opt.dataset.custom='1';
+      opt.dataset.provider=window._activeProvider||'';
+      sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
+      sel.appendChild(opt);
+    }
+    _applyModelToDropdown(defaultModel,sel,window._activeProvider||null);
+  }
+}
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -3285,31 +3321,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
-    if(s.default_model_provider) window._activeProvider=s.default_model_provider;
-    if(s.default_model){
-      window._defaultModel=s.default_model;
-      const sel=$('modelSelect');
-      if(sel&&typeof _applyModelToDropdown==='function'){
-        // Fresh page boot must prefer the profile/server default over stale
-        // browser-persisted model state. A restored session can still apply its
-        // own persisted model later through loadSession(). Preserve the browser
-        // keys for legacy/no-default fallback paths instead of deleting them.
-        const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
-        if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
-          existingDefaultOpt.dataset.provider=window._activeProvider;
-        }
-        if(!existingDefaultOpt){
-          const opt=document.createElement('option');
-          opt.value=s.default_model;
-          opt.textContent=typeof getModelLabel==='function'?getModelLabel(s.default_model):s.default_model;
-          opt.dataset.custom='1';
-          opt.dataset.provider=window._activeProvider||'';
-          sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
-          sel.appendChild(opt);
-        }
-        _applyModelToDropdown(s.default_model,sel,window._activeProvider||null);
-      }
-    }
+    _hydrateBootDefaultModelFromSettings(s);
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     window._renderUserMarkdown=!!s.render_user_markdown;
     // JSON/YAML structured code-block default view (#484): auto | on | off,
