@@ -13,6 +13,7 @@ const ICONS={
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
   download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
+  check:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 8 7 11 12 5"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -4787,6 +4788,31 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
+// Clear the unread badge for a session without opening it (#1748), used by the
+// sidebar "Mark as read" action.
+//
+// The viewed watermark must be the AUTHORITATIVE completed count, not just the
+// cached sidebar row's message_count. A background completion records its count
+// in the explicit completion-unread marker, and _hasUnreadForSession
+// short-circuits to "unread" on that marker regardless of the cached row. That
+// marker count can exceed the sidebar cache's message_count when the list has
+// not re-fetched the higher count yet. Persisting only the stale cached count
+// clears the badge now but lets the next /api/sessions refresh — which returns
+// the authoritative higher count — re-flag the session as unread, so the badge
+// disappears and reappears (#5900). Resolve one authoritative value here so the
+// code that decided the session was unread and the code that clears it agree.
+function _markSessionRead(session){
+  if(!session || !session.session_id) return;
+  const sid = session.session_id;
+  let viewedCount = Number(session.message_count || 0);
+  if(!Number.isFinite(viewedCount)) viewedCount = 0;
+  const marker = _getSessionCompletionUnread()[sid];
+  const markerCount = marker ? Number(marker.message_count) : NaN;
+  if(Number.isFinite(markerCount)) viewedCount = Math.max(viewedCount, markerCount);
+  _setSessionViewedCount(sid, viewedCount);
+  if(typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+}
+
 function _openSessionActionMenu(session, anchorEl){
   const isReadOnly = _isReadOnlySession(session);
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -4836,6 +4862,19 @@ function _openSessionActionMenu(session, anchorEl){
     ));
   }
   _appendSessionShareActions(menu, session);
+  // Mark as read — only shown when the session has unread notifications
+  // that need clearing (#1748).
+  if(_hasUnreadForSession(session)){
+    menu.appendChild(_buildSessionAction(
+      t('session_mark_read'),
+      t('session_mark_read_desc'),
+      ICONS.check,
+      ()=>{
+        closeSessionActionMenu();
+        _markSessionRead(session);
+      }
+    ));
+  }
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
     session.pinned?t('session_unpin_desc'):t('session_pin_desc'),

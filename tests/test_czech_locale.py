@@ -1,11 +1,11 @@
 from collections import Counter
 from pathlib import Path
 import re
-from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.test_issue2147_profile_concept_help import ENGLISH_FALLBACK_OWNED_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
-PROFILE_CONCEPT_FALLBACK_KEYS = set(PROFILE_CONCEPT_KEYS)
+ENGLISH_FALLBACK_KEYS = set(ENGLISH_FALLBACK_OWNED_KEYS)
 
 
 def read(path: Path) -> str:
@@ -107,7 +107,7 @@ def test_czech_locale_matches_english_key_coverage():
     src = read(REPO / "static" / "i18n.js")
     en_keys = set(locale_keys(src, "en"))
     cs_keys = set(locale_keys(src, "cs"))
-    assert sorted((en_keys - cs_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
+    assert sorted((en_keys - cs_keys) - ENGLISH_FALLBACK_KEYS) == []
     assert sorted(cs_keys - en_keys) == []
 
 

@@ -18,6 +18,20 @@ PROFILE_CONCEPT_KEYS = [
     "profile_concept_label_example",
 ]
 
+# Keys that intentionally live in the English (`en`) locale block ONLY and reach
+# every other locale through the t() runtime fallback (`_locale[key] ??
+# LOCALES.en[key]`). Per AGENTS.md guideline #8, new fallback copy goes in `en`
+# only — extend this single registry instead of copying the string into all 15
+# locale blocks. The per-locale coverage tests import this list and exempt it
+# from strict parity. Keep it in sync with `test_i18n_keys_are_english_fallback_owned`.
+ENGLISH_FALLBACK_OWNED_KEYS = [
+    *PROFILE_CONCEPT_KEYS,
+    # Sidebar "Mark as read" context-menu action (#1748). English-only fallback
+    # pending native translations in a follow-up.
+    "session_mark_read",
+    "session_mark_read_desc",
+]
+
 
 def _locale_blocks():
     """Extract every top-level locale block from static/i18n.js."""
@@ -42,17 +56,17 @@ def _render_profile_concept_help_body():
 
 
 def test_i18n_keys_are_english_fallback_owned():
-    """Profile concept keys live in English and fall back from every other locale."""
+    """English-fallback-owned keys live in `en` and fall back from every other locale."""
     locale_blocks = _locale_blocks()
     en_block = locale_blocks["en"]
-    for key in PROFILE_CONCEPT_KEYS:
+    for key in ENGLISH_FALLBACK_OWNED_KEYS:
         assert re.search(rf"\b{re.escape(key)}:\s*'", en_block), (
             f"missing key {key!r} in en locale block"
         )
     for locale, block in locale_blocks.items():
         if locale == "en":
             continue
-        for key in PROFILE_CONCEPT_KEYS:
+        for key in ENGLISH_FALLBACK_OWNED_KEYS:
             assert not re.search(rf"\b{re.escape(key)}:\s*'", block), (
                 f"key {key!r} must be absent from non-English locale {locale!r}"
             )
