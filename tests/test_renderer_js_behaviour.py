@@ -71,6 +71,7 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_renderExactAsteriskEmphasis'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -114,7 +115,28 @@ def test_codex_reasoning_adjacent_bold_summaries_render_as_markdown(driver_path)
     assert "****" not in out
     assert "**Evaluating" not in out
     assert "&lt;strong" not in out
-    assert "BOLD_BOUNDARY" not in out
+
+
+@pytest.mark.parametrize(
+    "markdown, expected",
+    [
+        ("***bold italic***", "<strong><em>bold italic</em></strong>"),
+        ("*****five star bold italic*****", "<strong><em>five star bold italic</em></strong>"),
+        ("- **one****two**", "<li><strong>one</strong><strong>two</strong></li>"),
+        ("# **one****two**", "<h1><strong>one</strong><strong>two</strong></h1>"),
+        ("> **one****two**", "<blockquote><p><strong>one</strong><strong>two</strong></p></blockquote>"),
+        ("`**one****two**`", "<code>**one****two**</code>"),
+    ],
+)
+def test_adjacent_bold_fix_preserves_other_emphasis_contexts(driver_path, markdown, expected):
+    assert expected in _render(driver_path, markdown)
+
+
+def test_literal_four_star_run_is_not_turned_into_empty_bold(driver_path):
+    out = _render(driver_path, "a****b")
+
+    assert "a****b" in out
+    assert "<strong></strong>" not in out
 
 
 

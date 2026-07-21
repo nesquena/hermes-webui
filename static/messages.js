@@ -3760,6 +3760,47 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // falls back to the full renderMd path — identical structure, just not
   // incremental. (#5455 WS2.1)
   const _anchorProseSmdCache = new Map();
+  const _anchorThinkingSmdCache = new Map();
+  function _anchorThinkingIncrementalNode(key, text){
+    if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
+    const value=String(text||'');
+    try{
+      let st=_anchorThinkingSmdCache.get(key);
+      // Reasoning normally grows by append-only deltas. If sanitization or replay
+      // changes the prefix, rebuild this one parser rather than corrupting its DOM.
+      if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      if(!st){
+        const node=_thinkingActivityNode('',false,key);
+        const body=node&&node.querySelector&&node.querySelector('.thinking-card-body');
+        if(!body) return null;
+        const markdown=document.createElement('div');
+        markdown.className='thinking-card-markdown';
+        body.appendChild(markdown);
+        const renderer=_smdRendererWithoutUnderscoreEmphasis(_safeSmdRenderer(markdown));
+        st={node,parser:window.smd.parser(renderer),writtenText:''};
+        _smdBindParserIdentity(renderer,st.parser,markdown);
+        _anchorThinkingSmdCache.set(key,st);
+        if(_anchorThinkingSmdCache.size>32){
+          const oldest=_anchorThinkingSmdCache.keys().next().value;
+          if(oldest!==key) _anchorThinkingSmdCache.delete(oldest);
+        }
+      }
+      const delta=value.slice(st.writtenText.length);
+      if(delta){
+        window.smd.parser_write(st.parser,delta);
+        st.writtenText=value;
+      }
+      const card=st.node&&st.node.querySelector&&st.node.querySelector('.thinking-card');
+      if(card) card._thinkingSource=value;
+      st.node._thinkingPendingText=value;
+      st.node._thinkingRenderedText=value;
+      return st.node;
+    }catch(_){
+      _anchorThinkingSmdCache.delete(key);
+      return null;
+    }
+  }
+  window.__anchorThinkingIncrementalNode=_anchorThinkingIncrementalNode;
   function _anchorProseIncrementalNode(key, text){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const value=String(text||'');
@@ -3807,6 +3848,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
   function _clearAnchorProseIncrementalNode(){
     if(typeof window!=='undefined'&&window.__anchorProseIncrementalNode===_anchorProseIncrementalNode) window.__anchorProseIncrementalNode=null;
+    if(typeof window!=='undefined'&&window.__anchorThinkingIncrementalNode===_anchorThinkingIncrementalNode) window.__anchorThinkingIncrementalNode=null;
     // Clear the per-parser MEDIA tail for each cached smd parser.
     // _anchorProseSmdCache is a Map<key, {parser, ...}>; we can't
     // iterate a WeakMap to clean up, but WeakMap keys become eligible
@@ -3825,6 +3867,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       });
     }
     _anchorProseSmdCache.clear();
+    if(typeof _anchorThinkingSmdCache!=='undefined'&&_anchorThinkingSmdCache.size){
+      _anchorThinkingSmdCache.forEach(function(st){
+        if(st&&st.parser&&typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(st.parser);
+        if(st&&st.parser&&typeof _smdMediaTailClear==='function') _smdMediaTailClear(st.parser);
+      });
+    }
+    _anchorThinkingSmdCache.clear();
   }
   function _anchorHasReasoningEvents(){
     const events=_anchorActivityEvents();
