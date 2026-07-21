@@ -73,10 +73,15 @@ eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('_renderExactAsteriskEmphasis'));
 eval(extractFunc('renderMd'));
+eval(extractFunc('_stripXmlToolCallsDisplay'));
+eval(extractFunc('_sanitizeThinkingDisplayText'));
+eval(extractFunc('_thinkingBodyHtml'));
 
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+process.stdin.on('end', () => {
+  process.stdout.write(process.argv[3] === 'thinking' ? _thinkingBodyHtml(buf) : renderMd(buf));
+});
 """
 
 
@@ -102,6 +107,21 @@ def _render(driver_path, markdown: str) -> str:
     return result.stdout
 
 
+def _render_thinking(driver_path, markdown: str) -> str:
+    """Run the exact Thinking-card Markdown wrapper from static/ui.js."""
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH), "thinking"],
+        input=markdown,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node Thinking driver failed: {result.stderr}")
+    return result.stdout
+
+
 def test_codex_reasoning_adjacent_bold_summaries_render_as_markdown(driver_path):
     raw = (
         "**Evaluating doc sync strategies****Deciding repo docs ingestion model****"
@@ -115,6 +135,32 @@ def test_codex_reasoning_adjacent_bold_summaries_render_as_markdown(driver_path)
     assert "****" not in out
     assert "**Evaluating" not in out
     assert "&lt;strong" not in out
+
+
+def test_codex_reasoning_adjacent_bold_summaries_get_one_line_each(driver_path):
+    raw = (
+        "**Evaluating doc sync strategies****Deciding repo docs ingestion model****"
+        "Planning dirtypages daemon for docs****Designing distributed repo syncing****"
+        "Designing metadata tagging policy**"
+    )
+
+    out = _render_thinking(driver_path, raw)
+
+    assert out.count("<strong>") == 5
+    assert out.count("<br>") == 4
+    assert "</strong><br><strong>" in out
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "This is **important** text.",
+        "**First** and **second** stay inline.",
+        "`**code****stays**`",
+    ],
+)
+def test_thinking_summary_lines_do_not_blockify_ordinary_bold(driver_path, raw):
+    assert "<br>" not in _render_thinking(driver_path, raw)
 
 
 @pytest.mark.parametrize(

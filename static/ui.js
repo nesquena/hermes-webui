@@ -10992,7 +10992,13 @@ function _restoreWorklogDetailDisclosureState(root, state){
 }
 function _thinkingBodyHtml(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
-  return clean?`<div class="thinking-card-markdown">${renderMd(clean)}</div>`:'';
+  if(!clean) return '';
+  // Codex emits distinct reasoning summaries as source-adjacent bold spans:
+  // **first****second**. renderMd correctly produces adjacent <strong> nodes;
+  // only Thinking-card presentation turns that exact adjacency into line breaks.
+  // Ordinary inline bold retains its surrounding text/whitespace and is untouched.
+  const rendered=renderMd(clean).replace(/<\/strong><strong>/g,'</strong><br><strong>');
+  return `<div class="thinking-card-markdown">${rendered}</div>`;
 }
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);

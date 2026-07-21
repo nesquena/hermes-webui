@@ -3776,7 +3776,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const markdown=document.createElement('div');
         markdown.className='thinking-card-markdown';
         body.appendChild(markdown);
-        const renderer=_smdRendererWithoutUnderscoreEmphasis(_safeSmdRenderer(markdown));
+        const renderer=_smdThinkingRenderer(_safeSmdRenderer(markdown));
         st={node,parser:window.smd.parser(renderer),writtenText:''};
         _smdBindParserIdentity(renderer,st.parser,markdown);
         _anchorThinkingSmdCache.set(key,st);
@@ -4217,6 +4217,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       baseEndToken(data);
+    };
+    return renderer;
+  }
+  function _smdThinkingRenderer(renderer){
+    renderer=_smdRendererWithoutUnderscoreEmphasis(renderer);
+    if(!renderer||!window.smd) return renderer;
+    const baseAddToken=renderer.add_token;
+    const baseEndToken=renderer.end_token;
+    const baseAddText=renderer.add_text;
+    const tokenStack=[];
+    let previousStrongClosed=false;
+    renderer.add_token=(data,token)=>{
+      if(token===window.smd.STRONG_AST&&previousStrongClosed){
+        baseAddToken(data,window.smd.LINE_BREAK);
+        baseEndToken(data);
+      }
+      previousStrongClosed=false;
+      tokenStack.push(token);
+      baseAddToken(data,token);
+    };
+    renderer.end_token=(data)=>{
+      const token=tokenStack.pop();
+      baseEndToken(data);
+      previousStrongClosed=token===window.smd.STRONG_AST;
+    };
+    renderer.add_text=(data,text)=>{
+      if(String(text||'')) previousStrongClosed=false;
+      baseAddText(data,text);
     };
     return renderer;
   }

@@ -6240,7 +6240,6 @@ main.main > #mainPlugin{display:none;}
 .thinking-card-markdown { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
 .thinking-card-markdown p { margin: 0 0 6px; }
 .thinking-card-markdown p:last-child { margin-bottom: 0; }
-.thinking-card-markdown strong + strong { margin-left: .5em; }
 .thinking-card-markdown ul,
 .thinking-card-markdown ol { margin: 6px 0; padding-left: 1.35em; }
 .thinking-card-markdown li { margin: 2px 0; }

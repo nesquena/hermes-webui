@@ -190,6 +190,7 @@ global.window={smd:{
 }};
 function _safeSmdRenderer(root){ return {root}; }
 function _smdRendererWithoutUnderscoreEmphasis(renderer){ return renderer; }
+function _smdThinkingRenderer(renderer){ return renderer; }
 function _smdBindParserIdentity(){}
 function _thinkingActivityNode(){
   nodeCreates++;

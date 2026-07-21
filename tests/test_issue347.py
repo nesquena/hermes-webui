@@ -56,6 +56,7 @@ def _run_renderers(markdown: str) -> dict:
     js += "\n" + _extract_function(UI_JS, "_matchBacktickFenceLine")
     js += "\n" + _extract_function(UI_JS, "_isBacktickFenceClose")
     js += "\n" + _extract_function(UI_JS, "_renderUserFencedBlocks")
+    js += "\n" + _extract_function(UI_JS, "_renderExactAsteriskEmphasis")
     js += "\n" + _extract_function(UI_JS, "renderMd")
     js += textwrap.dedent(
         r'''
