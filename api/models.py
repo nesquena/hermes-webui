@@ -2421,16 +2421,27 @@ class Session:
         if prune_media:
             from api.session_media import prune_session_media
 
-            retained_values = [self.messages, self.context_messages]
-            backup_path = self.path.with_suffix('.json.bak')
-            if _path_entry_exists(backup_path):
-                backup_payload = json.loads(backup_path.read_bytes())
-                if not isinstance(backup_payload, dict):
-                    raise ValueError("Invalid session backup while pruning media")
-                if backup_payload.get("session_id") != self.session_id:
-                    raise ValueError("Session backup identity mismatch while pruning media")
-                retained_values.append(backup_payload)
-            prune_session_media(self.session_id, retained_values)
+            try:
+                retained_values = [self.messages, self.context_messages]
+                backup_path = self.path.with_suffix('.json.bak')
+                if _path_entry_exists(backup_path):
+                    backup_payload = json.loads(backup_path.read_bytes())
+                    if not isinstance(backup_payload, dict):
+                        raise ValueError("Invalid session backup while pruning media")
+                    if backup_payload.get("session_id") != self.session_id:
+                        raise ValueError("Session backup identity mismatch while pruning media")
+                    retained_values.append(backup_payload)
+                prune_session_media(self.session_id, retained_values)
+            except Exception:
+                # The sidecar and index are already durably committed above.
+                # Pruning is retention-only because every live/recovery
+                # reference is kept, so a cleanup error must not turn that
+                # committed transcript mutation into a false HTTP failure.
+                logger.warning(
+                    "Could not prune session media after transcript truncation for %s",
+                    self.session_id,
+                    exc_info=True,
+                )
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the

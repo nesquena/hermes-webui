@@ -1728,3 +1728,51 @@ def test_truncate_prunes_only_media_unreachable_from_live_or_backup(tmp_path, mo
     assert stray_name not in files
     # The removed second message remains reachable from the recovery backup.
     assert len(files) == 2
+
+
+def test_truncate_does_not_report_committed_write_as_failed_when_prune_fails(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id="truncate-prune-failure",
+        messages=[
+            {"role": "user", "content": "keep"},
+            {"role": "assistant", "content": "remove"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "keep"},
+            {"role": "assistant", "content": "remove"},
+        ],
+    )
+    session.save(skip_index=True)
+    models.SESSIONS[session.session_id] = session
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": session.session_id, "keep_count": 1},
+    )
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes.api_config, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(
+        session_media,
+        "prune_session_media",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected prune failure")),
+    )
+    captured = _capture_route(monkeypatch)
+
+    routes.handle_post(
+        _FakeHandler("/api/session/truncate"),
+        urlparse("/api/session/truncate"),
+    )
+
+    assert captured["ok"]["ok"] is True
+    assert captured["status"] == 200
+    assert json.loads(session.path.read_text(encoding="utf-8"))["messages"] == [
+        {"role": "user", "content": "keep"}
+    ]
+    assert "Could not prune session media after transcript truncation" in caplog.text

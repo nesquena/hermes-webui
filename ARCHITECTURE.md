@@ -312,7 +312,10 @@ quarantine identity. Truncate/retry/undo and backup restore prune blobs by
 reachability across both the live sidecar and any recovery backup. A successful
 clear removes its stale backup before removing the complete private-media
 namespace; an already-empty session with no prior clear generation keeps an
-independently recoverable backup.
+independently recoverable backup. Reachability pruning runs after the transcript
+and recovery authority are durably committed; a pruning error is logged and can
+be retried by the next pruning mutation without falsely reporting the committed
+transcript write as failed.
 
 ### 4.3 SSE Streaming Engine
 
