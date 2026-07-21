@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import api.config as config
 import api.models as models
 from api.models import Session
@@ -26,14 +28,13 @@ def test_empty_active_pending_save_cannot_overwrite_existing_messages(tmp_path, 
     )
     existing.save()
 
-    stale = Session(
-        session_id=sid,
-        messages=[],
-        active_stream_id="stale-stream",
-        pending_user_message="prompt",
-        pending_started_at=123.0,
-    )
-    stale.save()
+    # A fresh constructor cannot adopt an existing sidecar's publication lease.
+    stale = Session(session_id=sid, messages=[])
+    stale.active_stream_id = "stale-stream"
+    stale.pending_user_message = "prompt"
+    stale.pending_started_at = 123.0
+    with pytest.raises(RuntimeError, match="stale session generation"):
+        stale.save()
 
     persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
     assert [m["content"] for m in persisted["messages"]] == ["prompt", "answer"]

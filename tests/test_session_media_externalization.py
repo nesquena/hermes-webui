@@ -740,6 +740,12 @@ def test_remove_session_media_deletes_only_requested_namespace(tmp_path, monkeyp
     assert session_media._session_media_dir("keep-second").exists()
     assert session_media.hydrate_session_media_urls(second, "keep-second")
 
+    # A retry retains the original quarantine as the one durable authority;
+    # it must not recursively quarantine the already-detached contents.
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.remove_session_media("delete-first")
+    assert list((tmp_path / "session-media").glob(".delete-*")) == quarantines
+
 
 def test_media_cleanup_retry_prefix_cannot_match_sibling_sid(tmp_path, monkeypatch):
     monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
@@ -1666,6 +1672,17 @@ def test_destination_collision_preserves_existing_owner_bytes(tmp_path, monkeypa
             raise AssertionError("collision reservation entered")
 
     assert path.read_bytes() == original
+
+
+def test_destination_reservation_rebuilds_corrupt_index_from_sidecars(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    models.SESSION_INDEX_FILE.write_text("{not-json", encoding="utf-8")
+
+    with models.reserve_session_destination("index-rebuild-owner"):
+        pass
+
+    assert json.loads(models.SESSION_INDEX_FILE.read_bytes()) == []
+    assert not (session_dir / "index-rebuild-owner.json").exists()
 
 
 def test_destination_reservation_token_rejects_same_thread_piggyback(

@@ -2440,21 +2440,20 @@ def test_importing_older_gateway_session_preserves_original_timestamps_and_order
         assert rename_status == 200, rename
         from api.models import Session
         from tests.conftest import TEST_WORKSPACE
-        newer_webui_session = Session(
-            session_id=newer_webui_sid,
-            title='Newer WebUI Session',
-            workspace=str(TEST_WORKSPACE),
-            model='openai/gpt-5',
-            created_at=newer_webui['session']['created_at'],
-            updated_at=time.time(),
-            profile='default',
-            messages=[{
-                'role': 'user',
-                'content': 'newer visible row',
-                'timestamp': time.time(),
-            }],
-            tool_calls=[],
-        )
+        newer_webui_session = Session.load(newer_webui_sid)
+        assert newer_webui_session is not None
+        newer_webui_session.title = 'Newer WebUI Session'
+        newer_webui_session.workspace = str(TEST_WORKSPACE)
+        newer_webui_session.model = 'openai/gpt-5'
+        newer_webui_session.created_at = newer_webui['session']['created_at']
+        newer_webui_session.updated_at = time.time()
+        newer_webui_session.profile = 'default'
+        newer_webui_session.messages = [{
+            'role': 'user',
+            'content': 'newer visible row',
+            'timestamp': time.time(),
+        }]
+        newer_webui_session.tool_calls = []
         newer_webui_session.save(touch_updated_at=False)
         rename_refresh, rename_refresh_status = post(
             '/api/session/rename',

@@ -1290,6 +1290,23 @@ def recover_incomplete_compression_transactions(session_dir: Path) -> dict:
                         finalized += 1
                         continue
                     if phase == "source_restored":
+                        # The source bytes are already restored, but a prior
+                        # destination cleanup may have retained a quarantined
+                        # media entry rather than risk unlinking a replacement.
+                        # Keep this intent until that exact destination retry
+                        # succeeds; retiring it here would lose the retry
+                        # authority while leaving the SID blocked by its
+                        # cleanup residual.
+                        result = rollback_reserved_session_destination(
+                            sid,
+                            token,
+                            durable_intent_path=path,
+                        )
+                        if not result.get("ok"):
+                            raise RuntimeError(
+                                "compression rollback residuals: "
+                                f"{result.get('residuals')!r}"
+                            )
                         _retire_compression_transaction(session_dir, sid)
                         rolled_back += 1
                         continue
@@ -1299,6 +1316,12 @@ def recover_incomplete_compression_transactions(session_dir: Path) -> dict:
                         _retire_compression_transaction(session_dir, sid)
                         rolled_back += 1
                         continue
+                    _restore_compression_transaction_source(session_dir, intent)
+                    intent = _advance_compression_transaction(
+                        session_dir,
+                        intent,
+                        "source_restored",
+                    )
                     result = rollback_reserved_session_destination(
                         sid,
                         token,
@@ -1309,12 +1332,6 @@ def recover_incomplete_compression_transactions(session_dir: Path) -> dict:
                             "compression rollback residuals: "
                             f"{result.get('residuals')!r}"
                         )
-                    _restore_compression_transaction_source(session_dir, intent)
-                    intent = _advance_compression_transaction(
-                        session_dir,
-                        intent,
-                        "source_restored",
-                    )
                     _retire_compression_transaction(session_dir, sid)
                     rolled_back += 1
                     continue

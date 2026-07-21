@@ -183,7 +183,7 @@ def test_startup_rolls_back_prepared_compression_claim_without_sidecar(
     assert not models._session_incarnation_claim_file(sid).exists()
 
 
-def test_startup_rolls_back_v2_compression_and_restores_exact_source(
+def test_startup_restores_v2_compression_source_and_retains_media_retry(
     tmp_path, monkeypatch
 ):
     import api.models as models
@@ -244,14 +244,21 @@ def test_startup_rolls_back_v2_compression_and_restores_exact_source(
 
     result = recover_incomplete_compression_transactions(tmp_path)
 
-    assert result == {"finalized": 0, "rolled_back": 1, "residuals": []}
+    assert result == {
+        "finalized": 0,
+        "rolled_back": 0,
+        "residuals": [
+            {"transaction": f"{new_sid}.json", "error": "RuntimeError"}
+        ],
+    }
     assert source.path.read_bytes() == source_before
     assert models.SESSION_INDEX_FILE.read_bytes() == index_before
     assert not (tmp_path / f"{new_sid}.json").exists()
     assert not media_dir.exists()
     assert not models._session_incarnation_claim_file(new_sid).exists()
     transaction_dir = tmp_path / "_compression_transactions"
-    assert not list(transaction_dir.iterdir())
+    assert (transaction_dir / f"{new_sid}.json").exists()
+    assert models._session_cleanup_residual_file(new_sid).exists()
 
 
 def test_startup_finalizes_v2_committed_compression_transaction(
