@@ -234,20 +234,35 @@ global.send = () => {
   global.__sendCalls += 1;
 };
 
-for (const name of [
-  '_selectedTextReplyT',
-  '_selectedTextReplyRoot',
-  '_selectedTextReplyNodeInChat',
-  '_selectedTextReplySelection',
-  '_formatSelectedTextReplyQuote',
-  '_seedSelectedTextRefineDraft',
-  '_selectedTextReplyLiveText',
-  '_selectedTextReplyButton',
-  '_hideSelectedTextReplyButton',
-  '_positionSelectedTextReplyButton',
-  '_updateSelectedTextReplyButton',
-]) {
-  eval(extractFunc(name));
+eval(extractFunc('_selectedTextReplyT'));
+eval(extractFunc('_selectedTextReplyRoot'));
+eval(extractFunc('_selectedTextReplyNodeInChat'));
+eval(extractFunc('_selectedTextReplySelection'));
+eval(extractFunc('_formatSelectedTextReplyQuote'));
+eval(extractFunc('_seedSelectedTextRefineDraft'));
+eval(extractFunc('_selectedTextReplyLiveText'));
+eval(extractFunc('_selectedTextReplyButton'));
+eval(extractFunc('_hideSelectedTextReplyButton'));
+eval(extractFunc('_positionSelectedTextReplyButton'));
+eval(extractFunc('_updateSelectedTextReplyButton'));
+
+if (scenario === 'browser_fixture') {
+  process.stdout.write(JSON.stringify({
+    helpers: [
+      extractFunc('_selectedTextReplyT'),
+      extractFunc('_selectedTextReplyRoot'),
+      extractFunc('_selectedTextReplyNodeInChat'),
+      extractFunc('_selectedTextReplySelection'),
+      extractFunc('_formatSelectedTextReplyQuote'),
+      extractFunc('_seedSelectedTextRefineDraft'),
+      extractFunc('_selectedTextReplyLiveText'),
+      extractFunc('_selectedTextReplyButton'),
+      extractFunc('_hideSelectedTextReplyButton'),
+      extractFunc('_positionSelectedTextReplyButton'),
+      extractFunc('_updateSelectedTextReplyButton'),
+    ].join('\n'),
+  }));
+  process.exit(0);
 }
 
 function buildShell() {
@@ -450,3 +465,77 @@ def test_refine_keys_exist_in_all_locale_blocks():
     assert I18N.count("selected_text_refine:") == 15
     assert I18N.count("selected_text_refine_title:") == 15
     assert I18N.count("selected_text_refine_instruction:") == 15
+
+
+def test_selected_text_mousedown_preserves_selection_until_click_revalidation_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the selected-text browser test")
+
+    fixture = _run_js("browser_fixture")["helpers"]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content(
+            "<!doctype html><html><body>"
+            '<div id="messages"><p id="transcript">Alpha Beta</p></div>'
+            '<textarea id="msg"></textarea>'
+            "</body></html>"
+        )
+        page.add_script_tag(
+            content=(
+                "let _selectedTextReplyBtn = null;"
+                "let _selectedTextRefineBtn = null;"
+                "let _selectedTextReplyGroup = null;"
+                "let _selectedTextReplyText = '';"
+                "let _selectedTextReplyRaf = 0;"
+                "let _pendingSelections = [];"
+                "let _selectionIdCounter = 0;"
+                + fixture
+            )
+        )
+        page.evaluate(
+            """
+            window.$ = id => document.getElementById(id);
+            window.t = key => ({
+              selected_text_reply: 'Reply with selection',
+              selected_text_reply_title: 'Reply',
+              selected_text_refine: 'Refine',
+              selected_text_refine_title: 'Refine',
+              selected_text_refine_instruction: 'Refine instruction:',
+            }[key] || key);
+            window.autoResize = () => {};
+            const range = document.createRange();
+            const text = document.getElementById('transcript').firstChild;
+            range.setStart(text, 0);
+            range.setEnd(text, text.length);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const group = _selectedTextReplyButton().parentElement;
+            group.classList.add('visible');
+            """
+        )
+        refine = page.locator("#selectedTextRefineBtn")
+        refine.hover()
+        page.mouse.down()
+        selection_after_mousedown = page.evaluate("window.getSelection().toString()")
+        page.mouse.up()
+        result = page.evaluate(
+            "({draft: document.getElementById('msg').value, selection: window.getSelection().toString()})"
+        )
+        browser.close()
+
+    assert selection_after_mousedown == "Alpha Beta"
+    assert result == {
+        "draft": (
+            "<!-- hermes-selected-context -->\n"
+            "> Alpha Beta\n\n"
+            "Refine instruction:"
+        ),
+        "selection": "",
+    }
