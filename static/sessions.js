@@ -1647,6 +1647,9 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
+    if(typeof refreshProfileTransitionFastMode==='function'){
+      refreshProfileTransitionFastMode(data.default_model,data.default_model_provider);
+    }
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);

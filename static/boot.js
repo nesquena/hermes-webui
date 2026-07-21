@@ -2198,6 +2198,7 @@ $('modelSelect').onchange=async()=>{
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
+  if(typeof clearProfileTransitionFastModeContext==='function') clearProfileTransitionFastModeContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
@@ -2205,6 +2206,7 @@ $('modelSelect').onchange=async()=>{
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
+    if(typeof syncFastMode==='function') syncFastMode();
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
@@ -2212,6 +2214,7 @@ $('modelSelect').onchange=async()=>{
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
   if(typeof syncReasoningChip==='function') syncReasoningChip();
+  if(typeof syncFastMode==='function') syncFastMode();
   syncTopbar();
   // Clarify scope: composer model changes are session-local, not the global default.
   if(typeof showToast==='function'){
@@ -3620,7 +3623,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
-    else if(typeof syncReasoningChip==='function') syncReasoningChip();
+    else {
+      if(typeof syncReasoningChip==='function') syncReasoningChip();
+      if(typeof syncFastMode==='function') syncFastMode();
+    }
   }).catch(e=>{
     window._modelDropdownReady=null;
     throw e;

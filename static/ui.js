@@ -5238,6 +5238,120 @@ document.addEventListener('click',function(e){
   }
 });
 
+// ── Fast mode ────────────────────────────────────────────────────────────────
+let _fastModeState=null;
+let _lastFastModeFetchKey=null;
+let _fastModeFetchSeq=0;
+let _fastModeMutationSeq=0;
+let _profileTransitionFastModeContext=null;
+
+function _fastModeContext(){
+  const transition=_profileTransitionFastModeContext;
+  const session=S&&S.session;
+  if(transition&&(!session||session.profile!==transition.profile)) return {profile:transition.profile,model:transition.model||'',provider:transition.provider||''};
+  const sel=$('modelSelect');
+  const model=(session&&session.model)||(sel&&sel.value)||'';
+  let provider=(session&&session.model_provider)||'';
+  if(!provider&&sel&&model&&typeof _modelStateForSelect==='function') provider=_modelStateForSelect(sel,model).model_provider||'';
+  return {profile:(session&&session.profile)||(S&&S.activeProfile)||'default',model,provider};
+}
+
+function _fastModeQuery(){
+  const params=new URLSearchParams();
+  const ctx=_fastModeContext();
+  if(ctx.model) params.set('model',ctx.model);
+  if(ctx.provider) params.set('provider',ctx.provider);
+  const qs=params.toString();
+  return qs?'?'+qs:'';
+}
+
+function _applyFastModeState(st, loading, error){
+  const button=$('composerFastModeButton');
+  const mobile=$('composerMobileFastModeAction');
+  const label=$('composerMobileFastModeLabel');
+  if(!button&&!mobile) return;
+  const supported=!!(st&&st.supported);
+  const enabled=supported&&!!st.enabled;
+  _fastModeState=supported?{supported:true,enabled,service_tier:st.service_tier||''}:null;
+  [button,mobile].forEach(function(el){
+    if(!el) return;
+    if(el===button) el.hidden=!supported;
+    else el.style.display=supported?'':'none';
+    el.disabled=!supported||!!loading;
+    el.setAttribute('aria-pressed',enabled?'true':'false');
+    el.classList.toggle('loading',!!loading);
+    el.classList.toggle('error',!!error);
+    const scope=t(enabled?'composer_fast_mode_on':'composer_fast_mode_off');
+    el.title=scope;
+    el.setAttribute('aria-label',scope);
+  });
+  if(label) label.textContent=t(enabled?'composer_fast_on':'composer_fast_off');
+}
+
+function fetchFastMode(keyOverride){
+  const key=keyOverride===undefined?_fastModeQuery():keyOverride;
+  const seq=++_fastModeFetchSeq;
+  _lastFastModeFetchKey=key;
+  api('/api/fast-mode'+key).then(function(st){
+    if(seq!==_fastModeFetchSeq) return;
+    _applyFastModeState(st||null,false,false);
+  }).catch(function(){
+    if(seq!==_fastModeFetchSeq) return;
+    _lastFastModeFetchKey=null;
+    _applyFastModeState(null,false,true);
+  });
+}
+
+function syncFastMode(){
+  const key=_fastModeQuery();
+  if(_lastFastModeFetchKey===key){
+    if(_fastModeState) _applyFastModeState(_fastModeState,false,false);
+    return;
+  }
+  _applyFastModeState(null,true,false);
+  fetchFastMode(key);
+}
+
+function refreshProfileTransitionFastMode(model,provider){
+  _profileTransitionFastModeContext={profile:(S&&S.activeProfile)||'default',model,provider};
+  _fastModeState=null;
+  _lastFastModeFetchKey=null;
+  ++_fastModeFetchSeq;
+  ++_fastModeMutationSeq;
+  _applyFastModeState(null,false,false);
+  syncFastMode();
+}
+
+function clearProfileTransitionFastModeContext(){
+  _profileTransitionFastModeContext=null;
+  _lastFastModeFetchKey=null;
+  ++_fastModeMutationSeq;
+}
+
+function toggleFastMode(){
+  if(!_fastModeState||!_fastModeState.supported) return;
+  const previous=Object.assign({},_fastModeState);
+  const desired=!previous.enabled;
+  const ctx=_fastModeContext();
+  const mutationSeq=++_fastModeMutationSeq;
+  ++_fastModeFetchSeq;
+  _applyFastModeState({supported:true,enabled:desired,service_tier:desired?'priority':''},true,false);
+  api('/api/fast-mode',{method:'POST',body:JSON.stringify({enabled:desired,model:ctx.model||'',provider:ctx.provider||''})})
+    .then(function(st){
+      if(mutationSeq!==_fastModeMutationSeq||_fastModeContext().profile!==ctx.profile) return;
+      _lastFastModeFetchKey=null;
+      fetchFastMode(_fastModeQuery());
+      showToast(t(st&&st.enabled?'composer_fast_mode_enabled':'composer_fast_mode_disabled'));
+    })
+    .catch(function(){
+      if(mutationSeq!==_fastModeMutationSeq||_fastModeContext().profile!==ctx.profile) return;
+      _lastFastModeFetchKey=null;
+      _applyFastModeState(previous,true,true);
+      showToast(t('composer_fast_mode_failed'));
+      fetchFastMode(_fastModeQuery());
+    });
+}
+
 // ── Session toolsets chip (#493) ───────────────────────────────────────────
 let _currentSessionToolsets = null; // null = active profile defaults, array = custom list
 let _toolsetsCatalog = null;
@@ -10535,6 +10649,7 @@ function syncTopbar(){
   }
   if(typeof syncModelChip==='function') syncModelChip();
   if(typeof syncReasoningChip==='function') syncReasoningChip();
+  if(typeof syncFastMode==='function') syncFastMode();
   if(typeof syncToolsetsChip==='function') syncToolsetsChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');

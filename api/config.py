@@ -4358,6 +4358,28 @@ def _normalize_openai_family_model_id(model_id: str | None) -> str:
     return model
 
 
+def _model_identity_matches_provider(
+    model_id: str | None, provider_id: str | None
+) -> bool:
+    """Fail closed when a qualified model contradicts its provider identity."""
+    model = str(model_id or "").strip()
+    provider = str(_resolve_provider_alias(str(provider_id or "").strip().lower()))
+    if not model or not provider:
+        return False
+
+    qualified = _parse_provider_qualified_model_id(model)
+    if qualified is not None:
+        _, embedded_provider = qualified
+        embedded = str(_resolve_provider_alias(embedded_provider.strip().lower()))
+        return embedded == provider
+
+    if "://" not in model and "/" in model:
+        embedded_provider = model.split("/", 1)[0].strip().lower()
+        embedded = str(_resolve_provider_alias(embedded_provider))
+        return embedded == provider
+    return True
+
+
 def _legacy_openai_service_tier_overrides(model_id: str | None, provider: str | None) -> dict:
     """Compatibility fallback for standalone WebUI installs without hermes_cli.
 
@@ -4411,6 +4433,8 @@ def _main_model_supports_service_tier(
     """Return True when the current main-model selection can use OpenAI service tier."""
     if not _is_openai_family_provider(provider):
         return False
+    if not _model_identity_matches_provider(model_id, provider):
+        return False
     return (
         str(_resolve_main_model_fast_mode_overrides(model_id, provider).get("service_tier", "")).strip().lower()
         == "priority"
@@ -4462,6 +4486,102 @@ def _public_main_service_tier(model_cfg: dict) -> str:
     return "priority" if service_tier == "priority" else ""
 
 
+def _resolve_fast_mode_selection(
+    model_id: str | None, provider_id: str | None, model_cfg: dict
+) -> tuple[str, str, bool]:
+    """Resolve a complete request override or the saved profile selection."""
+    override_model = str(model_id or "").strip()
+    override_provider = str(provider_id or "").strip()
+    if bool(override_model) != bool(override_provider):
+        return override_model, override_provider, False
+    effective_model = str(
+        override_model
+        or model_cfg.get("default")
+        or model_cfg.get("name")
+        or ""
+    ).strip()
+    effective_provider = str(
+        override_provider or model_cfg.get("provider") or ""
+    ).strip()
+    if not effective_provider and effective_model:
+        _, effective_provider, _ = resolve_model_provider(effective_model)
+    return effective_model, effective_provider, True
+
+
+def get_fast_mode_status(
+    *, model_id: str | None = None, provider_id: str | None = None
+) -> dict:
+    """Return profile-wide Fast mode state gated by the effective selection."""
+    config_data = _load_yaml_config_file(_get_config_path())
+    model_cfg = config_data.get("model") if isinstance(config_data, dict) else {}
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    effective_model, effective_provider, complete = _resolve_fast_mode_selection(
+        model_id, provider_id, model_cfg
+    )
+    supported = complete and _main_model_supports_service_tier(
+        effective_model, effective_provider
+    )
+    service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
+    service_tier = "priority" if service_tier == "priority" else ""
+    return {
+        "supported": supported,
+        "enabled": supported and service_tier == "priority",
+        "service_tier": service_tier,
+    }
+
+
+def set_fast_mode(
+    enabled: bool, *, model_id: str | None = None, provider_id: str | None = None
+) -> dict:
+    """Persist profile-wide Fast mode after validating the effective selection."""
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a boolean")
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file_raw(config_path)
+        model_cfg = config_data.get("model")
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+        effective_model, effective_provider, complete = _resolve_fast_mode_selection(
+            model_id, provider_id, model_cfg
+        )
+        supported = complete and _main_model_supports_service_tier(
+            effective_model, effective_provider
+        )
+        if enabled and not supported:
+            raise ValueError(
+                "The effective model/provider does not support Fast mode"
+            )
+        if enabled:
+            model_cfg["service_tier"] = "priority"
+        else:
+            model_cfg.pop("service_tier", None)
+        config_data["model"] = model_cfg
+        try:
+            # Use Hermes Agent's canonical atomic YAML writer so symlinks,
+            # ownership, and permissions follow the same semantics as the CLI
+            # instead of changing WebUI's shared writer for this one control.
+            from utils import atomic_yaml_write
+        except ImportError:
+            # Standalone WebUI installs without the agent utility retain the
+            # repository's existing config-save semantics.
+            _save_yaml_config_file(config_path, config_data)
+        else:
+            atomic_yaml_write(
+                config_path,
+                _config_for_yaml_save(config_data),
+                sort_keys=False,
+            )
+            with _yaml_file_cache_lock:
+                _yaml_file_cache.pop(str(config_path), None)
+    reload_config()
+    # Cached-agent signatures include _main_request_overrides, so the next turn
+    # safely rebuilds any agent whose effective Fast state changed.
+    return get_fast_mode_status(model_id=model_id, provider_id=provider_id)
+
+
 def _main_model_request_overrides(
     config_data: dict,
     effective_model: str | None = None,
@@ -4480,15 +4600,10 @@ def _main_model_request_overrides(
     if not isinstance(model_cfg, dict):
         return {}
     overrides = {}
-    gate_model = effective_model
-    gate_provider = effective_provider
-    if not gate_model:
-        gate_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
-    if not gate_provider:
-        gate_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if not gate_provider:
-            _, gate_provider, _ = resolve_model_provider(gate_model)
-    if _main_model_supports_service_tier(gate_model, gate_provider):
+    gate_model, gate_provider, complete = _resolve_fast_mode_selection(
+        effective_model, effective_provider, model_cfg
+    )
+    if complete and _main_model_supports_service_tier(gate_model, gate_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":
             overrides["service_tier"] = "priority"
