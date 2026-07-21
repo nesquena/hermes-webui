@@ -7545,7 +7545,8 @@ function _buildSessionSidebarGroups(orderedSessions,groupByProject,projects,now)
   }
   let curLabel=null,curItems=[];
   for(const s of unpinned){
-    const label=_sessionTimeBucketLabel(_sessionSortTimestampMs(s),now);
+    const ts=_sessionSortTimestampMs(s);
+    const label=_sessionTimeBucketLabel(ts, now);
     if(label!==curLabel){
       if(curItems.length) groups.push({label:curLabel,items:curItems});
       curLabel=label;curItems=[s];

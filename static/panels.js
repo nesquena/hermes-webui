@@ -8518,11 +8518,27 @@ function _scheduleAppearanceAutosave(){
   _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload,generation),350);
 }
 
+function _queueAppearanceSettingsWrite(payload){
+  const write=_appearanceAutosaveWriteQueue.then(()=>api('/api/settings',{method:'POST',body:JSON.stringify(payload)}));
+  _appearanceAutosaveWriteQueue=write.catch(()=>{});
+  return write;
+}
+
+function _writeSettingsWithAppearanceBarrier(payload){
+  if(_settingsAppearanceAutosaveTimer){
+    clearTimeout(_settingsAppearanceAutosaveTimer);
+    _settingsAppearanceAutosaveTimer=null;
+  }
+  _appearanceAutosaveGeneration++;
+  _settingsAppearanceAutosaveRetryPayload=null;
+  _setAppearanceAutosaveStatus();
+  return _queueAppearanceSettingsWrite(payload);
+}
+
 async function _autosaveAppearanceSettings(payload){
   const generation=arguments.length>1&&arguments[1]!=null?arguments[1]:_appearanceAutosaveGeneration;
   try{
-    const write=_appearanceAutosaveWriteQueue.then(()=>api('/api/settings',{method:'POST',body:JSON.stringify(payload)}));
-    _appearanceAutosaveWriteQueue=write.catch(()=>{});
+    const write=_queueAppearanceSettingsWrite(payload);
     const saved=await write;
     if(generation!==_appearanceAutosaveGeneration) return;
     _settingsAppearanceAutosaveRetryPayload=null;
@@ -9177,6 +9193,10 @@ async function loadSettingsPanel(){
     const langSel=$('settingsLanguage');
     if(langSel){
       langSel.innerHTML='';
+      langSel.addEventListener('change',function(){
+        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();}
+        _schedulePreferencesAutosave();
+      },{once:false});
       if(typeof LOCALES!=='undefined'){
         for(const [code,bundle] of Object.entries(LOCALES)){
           const opt=document.createElement('option');
@@ -9185,10 +9205,6 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();}
-        _schedulePreferencesAutosave();
-      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -12581,7 +12597,8 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      // Keep the password-save path visibly on the shared api('/api/settings'...) surface the preflight guard audits.
+      const saved=await _writeSettingsWithAppearanceBarrier(payload);
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12611,7 +12628,7 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _writeSettingsWithAppearanceBarrier(body);
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
