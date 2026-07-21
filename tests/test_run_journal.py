@@ -65,7 +65,9 @@ def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
 
     append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
 
-    assert len(fsync_calls) == 1
+    # Terminal events also update the durable terminal-run index used by
+    # unresolved Worklog reconciliation.
+    assert len(fsync_calls) == 3
 
 
 def test_run_journal_eager_fsync_mode_fsyncs_non_terminal_events(tmp_path, monkeypatch):
@@ -189,7 +191,93 @@ def test_terminal_run_summaries_bounds_unresolved_summary_parses(tmp_path, monke
     )
 
     assert len(summaries) == 64
-    assert len(calls) == 64
+    assert len(calls) == 0
+
+
+def test_terminal_run_summaries_bounds_directory_stats(tmp_path, monkeypatch):
+    for idx in range(300):
+        run_id = f"run_{idx:03d}"
+        append_run_event("session_1", run_id, "token", {"text": "new"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+        path = tmp_path / "_run_journal" / "session_1" / f"{run_id}.jsonl"
+        os.utime(path, (10.0 + idx, 10.0 + idx))
+
+    stat_calls = []
+    original_stat = Path.stat
+    journal_root = tmp_path / "_run_journal" / "session_1"
+
+    def counted_stat(self, *args, **kwargs):
+        if self.parent == journal_root and self.name.endswith(".jsonl"):
+            stat_calls.append(self.name)
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", counted_stat)
+
+    summaries = terminal_run_summaries_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=64,
+        max_candidates=64,
+    )
+
+    assert len(summaries) == 64
+    assert len(stat_calls) <= 64
+
+
+def test_terminal_run_summaries_rejects_malformed_index_authority(tmp_path):
+    append_run_event("session_1", "run_good", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_good", "done", {"session": {}}, session_dir=tmp_path)
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    with index_path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "foreign_session",
+                    "run_id": "run_foreign",
+                    "stream_id": "run_foreign",
+                    "last_seq": 1,
+                    "last_event_id": "run_foreign:1",
+                    "terminal": True,
+                    "terminal_state": "completed",
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "session_1",
+                    "run_id": "run_bad_stream",
+                    "stream_id": "../run_bad_stream",
+                    "last_seq": 1,
+                    "last_event_id": "run_bad_stream:1",
+                    "terminal": True,
+                    "terminal_state": "completed",
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "session_1",
+                    "run_id": "run_bad_seq",
+                    "stream_id": "run_bad_seq",
+                    "last_seq": 2,
+                    "last_event_id": "run_bad_seq:1",
+                    "terminal": True,
+                    "terminal_state": "completed",
+                }
+            )
+            + "\n"
+        )
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=4)
+
+    assert [summary["run_id"] for summary in summaries] == ["run_good"]
 
 
 def test_latest_summary_reuses_unchanged_journal_summary_without_reparsing(tmp_path, monkeypatch):

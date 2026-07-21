@@ -1231,6 +1231,7 @@ class Session:
                  enabled_toolsets=None,
                  composer_draft=None,
                  anchor_activity_scenes=None,
+                 terminal_anchor_reconciliation=None,
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
@@ -1319,6 +1320,9 @@ class Session:
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
+        self.terminal_anchor_reconciliation = (
+            terminal_anchor_reconciliation if isinstance(terminal_anchor_reconciliation, dict) else {}
+        )
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at

@@ -24,6 +24,17 @@ def _client_anchor_scene_message_ref(message):
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _authoritative_journal_events(events, session_id, run_id):
+    stamped = []
+    for event in events:
+        stamped_event = dict(event)
+        stamped_event.setdefault("version", 1)
+        stamped_event.setdefault("run_id", run_id)
+        stamped_event.setdefault("session_id", session_id)
+        stamped.append(stamped_event)
+    return stamped
+
+
 def _anchor_scene_visible_semantics(scene, *, include_terminal=False):
     semantics = []
     for row in scene.get("activity_rows") or []:
@@ -2335,6 +2346,7 @@ def test_terminal_journal_snapshot_can_settle_anchor_activity_scene(monkeypatch)
             },
         },
     ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
     monkeypatch.setattr(
         routes,
         "find_run_summary",
@@ -2441,6 +2453,7 @@ def test_terminal_journal_materializes_missing_settled_anchor_scene(monkeypatch)
             },
         },
     ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
     summary = {
         "session_id": session_id,
         "run_id": stream_id,
@@ -2522,6 +2535,7 @@ def test_terminal_journal_materialization_fails_closed_without_terminal_target(m
             "payload": {"message": "Cancelled by user"},
         },
     ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
     summary = {
         "session_id": session_id,
         "run_id": stream_id,
@@ -2549,7 +2563,8 @@ def test_terminal_journal_materialization_fails_closed_without_terminal_target(m
 
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
-    record = next(iter(session.anchor_activity_scenes.values()))
+    assert session.anchor_activity_scenes == {}
+    record = session.terminal_anchor_reconciliation["streams"][stream_id]
     assert record["scene"] is None
     assert record["terminal_disposition"]["reason"] == "missing_terminal_target"
 
@@ -2592,6 +2607,7 @@ def test_terminal_journal_materialization_fails_closed_without_message_ref(monke
             },
         },
     ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
     summary = {
         "session_id": session_id,
         "run_id": stream_id,
@@ -2617,7 +2633,8 @@ def test_terminal_journal_materialization_fails_closed_without_message_ref(monke
 
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
-    record = next(iter(session.anchor_activity_scenes.values()))
+    assert session.anchor_activity_scenes == {}
+    record = session.terminal_anchor_reconciliation["streams"][stream_id]
     assert record["scene"] is None
     assert record["terminal_disposition"]["reason"] == "missing_terminal_target"
 
@@ -2684,6 +2701,7 @@ def test_terminal_journal_materializes_detached_cancel_with_owned_target(monkeyp
             },
         },
     ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
     summary = {
         "session_id": session_id,
         "run_id": stream_id,
@@ -2762,6 +2780,7 @@ def test_terminal_journal_rejects_mismatched_terminal_target(monkeypatch):
             },
         },
     ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
     summary = {
         "session_id": session_id,
         "run_id": stream_id,
@@ -2783,7 +2802,8 @@ def test_terminal_journal_rejects_mismatched_terminal_target(monkeypatch):
 
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
-    record = next(iter(session.anchor_activity_scenes.values()))
+    assert session.anchor_activity_scenes == {}
+    record = session.terminal_anchor_reconciliation["streams"][stream_id]
     assert record["scene"] is None
     assert record["terminal_disposition"]["reason"] == "terminal_target_not_found"
 
@@ -2963,6 +2983,65 @@ def test_run_journal_live_snapshot_rejects_malformed_terminal_authority(
     assert routes._run_journal_live_snapshot(stream_id, settled=True) is None
 
 
+def test_run_journal_live_snapshot_rejects_malformed_nonterminal_sibling_authority(
+    monkeypatch,
+):
+    from api import routes
+
+    stream_id = "stream-sibling-authority"
+    session_id = "session-sibling-authority"
+    message = {"role": "assistant", "content": "owned answer", "_ts": 2.0}
+    events = [
+        {
+            "version": 999,
+            "event": "token",
+            "seq": 42,
+            "event_id": f"{stream_id}:1",
+            "run_id": stream_id,
+            "session_id": "foreign-session",
+            "created_at": 1.0,
+            "payload": {"text": "must not project"},
+        },
+        {
+            "version": 1,
+            "event": "done",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "run_id": stream_id,
+            "session_id": session_id,
+            "created_at": 2.0,
+            "terminal": True,
+            "payload": {
+                "terminal_message_target": {
+                    "version": "terminal_message_target_v1",
+                    "session_id": session_id,
+                    "run_id": stream_id,
+                    "stream_id": stream_id,
+                    "message_index": 1,
+                    "message_ref": _client_anchor_scene_message_ref(message),
+                },
+            },
+        },
+    ]
+    events = _authoritative_journal_events(events, session_id, stream_id)
+    summary = {
+        "session_id": session_id,
+        "run_id": stream_id,
+        "last_seq": 2,
+        "last_event_id": f"{stream_id}:2",
+        "terminal": True,
+        "terminal_state": "completed",
+    }
+    monkeypatch.setattr(routes, "find_run_summary", lambda _stream_id: summary)
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _session_id, _run_id: {"events": events, "malformed": []},
+    )
+
+    assert routes._run_journal_live_snapshot(stream_id, settled=True) is None
+
+
 def test_terminal_journal_records_non_materializable_disposition_once(monkeypatch):
     from api import routes
 
@@ -3001,6 +3080,7 @@ def test_terminal_journal_records_non_materializable_disposition_once(monkeypatc
             },
         },
     ]
+    events = _authoritative_journal_events(events, "session-non-materializable", stream_id)
     summary = {
         "session_id": "session-non-materializable",
         "run_id": stream_id,
@@ -3027,7 +3107,8 @@ def test_terminal_journal_records_non_materializable_disposition_once(monkeypatc
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
     assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
-    record = next(iter(session.anchor_activity_scenes.values()))
+    assert session.anchor_activity_scenes == {}
+    record = session.terminal_anchor_reconciliation["streams"][stream_id]
     assert record["message_index"] is None
     assert record["message_ref"] == ""
     assert record["scene"] is None
@@ -3192,11 +3273,101 @@ def test_terminal_journal_materializer_durably_skips_invalid_batch_and_reaches_o
         for record in session.anchor_activity_scenes.values()
         if isinstance(record, dict)
     }
-    assert set(invalid_streams).issubset(records_by_stream)
-    assert records_by_stream[invalid_streams[0]]["scene"] is None
-    assert records_by_stream[invalid_streams[0]]["terminal_disposition"]["reason"] == "missing_terminal_target"
+    progress_records = session.terminal_anchor_reconciliation["streams"]
+    assert set(invalid_streams).issubset(progress_records)
+    assert progress_records[invalid_streams[0]]["scene"] is None
+    assert progress_records[invalid_streams[0]]["terminal_disposition"]["reason"] == "missing_terminal_target"
     assert records_by_stream[old_stream]["scene"]["activity_rows"]
     assert records_by_stream[old_stream]["message_index"] == 1
+
+
+def test_terminal_reconciliation_progress_does_not_evict_real_anchor_scenes(
+    monkeypatch,
+):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    session_id = "session-progress-map"
+    messages = [
+        {"role": "user", "content": "older work"},
+        {"role": "assistant", "content": "older answer", "_ts": 2.0},
+    ]
+    real_records = {
+        f"real:{idx:03d}": {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": idx + 10,
+            "message_ref": f"real:{idx:03d}",
+            "stream_id": f"stream-real-{idx:03d}",
+            "scene": {"version": "activity_scene_v1", "activity_rows": [{"role": "prose"}]},
+            "updated_at": float(idx),
+        }
+        for idx in range(256)
+    }
+    invalid_streams = [f"stream-invalid-progress-{idx:03d}" for idx in range(320)]
+    summaries = [
+        {
+            "session_id": session_id,
+            "run_id": stream_id,
+            "last_seq": 1,
+            "last_event_id": f"{stream_id}:1",
+            "terminal": True,
+            "terminal_state": "completed",
+        }
+        for stream_id in invalid_streams
+    ]
+
+    def events_for(run_id):
+        return [
+            {
+                "version": 1,
+                "event": "done",
+                "seq": 1,
+                "event_id": f"{run_id}:1",
+                "run_id": run_id,
+                "session_id": session_id,
+                "created_at": 1.0,
+                "terminal": True,
+                "payload": {"message": "missing target"},
+            }
+        ]
+
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes=dict(real_records),
+        terminal_anchor_reconciliation={},
+        save_calls=0,
+    )
+    monkeypatch.setattr(routes, "terminal_run_summaries_for_session", lambda sid, **kwargs: summaries)
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda run_id: next(summary for summary in summaries if summary["run_id"] == run_id),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _session_id, run_id: {"events": events_for(run_id), "malformed": []},
+    )
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert set(real_records).issubset(session.anchor_activity_scenes)
+    streams = {
+        record["stream_id"]
+        for record in session.anchor_activity_scenes.values()
+        if isinstance(record, dict)
+    }
+    assert streams == {record["stream_id"] for record in real_records.values()}
+    progress = getattr(session, "terminal_anchor_reconciliation", {})
+    progress_records = progress.get("streams") if isinstance(progress, dict) else None
+    assert isinstance(progress_records, dict)
+    assert set(invalid_streams).issubset(progress_records)
 
 
 @pytest.mark.parametrize("terminal_event", ["cancel", "apperror"])
@@ -3360,6 +3531,7 @@ def test_terminal_journal_materializes_older_unresolved_terminal_once(monkeypatc
             },
         },
     ]
+    old_events = _authoritative_journal_events(old_events, session_id, old_stream)
     new_events = [
         {
             "event": "token",
@@ -3383,6 +3555,7 @@ def test_terminal_journal_materializes_older_unresolved_terminal_once(monkeypatc
             },
         },
     ]
+    new_events = _authoritative_journal_events(new_events, session_id, new_stream)
     new_ref = _client_anchor_scene_message_ref(messages[3])
     session = SessionStub(
         session_id=session_id,

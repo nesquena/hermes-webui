@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
+TERMINAL_RUN_INDEX_NAME = "_terminal_runs.jsonl"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
@@ -43,6 +44,10 @@ _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_RUN_EVENTS_MAX_BYTES = 2 * 1024 * 1024
+_RUN_EVENTS_MAX_ROWS = 2048
+_TERMINAL_INDEX_MAX_BYTES = 512 * 1024
+_TERMINAL_INDEX_MAX_ROWS = 1024
 _SNAPSHOT_ARGS_MAX_ITEMS = 64
 _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
@@ -68,6 +73,12 @@ def _run_path(session_id: str, run_id: str, session_dir: Path | None = None) -> 
     rid = _validate_id(run_id, "run_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     return root / RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+
+
+def _terminal_index_path(session_id: str, session_dir: Path | None = None) -> Path:
+    sid = _validate_id(session_id, "session_id")
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    return root / RUN_JOURNAL_DIR_NAME / sid / TERMINAL_RUN_INDEX_NAME
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -142,25 +153,47 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
+def _read_jsonl(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
+) -> tuple[list[dict], list[dict]]:
     events: list[dict] = []
     malformed: list[dict] = []
+    total_bytes = 0
+    row_count = 0
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        fh = path.open("rb")
     except FileNotFoundError:
         return events, malformed
-    for line_no, raw in enumerate(lines, start=1):
-        if not raw.strip():
-            continue
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            malformed.append({"line": line_no, "raw": raw})
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-        else:
-            malformed.append({"line": line_no, "raw": raw})
+    with fh:
+        for line_no, raw_bytes in enumerate(fh, start=1):
+            if max_bytes is not None:
+                total_bytes += len(raw_bytes)
+                if total_bytes > max(0, int(max_bytes)):
+                    malformed.append({"line": line_no, "reason": "replay_limit_bytes"})
+                    break
+            try:
+                raw = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                malformed.append({"line": line_no, "raw": ""})
+                continue
+            if not raw.strip():
+                continue
+            row_count += 1
+            if max_rows is not None and row_count > max(0, int(max_rows)):
+                malformed.append({"line": line_no, "reason": "replay_limit_rows"})
+                break
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
+                continue
+            if isinstance(parsed, dict):
+                events.append(parsed)
+            else:
+                malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
     return events, malformed
 
 
@@ -334,6 +367,65 @@ def _fsync_parent_dir(path: Path) -> None:
         pass
 
 
+def _append_terminal_run_index(
+    session_id: str,
+    run_id: str,
+    event: dict,
+    *,
+    session_dir: Path | None = None,
+) -> None:
+    path = _terminal_index_path(session_id, session_dir=session_dir)
+    entry = {
+        "version": 1,
+        "session_id": str(session_id),
+        "run_id": str(run_id),
+        "stream_id": str(run_id),
+        "last_seq": event.get("seq"),
+        "last_event_id": event.get("event_id"),
+        "terminal": True,
+        "terminal_state": event.get("terminal_state"),
+        "last_event": event.get("event"),
+        "created_at": event.get("created_at"),
+    }
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created_file = not path.exists()
+    with _lock_for(path):
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+    if created_file:
+        _fsync_parent_dir(path)
+
+
+def _iter_terminal_index_entries(path: Path, *, max_bytes: int, max_rows: int):
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    start = max(0, size - max(0, int(max_bytes)))
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            if start:
+                fh.readline()
+            data = fh.read(max(0, int(max_bytes)))
+    except FileNotFoundError:
+        return
+    rows = data.splitlines()
+    for raw in reversed(rows[-max(0, int(max_rows)) :]):
+        if not raw.strip():
+            continue
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            yield parsed
+
+
 def _event_created_at(event: dict, *, fallback: float = 0.0) -> float:
     try:
         return float(event.get("created_at") or fallback)
@@ -423,6 +515,13 @@ def append_run_event(
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
         _discard_cached_summary(path)
+        if terminal_state:
+            _append_terminal_run_index(
+                session_id,
+                run_id,
+                event,
+                session_dir=session_dir,
+            )
         if created_file:
             _fsync_parent_dir(path)
         return event
@@ -461,9 +560,11 @@ def read_run_events(
     after_seq: int | None = None,
     max_seq: int | None = None,
     session_dir: Path | None = None,
+    max_bytes: int | None = _RUN_EVENTS_MAX_BYTES,
+    max_rows: int | None = _RUN_EVENTS_MAX_ROWS,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path)
+    events, malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -606,27 +707,89 @@ def terminal_run_summaries_for_session(
         max_candidates = max(limit, min(int(max_candidates), 256))
     except (TypeError, ValueError):
         max_candidates = 64
-    candidates: list[tuple[float, str, Path]] = []
-    for path in session_root.glob("*.jsonl"):
+    skip_run_ids = {str(run_id or "").strip() for run_id in (skip_run_ids or [])}
+    summaries: list[dict] = []
+    seen_run_ids: set[str] = set()
+    inspected = 0
+
+    index_path = _terminal_index_path(sid, session_dir=root)
+    for entry in _iter_terminal_index_entries(
+        index_path,
+        max_bytes=_TERMINAL_INDEX_MAX_BYTES,
+        max_rows=max(max_candidates * 4, _TERMINAL_INDEX_MAX_ROWS),
+    ) or []:
+        if entry.get("version") != 1:
+            continue
+        raw_session_id = entry.get("session_id")
+        if not isinstance(raw_session_id, str) or raw_session_id.strip() != sid:
+            continue
         try:
-            run_id = _validate_id(path.stem, "run_id")
+            run_id = _validate_id(str(entry.get("run_id") or ""), "run_id")
         except ValueError:
             continue
         try:
-            mtime = path.stat().st_mtime
-        except OSError:
+            stream_id = _validate_id(str(entry.get("stream_id") or run_id), "stream_id")
+        except ValueError:
             continue
-        candidates.append((mtime, run_id, path))
-    skip_run_ids = {str(run_id or "").strip() for run_id in (skip_run_ids or [])}
-    ordered_candidates = sorted(candidates, reverse=True)
-    summaries: list[dict] = []
-    inspected = 0
-    for _mtime, run_id, path in ordered_candidates:
+        last_seq = entry.get("last_seq")
+        if not isinstance(last_seq, int) or isinstance(last_seq, bool) or last_seq <= 0:
+            continue
+        last_event_id = str(entry.get("last_event_id") or "").strip()
+        if last_event_id != f"{run_id}:{last_seq}":
+            continue
         if run_id in skip_run_ids:
             continue
+        if run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
         inspected += 1
         if inspected > max_candidates:
             break
+        if entry.get("terminal") is not True:
+            continue
+        summary = {
+            "session_id": sid,
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "event_count": int(entry.get("event_count") or 0),
+            "last_seq": last_seq,
+            "last_event_id": last_event_id,
+            "terminal": True,
+            "terminal_state": entry.get("terminal_state"),
+            "last_event": entry.get("last_event"),
+            "path": str(session_root / f"{run_id}.jsonl"),
+        }
+        summaries.append(summary)
+        if len(summaries) >= limit:
+            break
+    if summaries or inspected >= max_candidates:
+        return summaries
+
+    candidates: list[tuple[float, str, Path]] = []
+    try:
+        scandir_iter = os.scandir(session_root)
+    except OSError:
+        return summaries
+    with scandir_iter as entries:
+        for entry in entries:
+            name = entry.name
+            if not name.endswith(".jsonl") or name.startswith("_"):
+                continue
+            try:
+                run_id = _validate_id(name[:-6], "run_id")
+            except ValueError:
+                continue
+            if run_id in skip_run_ids or run_id in seen_run_ids:
+                continue
+            inspected += 1
+            if inspected > max_candidates:
+                break
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((mtime, run_id, Path(entry.path)))
+    for _mtime, run_id, path in sorted(candidates, reverse=True):
         summary = latest_run_summary(sid, run_id, session_dir=root)
         if not summary.get("terminal"):
             continue
