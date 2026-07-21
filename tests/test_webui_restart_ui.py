@@ -44,6 +44,9 @@ def test_restart_client_calls_managed_endpoint_then_recovers_by_bounded_health_p
     assert "result.status !== 'restarting'" in body
     assert "_showServerRestarting" in body
     assert "api('/health'" in boot
+    assert "let observedUnavailable = false;" in boot
+    assert "if (observedUnavailable)" in boot
+    assert "observedUnavailable = true;" in boot
     assert "window.location.reload()" in boot
     assert "attempt <" in boot, "Health recovery must have a bounded retry budget."
 
