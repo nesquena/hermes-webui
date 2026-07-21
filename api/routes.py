@@ -11811,6 +11811,77 @@ def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) 
     return text
 
 
+_WEBUI_RESTART_LOCK = threading.Lock()
+
+
+def _webui_pid_file() -> Path:
+    """Return the ctl.sh PID-file location without interpreting ctl state."""
+    configured = os.environ.get("HERMES_WEBUI_PID_FILE")
+    if configured:
+        return Path(configured)
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    return hermes_home / "webui.pid"
+
+
+def _is_ctl_managed_webui() -> bool:
+    """True only when ctl.sh recorded this exact server process as its daemon."""
+    try:
+        recorded_pid = int(_webui_pid_file().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return recorded_pid == os.getpid()
+
+
+def _schedule_webui_restart() -> None:
+    """Launch ctl.sh restart after this request response has left the server."""
+    repo_root = Path(__file__).resolve().parents[1]
+
+    def _restart():
+        try:
+            time.sleep(0.3)
+            subprocess.Popen(
+                ["bash", str(repo_root / "ctl.sh"), "restart"],
+                cwd=str(repo_root),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            logger.exception("Unable to launch ctl.sh restart")
+
+    threading.Thread(target=_restart, name="webui-managed-restart", daemon=True).start()
+
+
+def _handle_restart(handler) -> bool:
+    """Restart only the daemon whose ownership is proven by ctl.sh's PID file."""
+    if not _is_ctl_managed_webui():
+        j(
+            handler,
+            {
+                "status": "unsupported",
+                "error": "Automatic restart is available only for servers started with ./ctl.sh start.",
+            },
+            status=409,
+        )
+        return True
+    if not _WEBUI_RESTART_LOCK.acquire(blocking=False):
+        j(
+            handler,
+            {"status": "busy", "error": "A server restart is already in progress."},
+            status=429,
+        )
+        return True
+    try:
+        j(handler, {"status": "restarting"})
+        _schedule_webui_restart()
+        return True
+    except Exception:
+        _WEBUI_RESTART_LOCK.release()
+        logger.exception("Unable to schedule managed WebUI restart")
+        return False
+
+
 def _handle_shutdown(handler) -> bool:
     """Shut down the WebUI server process."""
     headers = getattr(handler, "headers", {})
@@ -13904,6 +13975,9 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return proxy_result
+
+    if parsed.path == "/api/restart":
+        return _handle_restart(handler)
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
