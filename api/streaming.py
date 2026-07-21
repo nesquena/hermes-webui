@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 import copy
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -4183,7 +4184,11 @@ def _publish_compression_continuation(
     old_sid: str,
     new_sid: str,
     resolved_profile_name: str | None,
-) -> None:
+    *,
+    agent=None,
+    agent_lock=None,
+    stream_id: str | None = None,
+):
     """Durably publish a reserved continuation or restore the old identity."""
     saved_identity = {
         "session_id": s.session_id,
@@ -4194,10 +4199,92 @@ def _publish_compression_continuation(
         "parent_session_id": getattr(s, "parent_session_id", None),
         "profile": getattr(s, "profile", None),
     }
-    from api.models import reserve_session_destination
+    from api.models import (
+        _durable_unlink,
+        _fsync_parent_directory,
+        _path_entry_exists,
+        _session_incarnation_claim_file,
+        reserve_session_destination,
+    )
+    import api.config as live_config
+
+    intent_dir = SESSION_DIR / "_compression_transactions"
+    intent_path = intent_dir / f"{new_sid}.json"
+
+    def write_intent(phase: str, token: str) -> None:
+        intent_dir.mkdir(parents=True, exist_ok=True)
+        _fsync_parent_directory(intent_dir)
+        tmp = intent_path.with_suffix(f".tmp.{uuid.uuid4().hex}")
+        try:
+            with open(tmp, "x", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": 1,
+                        "old_session_id": old_sid,
+                        "new_session_id": new_sid,
+                        "incarnation_token": token,
+                        "phase": phase,
+                    },
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, intent_path)
+            _fsync_parent_directory(intent_path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    registry_undo = []
+    transaction_committed = False
+
+    if agent is not None:
+        agent_identity_before_publication = getattr(agent, "session_id", None)
+        agent_rollback_identity = (
+            old_sid
+            if agent_identity_before_publication == new_sid
+            else agent_identity_before_publication
+        )
+
+        def undo_agent_identity():
+            agent.session_id = agent_rollback_identity
+
+        registry_undo.append(undo_agent_identity)
+
+    def mutate(mapping, key, value, lock) -> None:
+        with lock:
+            existed = key in mapping
+            previous = mapping.get(key)
+            mapping[key] = value
+
+        def undo():
+            with lock:
+                if existed:
+                    mapping[key] = previous
+                else:
+                    mapping.pop(key, None)
+
+        registry_undo.append(undo)
+
+    def remove(mapping, key, lock) -> None:
+        with lock:
+            existed = key in mapping
+            previous = mapping.pop(key, None)
+
+        def undo():
+            with lock:
+                if existed:
+                    mapping[key] = previous
+                else:
+                    mapping.pop(key, None)
+
+        registry_undo.append(undo)
 
     try:
         with reserve_session_destination(new_sid) as reservation:
+            write_intent("prepared", reservation.generation.token)
             _clone_session_media_for_compression_rotation(s, old_sid, new_sid)
             s.session_id = new_sid
             reservation.bind(s)
@@ -4211,13 +4298,124 @@ def _publish_compression_continuation(
             s.pre_compression_snapshot = False
             s.parent_session_id = old_sid
             s.save()
+            write_intent("sidecar_published", reservation.generation.token)
+
+            with LOCK:
+                old_cached = SESSIONS.get(old_sid)
+            if old_cached is not None and old_cached is not s:
+                cached_old_sid = str(getattr(old_cached, "session_id", "") or "")
+                if cached_old_sid == old_sid:
+                    raise RuntimeError("Compression source cache owner changed")
+            mutate(SESSIONS, new_sid, s, LOCK)
+            remove(SESSIONS, old_sid, LOCK)
+            if agent_lock is not None:
+                mutate(SESSION_AGENT_LOCKS, new_sid, agent_lock, SESSION_AGENT_LOCKS_LOCK)
+                remove(SESSION_AGENT_LOCKS, old_sid, SESSION_AGENT_LOCKS_LOCK)
+
+            with live_config.SESSION_AGENT_CACHE_LOCK:
+                cached_entry = live_config.SESSION_AGENT_CACHE.get(old_sid)
+            if cached_entry is not None:
+                cached_agent = cached_entry[0]
+                if not _cached_agent_matches_session(cached_agent, new_sid):
+                    raise RuntimeError("Compression cached-agent identity mismatch")
+                mutate(
+                    live_config.SESSION_AGENT_CACHE,
+                    new_sid,
+                    cached_entry,
+                    live_config.SESSION_AGENT_CACHE_LOCK,
+                )
+                remove(
+                    live_config.SESSION_AGENT_CACHE,
+                    old_sid,
+                    live_config.SESSION_AGENT_CACHE_LOCK,
+                )
+
+            with STREAMS_LOCK:
+                stream_entry = STREAMS.get(stream_id) if stream_id is not None else None
+            if isinstance(stream_entry, dict):
+                updated_stream_entry = dict(stream_entry)
+                updated_stream_entry["session_id"] = new_sid
+                mutate(STREAMS, stream_id, updated_stream_entry, STREAMS_LOCK)
+
+            with live_config.STREAM_SESSION_OWNERS_LOCK:
+                if stream_id is not None and stream_id in live_config.STREAM_SESSION_OWNERS:
+                    mutate_owner = True
+                else:
+                    mutate_owner = False
+            if mutate_owner:
+                mutate(
+                    live_config.STREAM_SESSION_OWNERS,
+                    stream_id,
+                    new_sid,
+                    live_config.STREAM_SESSION_OWNERS_LOCK,
+                )
+
+            with live_config.ACTIVE_RUNS_LOCK:
+                active_entry = (
+                    live_config.ACTIVE_RUNS.get(stream_id)
+                    if stream_id is not None
+                    else None
+                )
+            if isinstance(active_entry, dict):
+                updated_active_entry = dict(active_entry)
+                updated_active_entry["session_id"] = new_sid
+                mutate(
+                    live_config.ACTIVE_RUNS,
+                    stream_id,
+                    updated_active_entry,
+                    live_config.ACTIVE_RUNS_LOCK,
+                )
+
+            if agent is not None and getattr(agent, "session_id", None) != new_sid:
+                agent.session_id = new_sid
+
+            with LOCK:
+                SESSIONS.move_to_end(new_sid)
+                _evict_sessions_over_cap()
+            write_intent("migrations_complete", reservation.generation.token)
             reservation.commit()
+            transaction_committed = True
+        try:
+            _durable_unlink(intent_path)
+        except Exception:
+            # The transaction is already committed. Keep the complete intent
+            # for startup recovery to verify/finalize; never roll back live
+            # registry ownership after the publication point.
+            logger.warning(
+                "Could not retire committed compression intent for %s",
+                new_sid,
+                exc_info=True,
+            )
     except Exception:
+        if transaction_committed:
+            logger.warning(
+                "Compression transaction committed but authority release failed for %s",
+                new_sid,
+                exc_info=True,
+            )
+            return
+        for undo in reversed(registry_undo):
+            try:
+                undo()
+            except Exception:
+                logger.error("Compression registry rollback failed", exc_info=True)
         s.session_id = saved_identity["session_id"]
         s._publication_generation = saved_identity["publication_generation"]
         s.pre_compression_snapshot = saved_identity["pre_compression_snapshot"]
         s.parent_session_id = saved_identity["parent_session_id"]
         s.profile = saved_identity["profile"]
+        if (
+            not _path_entry_exists(SESSION_DIR / f"{new_sid}.json")
+            and not _path_entry_exists(_session_incarnation_claim_file(new_sid))
+        ):
+            try:
+                _durable_unlink(intent_path)
+            except Exception:
+                logger.error(
+                    "Could not retire rolled-back compression intent for %s",
+                    new_sid,
+                    exc_info=True,
+                )
         raise
 
 
@@ -9474,53 +9672,11 @@ def _run_agent_streaming(
                         old_sid,
                         new_sid,
                         _resolved_profile_name,
+                        agent=agent,
+                        agent_lock=_agent_lock,
+                        stream_id=stream_id,
                     )
                     _compression_continuation_session_id = new_sid
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                    # Migrate the per-session lock: alias new_sid to the held
-                    # _agent_lock reference directly (not via old_sid lookup),
-                    # then remove the old_sid entry to prevent a leak.
-                    with SESSION_AGENT_LOCKS_LOCK:
-                        SESSION_AGENT_LOCKS[new_sid] = _agent_lock
-                        SESSION_AGENT_LOCKS.pop(old_sid, None)
-                    # Migrate cached agent to the new session ID so the turn
-                    # count survives context compression.
-                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                    _skipped_agent_migration_entry = None
-                    with SESSION_AGENT_CACHE_LOCK:
-                        _cached_entry = SESSION_AGENT_CACHE.pop(old_sid, None)
-                        if _cached_entry:
-                            _cached_agent = _cached_entry[0]
-                            if _cached_agent_matches_session(_cached_agent, new_sid):
-                                SESSION_AGENT_CACHE[new_sid] = _cached_entry
-                            else:
-                                _skipped_agent_migration_entry = _cached_entry
-                                logger.warning(
-                                    '[webui] Skipped cached agent migration with mismatched session identity: old_sid=%s new_sid=%s agent_session_id=%s',
-                                    old_sid,
-                                    new_sid,
-                                    _cached_agent_session_identity(_cached_agent),
-                                )
-                    if _skipped_agent_migration_entry is not None:
-                        try:
-                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
-                        except Exception:
-                            logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
 
                 # ── Detect silent agent failure (no assistant reply produced) ──

@@ -32,6 +32,7 @@ import os
 import shutil
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 
 from api.turn_journal import (
@@ -44,7 +45,13 @@ from api.turn_journal import (
 logger = logging.getLogger(__name__)
 
 
-def _msg_count(p: Path) -> int:
+def _read_recovery_payload(path: Path, expected_sid: str) -> dict:
+    from api.models import _load_and_validate_session_payload
+
+    return _load_and_validate_session_payload(path, expected_sid)
+
+
+def _msg_count(p: Path, expected_sid: str) -> int:
     """Return the number of messages in a session JSON file, or -1 on read/parse error.
 
     Returns -1 for any non-session-shape file:
@@ -56,7 +63,7 @@ def _msg_count(p: Path) -> int:
       crash on the first non-dict file it encounters.
     """
     try:
-        data = json.loads(p.read_text(encoding='utf-8'))
+        data = _read_recovery_payload(p, expected_sid)
     except (OSError, json.JSONDecodeError, ValueError):
         return -1
     if not isinstance(data, dict):
@@ -96,7 +103,7 @@ def _rebuild_recovery_session_index(session_dir: Path) -> None:
         reverse=True,
     )
     index_path = session_dir / '_index.json'
-    tmp = index_path.with_suffix(f'.tmp.recovery.{os.getpid()}.{threading.current_thread().ident}')
+    tmp = index_path.with_suffix(f'.tmp.recovery.{uuid.uuid4().hex}')
     try:
         with open(tmp, 'w', encoding='utf-8') as fh:
             fh.write(json.dumps(entries, ensure_ascii=False, indent=2))
@@ -130,7 +137,7 @@ def _session_records_intentional_compress_shrink(session_path: Path) -> bool:
     loss is still recovered. See ``inspect_session_recovery_status``.
     """
     try:
-        data = json.loads(session_path.read_text(encoding='utf-8'))
+        data = _read_recovery_payload(session_path, session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError):
         return False
     if not isinstance(data, dict):
@@ -182,8 +189,8 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     is always the safer error. Fail OPEN on any read/parse error too.
     """
     try:
-        live = json.loads(session_path.read_text(encoding='utf-8'))
-        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+        live = _read_recovery_payload(session_path, session_path.stem)
+        bak = _read_recovery_payload(bak_path, session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError):
         return False
     if not isinstance(live, dict) or not isinstance(bak, dict):
@@ -222,8 +229,8 @@ def _session_records_clear_sentinel(session_path: Path, bak_path: Path) -> bool:
     recoverable; unreadable or partial matches fail open.
     """
     try:
-        data = json.loads(session_path.read_text(encoding='utf-8'))
-        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+        data = _read_recovery_payload(session_path, session_path.stem)
+        bak = _read_recovery_payload(bak_path, session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError):
         return False
     if not isinstance(data, dict) or not isinstance(bak, dict):
@@ -267,8 +274,8 @@ def _live_supersedes_backup_by_clear_generation(session_path: Path, bak_path: Pa
     genuine crash-loss is never suppressed.
     """
     try:
-        data = json.loads(session_path.read_text(encoding='utf-8'))
-        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+        data = _read_recovery_payload(session_path, session_path.stem)
+        bak = _read_recovery_payload(bak_path, session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError):
         return False
     if not isinstance(data, dict) or not isinstance(bak, dict):
@@ -297,7 +304,7 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     }
     """
     bak_path = session_path.with_suffix('.json.bak')
-    live_count = _msg_count(session_path)
+    live_count = _msg_count(session_path, session_path.stem)
     if not bak_path.exists():
         return {
             "session_id": session_path.stem,
@@ -305,7 +312,7 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
             "bak_messages": -1,
             "recommend": "no_backup",
         }
-    bak_count = _msg_count(bak_path)
+    bak_count = _msg_count(bak_path, session_path.stem)
     if bak_count > live_count:
         if (
             _session_records_clear_sentinel(session_path, bak_path)
@@ -344,6 +351,16 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
 
 
 def recover_session(session_path: Path) -> dict:
+    """Run focused recovery under the same cross-process SID authority as save."""
+    from api.models import SESSION_DIR, _session_publication_authority
+
+    if session_path.parent.resolve() == Path(SESSION_DIR).resolve():
+        with _session_publication_authority(session_path.stem):
+            return _recover_session_under_authority(session_path)
+    return _recover_session_under_authority(session_path)
+
+
+def _recover_session_under_authority(session_path: Path) -> dict:
     """Restore session_path from its .bak when the bak has more messages.
 
     Returns a status dict identical to ``inspect_session_recovery_status``
@@ -355,9 +372,13 @@ def recover_session(session_path: Path) -> dict:
     bak_path = session_path.with_suffix('.json.bak')
     # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
     # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
+    tmp_path = session_path.with_suffix(f'.json.recover.tmp.{uuid.uuid4().hex}')
     try:
+        # Validate the backup's embedded identity before it can replace the
+        # current sidecar or influence any media namespace decision.
+        _read_recovery_payload(bak_path, session_path.stem)
         shutil.copyfile(bak_path, tmp_path)
+        _read_recovery_payload(tmp_path, session_path.stem)
         with open(tmp_path, 'rb') as handle:
             os.fsync(handle.fileno())
         tmp_path.replace(session_path)
@@ -373,15 +394,12 @@ def recover_session(session_path: Path) -> dict:
         return {**status, "restored": False, "error": str(exc)}
     try:
         from api.config import SESSION_DIR
-        from api.session_media import prune_session_media
+        from api.models import retry_session_retention_cleanup
 
         if session_path.parent.resolve() == Path(SESSION_DIR).resolve():
-            restored_payload = json.loads(session_path.read_bytes())
-            if (
-                isinstance(restored_payload, dict)
-                and restored_payload.get("session_id") == session_path.stem
-            ):
-                prune_session_media(session_path.stem, [restored_payload])
+            cleanup = retry_session_retention_cleanup(session_path.stem, "prune")
+            if not cleanup["ok"]:
+                raise RuntimeError(f"media cleanup residuals: {cleanup['residuals']!r}")
     except Exception as exc:
         logger.warning("recover_session: media prune failed for %s: %s", session_path, exc)
         return {
@@ -437,9 +455,9 @@ def _orphaned_backup_live_paths(
         live_path = bak_path.with_suffix('')
         if live_path.name.startswith('_') or live_path.exists():
             continue
-        if _msg_count(bak_path) < 0:
-            continue
         session_id = live_path.stem
+        if _msg_count(bak_path, session_id) < 0:
+            continue
         # A WebUI session the user deleted must not be resurrected from its
         # surviving .bak on the next boot (#5498). Use the DURABLE tombstone
         # only — not the _index.json heuristic — so a genuine crash that loses
@@ -753,23 +771,25 @@ def _durable_tombstone_marks_deleted_webui_session(session_dir: Path, sid: str) 
         if Path(_models.SESSION_DIR).resolve() == session_dir.resolve():
             return sid in _models._load_webui_deleted_session_tombstone()
     except Exception:
-        pass
+        return True
     tombstone_path = session_dir / '_deleted_webui_sessions.json'
     try:
         raw = json.loads(tombstone_path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return False
     except (OSError, json.JSONDecodeError, ValueError):
-        return False
+        return True
     if not isinstance(raw, dict):
-        return False
+        return True
     try:
         version = int(raw.get('version', 0))
     except (TypeError, ValueError):
-        return False
+        return True
     if version != 1:
-        return False
+        return True
     ids = raw.get('ids')
     if not isinstance(ids, list):
-        return False
+        return True
     return sid in {str(value).strip() for value in ids if str(value or '').strip()}
 
 
@@ -831,8 +851,8 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         live_path = bak_path.with_suffix('')
         if live_path.exists() or live_path.name.startswith('_'):
             continue
-        bak_messages = _msg_count(bak_path)
         session_id = live_path.stem
+        bak_messages = _msg_count(bak_path, session_id)
         if bak_messages < 0:
             items.append(_new_audit_item(
                 session_id, "malformed_orphan_backup", "unsafe_to_repair", "manual_review", -1, bak_messages
@@ -881,7 +901,7 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         for session_id in sorted(live_ids - index_ids):
             items.append(_new_audit_item(
                 session_id, "index_missing_entry", "repairable", "rebuild_index",
-                _msg_count(session_dir / f"{session_id}.json"), -1,
+                _msg_count(session_dir / f"{session_id}.json", session_id), -1,
             ))
 
     for row in state_db_missing_rows:
@@ -924,14 +944,13 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         journal = read_turn_journal(session_id, session_dir=session_dir)
         states, _ = derive_turn_journal_states(journal.get('events') or [])
         live_path = session_dir / f"{session_id}.json"
-        live_messages = _msg_count(live_path)
+        live_messages = _msg_count(live_path, session_id)
         existing_user_messages: set[str] = set()
         try:
-            payload = json.loads(live_path.read_text(encoding='utf-8'))
-            if isinstance(payload, dict):
-                for message in payload.get('messages') or []:
-                    if isinstance(message, dict) and message.get('role') == 'user':
-                        existing_user_messages.add(str(message.get('content') or '').strip())
+            payload = _read_recovery_payload(live_path, session_id)
+            for message in payload.get('messages') or []:
+                if isinstance(message, dict) and message.get('role') == 'user':
+                    existing_user_messages.add(str(message.get('content') or '').strip())
         except (OSError, json.JSONDecodeError, ValueError):
             pass
         for turn_id, event in sorted(states.items()):
@@ -999,6 +1018,73 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     }
 
 
+def recover_incomplete_compression_transactions(session_dir: Path) -> dict:
+    """Finalize or roll back durable compression intents after process death."""
+    from api.models import (
+        SESSION_DIR,
+        Session,
+        _clear_session_incarnation_claim,
+        _durable_unlink,
+        _write_session_index,
+        rollback_reserved_session_destination,
+    )
+
+    if session_dir.resolve() != Path(SESSION_DIR).resolve():
+        return {"finalized": 0, "rolled_back": 0, "residuals": []}
+    root = session_dir / "_compression_transactions"
+    try:
+        paths = sorted(root.glob("*.json"))
+    except FileNotFoundError:
+        paths = []
+    finalized = 0
+    rolled_back = 0
+    residuals = []
+    for path in paths:
+        try:
+            intent = json.loads(path.read_bytes())
+            sid = path.stem
+            token = intent.get("incarnation_token") if isinstance(intent, dict) else None
+            phase = intent.get("phase") if isinstance(intent, dict) else None
+            if (
+                not isinstance(intent, dict)
+                or intent.get("version") != 1
+                or intent.get("new_session_id") != sid
+                or not isinstance(token, str)
+                or not token
+                or phase not in {"prepared", "sidecar_published", "migrations_complete"}
+            ):
+                raise ValueError("invalid compression transaction intent")
+            sidecar = session_dir / f"{sid}.json"
+            if sidecar.exists():
+                payload = _read_recovery_payload(sidecar, sid)
+                if payload.get("publication_incarnation") != token:
+                    raise ValueError("compression continuation incarnation mismatch")
+                session = Session(**payload)
+                _write_session_index(updates=[session])
+                _clear_session_incarnation_claim(sid, expected_token=token)
+                _durable_unlink(path)
+                finalized += 1
+                continue
+            result = rollback_reserved_session_destination(sid, token)
+            if not result.get("ok"):
+                raise RuntimeError(f"compression rollback residuals: {result.get('residuals')!r}")
+            _durable_unlink(path)
+            rolled_back += 1
+        except Exception as exc:
+            logger.warning("compression transaction recovery failed for %s", path, exc_info=True)
+            residuals.append(
+                {
+                    "transaction": path.name,
+                    "error": type(exc).__name__,
+                }
+            )
+    return {
+        "finalized": finalized,
+        "rolled_back": rolled_back,
+        "residuals": residuals,
+    }
+
+
 def recover_all_sessions_on_startup(
     session_dir: Path,
     rebuild_index: bool = False,
@@ -1010,6 +1096,7 @@ def recover_all_sessions_on_startup(
     """
     if not session_dir.exists():
         return {"scanned": 0, "restored": 0, "orphaned_backups": 0, "details": []}
+    compression_transactions = recover_incomplete_compression_transactions(session_dir)
     restored = 0
     details: list[dict] = []
     live_paths = [path for path in sorted(session_dir.glob('*.json')) if not path.name.startswith('_')]
@@ -1054,6 +1141,7 @@ def recover_all_sessions_on_startup(
         "restored": restored,
         "orphaned_backups": len(orphan_paths),
         "details": details,
+        "compression_transactions": compression_transactions,
     }
 
 

@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import multiprocessing
 import os
 import threading
 import zipfile
@@ -32,6 +33,74 @@ def _image_message(url):
             {"type": "image_url", "image_url": {"url": url}},
         ],
     }
+
+
+def _cross_process_index_writer(session_dir, index_file, sid, ready, start):
+    from pathlib import Path
+
+    from api import models as child_models
+
+    child_models.SESSION_DIR = Path(session_dir)
+    child_models.SESSION_INDEX_FILE = Path(index_file)
+    child_models.SESSIONS.clear()
+    session = child_models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": sid}],
+    )
+    session.save(skip_index=True)
+    ready.put(sid)
+    start.wait(10)
+    child_models._write_session_index(updates=[session])
+
+
+def _cross_process_recreate_session(session_dir, index_file, state_dir, sid, result_queue):
+    from pathlib import Path
+
+    from api import models as child_models
+    from api import session_media as child_media
+    import api.upload as child_upload
+
+    child_models.SESSION_DIR = Path(session_dir)
+    child_models.SESSION_INDEX_FILE = Path(index_file)
+    child_media.STATE_DIR = Path(state_dir)
+    child_upload._session_attachment_dir = (
+        lambda owner_sid: Path(state_dir) / "attachments" / owner_sid
+    )
+    child_models.SESSIONS.clear()
+    current = child_models.Session.load(sid)
+    cleanup = child_models.delete_session_artifacts(
+        sid,
+        expected_generation=current._publication_generation,
+        delete_state_db=False,
+    )
+    if not cleanup["ok"]:
+        result_queue.put({"error": cleanup["residuals"]})
+        return
+    replacement = child_models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "replacement"}],
+    )
+    with child_models.reserve_session_destination(sid) as reservation:
+        reservation.bind(replacement)
+        replacement.save(skip_index=True)
+        reservation.commit()
+    result_queue.put(
+        {
+            "token": replacement._publication_generation.token,
+            "content": replacement.path.read_text(encoding="utf-8"),
+        }
+    )
+
+
+def _cross_process_tombstone_writer(session_dir, sid, ready, start):
+    from pathlib import Path
+
+    from api import models as child_models
+
+    child_models.SESSION_DIR = Path(session_dir)
+    ready.put(sid)
+    start.wait(10)
+    child_models._record_webui_deleted_session_tombstone(sid)
 
 
 @pytest.fixture(autouse=True)
@@ -1281,6 +1350,9 @@ def test_same_sid_recreation_does_not_authorize_old_session_object(tmp_path, mon
     _configure_session_state(tmp_path, monkeypatch)
     old = Session(session_id="same-sid-generation", messages=[{"role": "user", "content": "old"}])
     old.save(skip_index=True)
+    old_token = json.loads(old.path.read_text(encoding="utf-8"))[
+        "publication_incarnation"
+    ]
     models.SESSIONS[old.session_id] = old
     _stub_delete_route_dependencies(monkeypatch, old, tmp_path)
     captured = _capture_route(monkeypatch)
@@ -1291,14 +1363,56 @@ def test_same_sid_recreation_does_not_authorize_old_session_object(tmp_path, mon
         session_id=old.session_id,
         messages=[{"role": "user", "content": "replacement"}],
     )
-    models._activate_session_publication_generation(replacement)
-    models._clear_webui_deleted_session_tombstone(replacement.session_id)
-    replacement.save(skip_index=True)
+    with models.reserve_session_destination(replacement.session_id) as reservation:
+        reservation.bind(replacement)
+        replacement.save(skip_index=True)
+        reservation.commit()
+    replacement_token = json.loads(replacement.path.read_text(encoding="utf-8"))[
+        "publication_incarnation"
+    ]
+    assert replacement_token != old_token
 
     old.messages.append({"role": "assistant", "content": "stale overwrite"})
     with pytest.raises(RuntimeError, match="stale"):
         old.save(skip_index=True)
     assert "replacement" in replacement.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(models._fcntl is None, reason="requires POSIX process locks")
+def test_persisted_incarnation_rejects_stale_object_after_other_process_recreates_sid(
+    tmp_path, monkeypatch
+):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    sid = "cross-process-incarnation"
+    old = Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "old"}],
+    )
+    old.save(skip_index=True)
+    old_token = old._publication_generation.token
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    worker = context.Process(
+        target=_cross_process_recreate_session,
+        args=(
+            str(session_dir),
+            str(models.SESSION_INDEX_FILE),
+            str(tmp_path),
+            sid,
+            result_queue,
+        ),
+    )
+    worker.start()
+    worker.join(20)
+    assert worker.exitcode == 0
+    result = result_queue.get(timeout=5)
+    assert "error" not in result
+    assert result["token"] != old_token
+
+    old.messages.append({"role": "assistant", "content": "stale overwrite"})
+    with pytest.raises(RuntimeError, match="stale session generation"):
+        old.save(skip_index=True)
+    assert "replacement" in old.path.read_text(encoding="utf-8")
 
 
 def test_delete_defers_while_run_is_active_then_retries_idempotently(tmp_path, monkeypatch):
@@ -1529,6 +1643,94 @@ def test_destination_reservation_token_rejects_same_thread_piggyback(
     assert persisted["messages"][0]["content"] == "owner"
 
 
+@pytest.mark.skipif(models._fcntl is None, reason="requires POSIX process locks")
+def test_index_read_modify_write_is_serialized_across_processes(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    models.SESSION_INDEX_FILE.write_text("[]", encoding="utf-8")
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+
+    workers = [
+        context.Process(
+            target=_cross_process_index_writer,
+            args=(
+                str(models.SESSION_DIR),
+                str(models.SESSION_INDEX_FILE),
+                sid,
+                ready,
+                start,
+            ),
+        )
+        for sid in ("process-index-a", "process-index-b")
+    ]
+    for worker in workers:
+        worker.start()
+    assert {ready.get(timeout=10), ready.get(timeout=10)} == {
+        "process-index-a",
+        "process-index-b",
+    }
+    start.set()
+    for worker in workers:
+        worker.join(15)
+        assert worker.exitcode == 0
+
+    rows = json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+    assert {row["session_id"] for row in rows} == {
+        "process-index-a",
+        "process-index-b",
+    }
+
+
+@pytest.mark.skipif(models._fcntl is None, reason="requires POSIX process locks")
+def test_tombstone_read_modify_write_is_serialized_across_processes(
+    tmp_path, monkeypatch
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+    workers = [
+        context.Process(
+            target=_cross_process_tombstone_writer,
+            args=(str(models.SESSION_DIR), sid, ready, start),
+        )
+        for sid in ("process-tombstone-a", "process-tombstone-b")
+    ]
+    for worker in workers:
+        worker.start()
+    assert {ready.get(timeout=10), ready.get(timeout=10)} == {
+        "process-tombstone-a",
+        "process-tombstone-b",
+    }
+    start.set()
+    for worker in workers:
+        worker.join(15)
+        assert worker.exitcode == 0
+
+    assert models._load_webui_deleted_session_tombstone() == {
+        "process-tombstone-a",
+        "process-tombstone-b",
+    }
+
+
+def test_corrupt_deleted_tombstone_fails_closed_for_session_publication(
+    tmp_path, monkeypatch
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    models._webui_deleted_session_tombstone_file().write_bytes(b"{partial")
+    sid = "corrupt-tombstone-publication"
+
+    with pytest.raises(ValueError, match="deleted-session tombstone"):
+        Session(session_id=sid).save(skip_index=True)
+    with pytest.raises(ValueError, match="deleted-session tombstone"):
+        with models.reserve_session_destination(sid):
+            pytest.fail("a corrupt authority file must prevent reservation")
+
+    assert not (models.SESSION_DIR / f"{sid}.json").exists()
+    assert not models._session_incarnation_claim_file(sid).exists()
+
+
 def test_import_index_failure_rolls_back_json_media_and_cache(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     _raw, data_url = _large_png_data_url()
@@ -1704,6 +1906,38 @@ def test_clear_durably_removes_backup_and_private_media(tmp_path, monkeypatch):
     assert not session_media._session_media_dir(session.session_id).exists()
 
 
+def test_clear_retires_backup_and_media_even_when_live_transcript_is_already_empty(
+    tmp_path, monkeypatch
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    session = Session(
+        session_id="clear-already-empty",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    session.save(skip_index=True)
+    session.messages = []
+    session.context_messages = []
+    session.save(skip_index=True)
+    backup = session.path.with_suffix(".json.bak")
+    assert backup.exists()
+    assert session_media._session_media_dir(session.session_id).exists()
+    models.SESSIONS[session.session_id] = session
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": session.session_id})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes.api_config, "_evict_session_agent", lambda _sid: None)
+    captured = _capture_route(monkeypatch)
+
+    routes.handle_post(_FakeHandler("/api/session/clear"), urlparse("/api/session/clear"))
+
+    assert captured["status"] == 200
+    assert not backup.exists()
+    assert not session_media._session_media_dir(session.session_id).exists()
+
+
 def test_truncate_prunes_only_media_unreachable_from_live_or_backup(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     _raw_a, data_url_a = _large_png_data_url(b"a")
@@ -1747,7 +1981,7 @@ def test_truncate_does_not_report_committed_write_as_failed_when_prune_fails(
             {"role": "assistant", "content": "remove"},
         ],
     )
-    session.save(skip_index=True)
+    session.save()
     models.SESSIONS[session.session_id] = session
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(
@@ -1758,6 +1992,7 @@ def test_truncate_does_not_report_committed_write_as_failed_when_prune_fails(
     monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
     monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
     monkeypatch.setattr(routes.api_config, "_evict_session_agent", lambda _sid: None)
+    original_prune = session_media.prune_session_media
     monkeypatch.setattr(
         session_media,
         "prune_session_media",
@@ -1776,3 +2011,100 @@ def test_truncate_does_not_report_committed_write_as_failed_when_prune_fails(
         {"role": "user", "content": "keep"}
     ]
     assert "Could not prune session media after transcript truncation" in caplog.text
+    residual = models._load_session_cleanup_residuals()[session.session_id]
+    assert residual["operation"] == "prune"
+    assert residual["residuals"][0]["artifact"] == "session_media"
+
+    monkeypatch.setattr(session_media, "prune_session_media", original_prune)
+    routes._handle_sessions_cleanup(_FakeHandler("/api/sessions/cleanup"), {})
+    assert captured["status"] == 200
+    assert session.path.exists()
+    assert session.session_id not in models._load_session_cleanup_residuals()
+    index_rows = json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+    assert any(row.get("session_id") == session.session_id for row in index_rows)
+
+
+@pytest.mark.parametrize(
+    "field,value_factory",
+    [
+        ("tool_calls", lambda ref: [{"result": ref}]),
+        ("composer_draft", lambda ref: {"text": ref}),
+        ("anchor_activity_scenes", lambda ref: {"scene": {"body": ref}}),
+        ("process_wakeup_pause", lambda ref: {"detail": ref}),
+        ("custom_extra", lambda ref: {"nested": [ref]}),
+    ],
+)
+def test_save_rejects_private_refs_outside_sanctioned_transcript_fields(
+    field,
+    value_factory,
+    tmp_path,
+    monkeypatch,
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    session = Session(
+        session_id=f"private-field-{field.replace('_', '-')}",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    session.save(skip_index=True)
+    before = session.path.read_bytes()
+    ref = session.messages[0]["content"][1]["image_url"]["url"]
+    setattr(session, field, value_factory(ref))
+
+    with pytest.raises(
+        session_media.SessionMediaIntegrityError,
+        match="outside messages/context_messages",
+    ):
+        session.save(skip_index=True)
+
+    assert session.path.read_bytes() == before
+
+
+def test_save_rejects_private_ref_in_non_image_transcript_path(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    session = Session(
+        session_id="private-non-image-part",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    session.save(skip_index=True)
+    before = session.path.read_bytes()
+    ref = session.messages[0]["content"][1]["image_url"]["url"]
+    session.messages = [{"role": "user", "content": ref}]
+
+    with pytest.raises(
+        session_media.SessionMediaIntegrityError,
+        match="outside an image part",
+    ):
+        session.save(skip_index=True)
+
+    assert session.path.read_bytes() == before
+
+
+def test_save_rejects_image_shaped_private_ref_in_message_metadata(
+    tmp_path, monkeypatch
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    session = Session(
+        session_id="private-image-shaped-metadata",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    session.save(skip_index=True)
+    before = session.path.read_bytes()
+    ref = session.messages[0]["content"][1]["image_url"]["url"]
+    session.messages[0]["metadata"] = {
+        "type": "image_url",
+        "image_url": {"url": ref},
+    }
+
+    with pytest.raises(
+        session_media.SessionMediaIntegrityError,
+        match="outside an image part",
+    ):
+        session.save(skip_index=True)
+
+    assert session.path.read_bytes() == before

@@ -5074,10 +5074,11 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
         )
-        _activate_session_publication_generation(s)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-        _apply_source_meta(s)
-        s.save(touch_updated_at=False)
+        with reserve_session_destination(s.session_id) as reservation:
+            reservation.bind(s)
+            _apply_source_meta(s)
+            s.save(touch_updated_at=False)
+            reservation.commit()
     else:
         # Regular CLI/agent sessions: import full message history
         msgs = get_cli_session_messages(sid)
@@ -5156,8 +5157,6 @@ def _build_share_metadata_sidecar(
         updated_at=cli_meta.get("updated_at") or getattr(snapshot_session, "updated_at", None),
         profile=cli_meta.get("profile") or getattr(snapshot_session, "profile", None),
     )
-    _activate_session_publication_generation(session)
-    _clear_webui_deleted_session_tombstone(session.session_id)
     session.is_cli_session = bool(
         getattr(snapshot_session, "is_cli_session", False)
         or is_cli_session_row(cli_meta)
@@ -5195,6 +5194,9 @@ def _build_share_metadata_sidecar(
             value = getattr(snapshot_session, attr, None)
         if value is not None:
             setattr(session, attr, value)
+    with reserve_session_destination(session.session_id) as reservation:
+        reservation.bind(session)
+        reservation.commit()
     return session
 
 
@@ -7826,7 +7828,10 @@ def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
     try:
         return sid in _load_webui_deleted_session_tombstone()
     except Exception:
-        return False
+        # This decision gates whether a missing sidecar may be claimed as a
+        # foreign session. An unreadable deletion authority is not proof that
+        # the SID is safe to reclaim.
+        return True
 
 
 def _state_db_session_source(sid: str) -> str:
@@ -8178,10 +8183,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
                           is_cli_flag=not _sa_child),
             "not_claimable",
         )
-    materialized = build_session(sid, cli_meta, msgs, read_only_flag=False)
-    _activate_session_publication_generation(materialized)
-    _clear_webui_deleted_session_tombstone(materialized.session_id)
-    return materialized, "materialized"
+    return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
 
 
 def _request_wants_all_profiles_import(body) -> bool:
@@ -9413,11 +9415,11 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _scan_session_cleanup_residuals,
-    _activate_session_publication_generation,
+    retry_session_retention_cleanup,
     reserve_session_destination,
-    _durable_unlink,
-    _clear_webui_deleted_session_tombstone,
+    _fsync_parent_directory,
     delete_session_artifacts,
+    _session_publication_authority,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -14916,9 +14918,7 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
-        with _get_session_agent_lock(sid):
-            had_sidecar_messages = bool(s.messages or [])
-            prior_clear_generation = getattr(s, "clear_generation", None)
+        with _get_session_agent_lock(sid), _session_publication_authority(sid):
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
             # display + context arrays are emptied AND the truncation watermark is
@@ -14960,12 +14960,7 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
-            s.clear_generation = (
-                uuid.uuid4().hex
-                if had_sidecar_messages
-                else prior_clear_generation
-            )
-            destructive_clear = had_sidecar_messages or bool(prior_clear_generation)
+            s.clear_generation = uuid.uuid4().hex
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
@@ -14998,25 +14993,9 @@ def handle_post(handler, parsed) -> bool:
                 logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)
             if not persisted_clear:
                 clear_residuals.append({"artifact": "session_json_verification"})
-            if persisted_clear and destructive_clear:
-                try:
-                    # The backup can retain references to the removed history;
-                    # commit its absence before deleting the media namespace.
-                    _durable_unlink(s.path.with_suffix('.json.bak'))
-                except Exception as exc:
-                    clear_residuals.append(
-                        {"artifact": "session_backup", "error": type(exc).__name__}
-                    )
-                    logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
-                if not clear_residuals:
-                    try:
-                        from api.session_media import remove_session_media
-
-                        remove_session_media(sid)
-                    except Exception as exc:
-                        clear_residuals.append(
-                            {"artifact": "session_media", "error": type(exc).__name__}
-                        )
+            if persisted_clear:
+                cleanup = retry_session_retention_cleanup(sid, "clear")
+                clear_residuals.extend(cleanup["residuals"])
             if clear_residuals:
                 return j(
                     handler,
@@ -15971,20 +15950,21 @@ def handle_post(handler, parsed) -> bool:
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
-                _activate_session_publication_generation(s)
-                _clear_webui_deleted_session_tombstone(s.session_id)
-                s.is_cli_session = is_cli_session_row(cli_meta)
-                s.source_tag = cli_meta.get("source_tag")
-                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
-                s.session_source = cli_meta.get("session_source")
-                s.source_label = cli_meta.get("source_label")
-                s.user_id = cli_meta.get("user_id")
-                s.chat_id = cli_meta.get("chat_id")
-                s.chat_type = cli_meta.get("chat_type")
-                s.thread_id = cli_meta.get("thread_id")
-                s.session_key = cli_meta.get("session_key")
-                s.platform = cli_meta.get("platform")
-                s.save(touch_updated_at=False)
+                with reserve_session_destination(s.session_id) as reservation:
+                    reservation.bind(s)
+                    s.is_cli_session = is_cli_session_row(cli_meta)
+                    s.source_tag = cli_meta.get("source_tag")
+                    s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                    s.session_source = cli_meta.get("session_source")
+                    s.source_label = cli_meta.get("source_label")
+                    s.user_id = cli_meta.get("user_id")
+                    s.chat_id = cli_meta.get("chat_id")
+                    s.chat_type = cli_meta.get("chat_type")
+                    s.thread_id = cli_meta.get("thread_id")
+                    s.session_key = cli_meta.get("session_key")
+                    s.platform = cli_meta.get("platform")
+                    s.save(touch_updated_at=False)
+                    reservation.commit()
             else:
                 msgs = get_cli_session_messages(sid)
                 if not msgs:
@@ -20631,14 +20611,19 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if item.get("session_id")
     )
     for sid, policy in pending_cleanup.items():
-        result = delete_session_artifacts(
-            sid,
-            durable_tombstone=policy["durable_tombstone"],
-            delete_state_db=policy["delete_state_db"],
-        )
+        operation = policy.get("operation", "delete")
+        if operation in {"prune", "clear"}:
+            result = retry_session_retention_cleanup(sid, operation)
+        else:
+            result = delete_session_artifacts(
+                sid,
+                durable_tombstone=policy["durable_tombstone"],
+                delete_state_db=policy["delete_state_db"],
+            )
         if result["ok"]:
             cleaned += 1
-            phase1_removed_ids.add(sid)
+            if operation == "delete":
+                phase1_removed_ids.add(sid)
         else:
             cleanup_residuals.append({"session_id": sid, "artifacts": result["residuals"]})
 
@@ -20675,7 +20660,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 {"session_id": p.stem, "artifacts": [{"artifact": "session_cleanup"}]}
             )
 
-    phase1_touched = bool(cleaned)
+    phase1_touched = bool(phase1_removed_ids)
     phase1_reconciled_index = False
     if phase1_removed_ids and SESSION_INDEX_FILE.exists():
         try:
@@ -20703,9 +20688,9 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     # prevent races with concurrent Session.save() / prune_session_from_index().
     if SESSION_INDEX_FILE.exists():
         try:
-            from api.models import _INDEX_WRITE_LOCK, _safe_replace
+            from api.models import _INDEX_WRITE_LOCK, _cross_process_file_lock, _safe_replace
 
-            with _INDEX_WRITE_LOCK:
+            with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
                 index_file_data = json.loads(
                     SESSION_INDEX_FILE.read_bytes()
                 )
@@ -20734,9 +20719,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                         # Ghost not added to survivors — removed from index.
 
                     if phase2_candidate_ids and len(survivors) < len(index_file_data):
-                        _tmp = SESSION_INDEX_FILE.with_suffix(
-                            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
-                        )
+                        _tmp = SESSION_INDEX_FILE.with_suffix(f".tmp.{uuid.uuid4().hex}")
                         _payload = json.dumps(survivors, ensure_ascii=False, indent=2)
                         try:
                             with open(_tmp, "w", encoding="utf-8") as f:
@@ -20744,6 +20727,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                                 f.flush()
                                 os.fsync(f.fileno())
                             _safe_replace(_tmp, SESSION_INDEX_FILE)
+                            _fsync_parent_directory(SESSION_INDEX_FILE)
                             phase2_rewrote_index = True
                             cleaned += len(phase2_candidate_ids)
                         except Exception:
@@ -22173,7 +22157,13 @@ def _handle_chat_start(handler, body, diag=None):
                     403,
                 )
             try:
-                synth.save()
+                with reserve_session_destination(synth.session_id) as reservation:
+                    reservation.bind(synth)
+                    synth.save()
+                    with LOCK:
+                        SESSIONS[synth.session_id] = synth
+                        SESSIONS.move_to_end(synth.session_id)
+                    reservation.commit()
             except Exception as _save_err:
                 # Persisting the sidecar failed: surface a generic 500 to
                 # the client (paths sanitised, see _sanitize_error) and log
@@ -22191,15 +22181,6 @@ def _handle_chat_start(handler, body, diag=None):
                     500,
                 )
             s = synth
-            try:
-                with LOCK:
-                    SESSIONS[s.session_id] = s
-                    SESSIONS.move_to_end(s.session_id)
-            except Exception:
-                # If the in-memory LRU refuses the new session, fall through
-                # with the just-persisted sidecar; _start_run will load it
-                # from disk if needed.
-                pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None

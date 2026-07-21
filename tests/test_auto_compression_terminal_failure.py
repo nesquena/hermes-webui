@@ -5,6 +5,7 @@ import copy
 import json
 import queue
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -112,6 +113,87 @@ def test_compression_destination_collision_never_overwrites_existing_owner(
 
     assert session.session_id == old_sid
     assert existing_path.read_bytes() == existing_bytes
+
+
+def test_compression_registry_failure_rolls_back_all_migrations_before_commit(
+    tmp_path, monkeypatch
+):
+    import api.config as live_config
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    old_sid = "compression-migrate-old"
+    new_sid = "compression-migrate-new"
+    stream_id = "compression-migrate-stream"
+    session = Session(
+        session_id=old_sid,
+        messages=[{"role": "user", "content": "history"}],
+    )
+    session.save(skip_index=True)
+    models.SESSIONS.clear()
+    models.SESSIONS[old_sid] = session
+    agent_lock = threading.Lock()
+
+    class Agent:
+        session_id = new_sid
+
+    agent = Agent()
+    streaming.SESSION_AGENT_LOCKS.clear()
+    streaming.SESSION_AGENT_LOCKS[old_sid] = agent_lock
+    streaming.STREAMS.clear()
+    streaming.STREAMS[stream_id] = {"session_id": old_sid}
+    with live_config.STREAM_SESSION_OWNERS_LOCK:
+        live_config.STREAM_SESSION_OWNERS[stream_id] = old_sid
+    with live_config.ACTIVE_RUNS_LOCK:
+        live_config.ACTIVE_RUNS[stream_id] = {"session_id": old_sid}
+    runtime_evictions = []
+    monkeypatch.setattr(
+        live_config,
+        "_evict_session_agent",
+        lambda sid: runtime_evictions.append(sid),
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_evict_sessions_over_cap",
+        lambda: (_ for _ in ()).throw(OSError("injected registry failure")),
+    )
+
+    try:
+        with pytest.raises(OSError, match="registry failure"):
+            streaming._publish_compression_continuation(
+                session,
+                old_sid,
+                new_sid,
+                None,
+                agent=agent,
+                agent_lock=agent_lock,
+                stream_id=stream_id,
+            )
+
+        assert session.session_id == old_sid
+        assert models.SESSIONS.get(old_sid) is session
+        assert new_sid not in models.SESSIONS
+        assert streaming.SESSION_AGENT_LOCKS.get(old_sid) is agent_lock
+        assert new_sid not in streaming.SESSION_AGENT_LOCKS
+        assert streaming.STREAMS[stream_id]["session_id"] == old_sid
+        assert live_config.STREAM_SESSION_OWNERS[stream_id] == old_sid
+        assert live_config.ACTIVE_RUNS[stream_id]["session_id"] == old_sid
+        assert agent.session_id == old_sid
+        assert new_sid not in runtime_evictions
+        assert not (session_dir / f"{new_sid}.json").exists()
+        assert not (session_dir / "_compression_transactions" / f"{new_sid}.json").exists()
+    finally:
+        models.SESSIONS.clear()
+        streaming.SESSION_AGENT_LOCKS.clear()
+        streaming.STREAMS.clear()
+        with live_config.STREAM_SESSION_OWNERS_LOCK:
+            live_config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+        with live_config.ACTIVE_RUNS_LOCK:
+            live_config.ACTIVE_RUNS.pop(stream_id, None)
 
 
 def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_errors_on_continuation(

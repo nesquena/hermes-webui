@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import threading
 import time
 import uuid
@@ -279,18 +280,28 @@ _SESSION_PUBLICATION_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = 
     weakref.WeakValueDictionary()
 )
 _SESSION_PUBLICATION_DELETED: set[str] = set()
+_CROSS_PROCESS_LOCKS_GUARD = threading.Lock()
+_CROSS_PROCESS_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = (
+    weakref.WeakValueDictionary()
+)
+_CROSS_PROCESS_LOCKS_HELD = threading.local()
 
 
 class _SessionPublicationGeneration:
-    """Weakly-owned lease for one live in-process SID incarnation."""
+    """Lease for one SID incarnation, persisted with the owning sidecar."""
 
-    def __init__(self) -> None:
-        self.token = uuid.uuid4().hex
+    def __init__(self, token: str | None = None) -> None:
+        self.token = str(token or secrets.token_hex(16))
 
 
 _SESSION_PUBLICATION_GENERATIONS: weakref.WeakValueDictionary[
     str, _SessionPublicationGeneration
 ] = weakref.WeakValueDictionary()
+_SESSION_INCARNATION_TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _is_session_incarnation_token(value) -> bool:
+    return isinstance(value, str) and bool(_SESSION_INCARNATION_TOKEN_RE.fullmatch(value))
 
 
 def _get_session_publication_lock(session_id: str) -> threading.RLock:
@@ -304,13 +315,16 @@ def _get_session_publication_lock(session_id: str) -> threading.RLock:
         return lock
 
 
-def _session_publication_generation(session_id: str) -> _SessionPublicationGeneration:
-    """Return the process-local lease shared by one live SID incarnation."""
+def _session_publication_generation(
+    session_id: str,
+    token: str | None = None,
+) -> _SessionPublicationGeneration:
+    """Return the lease shared by loaded objects for one persisted incarnation."""
     sid = str(session_id or "")
     with _SESSION_PUBLICATION_LOCKS_GUARD:
         generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
-        if generation is None:
-            generation = _SessionPublicationGeneration()
+        if generation is None or (token is not None and generation.token != token):
+            generation = _SessionPublicationGeneration(token)
             _SESSION_PUBLICATION_GENERATIONS[sid] = generation
         return generation
 
@@ -354,6 +368,16 @@ def _session_publication_rejection_reason(
     generation: _SessionPublicationGeneration | None,
 ) -> str | None:
     sid = str(session_id or "")
+    try:
+        residual_path = _session_cleanup_residual_file(sid)
+        if _path_entry_exists(residual_path):
+            _residual_sid, residual_policy = _read_session_cleanup_residual_record(
+                residual_path
+            )
+            if residual_policy.get("operation") == "delete":
+                return "deleted session with destructive cleanup pending"
+    except Exception:
+        return "unreadable cleanup authority for session"
     with _SESSION_PUBLICATION_LOCKS_GUARD:
         current_generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
         if (
@@ -364,6 +388,28 @@ def _session_publication_rejection_reason(
             return "stale session generation"
         if sid in _SESSION_PUBLICATION_DELETED:
             return "deleted session"
+    generation_token = getattr(generation, "token", None)
+    if _path_entry_exists(path):
+        try:
+            persisted = json.loads(path.read_bytes())
+        except Exception:
+            return "unreadable session incarnation"
+        persisted_token = (
+            persisted.get("publication_incarnation")
+            if isinstance(persisted, dict)
+            else None
+        )
+        if not isinstance(persisted, dict) or persisted.get("session_id") != sid:
+            return "session identity mismatch"
+        if persisted_token and persisted_token != generation_token:
+            return "stale session generation"
+    else:
+        try:
+            claim_token = _read_session_incarnation_claim(sid)
+        except Exception:
+            return "unreadable session incarnation claim"
+        if claim_token is not None and claim_token != generation_token:
+            return "stale session generation"
     # A live sidecar beats a stale durable tombstone after restart. An absent
     # sidecar plus tombstone is authoritative and must reject a late save.
     if not path.exists() and sid in _load_webui_deleted_session_tombstone():
@@ -395,6 +441,28 @@ def is_safe_session_id(sid) -> bool:
     return all(c in _SAFE_SID_CHARS for c in sid)
 
 
+def _load_and_validate_session_payload(
+    path: Path,
+    expected_session_id: str,
+) -> dict:
+    """Load one sidecar/backup without allowing its outer SID to redirect ownership."""
+    sid = str(expected_session_id or "")
+    if not is_safe_session_id(sid):
+        raise ValueError("Invalid expected session_id")
+    data = json.loads(path.read_bytes())
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid session payload: {path.name}")
+    if data.get("session_id") != sid:
+        raise ValueError(
+            f"Session payload identity mismatch: expected {sid!r}, "
+            f"found {data.get('session_id')!r}"
+        )
+    token = data.get("publication_incarnation")
+    if token is not None and not _is_session_incarnation_token(token):
+        raise ValueError("Invalid session publication incarnation")
+    return data
+
+
 _SESSION_DESTINATION_RESERVATIONS = threading.local()
 
 
@@ -406,40 +474,74 @@ def _active_destination_reservations() -> dict[str, str]:
     return active
 
 
+def _cross_process_lock(name: str) -> threading.RLock:
+    with _CROSS_PROCESS_LOCKS_GUARD:
+        lock = _CROSS_PROCESS_LOCKS.get(name)
+        if lock is None:
+            lock = threading.RLock()
+            _CROSS_PROCESS_LOCKS[name] = lock
+        return lock
+
+
+@contextmanager
+def _cross_process_file_lock(name: str):
+    """Serialize one file-backed authority across threads and processes."""
+    if not name or any(c not in _SAFE_SID_CHARS for c in name):
+        raise ValueError("Invalid cross-process lock name")
+    with _cross_process_lock(name):
+        held = getattr(_CROSS_PROCESS_LOCKS_HELD, "counts", None)
+        if held is None:
+            held = {}
+            _CROSS_PROCESS_LOCKS_HELD.counts = held
+        if held.get(name, 0):
+            held[name] += 1
+            try:
+                yield
+            finally:
+                held[name] -= 1
+            return
+
+        lock_root = SESSION_DIR / "_cross_process_locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / f"{name}.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+            if _fcntl is not None:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+
+                def unlock():
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            elif _msvcrt is not None:
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b"\0")
+                lock_file.seek(0)
+                _msvcrt.locking(  # type: ignore[attr-defined]
+                    lock_file.fileno(), _msvcrt.LK_LOCK, 1  # type: ignore[attr-defined]
+                )
+
+                def unlock():
+                    lock_file.seek(0)
+                    _msvcrt.locking(  # type: ignore[attr-defined]
+                        lock_file.fileno(), _msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                    )
+            else:
+                raise RuntimeError("cross-process file locking is unavailable")
+            held[name] = 1
+            try:
+                yield
+            finally:
+                held.pop(name, None)
+                unlock()
+
+
 @contextmanager
 def _session_publication_process_lock(session_id: str):
     """Hold the permanent cross-process publication lock for one SID."""
     sid = str(session_id or "")
     if not is_safe_session_id(sid):
         raise ValueError("Invalid session_id")
-    lock_root = SESSION_DIR / "_session_publication_locks"
-    lock_root.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_root / f"{sid}.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
-        if _fcntl is not None:
-            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
-            return
-        if _msvcrt is not None:
-            if os.fstat(lock_file.fileno()).st_size == 0:
-                lock_file.write(b"\0")
-            lock_file.seek(0)
-            _msvcrt.locking(  # type: ignore[attr-defined]
-                lock_file.fileno(), _msvcrt.LK_LOCK, 1  # type: ignore[attr-defined]
-            )
-            try:
-                yield
-            finally:
-                lock_file.seek(0)
-                _msvcrt.locking(  # type: ignore[attr-defined]
-                    lock_file.fileno(), _msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
-                )
-            return
-        raise RuntimeError("cross-process session publication locking is unavailable")
+    with _cross_process_file_lock(f"session-{sid}"):
+        yield
 
 
 @contextmanager
@@ -467,6 +569,72 @@ class SessionDestinationCollisionError(RuntimeError):
     pass
 
 
+SESSION_INCARNATION_CLAIM_VERSION = 1
+
+
+def _session_incarnation_claim_file(session_id: str) -> Path:
+    sid = str(session_id or "")
+    if not is_safe_session_id(sid):
+        raise ValueError("Invalid session_id")
+    return SESSION_DIR / "_session_incarnation_claims" / f"{sid}.json"
+
+
+def _read_session_incarnation_claim(session_id: str) -> str | None:
+    path = _session_incarnation_claim_file(session_id)
+    try:
+        raw = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    if (
+        not isinstance(raw, dict)
+        or raw.get("version") != SESSION_INCARNATION_CLAIM_VERSION
+        or raw.get("session_id") != session_id
+        or not _is_session_incarnation_token(raw.get("token"))
+    ):
+        raise ValueError(f"Invalid session incarnation claim for {session_id!r}")
+    return raw["token"]
+
+
+def _persist_session_incarnation_claim(session_id: str, token: str) -> None:
+    path = _session_incarnation_claim_file(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_parent_directory(path.parent)
+    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
+    try:
+        with open(tmp, "x", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "version": SESSION_INCARNATION_CLAIM_VERSION,
+                    "session_id": session_id,
+                    "token": token,
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        _safe_replace(tmp, path)
+        _fsync_parent_directory(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _clear_session_incarnation_claim(
+    session_id: str,
+    *,
+    expected_token: str | None = None,
+) -> None:
+    path = _session_incarnation_claim_file(session_id)
+    token = _read_session_incarnation_claim(session_id)
+    if token is None:
+        return
+    if expected_token is not None and token != expected_token:
+        raise RuntimeError(f"Session incarnation claim changed for {session_id!r}")
+    _durable_unlink(path)
+
+
 def _session_destination_owners(session_id: str) -> list[str]:
     """Return every known owner of a destination SID, failing closed."""
     sid = str(session_id or "")
@@ -479,6 +647,10 @@ def _session_destination_owners(session_id: str) -> list[str]:
         SESSION_DIR.glob(f"{sid}.json.bak.tmp.*")
     ):
         owners.append("session_temporary_files")
+    if _path_entry_exists(_session_incarnation_claim_file(sid)):
+        # Invalid claims are owners too: uncertainty must not authorize reuse.
+        _read_session_incarnation_claim(sid)
+        owners.append("session_incarnation_claim")
 
     from api.session_media import _session_media_dir
     from api.upload import _session_attachment_dir
@@ -496,7 +668,7 @@ def _session_destination_owners(session_id: str) -> list[str]:
         owners.append("run_journal")
 
     if _path_entry_exists(SESSION_INDEX_FILE):
-        with _INDEX_WRITE_LOCK:
+        with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
             rows = json.loads(SESSION_INDEX_FILE.read_bytes())
         if not isinstance(rows, list):
             raise RuntimeError("Cannot reserve a SID while the session index is invalid")
@@ -555,6 +727,7 @@ class _SessionDestinationReservation:
         self._committed = False
         self._entered = False
         self._bound_session_ref = None
+        self._claim_created = False
 
     def __enter__(self):
         if not is_safe_session_id(self.session_id):
@@ -578,6 +751,12 @@ class _SessionDestinationReservation:
                     f"Refusing to reserve session {self.session_id!r} while cleanup residuals remain"
                 )
             self.generation = _SessionPublicationGeneration()
+            _persist_session_incarnation_claim(
+                self.session_id,
+                self.generation.token,
+            )
+            self._claim_created = True
+            _clear_webui_deleted_session_tombstone(self.session_id)
             with _SESSION_PUBLICATION_LOCKS_GUARD:
                 _SESSION_PUBLICATION_GENERATIONS[self.session_id] = self.generation
                 _SESSION_PUBLICATION_DELETED.discard(self.session_id)
@@ -585,6 +764,18 @@ class _SessionDestinationReservation:
             self._entered = True
             return self
         except BaseException:
+            if self._claim_created and self.generation is not None:
+                try:
+                    _clear_session_incarnation_claim(
+                        self.session_id,
+                        expected_token=self.generation.token,
+                    )
+                except Exception:
+                    logger.error(
+                        "Could not roll back failed incarnation claim for %s",
+                        self.session_id,
+                        exc_info=True,
+                    )
             self._release()
             raise
 
@@ -646,6 +837,33 @@ class _SessionDestinationReservation:
 
 def reserve_session_destination(session_id: str) -> _SessionDestinationReservation:
     return _SessionDestinationReservation(session_id)
+
+
+def rollback_reserved_session_destination(session_id: str, token: str) -> dict:
+    """Crash-recovery rollback that may remove only one proven incarnation."""
+    sid = str(session_id or "")
+    with _session_publication_authority(sid):
+        sidecar = SESSION_DIR / f"{sid}.json"
+        persisted_token = None
+        if _path_entry_exists(sidecar):
+            payload = _load_and_validate_session_payload(sidecar, sid)
+            persisted_token = payload.get("publication_incarnation")
+        claim_token = _read_session_incarnation_claim(sid)
+        observed = persisted_token or claim_token
+        if observed != token:
+            raise RuntimeError(
+                f"Refusing to roll back unproven session incarnation {sid!r}"
+            )
+        generation = _SessionPublicationGeneration(token)
+        with _SESSION_PUBLICATION_LOCKS_GUARD:
+            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
+            _SESSION_PUBLICATION_DELETED.discard(sid)
+        return delete_session_artifacts(
+            sid,
+            expected_generation=generation,
+            durable_tombstone=False,
+            delete_state_db=False,
+        )
 
 
 def _cleanup_stale_tmp_files() -> None:
@@ -793,9 +1011,9 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
     """
     session_dir = session_dir or SESSION_DIR
     session_index_file = session_index_file or SESSION_INDEX_FILE
-    _tmp = session_index_file.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    _tmp = session_index_file.with_suffix(f'.tmp.{uuid.uuid4().hex}')
 
-    with _INDEX_WRITE_LOCK:
+    with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
         # Lazy full-rebuild path — used when index doesn't exist yet.
         if updates is None or not session_index_file.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
@@ -917,10 +1135,10 @@ def prune_session_from_index(session_id: str) -> None:
     if not SESSION_INDEX_FILE.exists():
         _fsync_parent_directory(SESSION_INDEX_FILE)
         return
-    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{uuid.uuid4().hex}')
 
     _fallback = False
-    with _INDEX_WRITE_LOCK:
+    with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
         try:
             with LOCK:
                 existing = json.loads(SESSION_INDEX_FILE.read_bytes())
@@ -1065,9 +1283,7 @@ def _save_webui_zero_message_orphan_tombstone(ids) -> None:
     _tmp = None
     try:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        _tmp = p.with_suffix(
-            f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
-        )
+        _tmp = p.with_suffix(f'.tmp.{uuid.uuid4().hex}')
         with open(_tmp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
@@ -1106,7 +1322,10 @@ def _record_webui_zero_message_orphan_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    with _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK:
+    with (
+        _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK,
+        _cross_process_file_lock("zero-message-tombstone"),
+    ):
         current = set(_load_webui_zero_message_orphan_tombstone())
         if sid in current:
             return
@@ -1133,7 +1352,10 @@ def _clear_webui_zero_message_orphan_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    with _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK:
+    with (
+        _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK,
+        _cross_process_file_lock("zero-message-tombstone"),
+    ):
         current = set(_load_webui_zero_message_orphan_tombstone())
         if sid not in current:
             return
@@ -1156,26 +1378,26 @@ def _webui_deleted_session_tombstone_file() -> "Path":
 
 def _load_webui_deleted_session_tombstone() -> frozenset[str]:
     p = _webui_deleted_session_tombstone_file()
-    if not p.exists():
+    if not _path_entry_exists(p):
         return frozenset()
     try:
         raw = json.loads(p.read_text(encoding='utf-8'))
-    except Exception:
-        logger.debug("Failed to load webui deleted-session tombstone", exc_info=True)
-        return frozenset()
+    except Exception as exc:
+        raise ValueError("Invalid webui deleted-session tombstone") from exc
     if not isinstance(raw, dict):
-        return frozenset()
+        raise ValueError("Invalid webui deleted-session tombstone")
     try:
-        if int(raw.get("version", 0)) != WEBUI_DELETED_SESSION_TOMBSTONE_VERSION:
-            return frozenset()
-    except (TypeError, ValueError):
-        return frozenset()
+        version = int(raw.get("version", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid webui deleted-session tombstone version") from exc
+    if version != WEBUI_DELETED_SESSION_TOMBSTONE_VERSION:
+        raise ValueError("Invalid webui deleted-session tombstone version")
     ids = raw.get("ids", [])
-    if not isinstance(ids, list):
-        return frozenset()
-    return frozenset(
-        str(sid).strip() for sid in ids if str(sid or "").strip()
-    )
+    if not isinstance(ids, list) or not all(
+        isinstance(sid, str) and is_safe_session_id(sid.strip()) for sid in ids
+    ):
+        raise ValueError("Invalid webui deleted-session tombstone ids")
+    return frozenset(sid.strip() for sid in ids)
 
 
 def _save_webui_deleted_session_tombstone(ids) -> None:
@@ -1192,9 +1414,7 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
     _tmp = None
     try:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        _tmp = p.with_suffix(
-            f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
-        )
+        _tmp = p.with_suffix(f'.tmp.{uuid.uuid4().hex}')
         with open(_tmp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
@@ -1214,7 +1434,10 @@ def _record_webui_deleted_session_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
+    with (
+        _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK,
+        _cross_process_file_lock("deleted-session-tombstone"),
+    ):
         current = set(_load_webui_deleted_session_tombstone())
         if sid in current:
             _fsync_parent_directory(_webui_deleted_session_tombstone_file())
@@ -1227,7 +1450,10 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
+    with (
+        _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK,
+        _cross_process_file_lock("deleted-session-tombstone"),
+    ):
         current = set(_load_webui_deleted_session_tombstone())
         if sid not in current:
             return
@@ -1283,10 +1509,12 @@ def _read_session_cleanup_residual_record(path: Path) -> tuple[str, dict]:
     items = raw.get("residuals")
     delete_state_db = raw.get("delete_state_db")
     durable_tombstone = raw.get("durable_tombstone")
+    operation = raw.get("operation", "delete")
     if (
         not isinstance(items, list)
         or not isinstance(delete_state_db, bool)
         or not isinstance(durable_tombstone, bool)
+        or operation not in {"delete", "prune", "clear"}
     ):
         raise ValueError("Invalid session cleanup residual policy")
     if not all(
@@ -1298,6 +1526,7 @@ def _read_session_cleanup_residual_record(path: Path) -> tuple[str, dict]:
         "residuals": list(items),
         "delete_state_db": delete_state_db,
         "durable_tombstone": durable_tombstone,
+        "operation": operation,
     }
 
 
@@ -1356,20 +1585,28 @@ def _persist_session_cleanup_residuals(
     *,
     durable_tombstone: bool,
     delete_state_db: bool,
+    operation: str = "delete",
 ) -> None:
     """Persist retryable artifact names until an idempotent cleanup succeeds."""
     sid = str(session_id or "")
     path = _session_cleanup_residual_file(sid)
-    with _SESSION_CLEANUP_RESIDUAL_LOCK:
+    if operation not in {"delete", "prune", "clear"}:
+        raise ValueError("Invalid session cleanup operation")
+    with (
+        _SESSION_CLEANUP_RESIDUAL_LOCK,
+        _cross_process_file_lock(f"cleanup-residual-{sid}"),
+    ):
         if not residuals:
+            if operation != "delete" and _path_entry_exists(path):
+                _existing_sid, existing_policy = _read_session_cleanup_residual_record(path)
+                if existing_policy.get("operation") != operation:
+                    return
             _durable_unlink(path)
             return
         root = _session_cleanup_residual_dir()
         root.mkdir(parents=True, exist_ok=True)
         _fsync_parent_directory(root)
-        tmp = path.with_suffix(
-            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
-        )
+        tmp = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
         try:
             with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump(
@@ -1379,6 +1616,7 @@ def _persist_session_cleanup_residuals(
                         "residuals": list(residuals),
                         "delete_state_db": bool(delete_state_db),
                         "durable_tombstone": bool(durable_tombstone),
+                        "operation": operation,
                     },
                     handle,
                     ensure_ascii=False,
@@ -1391,6 +1629,58 @@ def _persist_session_cleanup_residuals(
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+
+
+def retry_session_retention_cleanup(session_id: str, operation: str) -> dict:
+    """Retry reachability cleanup without deleting the live session owner."""
+    sid = str(session_id or "")
+    if operation not in {"prune", "clear"}:
+        raise ValueError("Invalid retention cleanup operation")
+    residuals = []
+    with _session_publication_authority(sid):
+        sidecar = SESSION_DIR / f"{sid}.json"
+        try:
+            current = _load_and_validate_session_payload(sidecar, sid)
+        except Exception as exc:
+            residuals.append({"artifact": "session_json", "error": type(exc).__name__})
+            current = None
+        backup = sidecar.with_suffix(".json.bak")
+        retained = [current] if current is not None else []
+        if operation == "clear":
+            try:
+                _durable_unlink(backup)
+            except Exception as exc:
+                residuals.append({"artifact": "session_backup", "error": type(exc).__name__})
+        elif _path_entry_exists(backup):
+            try:
+                retained.append(_load_and_validate_session_payload(backup, sid))
+            except Exception as exc:
+                residuals.append({"artifact": "session_backup", "error": type(exc).__name__})
+        if current is not None and not residuals:
+            try:
+                from api.session_media import (
+                    _collect_reference_filenames,
+                    prune_session_media,
+                    remove_session_media,
+                )
+
+                live_refs = _collect_reference_filenames(
+                    [current.get("messages", []), current.get("context_messages", [])]
+                )
+                if operation == "clear" and not live_refs:
+                    remove_session_media(sid)
+                else:
+                    prune_session_media(sid, retained)
+            except Exception as exc:
+                residuals.append({"artifact": "session_media", "error": type(exc).__name__})
+        _persist_session_cleanup_residuals(
+            sid,
+            residuals,
+            durable_tombstone=False,
+            delete_state_db=False,
+            operation=operation,
+        )
+    return {"ok": not residuals, "session_id": sid, "residuals": residuals}
 
 
 def delete_session_artifacts(
@@ -1471,7 +1761,10 @@ def delete_session_artifacts(
         except Exception as exc:
             residual("active_run_registry", exc)
             active_run = True
-        if active_run:
+        # A destination reservation rollback owns the not-yet-committed SID
+        # and may need to retire it after an in-transaction registry migration.
+        # Ordinary destructive requests still defer while any run is active.
+        if active_run and _reservation_token is None:
             residual("active_run")
         if residuals:
             try:
@@ -1497,6 +1790,16 @@ def delete_session_artifacts(
                 residual(artifact, exc)
             if _path_entry_exists(path):
                 residual(artifact)
+
+        try:
+            _clear_session_incarnation_claim(
+                sid,
+                expected_token=retired_generation.token,
+            )
+        except Exception as exc:
+            residual("session_incarnation_claim", exc)
+        if _path_entry_exists(_session_incarnation_claim_file(sid)):
+            residual("session_incarnation_claim")
 
         # Session.save() normally removes its own failed staging files, but a
         # process crash can leave transcript-bearing JSON/backup temporaries.
@@ -1582,32 +1885,36 @@ def delete_session_artifacts(
             except Exception as exc:
                 residual("state_db", exc)
 
-        try:
-            from api.config import (
-                SESSION_AGENT_LOCKS,
-                SESSION_AGENT_LOCKS_LOCK,
-                _evict_session_agent,
-            )
+        # Reservation owners roll back any pre-commit registry migration in
+        # their outer transaction. Evicting here could close a migrated agent
+        # before that undo restores it under the source SID.
+        if _reservation_token is None:
+            try:
+                from api.config import (
+                    SESSION_AGENT_LOCKS,
+                    SESSION_AGENT_LOCKS_LOCK,
+                    _evict_session_agent,
+                )
 
-            _evict_session_agent(sid)
-            with SESSION_AGENT_LOCKS_LOCK:
-                SESSION_AGENT_LOCKS.pop(sid, None)
-        except Exception as exc:
-            residual("agent_runtime_cache", exc)
+                _evict_session_agent(sid)
+                with SESSION_AGENT_LOCKS_LOCK:
+                    SESSION_AGENT_LOCKS.pop(sid, None)
+            except Exception as exc:
+                residual("agent_runtime_cache", exc)
 
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
+            try:
+                from api.background_process import forget_bg_task_completion_dedup
 
-            forget_bg_task_completion_dedup(sid)
-        except Exception as exc:
-            residual("background_completion_registry", exc)
+                forget_bg_task_completion_dedup(sid)
+            except Exception as exc:
+                residual("background_completion_registry", exc)
 
-        try:
-            from api.terminal import close_terminal
+            try:
+                from api.terminal import close_terminal
 
-            close_terminal(sid)
-        except Exception as exc:
-            residual("terminal", exc)
+                close_terminal(sid)
+            except Exception as exc:
+                residual("terminal", exc)
 
         try:
             _persist_session_cleanup_residuals(
@@ -1942,25 +2249,21 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
 
 def _load_session_from_path(path: Path) -> "Session | None":
     """Load a session from an explicit JSON path without consulting SESSION_DIR."""
-    try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    embedded_sid = str(data.get("session_id") or "")
-    expected_sids = {path.stem}
+    expected_sids = [path.stem]
     # Legacy Hermes sidecars were named ``session_<sid>.json``. Keep that
     # format readable, but never let an arbitrary outer filename redirect the
     # loaded object to another session's cache/index/media namespace.
     if path.stem.startswith("session_"):
-        expected_sids.add(path.stem[len("session_"):])
-    if embedded_sid not in expected_sids:
-        logger.warning(
-            "Rejecting session sidecar identity mismatch: path=%s embedded=%r",
-            path,
-            embedded_sid,
-        )
+        expected_sids.insert(0, path.stem[len("session_"):])
+    data = None
+    for expected_sid in expected_sids:
+        try:
+            data = _load_and_validate_session_payload(path, expected_sid)
+            break
+        except Exception:
+            continue
+    if data is None:
+        logger.warning("Rejecting invalid or identity-mismatched session sidecar: %s", path)
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
     return Session(**data)
@@ -2084,12 +2387,20 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 publication_incarnation=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         # Process-local incarnation lease stored in the class slot above. Every
         # load of the current SID shares this token; an intentional same-SID
         # recreation rotates it so old objects never regain publication authority.
-        self._publication_generation = _session_publication_generation(self.session_id)
+        if publication_incarnation is None:
+            publication_incarnation = _read_session_incarnation_claim(
+                self.session_id
+            )
+        self._publication_generation = _session_publication_generation(
+            self.session_id,
+            str(publication_incarnation) if publication_incarnation else None,
+        )
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
         self.model = model
@@ -2234,6 +2545,26 @@ class Session:
             raise RuntimeError(
                 f"Refusing to publish {rejection} {self.session_id!r}"
             )
+        if not _path_entry_exists(self.path) and _read_session_incarnation_claim(
+            self.session_id
+        ) is None:
+            if _session_has_cleanup_residual(self.session_id):
+                raise RuntimeError(
+                    f"Refusing to publish session {self.session_id!r} while cleanup residuals remain"
+                )
+            owners = _session_destination_owners(self.session_id)
+            with LOCK:
+                if SESSIONS.get(self.session_id) is self:
+                    owners = [owner for owner in owners if owner != "session_cache"]
+            if owners:
+                raise SessionDestinationCollisionError(
+                    f"Session destination {self.session_id!r} is already owned: "
+                    + ", ".join(owners)
+                )
+            _persist_session_incarnation_claim(
+                self.session_id,
+                self._publication_generation.token,
+            )
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial
@@ -2258,10 +2589,19 @@ class Session:
         # base64 work. Persist a private reference and hydrate only when a later
         # model call needs the original data URL.
         from api.session_media import (
+            assert_no_session_media_references,
             externalize_large_session_media,
-            verify_session_media_references,
+            verify_serialized_session_media_payload,
         )
 
+        assert_no_session_media_references(
+            {
+                key: value
+                for key, value in self.__dict__.items()
+                if key not in {"messages", "context_messages"}
+            },
+            context="session payload outside messages/context_messages",
+        )
         externalize_large_session_media(self.messages, self.session_id)
         externalize_large_session_media(self.context_messages, self.session_id)
         # Write metadata fields first so load_metadata_only() can read them
@@ -2294,6 +2634,7 @@ class Session:
             'share_token', 'share_created_at',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta['publication_incarnation'] = self._publication_generation.token
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -2317,7 +2658,9 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        payload_data = {**meta, **extra}
+        verify_serialized_session_media_payload(payload_data, self.session_id)
+        payload = json.dumps(payload_data, ensure_ascii=False, indent=2)
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -2336,8 +2679,10 @@ class Session:
                 existing_text = self.path.read_text(encoding='utf-8')
                 try:
                     existing = json.loads(existing_text)
+                    if not isinstance(existing, dict) or existing.get("session_id") != self.session_id:
+                        raise RuntimeError("Existing session sidecar identity mismatch")
                     existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
+                except json.JSONDecodeError:
                     existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
                 if (
@@ -2366,7 +2711,7 @@ class Session:
                     # land at all.
                     try:
                         bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            f'.bak.tmp.{uuid.uuid4().hex}'
                         )
                         with open(bak_tmp, 'w', encoding='utf-8') as bf:
                             bf.write(existing_text)
@@ -2383,7 +2728,7 @@ class Session:
         except OSError:
             pass
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        tmp = self.path.with_suffix(f'.tmp.{uuid.uuid4().hex}')
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(payload)
@@ -2392,8 +2737,8 @@ class Session:
             # Verify the exact retained media authority at the publication
             # boundary. A missing or corrupt blob must leave the previous JSON
             # untouched even when serialization and backup work took time.
-            verify_session_media_references(
-                [self.messages, self.context_messages],
+            verify_serialized_session_media_payload(
+                json.loads(payload),
                 self.session_id,
             )
             # Delete and save share the publication lock, but keep the
@@ -2418,6 +2763,10 @@ class Session:
             raise
         if not skip_index:
             _write_session_index(updates=[self])
+        _clear_session_incarnation_claim(
+            self.session_id,
+            expected_token=self._publication_generation.token,
+        )
         if prune_media:
             from api.session_media import prune_session_media
 
@@ -2432,15 +2781,28 @@ class Session:
                         raise ValueError("Session backup identity mismatch while pruning media")
                     retained_values.append(backup_payload)
                 prune_session_media(self.session_id, retained_values)
-            except Exception:
+                _persist_session_cleanup_residuals(
+                    self.session_id,
+                    [],
+                    durable_tombstone=False,
+                    delete_state_db=False,
+                    operation="prune",
+                )
+            except Exception as exc:
                 # The sidecar and index are already durably committed above.
-                # Pruning is retention-only because every live/recovery
-                # reference is kept, so a cleanup error must not turn that
-                # committed transcript mutation into a false HTTP failure.
+                # Preserve a durable, machine-readable retry authority before
+                # allowing callers to treat the transcript commit as complete.
                 logger.warning(
                     "Could not prune session media after transcript truncation for %s",
                     self.session_id,
                     exc_info=True,
+                )
+                _persist_session_cleanup_residuals(
+                    self.session_id,
+                    [{"artifact": "session_media", "error": type(exc).__name__}],
+                    durable_tombstone=False,
+                    delete_state_db=False,
+                    operation="prune",
                 )
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
@@ -2481,9 +2843,10 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
-        if not isinstance(data, dict) or data.get('session_id') != sid:
-            logger.warning("Rejecting session sidecar identity mismatch for %s", sid)
+        try:
+            data = _load_and_validate_session_payload(p, sid)
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger.warning("Rejecting invalid or identity-mismatched session sidecar for %s", sid)
             return None
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
@@ -5655,27 +6018,16 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
-    _activate_session_publication_generation(s)
-    # #4985: defensive — auto-generated uuids don't collide with the
-    # tombstone, but if a future caller ever passes an explicit id that
-    # was previously pruned, clear the entry so the new session isn't
-    # shadowed on the next poll. Wrapped because a tombstone failure
-    # must never block new-session creation.
-    try:
+    with reserve_session_destination(s.session_id) as reservation:
+        reservation.bind(s)
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-    except Exception:
-        logger.debug(
-            "Failed to clear webui tombstone for %s",
-            s.session_id,
-            exc_info=True,
-        )
-    with LOCK:
-        SESSIONS[s.session_id] = s
-        SESSIONS.move_to_end(s.session_id)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-    if wt:
-        s.save()
+        with LOCK:
+            SESSIONS[s.session_id] = s
+            SESSIONS.move_to_end(s.session_id)
+            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        if wt:
+            s.save()
+        reservation.commit()
     return s
 
 def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False) -> bool:
@@ -7186,22 +7538,11 @@ def import_cli_session(
         updated_at=updated_at,
         parent_session_id=parent_session_id,
     )
-    _activate_session_publication_generation(s)
-    # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
-    # If that sid was previously tombstoned as a webui zero-message orphan,
-    # clear the tombstone entry so the freshly-imported session is visible
-    # on the next poll. Wrapped because a tombstone failure must never block
-    # an import.
-    try:
+    with reserve_session_destination(s.session_id) as reservation:
+        reservation.bind(s)
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-    except Exception:
-        logger.debug(
-            "Failed to clear webui tombstone for %s",
-            s.session_id,
-            exc_info=True,
-        )
-    s.save(touch_updated_at=False)
+        s.save(touch_updated_at=False)
+        reservation.commit()
     return s
 
 

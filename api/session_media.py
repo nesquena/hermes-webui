@@ -85,6 +85,15 @@ def _validated_session_id(session_id: str) -> str:
     return sid
 
 
+@contextmanager
+def _session_media_authority(session_id: str):
+    """Share the durable SID mutation boundary with sidecar publication."""
+    from api.models import _session_publication_process_lock
+
+    with _session_publication_process_lock(_validated_session_id(session_id)):
+        yield
+
+
 def _state_root() -> Path:
     root = Path(STATE_DIR).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -336,8 +345,8 @@ def _write_media(session_id: str, mime: str, raw: bytes) -> str:
         raise _unsupported_backend_error()
     temp_name = None
     published = False
-    with _MEDIA_IO_LOCK:
-        sid = _validated_session_id(session_id)
+    sid = _validated_session_id(session_id)
+    with _session_media_authority(sid), _MEDIA_IO_LOCK:
         with _open_private_session(sid, create=True) as (
             state_fd,
             media_fd,
@@ -408,7 +417,10 @@ def _read_verified_media_reference(session_id: str, filename: str) -> tuple[str,
     if not _DIR_FD_OK:
         raise _unsupported_backend_error()
     try:
-        with _open_private_session(session_id, create=False) as (
+        with _session_media_authority(session_id), _open_private_session(
+            session_id,
+            create=False,
+        ) as (
             state_fd,
             media_fd,
             directory_fd,
@@ -481,6 +493,74 @@ def verify_session_media_references(value, session_id: str) -> int:
     return len(filenames)
 
 
+def verify_serialized_session_media_payload(payload: dict, session_id: str) -> int:
+    """Validate private refs across the complete sidecar schema.
+
+    Compact references are sanctioned only inside the two transcript fields,
+    and only in canonical ``type=image_url`` parts. Every other serialized
+    field must remain portable and free of private ownership handles.
+    """
+    if not isinstance(payload, dict):
+        raise SessionMediaIntegrityError("Session payload must be an object")
+    filenames = set()
+
+    def reject_private_refs(value) -> None:
+        assert_no_session_media_references(
+            value,
+            context="session transcript outside an image part",
+        )
+
+    for field in ("messages", "context_messages"):
+        transcript = payload.get(field, [])
+        if not isinstance(transcript, list):
+            reject_private_refs(transcript)
+            continue
+        for message in transcript:
+            if not isinstance(message, dict):
+                reject_private_refs(message)
+                continue
+            reject_private_refs(
+                {key: value for key, value in message.items() if key != "content"}
+            )
+            content = message.get("content")
+            if not isinstance(content, list):
+                reject_private_refs(content)
+                continue
+            for part in content:
+                image = part.get("image_url") if isinstance(part, dict) else None
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "image_url"
+                    and isinstance(image, dict)
+                ):
+                    url = image.get("url")
+                    if isinstance(url, str) and url.startswith(_MEDIA_SCHEME):
+                        filenames.add(_reference_filename(url))
+                    reject_private_refs(
+                        {
+                            **{key: value for key, value in part.items() if key != "image_url"},
+                            "image_url": {
+                                key: value for key, value in image.items() if key != "url"
+                            },
+                        }
+                    )
+                    continue
+                reject_private_refs(part)
+
+    outside = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"messages", "context_messages"}
+    }
+    assert_no_session_media_references(
+        outside,
+        context="session payload outside messages/context_messages",
+    )
+    for filename in sorted(filenames):
+        _read_verified_media_reference(session_id, filename)
+    return len(filenames)
+
+
 def clone_session_media_references(value, source_session_id: str, destination_session_id: str) -> int:
     """Transactionally give a new session verified ownership of all references."""
     if source_session_id == destination_session_id:
@@ -500,8 +580,8 @@ def clone_session_media_references(value, source_session_id: str, destination_se
     }
     staged = {}
     created = []
-    with _MEDIA_IO_LOCK:
-        destination_sid = _validated_session_id(destination_session_id)
+    destination_sid = _validated_session_id(destination_session_id)
+    with _session_media_authority(destination_sid), _MEDIA_IO_LOCK:
         with _open_private_session(destination_sid, create=True) as (
             state_fd,
             media_fd,
@@ -681,11 +761,46 @@ def _remove_tree_at(parent_fd: int, name: str, *, expected_fd: int | None = None
             return
     try:
         for entry_name in os.listdir(child_fd):
-            info = os.stat(entry_name, dir_fd=child_fd, follow_symlinks=False)
-            if stat.S_ISDIR(info.st_mode):
-                _remove_tree_at(child_fd, entry_name)
-            else:
-                os.unlink(entry_name, dir_fd=child_fd)
+            try:
+                entry_fd = os.open(
+                    entry_name,
+                    os.O_RDONLY | _O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=child_fd,
+                )
+            except OSError as exc:
+                raise SessionMediaIntegrityError(
+                    "Could not hold private media entry for removal"
+                ) from exc
+            held = os.fstat(entry_fd)
+            quarantine_name = f".remove-{secrets.token_hex(16)}"
+            try:
+                if not (stat.S_ISDIR(held.st_mode) or stat.S_ISREG(held.st_mode)):
+                    raise SessionMediaIntegrityError(
+                        "Unexpected entry in private session media directory"
+                    )
+                os.replace(
+                    entry_name,
+                    quarantine_name,
+                    src_dir_fd=child_fd,
+                    dst_dir_fd=child_fd,
+                )
+                _fsync_dir(child_fd)
+                _assert_entry_still_names_fd(
+                    child_fd,
+                    quarantine_name,
+                    entry_fd,
+                )
+                if stat.S_ISDIR(held.st_mode):
+                    _remove_tree_at(
+                        child_fd,
+                        quarantine_name,
+                        expected_fd=entry_fd,
+                    )
+                else:
+                    os.unlink(quarantine_name, dir_fd=child_fd)
+                    _fsync_dir(child_fd)
+            finally:
+                os.close(entry_fd)
         # Keep the authoritative handle open through the last identity check
         # and rmdir. In particular, never close it and then resolve ``name``
         # again as the old implementation did.
@@ -716,7 +831,7 @@ def remove_session_media(session_id: str) -> None:
         except FileNotFoundError:
             return
         raise _unsupported_backend_error()
-    with _MEDIA_IO_LOCK:
+    with _session_media_authority(sid), _MEDIA_IO_LOCK:
         try:
             state_fd = _open_root_fd(_state_root())
             try:
@@ -790,19 +905,48 @@ def prune_session_media(session_id: str, retained_values) -> int:
             return 0
         raise _unsupported_backend_error()
     removed = 0
-    with _MEDIA_IO_LOCK:
+    with _session_media_authority(sid), _MEDIA_IO_LOCK:
         try:
             with _open_private_session(sid, create=False) as handles:
                 directory_fd = handles[2]
                 for filename in os.listdir(directory_fd):
-                    info = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
-                    if not stat.S_ISREG(info.st_mode):
-                        raise SessionMediaIntegrityError(
-                            "Unexpected entry in private session media directory"
+                    try:
+                        entry_fd = os.open(
+                            filename,
+                            os.O_RDONLY
+                            | _O_NOFOLLOW
+                            | getattr(os, "O_NONBLOCK", 0),
+                            dir_fd=directory_fd,
                         )
-                    if filename not in retained:
-                        os.unlink(filename, dir_fd=directory_fd)
-                        removed += 1
+                    except OSError as exc:
+                        raise SessionMediaIntegrityError(
+                            "Could not hold private media entry for pruning"
+                        ) from exc
+                    try:
+                        held = os.fstat(entry_fd)
+                        if not stat.S_ISREG(held.st_mode):
+                            raise SessionMediaIntegrityError(
+                                "Unexpected entry in private session media directory"
+                            )
+                        if filename not in retained:
+                            quarantine = f".prune-{secrets.token_hex(16)}"
+                            os.replace(
+                                filename,
+                                quarantine,
+                                src_dir_fd=directory_fd,
+                                dst_dir_fd=directory_fd,
+                            )
+                            _fsync_dir(directory_fd)
+                            _assert_entry_still_names_fd(
+                                directory_fd,
+                                quarantine,
+                                entry_fd,
+                            )
+                            os.unlink(quarantine, dir_fd=directory_fd)
+                            _fsync_dir(directory_fd)
+                            removed += 1
+                    finally:
+                        os.close(entry_fd)
                 _fsync_dir(directory_fd)
         except FileNotFoundError:
             return 0
