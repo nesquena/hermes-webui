@@ -4704,8 +4704,31 @@ def _should_strip_reasoning_content(
     return False
 
 
-def _compact_image_parts_for_persistence(messages) -> int:
-    """Replace persisted image parts with text placeholders after a completed turn.
+def _part_is_inline_base64_image(part: dict) -> bool:
+    """Check if a part contains actual inline base64 image data."""
+    part_type = part.get('type')
+    if part_type in ('image', 'image_url', 'input_image'):
+        # Direct data URL: data:image/...;base64,...
+        url = part.get('image_url', {}).get('url') if isinstance(part.get('image_url'), dict) else part.get('url', '')
+        if isinstance(url, str) and re.match(r'data:image/[^,;]+;base64,', url):
+            return True
+        # Also check direct string source
+        source = part.get('source', part.get('url', ''))
+        if isinstance(source, str) and re.match(r'data:image/[^,;]+;base64,', source):
+            return True
+    # Anthropic-style: source: {type: "base64", ...}
+    if isinstance(part.get('source'), dict) and part['source'].get('type') == 'base64':
+        return True
+    # _multimodal envelope with base64
+    if isinstance(part.get('content'), list):
+        for sub in part['content']:
+            if isinstance(sub, dict) and _part_is_inline_base64_image(sub):
+                return True
+    return False
+
+
+def _compact_image_parts_for_persistence(messages) -> tuple[list, int]:
+    """Return (compacted_copy, changed_count). Does not mutate inputs.
 
     The active model receives native image parts while a tool call is running. Once
     the turn has completed, retaining base64 data URLs in both the visible
@@ -4716,12 +4739,14 @@ def _compact_image_parts_for_persistence(messages) -> int:
     future turns retain the conversational record and can re-open the original
     image from the preceding tool-call arguments when needed.
 
-    This intentionally mutates the owned session message rows in place. It is
-    called only after ``run_conversation()`` has returned, so it never removes
-    image parts that the current model invocation still needs.
+    Only inline base64 image data is compacted — http/file image references are
+    preserved as-is so the image can be re-fetched on replay.
     """
+    if not messages:
+        return list(messages or ()), 0
     changed = 0
-    for message in messages or ():
+    messages_copy = copy.deepcopy(messages)  # owned copy
+    for message in messages_copy:
         # Mirror Hermes Agent's durable-session policy: native *tool* results
         # are transient input for the current model call. User attachments are
         # a separate product contract and must remain intact here.
@@ -4740,14 +4765,8 @@ def _compact_image_parts_for_persistence(messages) -> int:
                 # the structured result during durable-session compaction.
                 compacted_content.append(part)
                 continue
-            part_type = part.get('type')
-            # Guard the set-membership with an isinstance check: a JSON-valid
-            # part can carry an unhashable ``type`` (e.g. a list), and
-            # ``unhashable in {...}`` raises TypeError — which would turn an
-            # otherwise-complete streaming send into the error path before the
-            # session is saved. Only the three string image types are compacted;
-            # every other part (including non-string ``type`` values) is preserved.
-            if isinstance(part_type, str) and part_type in {'image', 'image_url', 'input_image'}:
+            # Check if this part contains inline base64 data
+            if _part_is_inline_base64_image(part):
                 compacted_content.append({'type': 'text', 'text': '[screenshot]'})
                 image_parts += 1
             else:
@@ -4756,15 +4775,20 @@ def _compact_image_parts_for_persistence(messages) -> int:
         if image_parts:
             message['content'] = compacted_content
             changed += image_parts
-    return changed
+    return messages_copy, changed
 
 
 def _compact_session_image_parts_for_persistence(session) -> int:
     """Compact completed native-vision tool results in both durable histories."""
-    changed = (
-        _compact_image_parts_for_persistence(getattr(session, 'context_messages', None))
-        + _compact_image_parts_for_persistence(getattr(session, 'messages', None))
-    )
+    changed = 0
+    copied_ctx, c1 = _compact_image_parts_for_persistence(getattr(session, 'context_messages', None))
+    if c1:
+        session.context_messages = copied_ctx
+        changed += c1
+    copied_msgs, c2 = _compact_image_parts_for_persistence(getattr(session, 'messages', None))
+    if c2:
+        session.messages = copied_msgs
+        changed += c2
     if changed:
         logger.info(
             "Compacted %d completed image message part(s) for session %s",
@@ -6746,6 +6770,7 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
             text = str(preview)
     except Exception:
         pass
+    text = _strip_base64_data_urls(text)
     return text[:limit]
 
 
@@ -8880,6 +8905,7 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
+                        result_snippet = _strip_base64_data_urls(result_snippet)
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue

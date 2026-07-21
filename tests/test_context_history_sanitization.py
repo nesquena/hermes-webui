@@ -45,15 +45,17 @@ def test_compact_image_parts_for_persistence_keeps_text_and_drops_base64():
         },
     ]
 
-    changed = _compact_image_parts_for_persistence(messages)
+    copied, changed = _compact_image_parts_for_persistence(messages)
 
     assert changed == 1
-    assert messages[1]["content"] == [
+    assert copied[1]["content"] == [
         {"type": "text", "text": "Image loaded into your context."},
         {"type": "text", "text": "[screenshot]"},
     ]
-    assert "data:image" not in json.dumps(messages)
-    assert messages[0]["tool_calls"] == [{"id": "vision-1"}]
+    assert "data:image" not in json.dumps(copied)
+    assert copied[0]["tool_calls"] == [{"id": "vision-1"}]
+    # Original is not mutated
+    assert messages[1]["content"][1]["type"] == "image_url"
 
 
 
@@ -70,10 +72,10 @@ def test_compact_image_parts_for_persistence_counts_each_image_part():
         }
     ]
 
-    changed = _compact_image_parts_for_persistence(messages)
+    copied, changed = _compact_image_parts_for_persistence(messages)
 
     assert changed == 2
-    assert messages[0]["content"] == [
+    assert copied[0]["content"] == [
         {"type": "text", "text": "Before and after"},
         {"type": "text", "text": "[screenshot]"},
         {"type": "text", "text": "[screenshot]"},
@@ -97,10 +99,10 @@ def test_compact_image_parts_for_persistence_preserves_interleaved_non_image_par
         }
     ]
 
-    changed = _compact_image_parts_for_persistence(messages)
+    copied, changed = _compact_image_parts_for_persistence(messages)
 
     assert changed == 2
-    assert messages[0]["content"] == [
+    assert copied[0]["content"] == [
         {"type": "text", "text": "[screenshot]"},
         {"type": "text", "text": "between"},
         document,
@@ -108,8 +110,10 @@ def test_compact_image_parts_for_persistence_preserves_interleaved_non_image_par
         {"type": "text", "text": "[screenshot]"},
         {"type": "input_text", "content": "after"},
     ]
-    assert "data:image" not in json.dumps(messages)
-    assert _compact_image_parts_for_persistence(messages) == 0
+    assert "data:image" not in json.dumps(copied)
+    # Idempotent: a second pass changes nothing
+    second_copy, changed2 = _compact_image_parts_for_persistence(copied)
+    assert changed2 == 0
 
 
 def test_compact_image_parts_for_persistence_survives_unhashable_part_type():
@@ -131,17 +135,18 @@ def test_compact_image_parts_for_persistence_survives_unhashable_part_type():
         }
     ]
 
-    changed = _compact_image_parts_for_persistence(messages)
+    copied, changed = _compact_image_parts_for_persistence(messages)
 
     assert changed == 1
-    assert messages[0]["content"] == [
+    assert copied[0]["content"] == [
         list_type,
         {"type": "text", "text": "[screenshot]"},
         dict_type,
     ]
-    assert "data:image" not in json.dumps(messages)
+    assert "data:image" not in json.dumps(copied)
     # Idempotent: a second pass changes nothing and still does not raise.
-    assert _compact_image_parts_for_persistence(messages) == 0
+    second_copy, changed2 = _compact_image_parts_for_persistence(copied)
+    assert changed2 == 0
 
 
 def test_compact_session_image_parts_for_persistence_compacts_both_histories():
@@ -176,18 +181,22 @@ def test_compact_image_parts_for_persistence_keeps_user_image_attachment():
         }
     ]
 
-    changed = _compact_image_parts_for_persistence(messages)
+    copied, changed = _compact_image_parts_for_persistence(messages)
 
     assert changed == 0
+    assert copied[0]["content"][1]["type"] == "image_url"
+    # Original is not mutated
     assert messages[0]["content"][1]["type"] == "image_url"
 
 
 def test_compact_image_parts_for_persistence_leaves_text_history_unchanged():
     messages = [{"role": "tool", "content": "plain tool output"}]
 
-    changed = _compact_image_parts_for_persistence(messages)
+    copied, changed = _compact_image_parts_for_persistence(messages)
 
     assert changed == 0
+    assert copied == [{"role": "tool", "content": "plain tool output"}]
+    # Original is not mutated
     assert messages == [{"role": "tool", "content": "plain tool output"}]
 
 
