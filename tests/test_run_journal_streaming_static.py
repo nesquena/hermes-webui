@@ -32,7 +32,7 @@ def test_streaming_compacts_all_successful_agent_result_writebacks():
     # Normal completion plus both credential self-heal retry-success paths must
     # each compact after committing their own result shape. The retries use
     # different local variable names, so guard the durable invariant itself.
-    assert run_src.count("_compact_session_image_parts_for_persistence(s)") == 3
+    assert run_src.count("_compact_session_image_parts_for_persistence(s)") == 5
 
 
 def test_visible_process_echo_compare_ignores_all_whitespace():
