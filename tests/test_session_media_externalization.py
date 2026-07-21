@@ -1953,6 +1953,21 @@ def test_prune_file_replacement_after_final_check_is_not_unlinked(
     assert (media_dir / f"{replacement[0]}.moved").is_file()
 
 
+def test_prune_exact_removal_allows_additional_hardlink(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    sid = "prune-hardlink"
+    session_media.externalize_large_session_media(messages, sid)
+    media_dir = session_media._session_media_dir(sid)
+    stored = next(media_dir.iterdir())
+    sibling = media_dir / "additional-hardlink.png"
+    os.link(stored, sibling)
+
+    assert session_media.prune_session_media(sid, []) == 2
+    assert not list(media_dir.iterdir())
+
+
 def test_unsupported_backend_detects_broken_private_root_symlink(tmp_path, monkeypatch):
     monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     (tmp_path / "missing-target").mkdir()
