@@ -332,6 +332,10 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        if getattr(self, "_wallpaper_mutation_close", False):
+            queued = getattr(self, "_headers_buffer", ())
+            if not any(line.lower().startswith(b"connection:") for line in queued):
+                self.send_header("Connection", "close")
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -399,11 +403,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
+        self._wallpaper_mutation_close = False
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            if (
+                parsed.path == "/api/wallpaper"
+                and self.command in {"POST", "PATCH", "DELETE"}
+            ):
+                self._wallpaper_mutation_close = True
+                self.close_connection = True
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
@@ -629,6 +640,13 @@ def main() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from api.wallpaper import cleanup_wallpaper_orphans
+
+        cleanup_wallpaper_orphans()
+    except Exception:
+        logger.warning("Wallpaper startup cleanup failed")
 
     try:
         from api.gateway_watcher import start_watcher

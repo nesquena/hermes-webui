@@ -306,6 +306,8 @@ function _beforePanelSwitch(nextPanel) {
   }
   _revertSettingsPreview();
   _pendingSettingsTargetPanel = null;
+  _wallpaperAppearanceOwnerActive=false;
+  if(typeof endWallpaperSettingsSession==='function')endWallpaperSettingsSession();
   _resetSettingsPanelState();
   return true;
 }
@@ -7897,6 +7899,18 @@ function _renderComposerSituationalControlChips(){
   });
 }
 
+let _wallpaperAppearanceOwnerActive=false;
+function _syncWallpaperAppearanceOwnership(section){
+  const shouldOwn=_currentPanel==='settings'&&section==='appearance';
+  if(shouldOwn&&!_wallpaperAppearanceOwnerActive){
+    _wallpaperAppearanceOwnerActive=true;
+    if(typeof beginWallpaperSettingsSession==='function')beginWallpaperSettingsSession();
+  }else if(!shouldOwn&&_wallpaperAppearanceOwnerActive){
+    _wallpaperAppearanceOwnerActive=false;
+    if(typeof endWallpaperSettingsSession==='function')endWallpaperSettingsSession();
+  }
+}
+
 function switchSettingsSection(name,opts){
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
@@ -7918,6 +7932,7 @@ function switchSettingsSection(name,opts){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
+  _syncWallpaperAppearanceOwnership(section);
   const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
@@ -8301,6 +8316,10 @@ function toggleSettings(){
 }
 
 function _resetSettingsPanelState(){
+  if(_wallpaperAppearanceOwnerActive){
+    _wallpaperAppearanceOwnerActive=false;
+    if(typeof endWallpaperSettingsSession==='function')endWallpaperSettingsSession();
+  }
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
   _setAppearanceAutosaveStatus('');
