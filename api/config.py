@@ -3185,6 +3185,21 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
     return default_model
 
 
+def _default_model_has_explicit_source(config_data: dict | None = None) -> bool:
+    """True when the default model came from config or model env, not fallback."""
+    active_cfg = config_data if config_data is not None else cfg
+    model_cfg = active_cfg.get("model", {})
+    if isinstance(model_cfg, str) and model_cfg.strip():
+        return True
+    if isinstance(model_cfg, dict):
+        if str(model_cfg.get("default") or "").strip():
+            return True
+    env_model = (
+        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+    )
+    return bool(str(env_model or "").strip())
+
+
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
 # Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
 # importing from the agent tree (which may not be installed).  Any drift here
@@ -5211,6 +5226,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
         default_model = get_effective_default_model(cfg)
+        default_model_has_explicit_source = _default_model_has_explicit_source(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -5229,7 +5245,8 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if active_provider:
             detected_providers.add(active_provider)
-            _append_model_id(active_provider, default_model)
+            if default_model_has_explicit_source:
+                _append_model_id(active_provider, default_model)
 
         try:
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
@@ -5432,7 +5449,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                     }
                 )
 
-        if default_model:
+        if default_model and (
+            default_model_has_explicit_source or not active_provider or not groups
+        ):
             all_model_ids = {
                 str(model.get("id") or "")
                 for group in groups
@@ -6495,6 +6514,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
+        default_model_has_explicit_source = _default_model_has_explicit_source(cfg)
         groups = []
 
         def _norm_model_id(model_id: str) -> str:
@@ -6533,7 +6553,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _build_configured_model_badges() -> dict[str, dict[str, str]]:
             configured_entries: list[dict[str, str]] = []
-            if active_provider and default_model:
+            if active_provider and default_model and default_model_has_explicit_source:
                 configured_entries.append(
                     {
                         "provider": active_provider,
@@ -7818,7 +7838,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
                 )
 
-        if default_model:
+        if default_model and (
+            default_model_has_explicit_source or not active_provider or not groups
+        ):
             # Guard against provider-id values mistakenly stored in
             # ``model.default``. The injection logic below puts ANY string
             # into the picker as a fake option, so a stray provider id
