@@ -2564,9 +2564,10 @@ def test_terminal_journal_materialization_fails_closed_without_terminal_target(m
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
     assert session.anchor_activity_scenes == {}
-    record = session.terminal_anchor_reconciliation["streams"][stream_id]
-    assert record["scene"] is None
-    assert record["terminal_disposition"]["reason"] == "missing_terminal_target"
+    progress = session.terminal_anchor_reconciliation
+    assert stream_id in progress["recent_stream_ids"]
+    assert progress["last_non_materializable"]["stream_id"] == stream_id
+    assert progress["last_non_materializable"]["reason"] == "missing_terminal_target"
 
 
 def test_terminal_journal_materialization_fails_closed_without_message_ref(monkeypatch):
@@ -2634,9 +2635,10 @@ def test_terminal_journal_materialization_fails_closed_without_message_ref(monke
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
     assert session.anchor_activity_scenes == {}
-    record = session.terminal_anchor_reconciliation["streams"][stream_id]
-    assert record["scene"] is None
-    assert record["terminal_disposition"]["reason"] == "missing_terminal_target"
+    progress = session.terminal_anchor_reconciliation
+    assert stream_id in progress["recent_stream_ids"]
+    assert progress["last_non_materializable"]["stream_id"] == stream_id
+    assert progress["last_non_materializable"]["reason"] == "missing_terminal_target"
 
 
 def test_terminal_journal_materializes_detached_cancel_with_owned_target(monkeypatch):
@@ -2803,9 +2805,10 @@ def test_terminal_journal_rejects_mismatched_terminal_target(monkeypatch):
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
     assert session.save_calls == 1
     assert session.anchor_activity_scenes == {}
-    record = session.terminal_anchor_reconciliation["streams"][stream_id]
-    assert record["scene"] is None
-    assert record["terminal_disposition"]["reason"] == "terminal_target_not_found"
+    progress = session.terminal_anchor_reconciliation
+    assert stream_id in progress["recent_stream_ids"]
+    assert progress["last_non_materializable"]["stream_id"] == stream_id
+    assert progress["last_non_materializable"]["reason"] == "terminal_target_not_found"
 
 
 def test_terminal_target_rejects_missing_version_and_malformed_index():
@@ -3108,12 +3111,10 @@ def test_terminal_journal_records_non_materializable_disposition_once(monkeypatc
     assert session.save_calls == 1
     assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
     assert session.anchor_activity_scenes == {}
-    record = session.terminal_anchor_reconciliation["streams"][stream_id]
-    assert record["message_index"] is None
-    assert record["message_ref"] == ""
-    assert record["scene"] is None
-    assert record["stream_id"] == stream_id
-    assert record["terminal_disposition"]["kind"] == "consumed_non_materializable"
+    progress = session.terminal_anchor_reconciliation
+    assert progress["last_non_materializable"]["stream_id"] == stream_id
+    assert progress["last_non_materializable"]["kind"] == "consumed_non_materializable"
+    assert stream_id in progress["recent_stream_ids"]
 
     assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
     assert session.save_calls == 1
@@ -3273,10 +3274,11 @@ def test_terminal_journal_materializer_durably_skips_invalid_batch_and_reaches_o
         for record in session.anchor_activity_scenes.values()
         if isinstance(record, dict)
     }
-    progress_records = session.terminal_anchor_reconciliation["streams"]
-    assert set(invalid_streams).issubset(progress_records)
-    assert progress_records[invalid_streams[0]]["scene"] is None
-    assert progress_records[invalid_streams[0]]["terminal_disposition"]["reason"] == "missing_terminal_target"
+    progress = session.terminal_anchor_reconciliation
+    recent_streams = progress["recent_stream_ids"]
+    assert len(recent_streams) <= routes._TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT
+    assert set(recent_streams).issubset(set(invalid_streams))
+    assert progress["last_non_materializable"]["reason"] == "missing_terminal_target"
     assert records_by_stream[old_stream]["scene"]["activity_rows"]
     assert records_by_stream[old_stream]["message_index"] == 1
 
@@ -3365,9 +3367,107 @@ def test_terminal_reconciliation_progress_does_not_evict_real_anchor_scenes(
     }
     assert streams == {record["stream_id"] for record in real_records.values()}
     progress = getattr(session, "terminal_anchor_reconciliation", {})
-    progress_records = progress.get("streams") if isinstance(progress, dict) else None
-    assert isinstance(progress_records, dict)
-    assert set(invalid_streams).issubset(progress_records)
+    recent_streams = progress.get("recent_stream_ids") if isinstance(progress, dict) else None
+    assert isinstance(recent_streams, list)
+    assert len(recent_streams) <= routes._TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT
+    assert set(recent_streams).issubset(set(invalid_streams))
+    assert "streams" not in progress
+
+
+def test_terminal_reconciliation_cursor_advances_past_invalid_index_pages(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.run_journal import append_run_event
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    session_id = "session-terminal-cursor"
+    valid_stream = "stream-terminal-cursor-valid"
+    messages = [
+        {"role": "user", "content": "finish work"},
+        {"role": "assistant", "content": "working final answer", "_ts": 2.0},
+    ]
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    append_run_event(
+        session_id,
+        valid_stream,
+        "reasoning",
+        {"text": "checking"},
+        session_dir=tmp_path,
+        created_at=0.5,
+    )
+    append_run_event(
+        session_id,
+        valid_stream,
+        "token",
+        {"text": "working"},
+        session_dir=tmp_path,
+        created_at=1.0,
+    )
+    append_run_event(
+        session_id,
+        valid_stream,
+        "done",
+        {
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": session_id,
+                "run_id": valid_stream,
+                "stream_id": valid_stream,
+                "message_index": 1,
+                "message_ref": _client_anchor_scene_message_ref(messages[1]),
+            },
+            "session": {
+                "session_id": session_id,
+                "message_count": len(messages),
+                "messages": messages,
+            },
+        },
+        session_dir=tmp_path,
+        created_at=2.0,
+    )
+    invalid_streams = [f"stream-terminal-cursor-invalid-{idx:03d}" for idx in range(130)]
+    for idx, stream_id in enumerate(invalid_streams):
+        append_run_event(
+            session_id,
+            stream_id,
+            "done",
+            {"message": "missing target"},
+            session_dir=tmp_path,
+            created_at=10.0 + idx,
+        )
+
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        terminal_anchor_reconciliation={},
+        save_calls=0,
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert session.save_calls == 1
+    records_by_stream = {
+        record["stream_id"]: record
+        for record in session.anchor_activity_scenes.values()
+        if isinstance(record, dict)
+    }
+    assert records_by_stream[valid_stream]["message_index"] == 1
+    progress = session.terminal_anchor_reconciliation
+    assert "streams" not in progress
+    assert len(progress["recent_stream_ids"]) <= routes._TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT
+    assert set(progress["recent_stream_ids"]).issubset(set(invalid_streams))
+    cursor = progress["index_cursor"]
+    assert cursor["index_size"] > 0
+    assert 0 <= cursor["end_offset"] < cursor["index_size"]
 
 
 @pytest.mark.parametrize("terminal_event", ["cancel", "apperror"])

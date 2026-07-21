@@ -161,39 +161,52 @@ def _read_jsonl(
 ) -> tuple[list[dict], list[dict]]:
     events: list[dict] = []
     malformed: list[dict] = []
-    total_bytes = 0
     row_count = 0
+
+    def parse_row(line_no: int, raw_bytes: bytes) -> bool:
+        nonlocal row_count
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            malformed.append({"line": line_no, "raw": ""})
+            return True
+        if not raw.strip():
+            return True
+        row_count += 1
+        if max_rows is not None and row_count > max(0, int(max_rows)):
+            malformed.append({"line": line_no, "reason": "replay_limit_rows"})
+            return False
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
+            return True
+        if isinstance(parsed, dict):
+            events.append(parsed)
+        else:
+            malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
+        return True
+
+    if max_bytes is not None:
+        try:
+            for line_no, raw_bytes, _total_bytes in _iter_bounded_raw_jsonl_lines(
+                path,
+                max_bytes=max(0, int(max_bytes)),
+            ):
+                if not parse_row(line_no, raw_bytes):
+                    break
+        except ValueError as exc:
+            malformed.append({"line": None, "reason": str(exc) or "replay_limit_bytes"})
+        return events, malformed
+
     try:
         fh = path.open("rb")
     except FileNotFoundError:
         return events, malformed
     with fh:
         for line_no, raw_bytes in enumerate(fh, start=1):
-            if max_bytes is not None:
-                total_bytes += len(raw_bytes)
-                if total_bytes > max(0, int(max_bytes)):
-                    malformed.append({"line": line_no, "reason": "replay_limit_bytes"})
-                    break
-            try:
-                raw = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                malformed.append({"line": line_no, "raw": ""})
-                continue
-            if not raw.strip():
-                continue
-            row_count += 1
-            if max_rows is not None and row_count > max(0, int(max_rows)):
-                malformed.append({"line": line_no, "reason": "replay_limit_rows"})
+            if not parse_row(line_no, raw_bytes):
                 break
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
-                continue
-            if isinstance(parsed, dict):
-                events.append(parsed)
-            else:
-                malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
     return events, malformed
 
 
@@ -400,28 +413,111 @@ def _append_terminal_run_index(
         _fsync_parent_dir(path)
 
 
-def _iter_terminal_index_entries(path: Path, *, max_bytes: int, max_rows: int):
+def terminal_run_index_size_for_session(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+) -> int:
+    try:
+        path = _terminal_index_path(session_id, session_dir=session_dir)
+    except ValueError:
+        return 0
+    try:
+        return max(0, int(path.stat().st_size))
+    except OSError:
+        return 0
+
+
+def _terminal_index_window(
+    path: Path,
+    *,
+    max_bytes: int,
+    end_offset: int | None = None,
+) -> tuple[int, int, bytes] | None:
     try:
         size = path.stat().st_size
     except OSError:
-        return
-    start = max(0, size - max(0, int(max_bytes)))
+        return None
+    try:
+        end = size if end_offset is None else max(0, min(int(end_offset), int(size)))
+    except (TypeError, ValueError):
+        end = size
+    if end <= 0:
+        return (0, 0, b"")
+    byte_limit = max(0, int(max_bytes))
+    start = max(0, end - byte_limit)
     try:
         with path.open("rb") as fh:
             fh.seek(start)
-            if start:
-                fh.readline()
-            data = fh.read(max(0, int(max_bytes)))
+            data = fh.read(end - start)
     except FileNotFoundError:
+        return None
+    if start and data:
+        newline = data.find(b"\n")
+        if newline < 0:
+            # The tail begins inside a row larger than the allowed window. Treat
+            # it as unavailable instead of buffering forward to find its end.
+            return (end, end, b"")
+        start += newline + 1
+        data = data[newline + 1 :]
+    return (start, end, data)
+
+
+def _terminal_index_entry_rows(
+    path: Path,
+    *,
+    max_bytes: int,
+    max_rows: int,
+    end_offset: int | None = None,
+):
+    window = _terminal_index_window(path, max_bytes=max_bytes, end_offset=end_offset)
+    if window is None:
         return
-    rows = data.splitlines()
-    for raw in reversed(rows[-max(0, int(max_rows)) :]):
+    start, _end, data = window
+    rows: list[tuple[int, int, bytes]] = []
+    pos = 0
+    while pos < len(data):
+        newline = data.find(b"\n", pos)
+        if newline < 0:
+            raw = data[pos:]
+            row_end = start + len(data)
+            pos = len(data)
+        else:
+            raw = data[pos:newline]
+            row_end = start + newline + 1
+            pos = newline + 1
+        rows.append((row_end - len(raw) - (0 if newline < 0 else 1), row_end, raw))
+    row_limit = max(0, int(max_rows))
+    if row_limit <= 0:
+        return
+    for row_start, row_end, raw in reversed(rows[-row_limit:]):
         if not raw.strip():
+            yield row_start, row_end, None
             continue
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
+            yield row_start, row_end, None
             continue
+        if isinstance(parsed, dict):
+            yield row_start, row_end, parsed
+        else:
+            yield row_start, row_end, None
+
+
+def _iter_terminal_index_entries(
+    path: Path,
+    *,
+    max_bytes: int,
+    max_rows: int,
+    end_offset: int | None = None,
+):
+    for _row_start, _row_end, parsed in _terminal_index_entry_rows(
+        path,
+        max_bytes=max_bytes,
+        max_rows=max_rows,
+        end_offset=end_offset,
+    ) or []:
         if isinstance(parsed, dict):
             yield parsed
 
@@ -599,15 +695,27 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
     }
 
 
-def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
+def latest_run_summary(
+    session_id: str,
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
+) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    cached = _get_cached_summary(path)
+    cache_allowed = max_bytes is None and max_rows is None
+    cached = _get_cached_summary(path) if cache_allowed else None
     if cached is not None:
         return cached
     pre_read_signature = _summary_cache_signature(path)
-    events, _malformed = _read_jsonl(path)
+    if max_bytes is None and max_rows is None:
+        events, _malformed = _read_jsonl(path)
+    else:
+        events, _malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
     summary = _summary_from_events(session_id, run_id, events)
-    _cache_summary(path, summary, expected_signature=pre_read_signature)
+    if cache_allowed:
+        _cache_summary(path, summary, expected_signature=pre_read_signature)
     return summary
 
 
@@ -647,18 +755,29 @@ def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = N
     return (count, max_mtime, total_size)
 
 
-def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | None:
+def find_run_summary(
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
+) -> dict | None:
     rid = _validate_id(run_id, "run_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     journal_root = root / RUN_JOURNAL_DIR_NAME
     for path in journal_root.glob(f"*/{rid}.jsonl"):
         session_id = path.parent.name
-        summary = _get_cached_summary(path)
+        cache_allowed = max_bytes is None and max_rows is None
+        summary = _get_cached_summary(path) if cache_allowed else None
         if summary is None:
             pre_read_signature = _summary_cache_signature(path)
-            events, _malformed = _read_jsonl(path)
+            if max_bytes is None and max_rows is None:
+                events, _malformed = _read_jsonl(path)
+            else:
+                events, _malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
             summary = _summary_from_events(session_id, rid, events)
-            _cache_summary(path, summary, expected_signature=pre_read_signature)
+            if cache_allowed:
+                _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
     return None
@@ -678,29 +797,75 @@ def latest_terminal_run_summary_for_session(
     return summaries[0] if summaries else None
 
 
-def terminal_run_summaries_for_session(
+def _terminal_index_summary_from_entry(
+    entry: dict,
+    *,
+    session_id: str,
+    session_root: Path,
+) -> dict | None:
+    if entry.get("version") != 1:
+        return None
+    raw_session_id = entry.get("session_id")
+    if not isinstance(raw_session_id, str) or raw_session_id.strip() != session_id:
+        return None
+    try:
+        run_id = _validate_id(str(entry.get("run_id") or ""), "run_id")
+    except ValueError:
+        return None
+    try:
+        stream_id = _validate_id(str(entry.get("stream_id") or run_id), "stream_id")
+    except ValueError:
+        return None
+    last_seq = entry.get("last_seq")
+    if not isinstance(last_seq, int) or isinstance(last_seq, bool) or last_seq <= 0:
+        return None
+    last_event_id = str(entry.get("last_event_id") or "").strip()
+    if last_event_id != f"{run_id}:{last_seq}":
+        return None
+    if entry.get("terminal") is not True:
+        return None
+    return {
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "event_count": int(entry.get("event_count") or 0),
+        "last_seq": last_seq,
+        "last_event_id": last_event_id,
+        "terminal": True,
+        "terminal_state": entry.get("terminal_state"),
+        "last_event": entry.get("last_event"),
+        "path": str(session_root / f"{run_id}.jsonl"),
+    }
+
+
+def terminal_run_summary_page_for_session(
     session_id: str,
     *,
     session_dir: Path | None = None,
     limit: int = 16,
     max_candidates: int = 64,
     skip_run_ids: Iterable[str] | None = None,
-) -> list[dict]:
-    """Return newest terminal run summaries for one session.
-
-    ``skip_run_ids`` lets callers exclude already-resolved or active streams
-    before the bounded summary parse, so durable reconciliation records can
-    advance through invalid settled terminals without an unbounded directory
-    scan.
-    """
+    index_end_offset: int | None = None,
+) -> dict:
+    """Return one bounded page of terminal summaries plus compact index cursor metadata."""
     try:
         sid = _validate_id(session_id, "session_id")
     except ValueError:
-        return []
+        return {
+            "summaries": [],
+            "index_size": 0,
+            "next_index_end_offset": None,
+            "exhausted": True,
+        }
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     session_root = root / RUN_JOURNAL_DIR_NAME / sid
     if not session_root.exists():
-        return []
+        return {
+            "summaries": [],
+            "index_size": 0,
+            "next_index_end_offset": None,
+            "exhausted": True,
+        }
     try:
         limit = max(1, min(int(limit), 64))
     except (TypeError, ValueError):
@@ -713,65 +878,74 @@ def terminal_run_summaries_for_session(
     summaries: list[dict] = []
     seen_run_ids: set[str] = set()
     inspected = 0
+    next_index_end_offset: int | None = None
 
     index_path = _terminal_index_path(sid, session_dir=root)
-    for entry in _iter_terminal_index_entries(
+    index_size = terminal_run_index_size_for_session(sid, session_dir=root)
+    if index_size > 0 and index_end_offset is not None:
+        try:
+            if int(index_end_offset) <= 0:
+                return {
+                    "summaries": [],
+                    "index_size": index_size,
+                    "next_index_end_offset": 0,
+                    "exhausted": True,
+                }
+        except (TypeError, ValueError):
+            pass
+    for row_start, _row_end, entry in _terminal_index_entry_rows(
         index_path,
         max_bytes=_TERMINAL_INDEX_MAX_BYTES,
         max_rows=max(max_candidates * 4, _TERMINAL_INDEX_MAX_ROWS),
+        end_offset=index_end_offset,
     ) or []:
-        if entry.get("version") != 1:
+        next_index_end_offset = row_start
+        if not isinstance(entry, dict):
+            inspected += 1
+            if inspected >= max_candidates:
+                break
             continue
-        raw_session_id = entry.get("session_id")
-        if not isinstance(raw_session_id, str) or raw_session_id.strip() != sid:
+        summary = _terminal_index_summary_from_entry(entry, session_id=sid, session_root=session_root)
+        if summary is None:
+            inspected += 1
+            if inspected >= max_candidates:
+                break
             continue
-        try:
-            run_id = _validate_id(str(entry.get("run_id") or ""), "run_id")
-        except ValueError:
-            continue
-        try:
-            stream_id = _validate_id(str(entry.get("stream_id") or run_id), "stream_id")
-        except ValueError:
-            continue
-        last_seq = entry.get("last_seq")
-        if not isinstance(last_seq, int) or isinstance(last_seq, bool) or last_seq <= 0:
-            continue
-        last_event_id = str(entry.get("last_event_id") or "").strip()
-        if last_event_id != f"{run_id}:{last_seq}":
-            continue
-        if run_id in skip_run_ids:
-            continue
-        if run_id in seen_run_ids:
+        run_id = str(summary.get("run_id") or "")
+        if run_id in skip_run_ids or run_id in seen_run_ids:
             continue
         seen_run_ids.add(run_id)
         inspected += 1
         if inspected > max_candidates:
             break
-        if entry.get("terminal") is not True:
-            continue
-        summary = {
-            "session_id": sid,
-            "run_id": run_id,
-            "stream_id": stream_id,
-            "event_count": int(entry.get("event_count") or 0),
-            "last_seq": last_seq,
-            "last_event_id": last_event_id,
-            "terminal": True,
-            "terminal_state": entry.get("terminal_state"),
-            "last_event": entry.get("last_event"),
-            "path": str(session_root / f"{run_id}.jsonl"),
-        }
         summaries.append(summary)
         if len(summaries) >= limit:
             break
-    if summaries or inspected >= max_candidates:
-        return summaries
+    if summaries or inspected >= max_candidates or next_index_end_offset is not None:
+        return {
+            "summaries": summaries,
+            "index_size": index_size,
+            "next_index_end_offset": next_index_end_offset,
+            "exhausted": next_index_end_offset in {None, 0},
+        }
+    if index_size > 0:
+        return {
+            "summaries": [],
+            "index_size": index_size,
+            "next_index_end_offset": 0,
+            "exhausted": True,
+        }
 
     candidates: list[tuple[float, str, Path]] = []
     try:
         scandir_iter = os.scandir(session_root)
     except OSError:
-        return summaries
+        return {
+            "summaries": summaries,
+            "index_size": index_size,
+            "next_index_end_offset": None,
+            "exhausted": True,
+        }
     with scandir_iter as entries:
         for entry in entries:
             name = entry.name
@@ -792,7 +966,13 @@ def terminal_run_summaries_for_session(
                 continue
             candidates.append((mtime, run_id, Path(entry.path)))
     for _mtime, run_id, path in sorted(candidates, reverse=True):
-        summary = latest_run_summary(sid, run_id, session_dir=root)
+        summary = latest_run_summary(
+            sid,
+            run_id,
+            session_dir=root,
+            max_bytes=_RUN_EVENTS_MAX_BYTES,
+            max_rows=_RUN_EVENTS_MAX_ROWS,
+        )
         if not summary.get("terminal"):
             continue
         summary = dict(summary)
@@ -800,7 +980,38 @@ def terminal_run_summaries_for_session(
         summaries.append(summary)
         if len(summaries) >= limit:
             break
-    return summaries
+    return {
+        "summaries": summaries,
+        "index_size": index_size,
+        "next_index_end_offset": None,
+        "exhausted": True,
+    }
+
+
+def terminal_run_summaries_for_session(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+    limit: int = 16,
+    max_candidates: int = 64,
+    skip_run_ids: Iterable[str] | None = None,
+) -> list[dict]:
+    """Return newest terminal run summaries for one session.
+
+    ``skip_run_ids`` lets callers exclude already-resolved or active streams
+    before the bounded summary parse, so durable reconciliation records can
+    advance through invalid settled terminals without an unbounded directory
+    scan.
+    """
+    page = terminal_run_summary_page_for_session(
+        session_id,
+        session_dir=session_dir,
+        limit=limit,
+        max_candidates=max_candidates,
+        skip_run_ids=skip_run_ids,
+    )
+    summaries = page.get("summaries") if isinstance(page, dict) else []
+    return summaries if isinstance(summaries, list) else []
 
 
 def read_session_run_events(

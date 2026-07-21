@@ -3305,7 +3305,13 @@ def _terminal_anchor_scene_disposition_from_payload(
     }
 
 
-def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: bool = False) -> dict | None:
+def _run_journal_live_snapshot(
+    stream_id: str | None,
+    *,
+    handler=None,
+    settled: bool = False,
+    summary: dict | None = None,
+) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
         return None
@@ -3315,7 +3321,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None, settled: 
         emit_error=False,
     ):
         return None
-    summary = find_run_summary(stream_id)
+    summary = summary if isinstance(summary, dict) else find_run_summary(stream_id)
     if not summary:
         return None
     session_id = str(summary.get("session_id") or "")
@@ -5506,30 +5512,106 @@ def _terminal_anchor_scene_non_materializable_record(
     }
 
 
+_TERMINAL_ANCHOR_RECONCILIATION_VERSION = "terminal_anchor_reconciliation_v2"
+_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT = 128
+_TERMINAL_ANCHOR_RECONCILIATION_MAX_PAGES = 8
+
+
+def _terminal_anchor_reconciliation_recent_ids_from_raw(raw: dict) -> list[str]:
+    recent = raw.get("recent_stream_ids") if isinstance(raw, dict) else None
+    if isinstance(recent, list):
+        ids = [str(stream_id or "").strip() for stream_id in recent]
+        return [stream_id for stream_id in ids if stream_id][-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+    streams = raw.get("streams") if isinstance(raw, dict) else None
+    if not isinstance(streams, dict):
+        return []
+    ids: list[str] = []
+    for stream_id, record in streams.items():
+        if isinstance(record, dict):
+            candidate = str(record.get("stream_id") or stream_id or "").strip()
+        else:
+            candidate = str(stream_id or "").strip()
+        if candidate:
+            ids.append(candidate)
+    return ids[-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+
+
 def _terminal_anchor_reconciliation_progress(session) -> dict:
     raw = getattr(session, "terminal_anchor_reconciliation", None)
     progress = raw if isinstance(raw, dict) else {}
-    streams = progress.get("streams")
-    if not isinstance(streams, dict):
-        streams = {}
+    cursor = progress.get("index_cursor")
+    normalized_cursor: dict | None = None
+    if isinstance(cursor, dict):
+        try:
+            index_size = max(0, int(cursor.get("index_size") or 0))
+            end_offset = max(0, int(cursor.get("end_offset") or 0))
+        except (TypeError, ValueError):
+            index_size = 0
+            end_offset = 0
+        if index_size > 0:
+            normalized_cursor = {
+                "index_size": index_size,
+                "end_offset": min(index_size, end_offset),
+                "updated_at": float(cursor.get("updated_at") or 0.0),
+            }
     progress = {
-        "version": "terminal_anchor_reconciliation_v1",
-        "streams": streams,
+        "version": _TERMINAL_ANCHOR_RECONCILIATION_VERSION,
+        "recent_stream_ids": _terminal_anchor_reconciliation_recent_ids_from_raw(progress),
     }
+    if normalized_cursor is not None:
+        progress["index_cursor"] = normalized_cursor
     session.terminal_anchor_reconciliation = progress
     return progress
 
 
 def _terminal_anchor_reconciliation_stream_ids(session) -> set[str]:
     raw = getattr(session, "terminal_anchor_reconciliation", None)
-    streams = raw.get("streams") if isinstance(raw, dict) else None
-    if not isinstance(streams, dict):
+    if not isinstance(raw, dict):
         return set()
-    return {
-        str(record.get("stream_id") or stream_id or "").strip()
-        for stream_id, record in streams.items()
-        if isinstance(record, dict) and str(record.get("stream_id") or stream_id or "").strip()
+    return set(_terminal_anchor_reconciliation_recent_ids_from_raw(raw))
+
+
+def _terminal_anchor_reconciliation_index_end_offset(progress: dict, index_size: int) -> int | None:
+    cursor = progress.get("index_cursor") if isinstance(progress, dict) else None
+    if not isinstance(cursor, dict):
+        return None
+    try:
+        cursor_index_size = int(cursor.get("index_size") or 0)
+        end_offset = int(cursor.get("end_offset") or 0)
+    except (TypeError, ValueError):
+        return None
+    if cursor_index_size != int(index_size):
+        return None
+    return max(0, min(int(index_size), end_offset))
+
+
+def _terminal_anchor_reconciliation_set_cursor(
+    progress: dict,
+    *,
+    index_size: int,
+    end_offset: int | None,
+) -> bool:
+    if not isinstance(progress, dict) or int(index_size) <= 0 or end_offset is None:
+        return False
+    bounded_index_size = max(0, int(index_size))
+    bounded_end_offset = max(0, min(int(index_size), int(end_offset)))
+    existing = progress.get("index_cursor")
+    if isinstance(existing, dict):
+        try:
+            if (
+                int(existing.get("index_size") or 0) == bounded_index_size
+                and int(existing.get("end_offset") or 0) == bounded_end_offset
+            ):
+                return False
+        except (TypeError, ValueError):
+            pass
+    cursor = {
+        "index_size": bounded_index_size,
+        "end_offset": bounded_end_offset,
+        "updated_at": time.time(),
     }
+    progress["index_cursor"] = cursor
+    return True
 
 
 def _record_terminal_anchor_scene_non_materializable(
@@ -5542,15 +5624,23 @@ def _record_terminal_anchor_scene_non_materializable(
     stream_id = str(stream_id or "").strip()
     if not stream_id:
         return False
-    streams = progress.setdefault("streams", {})
-    if not isinstance(streams, dict):
-        streams = {}
-        progress["streams"] = streams
-    if stream_id in streams:
+    recent = progress.setdefault("recent_stream_ids", [])
+    if not isinstance(recent, list):
+        recent = []
+    recent_ids = [str(item or "").strip() for item in recent if str(item or "").strip()]
+    if stream_id in recent_ids:
         return False
-    streams[stream_id] = (
-        _terminal_anchor_scene_non_materializable_record(session_id, run_id, stream_id, reason)
-    )
+    recent_ids.append(stream_id)
+    progress["recent_stream_ids"] = recent_ids[-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+    progress["last_non_materializable"] = {
+        "version": "terminal_disposition_v1",
+        "kind": "consumed_non_materializable",
+        "reason": str(reason or "non_materializable_terminal").strip(),
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "updated_at": time.time(),
+    }
     return True
 
 
@@ -5566,127 +5656,179 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             for record in dict(_anchor_scene_records(session)).values()
             if isinstance(record, dict) and str(record.get("stream_id") or "").strip()
         }
+        progress = _terminal_anchor_reconciliation_progress(session)
         skip_stream_ids.update(_terminal_anchor_reconciliation_stream_ids(session))
+        index_size = terminal_run_index_size_for_session(sid)
+        index_end_offset = _terminal_anchor_reconciliation_index_end_offset(progress, index_size)
     skip_stream_ids.update(active_stream_ids)
-    summaries = terminal_run_summaries_for_session(
-        sid,
-        limit=64,
-        max_candidates=64,
-        skip_run_ids=skip_stream_ids,
-    )
-    if not summaries:
+
+    pages: list[dict] = []
+    page_end_offset = index_end_offset
+    for _page_idx in range(_TERMINAL_ANCHOR_RECONCILIATION_MAX_PAGES):
+        page = terminal_run_summary_page_for_session(
+            sid,
+            limit=64,
+            max_candidates=64,
+            skip_run_ids=skip_stream_ids,
+            index_end_offset=page_end_offset,
+        )
+        summaries = page.get("summaries") if isinstance(page, dict) else None
+        next_end_offset = page.get("next_index_end_offset") if isinstance(page, dict) else None
+        if isinstance(page, dict):
+            pages.append(page)
+        if not isinstance(summaries, list) or not summaries:
+            if next_end_offset is None or next_end_offset == page_end_offset:
+                break
+        if next_end_offset in {None, page_end_offset}:
+            break
+        page_end_offset = int(next_end_offset)
+        if page_end_offset <= 0:
+            break
+    if pages and not any(page.get("summaries") for page in pages) and not any(
+        int(page.get("index_size") or 0) for page in pages
+    ):
+        fallback_summaries = terminal_run_summaries_for_session(
+            sid,
+            limit=64,
+            max_candidates=64,
+            skip_run_ids=skip_stream_ids,
+        )
+        if fallback_summaries:
+            pages = [
+                {
+                    "summaries": fallback_summaries,
+                    "index_size": 0,
+                    "next_index_end_offset": None,
+                    "exhausted": True,
+                }
+            ]
+    if not pages:
         return False
+
     with _get_session_agent_lock(sid):
         records = dict(_anchor_scene_records(session))
         progress = _terminal_anchor_reconciliation_progress(session)
-        progress_streams = progress.get("streams") if isinstance(progress.get("streams"), dict) else {}
         changed = False
-        for summary in summaries:
-            stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
-            if not stream_id or stream_id in active_stream_ids:
-                continue
-            if _anchor_scene_record_exists_for_stream(records, stream_id):
-                continue
-            if stream_id in progress_streams:
-                continue
-            snapshot = _run_journal_live_snapshot(stream_id, handler=handler, settled=True)
-            if not isinstance(snapshot, dict):
-                if _record_terminal_anchor_scene_non_materializable(
-                    progress,
-                    sid,
+        for page in pages:
+            index_size = int(page.get("index_size") or 0)
+            next_end_offset = page.get("next_index_end_offset")
+            summaries = page.get("summaries") if isinstance(page.get("summaries"), list) else []
+            if _terminal_anchor_reconciliation_set_cursor(
+                progress,
+                index_size=index_size,
+                end_offset=next_end_offset,
+            ):
+                changed = True
+            progress_streams = _terminal_anchor_reconciliation_stream_ids(session)
+            for summary in summaries:
+                stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
+                if not stream_id or stream_id in active_stream_ids:
+                    continue
+                if _anchor_scene_record_exists_for_stream(records, stream_id):
+                    continue
+                if stream_id in progress_streams:
+                    continue
+                snapshot = _run_journal_live_snapshot(
                     stream_id,
-                    stream_id,
-                    "invalid_terminal_journal_snapshot",
-                ):
-                    changed = True
-                continue
-            disposition = _terminal_anchor_scene_non_materializable_disposition(snapshot)
-            if disposition is not None:
-                progress.setdefault("streams", {})[stream_id] = {
+                    handler=handler,
+                    settled=True,
+                    summary=summary,
+                )
+                if not isinstance(snapshot, dict):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "invalid_terminal_journal_snapshot",
+                    ):
+                        changed = True
+                    continue
+                disposition = _terminal_anchor_scene_non_materializable_disposition(snapshot)
+                if disposition is not None:
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        str(disposition.get("reason") or "non_materializable_terminal"),
+                    ):
+                        changed = True
+                    continue
+                if not isinstance(snapshot.get("terminal_message_target"), dict):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "missing_terminal_target",
+                    ):
+                        changed = True
+                    continue
+                scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+                rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+                if not isinstance(rows, list) or not rows:
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_snapshot_no_activity_rows",
+                    ):
+                        changed = True
+                    continue
+                message_index = _terminal_anchor_scene_message_index(messages, snapshot)
+                if message_index is None or not (0 <= message_index < len(messages)):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_target_not_found",
+                    ):
+                        changed = True
+                    continue
+                message = messages[message_index]
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_target_not_assistant",
+                    ):
+                        changed = True
+                    continue
+                if _anchor_scene_record_exists_for_message(records, message, message_index):
+                    continue
+                completed_scene = _complete_hydrated_anchor_scene(
+                    messages,
+                    scene,
+                    message_index,
+                    message_offset=0,
+                    tool_calls=getattr(session, "tool_calls", None),
+                    stream_id=stream_id,
+                )
+                if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_completed_scene_empty",
+                    ):
+                        changed = True
+                    continue
+                ref = _assistant_anchor_scene_message_ref(message)
+                records[ref or f"index:{message_index}"] = {
                     "version": "anchor_activity_scene_record_v1",
-                    "message_index": None,
-                    "message_ref": "",
+                    "message_index": message_index,
+                    "message_ref": ref,
                     "stream_id": stream_id,
-                    "scene": None,
-                    "terminal_disposition": disposition,
+                    "scene": completed_scene,
                     "updated_at": time.time(),
                 }
                 changed = True
-                continue
-            if not isinstance(snapshot.get("terminal_message_target"), dict):
-                if _record_terminal_anchor_scene_non_materializable(
-                    progress,
-                    sid,
-                    stream_id,
-                    stream_id,
-                    "missing_terminal_target",
-                ):
-                    changed = True
-                continue
-            scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
-            rows = scene.get("activity_rows") if isinstance(scene, dict) else None
-            if not isinstance(rows, list) or not rows:
-                if _record_terminal_anchor_scene_non_materializable(
-                    progress,
-                    sid,
-                    stream_id,
-                    stream_id,
-                    "terminal_snapshot_no_activity_rows",
-                ):
-                    changed = True
-                continue
-            message_index = _terminal_anchor_scene_message_index(messages, snapshot)
-            if message_index is None or not (0 <= message_index < len(messages)):
-                if _record_terminal_anchor_scene_non_materializable(
-                    progress,
-                    sid,
-                    stream_id,
-                    stream_id,
-                    "terminal_target_not_found",
-                ):
-                    changed = True
-                continue
-            message = messages[message_index]
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                if _record_terminal_anchor_scene_non_materializable(
-                    progress,
-                    sid,
-                    stream_id,
-                    stream_id,
-                    "terminal_target_not_assistant",
-                ):
-                    changed = True
-                continue
-            if _anchor_scene_record_exists_for_message(records, message, message_index):
-                continue
-            completed_scene = _complete_hydrated_anchor_scene(
-                messages,
-                scene,
-                message_index,
-                message_offset=0,
-                tool_calls=getattr(session, "tool_calls", None),
-                stream_id=stream_id,
-            )
-            if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
-                if _record_terminal_anchor_scene_non_materializable(
-                    progress,
-                    sid,
-                    stream_id,
-                    stream_id,
-                    "terminal_completed_scene_empty",
-                ):
-                    changed = True
-                continue
-            ref = _assistant_anchor_scene_message_ref(message)
-            records[ref or f"index:{message_index}"] = {
-                "version": "anchor_activity_scene_record_v1",
-                "message_index": message_index,
-                "message_ref": ref,
-                "stream_id": stream_id,
-                "scene": completed_scene,
-                "updated_at": time.time(),
-            }
-            changed = True
         if not changed:
             return False
         if len(records) > 256:
@@ -10437,6 +10579,8 @@ from api.run_journal import (
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
+    terminal_run_index_size_for_session,
+    terminal_run_summary_page_for_session,
     terminal_run_summaries_for_session,
 )
 from api.todo_state import attach_todo_state

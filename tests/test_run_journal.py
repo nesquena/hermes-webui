@@ -10,6 +10,7 @@ from api.run_journal import (
     latest_run_summary,
     read_run_events,
     stale_interrupted_event,
+    terminal_run_summary_page_for_session,
     terminal_run_summaries_for_session,
 )
 
@@ -49,6 +50,23 @@ def test_run_journal_reads_bounded_replay_window(tmp_path):
 
     assert [event["seq"] for event in journal["events"]] == [2, 3]
     assert [event["payload"]["text"] for event in journal["events"]] == ["two", "three"]
+
+
+def test_run_journal_rejects_single_over_cap_row_before_json_parse(tmp_path):
+    path = tmp_path / "_run_journal" / "session_1" / "run_giant.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"version":1,"payload":"' + (b"x" * 70000) + b'"}')
+
+    journal = read_run_events(
+        "session_1",
+        "run_giant",
+        session_dir=tmp_path,
+        max_bytes=32,
+        max_rows=64,
+    )
+
+    assert journal["events"] == []
+    assert journal["malformed"] == [{"line": None, "reason": "replay_limit_bytes"}]
 
 
 def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
@@ -278,6 +296,96 @@ def test_terminal_run_summaries_rejects_malformed_index_authority(tmp_path):
     summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=4)
 
     assert [summary["run_id"] for summary in summaries] == ["run_good"]
+
+
+def test_terminal_run_summaries_fail_closed_on_single_over_cap_index_row(tmp_path):
+    append_run_event("session_1", "run_good", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_good", "done", {"session": {}}, session_dir=tmp_path)
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    with index_path.open("ab") as fh:
+        fh.write(b'{"version":1,"oversized":"' + (b"x" * (600 * 1024)) + b'"}')
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
+
+    assert summaries == []
+
+
+def test_terminal_run_summaries_uses_bounded_legacy_summary_fallback(tmp_path, monkeypatch):
+    path = tmp_path / "_run_journal" / "session_1" / "legacy_run.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "event": "done",
+                "type": "done",
+                "seq": 1,
+                "event_id": "legacy_run:1",
+                "run_id": "legacy_run",
+                "session_id": "session_1",
+                "terminal": True,
+                "terminal_state": "completed",
+                "payload": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    calls = []
+    original_latest_run_summary = latest_run_summary
+
+    def counted_latest_run_summary(
+        session_id,
+        run_id,
+        *,
+        session_dir=None,
+        max_bytes=None,
+        max_rows=None,
+    ):
+        calls.append({"max_bytes": max_bytes, "max_rows": max_rows})
+        return original_latest_run_summary(
+            session_id,
+            run_id,
+            session_dir=session_dir,
+            max_bytes=max_bytes,
+            max_rows=max_rows,
+        )
+
+    monkeypatch.setattr("api.run_journal.latest_run_summary", counted_latest_run_summary)
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
+
+    assert [summary["run_id"] for summary in summaries] == ["legacy_run"]
+    assert calls == [{"max_bytes": 2 * 1024 * 1024, "max_rows": 2048}]
+
+
+def test_terminal_run_summary_pages_advance_with_compact_index_cursor(tmp_path):
+    for idx in range(150):
+        run_id = f"run_{idx:03d}"
+        append_run_event("session_1", run_id, "token", {"text": "ok"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+
+    first = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=64,
+        max_candidates=64,
+    )
+    second = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=64,
+        max_candidates=64,
+        index_end_offset=first["next_index_end_offset"],
+    )
+
+    first_ids = [summary["run_id"] for summary in first["summaries"]]
+    second_ids = [summary["run_id"] for summary in second["summaries"]]
+    assert first_ids[0] == "run_149"
+    assert len(first_ids) == 64
+    assert len(second_ids) == 64
+    assert set(first_ids).isdisjoint(second_ids)
+    assert second["next_index_end_offset"] < first["next_index_end_offset"]
 
 
 def test_latest_summary_reuses_unchanged_journal_summary_without_reparsing(tmp_path, monkeypatch):
