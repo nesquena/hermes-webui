@@ -166,6 +166,8 @@ if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
 let _selectedTextReplyBtn=null;
+let _selectedTextRefineBtn=null;
+let _selectedTextReplyGroup=null;
 let _selectedTextReplyText='';
 let _pendingSelections=[];  // [{id, name, text}] — named context blocks
 let _selectionIdCounter=0;
@@ -805,6 +807,30 @@ function insertSavedPromptIntoComposer(text){
   if(typeof autoResize==='function') autoResize();
 }
 
+function _seedSelectedTextRefineDraft(text){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  const quote=_formatSelectedTextReplyQuote(text);
+  const instruction=_selectedTextReplyT('selected_text_refine_instruction','Refine instruction:');
+  if(!composer||!quote||!instruction)return;
+  const current=String(composer.value||'');
+  const addition=`${quote}\n\n${instruction}`;
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${addition}`:addition;
+  composer.focus();
+  try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
+  composer.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function')autoResize();
+}
+
+function _selectedTextReplyLiveText(){
+  const info=_selectedTextReplySelection();
+  if(!info){
+    _hideSelectedTextReplyButton();
+    return '';
+  }
+  _selectedTextReplyText=info.text;
+  return info.text;
+}
+
 let _savedPromptsCache=null;
 
 async function _loadSavedPrompts(){
@@ -1053,49 +1079,78 @@ function _flushSelectionBlocksToComposer(){
 
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
+  const group=document.createElement('div');
+  group.id='selectedTextActionGroup';
+  group.className='selected-text-action-group';
   const btn=document.createElement('button');
   btn.type='button';
   btn.id='selectedTextReplyBtn';
   btn.className='selected-text-reply-btn';
   btn.setAttribute('data-i18n', 'selected_text_reply');
   btn.setAttribute('data-i18n-title', 'selected_text_reply_title');
-  btn.setAttribute('data-i18n-aria-label', 'selected_text_reply_title');
+  btn.setAttribute('data-i18n-aria-label', 'selected_text_reply');
   btn.textContent=_selectedTextReplyT('selected_text_reply', 'Reply with selection');
   btn.title=_selectedTextReplyT('selected_text_reply_title', 'Append selected chat text as quoted context');
-  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-label', btn.textContent);
   btn.addEventListener('mousedown', e=>e.preventDefault());
   btn.addEventListener('click', e=>{
     e.preventDefault();
-    if(_selectedTextReplyText){
-      _addNamedContextBlock(_selectedTextReplyText);
+    const text=_selectedTextReplyLiveText();
+    if(text){
+      _addNamedContextBlock(text);
       _hideSelectedTextReplyButton();
       const selection=window.getSelection&&window.getSelection();
       if(selection&&selection.removeAllRanges)selection.removeAllRanges();
     }
   });
-  document.body.appendChild(btn);
+  const refine=document.createElement('button');
+  refine.type='button';
+  refine.id='selectedTextRefineBtn';
+  refine.className='selected-text-refine-btn';
+  refine.setAttribute('data-i18n', 'selected_text_refine');
+  refine.setAttribute('data-i18n-title', 'selected_text_refine_title');
+  refine.setAttribute('data-i18n-aria-label', 'selected_text_refine');
+  refine.textContent=_selectedTextReplyT('selected_text_refine', 'Refine');
+  refine.title=_selectedTextReplyT('selected_text_refine_title', 'Start an editable refinement draft from the selection');
+  refine.setAttribute('aria-label', refine.textContent);
+  refine.addEventListener('mousedown', e=>e.preventDefault());
+  refine.addEventListener('click', e=>{
+    e.preventDefault();
+    const text=_selectedTextReplyLiveText();
+    if(text){
+      _seedSelectedTextRefineDraft(text);
+      _hideSelectedTextReplyButton();
+      const selection=window.getSelection&&window.getSelection();
+      if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+    }
+  });
+  group.appendChild(btn);
+  group.appendChild(refine);
+  document.body.appendChild(group);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
   _selectedTextReplyBtn=btn;
+  _selectedTextRefineBtn=refine;
+  _selectedTextReplyGroup=group;
   return btn;
 }
 
 function _hideSelectedTextReplyButton(){
   _selectedTextReplyText='';
-  if(_selectedTextReplyBtn)_selectedTextReplyBtn.classList.remove('visible');
+  if(_selectedTextReplyGroup)_selectedTextReplyGroup.classList.remove('visible');
 }
 
 function _positionSelectedTextReplyButton(info){
   const btn=_selectedTextReplyButton();
   _selectedTextReplyText=info.text;
-  btn.classList.add('visible');
+  _selectedTextReplyGroup.classList.add('visible');
   const gap=8;
-  const btnRect=btn.getBoundingClientRect();
-  const width=btnRect.width||150;
-  const height=btnRect.height||32;
+  const groupRect=_selectedTextReplyGroup.getBoundingClientRect();
+  const width=groupRect.width||250;
+  const height=groupRect.height||40;
   const left=Math.min(Math.max(gap, info.rect.left+(info.rect.width/2)-(width/2)), Math.max(gap, window.innerWidth-width-gap));
   const top=Math.max(gap, info.rect.top-height-gap);
-  btn.style.left=`${left}px`;
-  btn.style.top=`${top}px`;
+  _selectedTextReplyGroup.style.left=`${left}px`;
+  _selectedTextReplyGroup.style.top=`${top}px`;
 }
 
 function _updateSelectedTextReplyButton(){
@@ -1114,7 +1169,7 @@ function _updateSelectedTextReplyButton(){
 if(typeof document!=='undefined'){
   document.addEventListener('selectionchange', _updateSelectedTextReplyButton);
   document.addEventListener('mouseup', e=>{
-    if(e.target&&e.target.closest&&e.target.closest('.selected-text-reply-btn'))return;
+    if(e.target&&e.target.closest&&e.target.closest('.selected-text-action-group'))return;
     _updateSelectedTextReplyButton();
   });
   document.addEventListener('keyup', e=>{
