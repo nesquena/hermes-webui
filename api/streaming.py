@@ -1617,6 +1617,26 @@ def _cleanup_ephemeral_session(
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+
+    # Keep the legacy finalizer contract for minimal Session-like objects that
+    # carry only an explicit temporary path (including older integrations and
+    # focused tests). Real /btw sessions always have a safe session_id and must
+    # go through the complete generation-aware retirement below.
+    if not session_id:
+        residuals = []
+        session_path = getattr(session, "path", None)
+        if session_path:
+            try:
+                Path(session_path).unlink(missing_ok=True)
+            except OSError as exc:
+                residuals.append({"artifact": "session_json", "error": type(exc).__name__})
+        return {
+            "ok": not residuals,
+            "session_id": session_id,
+            "residuals": residuals,
+            "generation": None,
+        }
+
     from api.models import delete_session_artifacts
 
     cleanup = delete_session_artifacts(
