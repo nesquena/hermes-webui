@@ -1599,6 +1599,11 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 
 
 class Session:
+    # Keep lifecycle authority out of ``__dict__``. A few supported internal
+    # and test utilities serialize that mapping directly, while the generation
+    # object is deliberately process-local and non-serializable.
+    __slots__ = ("_publication_generation", "__dict__", "__weakref__")
+
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
                  model_provider=None,
@@ -1649,9 +1654,9 @@ class Session:
                  share_created_at=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
-        # Process-local incarnation lease. Every load of the current SID shares
-        # this token; an intentional same-SID recreation rotates it so old
-        # in-process Session objects can never regain publication authority.
+        # Process-local incarnation lease stored in the class slot above. Every
+        # load of the current SID shares this token; an intentional same-SID
+        # recreation rotates it so old objects never regain publication authority.
         self._publication_generation = _session_publication_generation(self.session_id)
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
