@@ -4297,27 +4297,93 @@ def _should_strip_reasoning_content(
     return False
 
 
-def _part_is_inline_base64_image(part: dict) -> bool:
-    """Check if a part contains actual inline base64 image data."""
+def _is_inline_base64_image_leaf(part: dict) -> bool:
+    """Check if this specific dict IS an inline base64 image (leaf, not wrapper).
+
+    Returns True only for actual image-containing leaves. Does NOT recurse into
+    nested ``content`` lists — the caller handles projection of those wrappers
+    recursively. Preserves HTTP(S), file:, artifact, handle, and path references.
+    """
     part_type = part.get('type')
-    if part_type in ('image', 'image_url', 'input_image'):
-        # Direct data URL: data:image/...;base64,...
-        url = part.get('image_url', {}).get('url') if isinstance(part.get('image_url'), dict) else part.get('url', '')
-        if isinstance(url, str) and re.match(r'data:image/[^,;]+;base64,', url):
-            return True
-        # Also check direct string source
-        source = part.get('source', part.get('url', ''))
-        if isinstance(source, str) and re.match(r'data:image/[^,;]+;base64,', source):
-            return True
-    # Anthropic-style: source: {type: "base64", ...}
-    if isinstance(part.get('source'), dict) and part['source'].get('type') == 'base64':
+    if not isinstance(part_type, str):
+        return False
+    if part_type not in ('image', 'image_url', 'input_image'):
+        return False
+    # Direct data URL: data:image/...;base64,...
+    url = None
+    if isinstance(part.get('image_url'), dict):
+        url = part['image_url'].get('url')
+    elif isinstance(part.get('image_url'), str):
+        url = part['image_url']
+    if url is None and 'url' in part:
+        url = part['url']
+    if isinstance(url, str) and re.match(r'data:image/[^,;]+;base64,', url):
         return True
-    # _multimodal envelope with base64
-    if isinstance(part.get('content'), list):
-        for sub in part['content']:
-            if isinstance(sub, dict) and _part_is_inline_base64_image(sub):
+    # Direct string source
+    source = part.get('source', part.get('url', ''))
+    if isinstance(source, str) and re.match(r'data:image/[^,;]+;base64,', source):
+        return True
+    # Anthropic-style source: {type: "base64", media_type: "image/...", ...}
+    if isinstance(part.get('source'), dict):
+        src = part['source']
+        if src.get('type') == 'base64':
+            media = src.get('media_type', '')
+            if isinstance(media, str) and 'image' in media:
+                return True
+            # No media_type specified but type indicates an image part
+            if not media:
                 return True
     return False
+
+
+def _project_image_parts(part: dict) -> dict:
+    """Return a recursively-projected copy with inline base64 image leaves replaced.
+
+    Only inline base64 image data is replaced with a ``[screenshot]`` text
+    placeholder. HTTP(S), file:, artifact, handle, and path references are
+    preserved. Nested ``_multimodal`` envelopes, ``tool_result.content``,
+    Anthropic-style ``source: {type: 'base64', ...}``, and mixed wrappers
+    (containing both base64 and non-base64 children) are handled correctly
+    by recursing into ``content`` lists and replacing only actual leaves.
+    """
+    if not isinstance(part, dict):
+        return part
+    projected = dict(part)
+    changed = False
+    # Recursively project nested content lists
+    if isinstance(projected.get('content'), list):
+        new_content = []
+        for sub in projected['content']:
+            if isinstance(sub, dict):
+                projected_sub = _project_image_parts(sub)
+                new_content.append(projected_sub)
+                if projected_sub is not sub:
+                    changed = True
+            else:
+                new_content.append(sub)
+        if changed:
+            projected['content'] = new_content
+    # Check if THIS part (after any inner projection) is a base64 image leaf
+    if _is_inline_base64_image_leaf(projected):
+        return {'type': 'text', 'text': '[screenshot]'}
+    return projected if changed else part
+
+
+def _project_live_tool_args(args) -> dict:
+    """Return a copy of tool args with inline base64 data URLs replaced.
+
+    Recursively walks the args dict/list structure and replaces any
+    ``data:image/...;base64,...`` string values with ``[base64 image]``.
+    Preserves HTTP(S), file:, artifact, handle, and path references.
+    """
+    if isinstance(args, str):
+        return _strip_base64_data_urls(args)
+    if isinstance(args, dict):
+        return {k: _project_live_tool_args(v) for k, v in args.items()}
+    if isinstance(args, (list, tuple)):
+        projected = [_project_live_tool_args(v) for v in args]
+        return tuple(projected) if isinstance(args, tuple) else projected
+    return args
 
 
 def _compact_image_parts_for_persistence(messages) -> tuple[list, int]:
@@ -4358,12 +4424,13 @@ def _compact_image_parts_for_persistence(messages) -> tuple[list, int]:
                 # the structured result during durable-session compaction.
                 compacted_content.append(part)
                 continue
-            # Check if this part contains inline base64 data
-            if _part_is_inline_base64_image(part):
-                compacted_content.append({'type': 'text', 'text': '[screenshot]'})
+            # Project: recursively replace inline base64 image leaves while
+            # preserving non-base64 references (HTTP, file, artifact, handle,
+            # path) and unrelated fields/order exactly.
+            projected = _project_image_parts(part)
+            compacted_content.append(projected)
+            if projected is not part:
                 image_parts += 1
-            else:
-                compacted_content.append(part)
 
         if image_parts:
             message['content'] = compacted_content
@@ -8249,14 +8316,14 @@ def _run_agent_streaming(
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
-                        'args': args if isinstance(args, dict) else {},
+                        'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                     })
                     # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
                     # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
                         STREAM_LIVE_TOOL_CALLS[stream_id].append({
                             'name': name,
-                            'args': args if isinstance(args, dict) else {},
+                            'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                             'done': False,
                         })
                     put('tool', {
@@ -8330,7 +8397,7 @@ def _run_agent_streaming(
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
-                        'preview': preview,
+                        'preview': _strip_base64_data_urls(preview) if isinstance(preview, str) else preview,
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
@@ -8377,7 +8444,7 @@ def _run_agent_streaming(
                         _live_tool_event_start_ids.add(tool_call_id)
                         _live_tool_calls.append({
                             'name': name,
-                            'args': args if isinstance(args, dict) else {},
+                            'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                             'tid': tool_call_id,
                         })
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
@@ -8385,7 +8452,7 @@ def _run_agent_streaming(
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                 'name': name,
-                                'args': args if isinstance(args, dict) else {},
+                                'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                                 'done': False,
                                 'tid': tool_call_id,
                             })
@@ -9287,7 +9354,6 @@ def _run_agent_streaming(
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
-                    _compact_session_image_parts_for_persistence(s)
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -10848,7 +10914,6 @@ def _run_agent_streaming(
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
-                                _compact_session_image_parts_for_persistence(s)
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
