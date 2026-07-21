@@ -1151,13 +1151,20 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     assert "if(preferProjectedThinking&&row&&row.role==='thinking') continue;" in complete
     assert "row=_anchorSceneSettleLiveRunningRow(row,dropProjectedThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
+    assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
+    assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
+    assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
     assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
     drop_idx = settle_live.index(
         "if(row.role==='thinking'&&dropLiveThinking&&hasLiveIdentity) return null;"
     )
     status_idx = settle_live.index("if(String(row.status||'').toLowerCase()!=='running') return row;")
     assert drop_idx < status_idx
-    assert "return {...row,status:'completed'};" in settle_live
+    assert "const sealed={...row,status:'completed'};" in settle_live
+    assert "sealed.payload={...row.payload,status:'completed'};" in settle_live
+    assert "if(row.role==='tool') sealed.payload.done=true;" in settle_live
+    assert "sealed.tool={...row.tool,done:true};" in settle_live
+    assert "return sealed;" in settle_live
 
 
 def test_settled_anchor_scene_separates_final_answer_from_activity_rows():
