@@ -275,11 +275,14 @@ verifies absence of JSON, backup and crashed-save temporaries, attachments,
 private media, turn/run journals, sidebar index state, and (where WebUI owns it)
 `state.db` state before returning success. Failures return machine-readable
 residual artifact names and persist
-`sessions/_session_cleanup_residuals.json` so a later delete or cleanup request
-can retry them. Each marker retains the original tombstone and `state.db`
-ownership policy, so retrying cleanup cannot turn a messaging-sidecar delete
-into deletion of the externally owned messaging transcript. The generic
-`/api/media` file server hard-denies the complete `session-media` subtree.
+`sessions/_session_cleanup_residuals/<session_id>.json` so a later delete or
+cleanup request can retry them. Residual authority is sharded by SID: a corrupt
+or future-version record fails closed for its owning SID without preventing
+unrelated sessions from being created. Each marker retains the original
+tombstone and `state.db` ownership policy, so retrying cleanup cannot turn a
+messaging-sidecar delete into deletion of the externally owned messaging
+transcript. The generic `/api/media` file server hard-denies the complete
+`session-media` subtree.
 
 Ephemeral `/btw` sessions register an exact
 `{parent_session_id, ephemeral_session_id, stream_id}` owner before the stream

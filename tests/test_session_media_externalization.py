@@ -1153,6 +1153,45 @@ def test_delete_reports_and_persists_every_private_artifact_residual(
         models._activate_session_publication_generation(replacement)
 
 
+@pytest.mark.parametrize(
+    "corrupt_payload",
+    [
+        b"{not-json",
+        json.dumps(
+            {
+                "version": models.SESSION_CLEANUP_RESIDUAL_VERSION + 1,
+                "session_id": "blocked-residual",
+                "residuals": [{"artifact": "session_json"}],
+                "delete_state_db": True,
+                "durable_tombstone": True,
+            }
+        ).encode("utf-8"),
+    ],
+)
+def test_corrupt_cleanup_record_blocks_only_its_own_session(
+    corrupt_payload,
+    tmp_path,
+    monkeypatch,
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    blocked_sid = "blocked-residual"
+    models._persist_session_cleanup_residuals(
+        blocked_sid,
+        [{"artifact": "session_json"}],
+        durable_tombstone=True,
+        delete_state_db=True,
+    )
+    models._session_cleanup_residual_file(blocked_sid).write_bytes(corrupt_payload)
+
+    unrelated = Session(session_id="unrelated-new-session")
+    models._activate_session_publication_generation(unrelated)
+
+    with pytest.raises(RuntimeError, match="cleanup residuals remain"):
+        models._activate_session_publication_generation(Session(session_id=blocked_sid))
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        models._load_session_cleanup_residuals()
+
+
 def test_cleanup_route_uses_generation_aware_deletion(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     stale = Session(session_id="cleanup-stale-save", title="Untitled")
