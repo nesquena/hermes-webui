@@ -46,6 +46,74 @@ def test_compression_media_clone_failure_keeps_source_identity(monkeypatch):
     assert session.session_id == "old-media-session"
 
 
+def test_compression_publication_failure_rolls_back_only_reserved_destination(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    models.SESSIONS.clear()
+    models._SESSION_PUBLICATION_DELETED.clear()
+    models._SESSION_PUBLICATION_GENERATIONS.clear()
+    models._active_destination_reservations().clear()
+    old_sid = "compression-old-rollback"
+    new_sid = "compression-new-rollback"
+    image_raw = b"\x89PNG\r\n\x1a\n" + (b"x" * (70 * 1024))
+    image_data_url = "data:image/png;base64," + base64.b64encode(image_raw).decode("ascii")
+    session = Session(
+        session_id=old_sid,
+        messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_data_url}}]}],
+        context_messages=[],
+    )
+    session.save(skip_index=True)
+    old_generation = session._publication_generation
+    original_save = Session.save
+
+    def publish_then_fail(self, *args, **kwargs):
+        original_save(self, *args, **kwargs)
+        if self is session and self.session_id == new_sid:
+            raise OSError("fail after continuation publication")
+
+    monkeypatch.setattr(Session, "save", publish_then_fail)
+    with pytest.raises(OSError, match="continuation publication"):
+        streaming._publish_compression_continuation(session, old_sid, new_sid, None)
+
+    assert session.session_id == old_sid
+    assert session._publication_generation is old_generation
+    assert (session_dir / f"{old_sid}.json").exists()
+    assert not (session_dir / f"{new_sid}.json").exists()
+    assert not session_media._session_media_dir(new_sid).exists()
+
+
+def test_compression_destination_collision_never_overwrites_existing_owner(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    models.SESSIONS.clear()
+    models._SESSION_PUBLICATION_DELETED.clear()
+    models._SESSION_PUBLICATION_GENERATIONS.clear()
+    models._active_destination_reservations().clear()
+    old_sid = "compression-old-collision"
+    new_sid = "compression-owned-target"
+    session = Session(session_id=old_sid, messages=[{"role": "user", "content": "old"}])
+    session.save(skip_index=True)
+    existing_path = session_dir / f"{new_sid}.json"
+    existing_bytes = b'{"session_id":"compression-owned-target","messages":[{"role":"user","content":"owner"}]}'
+    existing_path.write_bytes(existing_bytes)
+
+    with pytest.raises(models.SessionDestinationCollisionError):
+        streaming._publish_compression_continuation(session, old_sid, new_sid, None)
+
+    assert session.session_id == old_sid
+    assert existing_path.read_bytes() == existing_bytes
+
+
 def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_errors_on_continuation(
     tmp_path, monkeypatch
 ):

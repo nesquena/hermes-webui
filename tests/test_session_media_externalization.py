@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import threading
 import zipfile
 from types import SimpleNamespace
@@ -88,6 +89,17 @@ def _configure_session_state(tmp_path, monkeypatch):
     models._SESSION_PUBLICATION_LOCKS.clear()
     if hasattr(models, "_SESSION_PUBLICATION_GENERATIONS"):
         models._SESSION_PUBLICATION_GENERATIONS.clear()
+    models._active_destination_reservations().clear()
+    with routes.api_config.SESSION_AGENT_CACHE_LOCK:
+        routes.api_config.SESSION_AGENT_CACHE.clear()
+    with routes.api_config.SESSION_AGENT_LOCKS_LOCK:
+        routes.api_config.SESSION_AGENT_LOCKS.clear()
+    with routes.api_config.ACTIVE_RUNS_LOCK:
+        routes.api_config.ACTIVE_RUNS.clear()
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.clear()
+    with routes.api_config.STREAM_SESSION_OWNERS_LOCK:
+        routes.api_config.STREAM_SESSION_OWNERS.clear()
     return session_dir
 
 
@@ -653,6 +665,20 @@ def test_remove_session_media_deletes_only_requested_namespace(tmp_path, monkeyp
     assert not session_media._session_media_dir("delete-first").exists()
     assert session_media._session_media_dir("keep-second").exists()
     assert session_media.hydrate_session_media_urls(second, "keep-second")
+
+
+def test_media_cleanup_retry_prefix_cannot_match_sibling_sid(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    media_root = tmp_path / "session-media"
+    media_root.mkdir()
+    sibling_quarantine = media_root / (
+        session_media._deletion_quarantine_prefix("a-b") + "stale"
+    )
+    sibling_quarantine.mkdir()
+
+    session_media.remove_session_media("a")
+
+    assert sibling_quarantine.is_dir()
 
 
 def test_archive_named_session_media_cannot_precreate_private_namespace(tmp_path, monkeypatch):
@@ -1447,3 +1473,258 @@ def test_ephemeral_cleanup_failure_keeps_exact_retryable_owner(tmp_path, monkeyp
     assert owner is not None
     assert owner["cleanup_pending"] is True
     assert session.session_id in models._load_session_cleanup_residuals()
+
+
+def test_sidecar_outer_identity_cannot_redirect_session_namespace(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    payload = {
+        "session_id": "identity-b",
+        "title": "claimed",
+        "created_at": 1,
+        "updated_at": 1,
+        "messages": [{"role": "user", "content": "secret"}],
+    }
+    (session_dir / "identity-a.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    assert Session.load("identity-a") is None
+    assert Session.load_metadata_only("identity-a") is None
+    assert models._load_session_from_path(session_dir / "identity-a.json") is None
+    assert "identity-b" not in models.SESSIONS
+
+
+def test_destination_collision_preserves_existing_owner_bytes(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    path = session_dir / "reserved-owner.json"
+    original = b'{"session_id":"reserved-owner","messages":[{"role":"user","content":"keep"}]}'
+    path.write_bytes(original)
+
+    with pytest.raises(models.SessionDestinationCollisionError):
+        with models.reserve_session_destination("reserved-owner"):
+            raise AssertionError("collision reservation entered")
+
+    assert path.read_bytes() == original
+
+
+def test_destination_reservation_token_rejects_same_thread_piggyback(
+    tmp_path, monkeypatch
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    owner = Session(
+        session_id="reserved-token-owner",
+        messages=[{"role": "user", "content": "owner"}],
+    )
+    rogue = Session(
+        session_id=owner.session_id,
+        messages=[{"role": "user", "content": "rogue"}],
+    )
+
+    with models.reserve_session_destination(owner.session_id) as reservation:
+        reservation.bind(owner)
+        with pytest.raises(RuntimeError, match="publication transaction"):
+            rogue.save(skip_index=True)
+        owner.save(skip_index=True)
+        reservation.commit()
+
+    persisted = json.loads(owner.path.read_text(encoding="utf-8"))
+    assert persisted["messages"][0]["content"] == "owner"
+
+
+def test_import_index_failure_rolls_back_json_media_and_cache(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    destination_id = "importrollback"
+    monkeypatch.setattr(models.uuid, "uuid4", lambda: SimpleNamespace(hex=destination_id))
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: path)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        models,
+        "_write_session_index",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("index failed")),
+    )
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_session_import(
+        _FakeHandler("/api/session/import"),
+        {"messages": [_image_message(data_url)], "workspace": str(tmp_path)},
+    )
+
+    assert captured["bad"][1] == 500
+    assert destination_id not in models.SESSIONS
+    assert not (models.SESSION_DIR / f"{destination_id}.json").exists()
+    assert not session_media._session_media_dir(destination_id).exists()
+
+
+def test_focused_recovery_index_failure_rolls_back_destination(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    source = Session(
+        session_id="focused-recovery-source",
+        title="Exhausted",
+        workspace=str(tmp_path),
+    )
+    source.save(skip_index=True)
+    destination_id = "recoveryrollback"
+    monkeypatch.setattr(models.uuid, "uuid4", lambda: SimpleNamespace(hex=destination_id))
+    monkeypatch.setattr(routes, "get_session", lambda _sid: source)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(
+        routes,
+        "compression_recovery_payload_for_session",
+        lambda _session: {"recommended_action": routes.COMPRESSION_RECOVERY_ACTION_START_FOCUSED},
+    )
+    monkeypatch.setattr(routes, "find_compression_recovery_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        models,
+        "_write_session_index",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("index failed")),
+    )
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_session_compression_recovery_start(
+        _FakeHandler("/api/session/compression-recovery/start"),
+        {"session_id": source.session_id},
+    )
+
+    assert captured["bad"][1] == 500
+    assert destination_id not in models.SESSIONS
+    assert not (models.SESSION_DIR / f"{destination_id}.json").exists()
+
+
+def test_delete_requires_durable_tombstone_directory_barrier(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id="delete-dir-barrier",
+        messages=[{"role": "user", "content": "retain until intent is durable"}],
+    )
+    session.save(skip_index=True)
+    original_fsync_parent = models._fsync_parent_directory
+
+    def fail_tombstone_barrier(path):
+        if path == models._webui_deleted_session_tombstone_file():
+            raise OSError("directory fsync failed")
+        return original_fsync_parent(path)
+
+    monkeypatch.setattr(models, "_fsync_parent_directory", fail_tombstone_barrier)
+    result = models.delete_session_artifacts(
+        session.session_id,
+        delete_state_db=False,
+    )
+
+    assert result["ok"] is False
+    assert {item["artifact"] for item in result["residuals"]} >= {
+        "deleted_session_tombstone"
+    }
+    assert session.path.exists()
+
+
+def test_session_save_does_not_report_success_when_directory_barrier_fails(
+    tmp_path, monkeypatch
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id="save-dir-barrier",
+        messages=[{"role": "user", "content": "durable publication"}],
+    )
+    original_fsync_parent = models._fsync_parent_directory
+
+    def fail_sidecar_barrier(path):
+        if path == session.path:
+            raise OSError("directory fsync failed")
+        return original_fsync_parent(path)
+
+    monkeypatch.setattr(models, "_fsync_parent_directory", fail_sidecar_barrier)
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        session.save(skip_index=True)
+
+
+def test_media_final_replacement_is_not_removed(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    session_media.externalize_large_session_media(messages, "replace-race")
+    original_assert = session_media._assert_entry_still_names_fd
+    calls = 0
+    replacement_names = []
+
+    def replace_before_final_check(parent_fd, name, child_fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            moved = name + ".moved"
+            os.rename(name, moved, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            os.mkdir(name, dir_fd=parent_fd)
+            replacement_names.append(name)
+        return original_assert(parent_fd, name, child_fd)
+
+    monkeypatch.setattr(
+        session_media,
+        "_assert_entry_still_names_fd",
+        replace_before_final_check,
+    )
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="changed"):
+        session_media.remove_session_media("replace-race")
+
+    assert replacement_names
+    assert (tmp_path / "session-media" / replacement_names[0]).is_dir()
+
+
+def test_unsupported_backend_detects_broken_private_root_symlink(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    (tmp_path / "missing-target").mkdir()
+    os.symlink(tmp_path / "gone", tmp_path / "session-media")
+    monkeypatch.setattr(session_media, "_DIR_FD_OK", False)
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="unsupported"):
+        session_media.remove_session_media("broken-root")
+
+
+def test_clear_durably_removes_backup_and_private_media(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    session = Session(
+        session_id="clear-private-media",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    session.save(skip_index=True)
+    models.SESSIONS[session.session_id] = session
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": session.session_id})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes.api_config, "_evict_session_agent", lambda _sid: None)
+    captured = _capture_route(monkeypatch)
+
+    routes.handle_post(_FakeHandler("/api/session/clear"), urlparse("/api/session/clear"))
+
+    assert captured["ok"]["ok"] is True
+    assert not session.path.with_suffix(".json.bak").exists()
+    assert not session_media._session_media_dir(session.session_id).exists()
+
+
+def test_truncate_prunes_only_media_unreachable_from_live_or_backup(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    _raw_a, data_url_a = _large_png_data_url(b"a")
+    _raw_b, data_url_b = _large_png_data_url(b"b")
+    _raw_stray, data_url_stray = _large_png_data_url(b"z")
+    session = Session(
+        session_id="truncate-reachability",
+        messages=[_image_message(data_url_a), _image_message(data_url_b)],
+        context_messages=[_image_message(data_url_a), _image_message(data_url_b)],
+    )
+    session.save(skip_index=True)
+    stray = [_image_message(data_url_stray)]
+    session_media.externalize_large_session_media(stray, session.session_id)
+    stray_name = stray[0]["content"][1]["image_url"]["url"].split("//", 1)[1]
+
+    from api.session_ops import truncate_session_at_keep
+
+    truncate_session_at_keep(session, 1)
+    session.save(skip_index=True, prune_media=True)
+
+    files = {path.name for path in session_media._session_media_dir(session.session_id).iterdir()}
+    assert stray_name not in files
+    # The removed second message remains reachable from the recovery backup.
+    assert len(files) == 2

@@ -670,12 +670,15 @@ def hydrate_session_media_urls(value, session_id: str):
     return hydrated
 
 
-def _remove_tree_at(parent_fd: int, name: str) -> None:
-    """Remove one child tree without following symlinks."""
-    try:
-        child_fd = os.open(name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent_fd)
-    except FileNotFoundError:
-        return
+def _remove_tree_at(parent_fd: int, name: str, *, expected_fd: int | None = None) -> None:
+    """Remove exactly one held child tree without following replacements."""
+    child_fd = expected_fd
+    owns_fd = child_fd is None
+    if child_fd is None:
+        try:
+            child_fd = os.open(name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return
     try:
         for entry_name in os.listdir(child_fd):
             info = os.stat(entry_name, dir_fd=child_fd, follow_symlinks=False)
@@ -683,10 +686,21 @@ def _remove_tree_at(parent_fd: int, name: str) -> None:
                 _remove_tree_at(child_fd, entry_name)
             else:
                 os.unlink(entry_name, dir_fd=child_fd)
+        # Keep the authoritative handle open through the last identity check
+        # and rmdir. In particular, never close it and then resolve ``name``
+        # again as the old implementation did.
+        _assert_entry_still_names_fd(parent_fd, name, child_fd)
+        os.rmdir(name, dir_fd=parent_fd)
+        _fsync_dir(parent_fd)
     finally:
-        os.close(child_fd)
-    os.rmdir(name, dir_fd=parent_fd)
-    _fsync_dir(parent_fd)
+        if owns_fd and child_fd is not None:
+            os.close(child_fd)
+
+
+def _deletion_quarantine_prefix(session_id: str) -> str:
+    # Hashing makes the ownership prefix unambiguous: SID ``a`` must never
+    # match a quarantine belonging to sibling SID ``a-b`` during retry.
+    return f".delete-{hashlib.sha256(session_id.encode('utf-8')).hexdigest()}-"
 
 
 def remove_session_media(session_id: str) -> None:
@@ -697,18 +711,99 @@ def remove_session_media(session_id: str) -> None:
         # this implementation. Absence is therefore a safe no-op; presence is
         # not deleted through a mutable pathname because that would reintroduce
         # the check-then-use parent-swap vulnerability this guard prevents.
-        if not (_state_root() / _PRIVATE_ROOT_NAME).exists():
+        try:
+            os.lstat(_state_root() / _PRIVATE_ROOT_NAME)
+        except FileNotFoundError:
             return
         raise _unsupported_backend_error()
-    try:
-        state_fd = _open_root_fd(_state_root())
+    with _MEDIA_IO_LOCK:
         try:
-            media_fd, _ = _open_child_dir(state_fd, _PRIVATE_ROOT_NAME, create=False)
+            state_fd = _open_root_fd(_state_root())
             try:
-                _remove_tree_at(media_fd, sid)
+                media_fd, _ = _open_child_dir(state_fd, _PRIVATE_ROOT_NAME, create=False)
+                try:
+                    quarantine_prefix = _deletion_quarantine_prefix(sid)
+                    for entry_name in os.listdir(media_fd):
+                        if entry_name.startswith(quarantine_prefix):
+                            _remove_tree_at(media_fd, entry_name)
+                    try:
+                        session_fd = os.open(
+                            sid,
+                            os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
+                            dir_fd=media_fd,
+                        )
+                    except FileNotFoundError:
+                        # Retry the durability barrier even when a prior call
+                        # already completed the rename/remove operations.
+                        _fsync_dir(media_fd)
+                        return
+                    quarantine = f"{quarantine_prefix}{secrets.token_hex(16)}"
+                    try:
+                        os.replace(
+                            sid,
+                            quarantine,
+                            src_dir_fd=media_fd,
+                            dst_dir_fd=media_fd,
+                        )
+                        _fsync_dir(media_fd)
+                        _assert_entry_still_names_fd(media_fd, quarantine, session_fd)
+                        _remove_tree_at(
+                            media_fd,
+                            quarantine,
+                            expected_fd=session_fd,
+                        )
+                    finally:
+                        os.close(session_fd)
+                finally:
+                    os.close(media_fd)
             finally:
-                os.close(media_fd)
-        finally:
-            os.close(state_fd)
-    except FileNotFoundError:
-        return
+                os.close(state_fd)
+        except FileNotFoundError:
+            return
+
+
+def _retained_media_filenames(values) -> set[str]:
+    retained: set[str] = set()
+
+    def visit(node) -> None:
+        if isinstance(node, dict):
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+        elif isinstance(node, str) and node.startswith(_MEDIA_SCHEME):
+            retained.add(_reference_filename(node))
+
+    visit(values)
+    return retained
+
+
+def prune_session_media(session_id: str, retained_values) -> int:
+    """Durably remove blobs unreachable from current and recovery payloads."""
+    sid = _validated_session_id(session_id)
+    retained = _retained_media_filenames(retained_values)
+    if not _DIR_FD_OK:
+        try:
+            os.lstat(_state_root() / _PRIVATE_ROOT_NAME)
+        except FileNotFoundError:
+            return 0
+        raise _unsupported_backend_error()
+    removed = 0
+    with _MEDIA_IO_LOCK:
+        try:
+            with _open_private_session(sid, create=False) as handles:
+                directory_fd = handles[2]
+                for filename in os.listdir(directory_fd):
+                    info = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise SessionMediaIntegrityError(
+                            "Unexpected entry in private session media directory"
+                        )
+                    if filename not in retained:
+                        os.unlink(filename, dir_fd=directory_fd)
+                        removed += 1
+                _fsync_dir(directory_fd)
+        except FileNotFoundError:
+            return 0
+    return removed
