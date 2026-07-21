@@ -288,24 +288,34 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "_STREAM_FALLBACK_NOTICES must be declared as a module-level dict."
     )
 
-    # 2. The callback writes to it
-    callback_write_idx = src.find("_STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]")
-    assert callback_write_idx != -1, (
+    # 2. The callback writes to it under STREAMS_LOCK (greptile P1: write must
+    # be atomic w.r.t. cancel_stream()'s under-lock snapshot)
+    callback_write_idx = src.find("with STREAMS_LOCK:")
+    assert callback_write_idx != -1, "STREAMS_LOCK not found in source"
+    fb_write_in_lock = src.find(
+        "_STREAM_FALLBACK_NOTICES[stream_id] = _pending_fallback_notices[-1]",
+        callback_write_idx,
+    )
+    assert fb_write_in_lock != -1, (
         "_agent_status_callback must mirror the latest notice to "
-        "_STREAM_FALLBACK_NOTICES[stream_id] so cancel_stream() can read it."
+        "_STREAM_FALLBACK_NOTICES[stream_id] under STREAMS_LOCK so "
+        "cancel_stream()'s snapshot sees a consistent value."
     )
 
-    # 3. cancel_stream() reads and stamps it before _cs.save()
-    cancel_stamping = src.find("_cancel_fb_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)")
+    # 3. cancel_stream() reads and stamps it before _cs.save(), using the
+    # pre-interrupt snapshot (greptile P1: live read after interrupt can miss)
+    cancel_stamping = src.find("_cancel_fb_notice = _snap_fb_notice")
     assert cancel_stamping != -1, (
-        "cancel_stream() must read _STREAM_FALLBACK_NOTICES before its s.save() "
-        "so a mid-stream cancel after a real fallback still persists the notice."
+        "cancel_stream() must read the fallback notice from the pre-interrupt "
+        "snapshot (_snap_fb_notice) before its s.save() so a mid-stream cancel "
+        "after a real fallback still persists the notice even when the worker's "
+        "finally has already popped the live map."
     )
-    # Verify the stamping skips the _error cancel marker
+    # Verify the stamping only targets the active turn's _partial message
     stamping_block = src[cancel_stamping:cancel_stamping + 500]
-    assert "not _dm.get('_error')" in stamping_block, (
-        "cancel_stream() must skip the _error cancel marker when stamping "
-        "_fallbackNotice — stamp the partial/prior assistant message instead."
+    assert "_dm.get('_partial')" in stamping_block, (
+        "cancel_stream() must only stamp the _partial message for the active "
+        "turn, not walk back to prior turns' assistant messages."
     )
 
     # 4. The finally cleanup pops it
