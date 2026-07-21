@@ -26394,11 +26394,12 @@ def _handle_mcp_servers_list(handler):
         _server_summary(name, scfg, runtime.get(str(name)))
         for name, scfg in servers.items()
     ]
+    caps = _mcp_write_capability()
     return j(handler, {
         "servers": result,
-        "toggle_supported": True,
+        "toggle_supported": caps.get("writable", True),
         "reload_required": True,
-        **_mcp_write_capability(),
+        **caps,
     })
 
 
@@ -26413,7 +26414,21 @@ def _mcp_bridge_or_legacy(handler):
     from api import agent_config_bridge as _bridge
 
     if _bridge.bridge_available():
-        return True, get_active_hermes_home()
+        home = get_active_hermes_home()
+        # The WebUI's _get_config_path() honors HERMES_CONFIG_PATH — an env-var
+        # override that can point to a config file *outside* the active profile
+        # home.  The Agent's save_config() always writes to
+        # <override-home>/config.yaml and does NOT check HERMES_CONFIG_PATH.
+        # When the env override is set and diverges, fall back to legacy mode so
+        # GET and mutation stay in sync on the same file.  Otherwise a bridge
+        # write would silently mutate <home>/config.yaml while GET returns the
+        # external override file — a data-integrity split.
+        cfg_path_override = os.getenv("HERMES_CONFIG_PATH", "").strip()
+        if cfg_path_override:
+            agent_default_path = Path(home) / "config.yaml"
+            if os.path.expanduser(cfg_path_override) != str(agent_default_path):
+                return False, None
+        return True, home
     try:
         _bridge.require_bridge()
     except _bridge.AgentBridgeUnavailable as exc:

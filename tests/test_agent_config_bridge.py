@@ -112,6 +112,10 @@ class TestBridgeProbe:
     def test_standalone_mode_is_not_available(self, monkeypatch):
         monkeypatch.setattr(bridge, "_import_state", None, raising=False)
         monkeypatch.setattr(bridge, "_AGENT_DIR", None, raising=False)
+        # conftest.py sets HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE=1 process-wide;
+        # clear it so the test exercises the "no agent checkout" path, not the
+        # "disabled via env var" path.
+        monkeypatch.delenv("HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE", raising=False)
         assert not bridge.bridge_available()
         assert bridge._probe_import() == "unavailable:no agent checkout discovered"
 
@@ -135,6 +139,13 @@ class TestBridgeProbe:
                     raise ImportError(f"{fullname} blocked by test")
                 return None
 
+        # Earlier tests using fake_agent_modules may have cached these in
+        # sys.modules, which would let the import succeed despite the meta_path
+        # blocker.  Evict them before installing the blocker so _probe_import
+        # must go through our finder, then restore after.
+        _BLOCKED_MODS = ("hermes_constants", "hermes_cli", "hermes_cli.config")
+        _saved = {m: sys.modules.pop(m, None) for m in _BLOCKED_MODS}
+
         blocker = _Blocker()
         sys.meta_path.insert(0, blocker)
         try:
@@ -143,6 +154,9 @@ class TestBridgeProbe:
         finally:
             sys.meta_path.remove(blocker)
             bridge._import_state = None
+            for m in _BLOCKED_MODS:
+                if _saved.get(m) is not None and m not in sys.modules:
+                    sys.modules[m] = _saved[m]
 
     def test_require_bridge_noop_standalone(self, monkeypatch):
         monkeypatch.setattr(bridge, "_import_state", None, raising=False)
@@ -168,6 +182,9 @@ class TestBridgeProbe:
                     raise ImportError(f"{fullname} blocked")
                 return None
 
+        _BLOCKED_MODS = ("hermes_constants", "hermes_cli", "hermes_cli.config")
+        _saved = {m: sys.modules.pop(m, None) for m in _BLOCKED_MODS}
+
         blocker = _Blocker()
         sys.meta_path.insert(0, blocker)
         try:
@@ -176,6 +193,9 @@ class TestBridgeProbe:
         finally:
             sys.meta_path.remove(blocker)
             bridge._import_state = None
+            for m in _BLOCKED_MODS:
+                if _saved.get(m) is not None and m not in sys.modules:
+                    sys.modules[m] = _saved[m]
 
     def test_keyboard_interrupt_during_probe_propagates(self, monkeypatch, tmp_path):
         """KeyboardInterrupt in the import probe must propagate, not be swallowed."""
@@ -189,6 +209,9 @@ class TestBridgeProbe:
                     raise KeyboardInterrupt()
                 return None
 
+        _BLOCKED_MODS = ("hermes_constants", "hermes_cli", "hermes_cli.config")
+        _saved = {m: sys.modules.pop(m, None) for m in _BLOCKED_MODS}
+
         finder = _RaisingFinder()
         sys.meta_path.insert(0, finder)
         try:
@@ -197,6 +220,9 @@ class TestBridgeProbe:
         finally:
             sys.meta_path.remove(finder)
             bridge._import_state = None
+            for m in _BLOCKED_MODS:
+                if _saved.get(m) is not None and m not in sys.modules:
+                    sys.modules[m] = _saved[m]
 
 
 # ── config.yaml persistence tests ────────────────────────────────────────────

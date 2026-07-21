@@ -69,6 +69,11 @@ def _probe_import() -> str:
             for required in ("save_config", "load_config", "save_env_value"):
                 if not callable(getattr(_agent_config, required, None)):
                     raise ImportError(f"hermes_cli.config.{required} missing")
+            # Probe the context-var override helpers too — these are called by
+            # scoped_agent_home() in every bridge write path.
+            for attr in ("set_hermes_home_override", "reset_hermes_home_override"):
+                if not callable(getattr(hermes_constants, attr, None)):
+                    raise ImportError(f"hermes_constants.{attr} missing")
             _import_state = "ok"
         except (KeyboardInterrupt, GeneratorExit):
             raise
