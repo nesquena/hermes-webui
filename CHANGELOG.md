@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- **New chat: you can now hide the entire welcome panel, not just the suggestions.** A new opt-in Settings → Preferences toggle, "Hide new-chat welcome panel," hides the whole empty-state block (logo, heading, subtitle, and suggestion buttons) on an empty new conversation while keeping the composer available and focused. It extends the existing "hide new-chat suggestions" preference with the same persisted, hot-applied pattern; default is unchanged (panel shown). Thanks @vaidu-ai. (#6183, #6160)
+
 - **Workspace Artifacts pane: long filenames are fully readable and long parent directories stay inside the drawer.** A long artifact filename used to be ellipsized (so you couldn't tell files apart), and an unusually long immediate-parent directory could expand the Artifacts drawer horizontally and bleed past its edge. The list now shows the filename first with parent-preserving path truncation, and the directory tail is width-capped (`min-width: 0` + `overflow: hidden` + `text-overflow: ellipsis`) so it clips inside the card instead of blowing out the drawer. Adds behavioral/locale coverage for the artifact path lifecycle. Thanks @rodboev. (#6078, #6067)
 
 - **The Kanban "New task" modal is reachable on phones again.** On a narrow viewport, a tall create-task modal was vertically centered, pushing its top (the title and first input) above the top of the screen with no way to scroll back to it. The mobile overlay now uses `align-items: safe center` and `overflow-y: auto`, so an overflowing modal keeps its top on-screen and scrolls as needed; desktop and wider layouts are unchanged. Thanks @jpalazz2. (#6301)
