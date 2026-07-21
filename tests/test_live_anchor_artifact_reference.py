@@ -273,9 +273,15 @@ def test_oversize_strings_reject_before_utf8_size(tmp_path, monkeypatch):
     workspace.mkdir()
     target = workspace / "guarded.md"
     huge_result_scalar = "x" * (artifact_references._MAX_RESULT_BYTES + 1)
+    huge_serialized_result = "{" + (" " * artifact_references._MAX_RESULT_BYTES)
     huge_tool_call_id = "t" * (artifact_references._MAX_TOOL_CALL_ID_BYTES + 1)
     huge_payload_path = "p" * (artifact_references._MAX_PATH_BYTES + 1)
-    protected = {huge_result_scalar, huge_tool_call_id, huge_payload_path}
+    protected = {
+        huge_result_scalar,
+        huge_serialized_result,
+        huge_tool_call_id,
+        huge_payload_path,
+    }
     original_utf8_size = artifact_references._utf8_size
 
     def guarded_utf8_size(value):
@@ -299,6 +305,13 @@ def test_oversize_strings_reject_before_utf8_size(tmp_path, monkeypatch):
     assert artifact_references.derive_file_artifact_references(
         "write_file",
         {"path": str(target)},
+        huge_serialized_result,
+        workspace,
+        tool_call_id="call-serialized-result-guard",
+    ) == []
+    assert artifact_references.derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
         json.dumps({"bytes_written": 1, "resolved_path": str(target)}),
         workspace,
         tool_call_id=huge_tool_call_id,
@@ -308,6 +321,70 @@ def test_oversize_strings_reject_before_utf8_size(tmp_path, monkeypatch):
         "path": huge_payload_path,
         "source_tool": "write_file",
     }) is None
+
+
+def test_structured_result_gate_scans_wide_containers_lazily(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "wide.md"
+    scalar = "x" * 256
+
+    class GuardedWideDict(dict):
+        def __init__(self):
+            super().__init__()
+            self.yielded = 0
+
+        def items(self):
+            for idx in range(10000):
+                self.yielded += 1
+                yield f"key-{idx}", scalar
+
+    class GuardedWideList(list):
+        def __init__(self):
+            super().__init__()
+            self.indexed = 0
+            self.iterated = 0
+
+        def __len__(self):
+            return 10000
+
+        def __getitem__(self, index):
+            self.indexed += 1
+            return scalar
+
+        def __iter__(self):
+            for _idx in range(10000):
+                self.iterated += 1
+                yield scalar
+
+    wide_dict = GuardedWideDict()
+    assert derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
+        {
+            "bytes_written": 1,
+            "resolved_path": str(target),
+            "wide": wide_dict,
+        },
+        workspace,
+        tool_call_id="call-wide-dict",
+    ) == []
+    assert 0 < wide_dict.yielded < 512
+
+    wide_list = GuardedWideList()
+    assert derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
+        {
+            "bytes_written": 1,
+            "resolved_path": str(target),
+            "wide": wide_list,
+        },
+        workspace,
+        tool_call_id="call-wide-list",
+    ) == []
+    assert wide_list.indexed == 0
+    assert 0 < wide_list.iterated < 512
 
 
 def test_structured_result_gate_rejects_cycles_and_excessive_depth(tmp_path):

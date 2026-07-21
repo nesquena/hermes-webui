@@ -126,6 +126,38 @@ def _json_within_bytes(value, limit: int) -> bool:
             if not add(depth):
                 return False
             continue
+        if kind == 'dict_next':
+            iterator, oid, first, container_depth = item
+            try:
+                key, child = next(iterator)
+            except StopIteration:
+                stack.append(('exit', oid, 1))  # }
+                continue
+            except Exception:
+                return False
+            if not isinstance(key, str):
+                return False
+            if not first and not add(1):  # ,
+                return False
+            stack.append(('dict_next', (iterator, oid, False, container_depth), container_depth))
+            stack.append(('value', child, container_depth + 1))
+            stack.append(('bytes', 1, 0))  # :
+            stack.append(('value', key, container_depth + 1))
+            continue
+        if kind == 'seq_next':
+            iterator, oid, first, container_depth = item
+            try:
+                child = next(iterator)
+            except StopIteration:
+                stack.append(('exit', oid, 1))  # ]
+                continue
+            except Exception:
+                return False
+            if not first and not add(1):  # ,
+                return False
+            stack.append(('seq_next', (iterator, oid, False, container_depth), container_depth))
+            stack.append(('value', child, container_depth + 1))
+            continue
 
         if depth > _MAX_JSON_NESTING:
             return False
@@ -136,17 +168,7 @@ def _json_within_bytes(value, limit: int) -> bool:
             active.add(oid)
             if not add(1):  # {
                 return False
-            stack.append(('exit', oid, 1))  # }
-            items = list(item.items())
-            for idx in range(len(items) - 1, -1, -1):
-                key, child = items[idx]
-                if not isinstance(key, str):
-                    return False
-                stack.append(('value', child, depth + 1))
-                stack.append(('bytes', 1, 0))  # :
-                stack.append(('value', key, depth + 1))
-                if idx > 0:
-                    stack.append(('bytes', 1, 0))  # ,
+            stack.append(('dict_next', (iter(item.items()), oid, True, depth), depth))
             continue
         if isinstance(item, (list, tuple)):
             oid = id(item)
@@ -155,11 +177,7 @@ def _json_within_bytes(value, limit: int) -> bool:
             active.add(oid)
             if not add(1):  # [
                 return False
-            stack.append(('exit', oid, 1))  # ]
-            for idx in range(len(item) - 1, -1, -1):
-                stack.append(('value', item[idx], depth + 1))
-                if idx > 0:
-                    stack.append(('bytes', 1, 0))  # ,
+            stack.append(('seq_next', (iter(item), oid, True, depth), depth))
             continue
 
         remaining = limit - total
@@ -188,7 +206,7 @@ def _result_object(result):
         return result if _json_within_bytes(result, _MAX_RESULT_BYTES) else None
     if not isinstance(result, str):
         return None
-    if _utf8_size(result) > _MAX_RESULT_BYTES:
+    if len(result) > _MAX_RESULT_BYTES or _utf8_size(result) > _MAX_RESULT_BYTES:
         return None
     try:
         parsed = json.loads(result)
