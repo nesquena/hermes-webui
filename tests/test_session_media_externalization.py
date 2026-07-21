@@ -86,6 +86,8 @@ def _configure_session_state(tmp_path, monkeypatch):
     routes.SESSIONS.clear()
     models._SESSION_PUBLICATION_DELETED.clear()
     models._SESSION_PUBLICATION_LOCKS.clear()
+    if hasattr(models, "_SESSION_PUBLICATION_GENERATIONS"):
+        models._SESSION_PUBLICATION_GENERATIONS.clear()
     return session_dir
 
 
@@ -101,8 +103,8 @@ def _stub_delete_route_dependencies(monkeypatch, session, tmp_path):
     monkeypatch.setattr(routes.api_config, "_evict_session_agent", lambda _sid: None)
     monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
     monkeypatch.setattr("api.upload._session_attachment_dir", lambda _sid: tmp_path / "uploads" / _sid)
-    monkeypatch.setattr("api.turn_journal.delete_turn_journal", lambda _sid: None)
-    monkeypatch.setattr("api.run_journal.delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr("api.turn_journal.delete_turn_journal", lambda _sid, **_kwargs: None)
+    monkeypatch.setattr("api.run_journal.delete_run_journal", lambda _sid, **_kwargs: None)
     monkeypatch.setattr("api.background_process.forget_bg_task_completion_dedup", lambda _sid: None)
     monkeypatch.setattr("api.terminal.close_terminal", lambda _sid: None)
 
@@ -324,6 +326,67 @@ def test_branch_clones_externalized_media_before_session_commit(tmp_path, monkey
     destination_id = captured["ok"]["session_id"]
     destination = Session.load(destination_id)
     _assert_destination_media_is_independent(destination, source.session_id, raw, data_url)
+
+
+@pytest.mark.parametrize(
+    "path,destination_id",
+    [
+        ("/api/session/duplicate", "duprollback1"),
+        ("/api/session/branch", "branchrollbk"),
+    ],
+)
+@pytest.mark.parametrize("failure", ["save", "index"])
+def test_new_id_routes_roll_back_after_media_clone_failure(
+    path,
+    destination_id,
+    failure,
+    tmp_path,
+    monkeypatch,
+):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    _raw, data_url = _large_png_data_url()
+    source = Session(
+        session_id=f"source-{destination_id}",
+        title="Media source",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+    source.save(skip_index=True)
+    models.SESSIONS[source.session_id] = source
+    monkeypatch.setattr(models.uuid, "uuid4", lambda: SimpleNamespace(hex=destination_id))
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: source)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_, **__: None)
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+    monkeypatch.setattr("api.upload._session_attachment_dir", lambda sid: tmp_path / "uploads" / sid)
+    monkeypatch.setattr("api.turn_journal.delete_turn_journal", lambda _sid, **_kwargs: 0)
+    monkeypatch.setattr("api.run_journal.delete_run_journal", lambda _sid, **_kwargs: False)
+    original_save = Session.save
+
+    if failure == "save":
+        def fail_destination_save(self, *args, **kwargs):
+            if self.session_id == destination_id:
+                raise OSError("injected destination save failure")
+            return original_save(self, *args, **kwargs)
+
+        monkeypatch.setattr(Session, "save", fail_destination_save)
+    else:
+        monkeypatch.setattr(
+            models,
+            "_write_session_index",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected index failure")),
+        )
+
+    captured = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(path), urlparse(path))
+
+    assert captured["bad"][1] == 500
+    assert destination_id not in models.SESSIONS
+    assert not (session_dir / f"{destination_id}.json").exists()
+    assert not (session_dir / f"{destination_id}.json.bak").exists()
+    destination_media = session_media._session_media_dir(destination_id)
+    assert not destination_media.exists() or not list(destination_media.iterdir())
 
 
 def test_gateway_runs_api_hydrates_compact_history_without_mutation(tmp_path, monkeypatch):
@@ -818,13 +881,15 @@ def test_btw_thread_start_failure_rolls_back_all_ephemeral_ownership(tmp_path, m
     )
     source.save(skip_index=True)
     models.SESSIONS[source.session_id] = source
+    _stub_delete_route_dependencies(monkeypatch, source, tmp_path)
     destination_id = "btw-failure-destination"
+    stream_id = "btw-failure-stream"
     monkeypatch.setattr(routes, "Session", lambda **kwargs: Session(session_id=destination_id, **kwargs))
+    monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex=stream_id))
     monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: source)
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
-    monkeypatch.setattr("api.background.track_btw", lambda *_args: None)
 
     class FailingThread:
         def __init__(self, *args, **kwargs):
@@ -846,9 +911,15 @@ def test_btw_thread_start_failure_rolls_back_all_ephemeral_ownership(tmp_path, m
     assert not (models.SESSION_DIR / f"{destination_id}.json").exists()
     assert not session_media._session_media_dir(destination_id).exists()
     assert destination_id not in routes.api_config.STREAM_SESSION_OWNERS.values()
+    from api.background import find_btw_owner
+
+    assert find_btw_owner(destination_id, stream_id) is None
 
 
-def test_path_fallback_externalizes_hydrates_clones_and_removes(tmp_path, monkeypatch):
+def test_missing_anchored_capabilities_fail_closed_without_persisting_private_refs(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     monkeypatch.setattr(session_media, "_DIR_FD_OK", False, raising=False)
 
@@ -859,25 +930,27 @@ def test_path_fallback_externalizes_hydrates_clones_and_removes(tmp_path, monkey
     _raw, data_url = _large_png_data_url()
     messages = [_image_message(data_url)]
 
-    assert session_media.externalize_large_session_media(messages, "fallback-source") == 1
-    assert session_media.hydrate_session_media_urls(messages, "fallback-source")[0][
-        "content"
-    ][1]["image_url"]["url"] == data_url
-    assert session_media.clone_session_media_references(
-        messages,
-        "fallback-source",
-        "fallback-destination",
-    ) == 1
-    session_media.remove_session_media("fallback-source")
-    assert session_media.hydrate_session_media_urls(messages, "fallback-destination")[0][
-        "content"
-    ][1]["image_url"]["url"] == data_url
-    session_media.remove_session_media("fallback-destination")
-    assert not session_media._session_media_dir("fallback-destination").exists()
+    assert session_media.externalize_large_session_media(messages, "unsupported-source") == 0
+    assert messages[0]["content"][1]["image_url"]["url"] == data_url
+    assert not (tmp_path / "session-media").exists()
+
+    compact = [_image_message("webui-media://" + "a" * 64 + ".png")]
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="unsupported"):
+        session_media.hydrate_session_media_urls(compact, "unsupported-source")
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="unsupported"):
+        session_media.clone_session_media_references(
+            compact,
+            "unsupported-source",
+            "unsupported-destination",
+        )
+    (tmp_path / "session-media" / "unsupported-source").mkdir(parents=True)
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="unsupported"):
+        session_media.remove_session_media("unsupported-source")
 
 
 def test_ephemeral_cleanup_retires_json_cache_stream_tracking_and_media(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
     _raw, data_url = _large_png_data_url()
     session = Session(
         session_id="btw-cleanup",
@@ -906,7 +979,11 @@ def test_ephemeral_cleanup_retires_json_cache_stream_tracking_and_media(tmp_path
     assert routes.stream_owner_session_id("btw-cleanup-stream") is None
     assert not session.path.exists()
     assert not session_media._session_media_dir(session.session_id).exists()
-    assert cleanup_btw(session.parent_session_id) is None
+    assert cleanup_btw(
+        session.parent_session_id,
+        session.session_id,
+        session.active_stream_id or "btw-cleanup-stream",
+    ) is None
 
 
 def test_delete_serializes_against_late_save_and_tombstones_publication(tmp_path, monkeypatch):
@@ -978,8 +1055,316 @@ def test_delete_reports_failure_when_private_media_cleanup_fails(tmp_path, monke
 
     _call_delete_route(session.session_id)
 
-    assert captured["bad"][1] == 500
-    assert "private media cleanup failed" in captured["bad"][0]
+    assert captured["status"] == 500
+    assert captured["ok"]["error"] == "Session cleanup incomplete"
+    assert {item["artifact"] for item in captured["ok"]["residuals"]} >= {
+        "session_media"
+    }
     assert session.session_id not in models.SESSIONS
     with pytest.raises(RuntimeError, match="deleted session"):
         session.save(skip_index=True)
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "deleted_session_tombstone",
+        "session_json",
+        "session_backup",
+        "session_temporary_files",
+        "attachments",
+        "turn_journal",
+        "run_journal",
+        "session_index",
+        "state_db",
+    ],
+)
+def test_delete_reports_and_persists_every_private_artifact_residual(
+    artifact,
+    tmp_path,
+    monkeypatch,
+):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id=f"residual-{artifact.replace('_', '-')}",
+        messages=[{"role": "user", "content": "private transcript"}],
+    )
+    session.save(skip_index=True)
+    models.SESSIONS[session.session_id] = session
+    _stub_delete_route_dependencies(monkeypatch, session, tmp_path)
+    captured = _capture_route(monkeypatch)
+
+    if artifact == "deleted_session_tombstone":
+        monkeypatch.setattr(models, "_record_webui_deleted_session_tombstone", lambda _sid: None)
+    elif artifact in {"session_json", "session_backup", "session_temporary_files"}:
+        if artifact == "session_temporary_files":
+            target = session_dir / f"{session.session_id}.tmp.crashed"
+            target.write_text('{"private":"temporary"}', encoding="utf-8")
+        else:
+            target = session.path if artifact == "session_json" else session.path.with_suffix(".json.bak")
+        if artifact == "session_backup":
+            target.write_text('{"private":"backup"}', encoding="utf-8")
+        original_unlink = type(target).unlink
+
+        def fail_target_unlink(self, *args, **kwargs):
+            if self == target:
+                raise OSError("injected unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(target), "unlink", fail_target_unlink)
+    elif artifact == "attachments":
+        attachment_dir = tmp_path / "uploads" / session.session_id
+        attachment_dir.mkdir(parents=True)
+        (attachment_dir / "private.txt").write_text("private", encoding="utf-8")
+        monkeypatch.setattr(
+            "shutil.rmtree",
+            lambda path, *args, **kwargs: (_ for _ in ()).throw(OSError("injected rmtree failure"))
+            if path == attachment_dir
+            else None,
+        )
+    elif artifact == "turn_journal":
+        turn_root = session_dir / "_turn_journal"
+        turn_root.mkdir()
+        (turn_root / f"{session.session_id}.jsonl").write_text("private\n", encoding="utf-8")
+    elif artifact == "run_journal":
+        run_root = session_dir / "_run_journal" / session.session_id
+        run_root.mkdir(parents=True)
+        (run_root / "run.jsonl").write_text("private\n", encoding="utf-8")
+    elif artifact == "session_index":
+        models.SESSION_INDEX_FILE.write_text(
+            json.dumps([{"session_id": session.session_id}]),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(models, "prune_session_from_index", lambda _sid: None)
+    elif artifact == "state_db":
+        monkeypatch.setattr(models, "delete_cli_session", lambda _sid: False)
+
+    _call_delete_route(session.session_id)
+
+    assert captured["status"] == 500
+    residual_names = {item["artifact"] for item in captured["ok"]["residuals"]}
+    assert artifact in residual_names
+    persisted = models._load_session_cleanup_residuals()
+    assert artifact in {
+        item["artifact"] for item in persisted[session.session_id]["residuals"]
+    }
+    replacement = Session(session_id=session.session_id)
+    with pytest.raises(RuntimeError, match="cleanup residuals remain"):
+        models._activate_session_publication_generation(replacement)
+
+
+def test_cleanup_route_uses_generation_aware_deletion(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    stale = Session(session_id="cleanup-stale-save", title="Untitled")
+    stale.save(skip_index=True)
+    models.SESSIONS[stale.session_id] = stale
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+    monkeypatch.setattr("api.upload._session_attachment_dir", lambda sid: tmp_path / "uploads" / sid)
+    monkeypatch.setattr("api.turn_journal.delete_turn_journal", lambda _sid, **_kwargs: 0)
+    monkeypatch.setattr("api.run_journal.delete_run_journal", lambda _sid, **_kwargs: False)
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_sessions_cleanup(_FakeHandler("/api/sessions/cleanup"), {})
+
+    assert captured["ok"]["cleaned"] == 1
+    assert not stale.path.exists()
+    with pytest.raises(RuntimeError, match="stale|deleted session"):
+        stale.save(skip_index=True)
+
+
+def test_same_sid_recreation_does_not_authorize_old_session_object(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    old = Session(session_id="same-sid-generation", messages=[{"role": "user", "content": "old"}])
+    old.save(skip_index=True)
+    models.SESSIONS[old.session_id] = old
+    _stub_delete_route_dependencies(monkeypatch, old, tmp_path)
+    captured = _capture_route(monkeypatch)
+    _call_delete_route(old.session_id)
+    assert captured["ok"]["ok"] is True
+
+    replacement = Session(
+        session_id=old.session_id,
+        messages=[{"role": "user", "content": "replacement"}],
+    )
+    models._activate_session_publication_generation(replacement)
+    models._clear_webui_deleted_session_tombstone(replacement.session_id)
+    replacement.save(skip_index=True)
+
+    old.messages.append({"role": "assistant", "content": "stale overwrite"})
+    with pytest.raises(RuntimeError, match="stale"):
+        old.save(skip_index=True)
+    assert "replacement" in replacement.path.read_text(encoding="utf-8")
+
+
+def test_delete_defers_while_run_is_active_then_retries_idempotently(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id="delete-active-run",
+        messages=[{"role": "user", "content": "still running"}],
+    )
+    session.save(skip_index=True)
+    models.SESSIONS[session.session_id] = session
+    _stub_delete_route_dependencies(monkeypatch, session, tmp_path)
+    captured = _capture_route(monkeypatch)
+    stream_id = "delete-active-stream"
+    with routes.api_config.ACTIVE_RUNS_LOCK:
+        routes.api_config.ACTIVE_RUNS[stream_id] = {"session_id": session.session_id}
+    try:
+        _call_delete_route(session.session_id)
+        assert captured["status"] == 500
+        assert {item["artifact"] for item in captured["ok"]["residuals"]} >= {
+            "active_run"
+        }
+        assert session.path.exists()
+        with pytest.raises(RuntimeError, match="deleted session"):
+            session.save(skip_index=True)
+    finally:
+        with routes.api_config.ACTIVE_RUNS_LOCK:
+            routes.api_config.ACTIVE_RUNS.pop(stream_id, None)
+
+    _call_delete_route(session.session_id)
+    assert captured["status"] == 200
+    assert captured["ok"]["ok"] is True
+    assert not session.path.exists()
+    assert session.session_id not in models._load_session_cleanup_residuals()
+
+
+def test_cleanup_retry_preserves_messaging_state_db_ownership_policy(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id="messaging-cleanup-policy",
+        messages=[{"role": "user", "content": "external owner"}],
+    )
+    session.save(skip_index=True)
+    backup = session.path.with_suffix(".json.bak")
+    backup.write_text("private backup", encoding="utf-8")
+    models.SESSIONS[session.session_id] = session
+    _stub_delete_route_dependencies(monkeypatch, session, tmp_path)
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda _sid: True)
+    state_db_calls = []
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: state_db_calls.append(sid) or True,
+    )
+    captured = _capture_route(monkeypatch)
+    original_unlink = type(backup).unlink
+
+    def fail_backup(self, *args, **kwargs):
+        if self == backup:
+            raise OSError("backup busy")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(backup), "unlink", fail_backup)
+    _call_delete_route(session.session_id)
+    assert captured["status"] == 500
+    policy = models._load_session_cleanup_residuals()[session.session_id]
+    assert policy["delete_state_db"] is False
+    assert policy["durable_tombstone"] is False
+    assert state_db_calls == []
+
+    monkeypatch.setattr(type(backup), "unlink", original_unlink)
+    routes._handle_sessions_cleanup(_FakeHandler("/api/sessions/cleanup"), {})
+
+    assert captured["status"] == 200
+    assert state_db_calls == []
+    assert not backup.exists()
+    assert session.session_id not in models._load_session_cleanup_residuals()
+
+
+def test_ephemeral_cancel_before_worker_retires_exact_owned_lifecycle(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    from api.background import cleanup_btw, track_btw
+    from api.config import SESSION_AGENT_LOCKS
+
+    ephemeral = Session(
+        session_id="btw-preworker-cancel",
+        parent_session_id="btw-preworker-parent",
+        messages=[{"role": "user", "content": "private question"}],
+    )
+    ephemeral.active_stream_id = "btw-preworker-stream"
+    ephemeral.save(skip_index=True)
+    models.SESSIONS[ephemeral.session_id] = ephemeral
+    routes.register_stream_owner(ephemeral.active_stream_id, ephemeral.session_id)
+    track_btw(
+        ephemeral.parent_session_id,
+        ephemeral.session_id,
+        ephemeral.active_stream_id,
+        "private question",
+    )
+    SESSION_AGENT_LOCKS[ephemeral.session_id] = threading.Lock()
+    run_dir = session_dir / "_run_journal" / ephemeral.session_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.jsonl").write_text('{"private":true}\n', encoding="utf-8")
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+
+    streaming._run_agent_streaming(
+        ephemeral.session_id,
+        "private question",
+        "model",
+        str(tmp_path),
+        ephemeral.active_stream_id,
+        ephemeral=True,
+    )
+
+    assert not ephemeral.path.exists()
+    assert not run_dir.exists()
+    assert ephemeral.session_id not in models.SESSIONS
+    assert ephemeral.session_id not in SESSION_AGENT_LOCKS
+    assert cleanup_btw(
+        ephemeral.parent_session_id,
+        ephemeral.session_id,
+        ephemeral.active_stream_id,
+    ) is None
+
+
+def test_ephemeral_cleanup_does_not_erase_newer_parent_owner(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    from api.background import cleanup_btw, track_btw
+
+    older = Session(session_id="btw-older", parent_session_id="shared-parent")
+    older.active_stream_id = "older-stream"
+    newer = Session(session_id="btw-newer", parent_session_id="shared-parent")
+    newer.active_stream_id = "newer-stream"
+    track_btw("shared-parent", older.session_id, older.active_stream_id, "older")
+    track_btw("shared-parent", newer.session_id, newer.active_stream_id, "newer")
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+
+    streaming._cleanup_ephemeral_session(older, stream_id=older.active_stream_id)
+
+    owned = cleanup_btw("shared-parent", newer.session_id, newer.active_stream_id)
+    assert owned is not None
+    assert owned["ephemeral_session_id"] == newer.session_id
+
+
+def test_ephemeral_cleanup_failure_keeps_exact_retryable_owner(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    from api.background import find_btw_owner, track_btw
+
+    session = Session(session_id="btw-cleanup-residual", parent_session_id="btw-residual-parent")
+    session.active_stream_id = "btw-residual-stream"
+    session.save(skip_index=True)
+    models.SESSIONS[session.session_id] = session
+    track_btw(
+        session.parent_session_id,
+        session.session_id,
+        session.active_stream_id,
+        "private question",
+    )
+    run_dir = session_dir / "_run_journal" / session.session_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.jsonl").write_text("private\n", encoding="utf-8")
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+    monkeypatch.setattr(
+        "api.run_journal.delete_run_journal",
+        lambda _sid, **_kwargs: False,
+    )
+
+    result = streaming._cleanup_ephemeral_session(session)
+
+    assert result["ok"] is False
+    assert {item["artifact"] for item in result["residuals"]} >= {"run_journal"}
+    owner = find_btw_owner(session.session_id, "btw-residual-stream")
+    assert owner is not None
+    assert owner["cleanup_pending"] is True
+    assert session.session_id in models._load_session_cleanup_residuals()

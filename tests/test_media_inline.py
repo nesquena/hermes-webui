@@ -908,6 +908,23 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         finally:
             sess_file.unlink(missing_ok=True)
 
+        # Session-externalized image blobs are private to their owning session
+        # and must never become reachable through the generic MEDIA: file server.
+        private_dir = state_dir / "session-media" / "other-session"
+        private_dir.mkdir(parents=True, exist_ok=True)
+        private_file = private_dir / ("a" * 64 + ".png")
+        private_file.write_bytes(b"\x89PNG\r\n\x1a\nprivate")
+        try:
+            _, status, _ = self._get(
+                "/api/media?path=" + urllib.parse.quote(str(private_file.resolve()))
+            )
+            self.assertEqual(
+                status, 403,
+                f"files under session-media/ must be denied, got {status}",
+            )
+        finally:
+            private_file.unlink(missing_ok=True)
+
     def test_deny_list_does_not_overblock_active_workspace_media(self):
         """#3234 follow-up: workspace media with a sensitive-looking basename must
         still serve when it lives under the active workspace carve-out.

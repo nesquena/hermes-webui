@@ -13,8 +13,10 @@ _lock = threading.Lock()
 # parent_session_id -> list of task dicts
 _BACKGROUND_TASKS: dict[str, list[dict[str, Any]]] = {}
 
-# btw ephemeral session tracking: parent_sid -> {ephemeral_sid, stream_id, question}
-_BTW_TRACKING: dict[str, dict[str, Any]] = {}
+# btw ephemeral ownership: (parent_sid, ephemeral_sid, stream_id) -> record.
+# A parent may have overlapping side questions; each lifecycle stays independently
+# consumable so an older completion cannot erase or hide a newer owner.
+_BTW_TRACKING: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
 def track_background(parent_sid: str, bg_sid: str, stream_id: str,
@@ -33,13 +35,16 @@ def track_background(parent_sid: str, bg_sid: str, stream_id: str,
 
 
 def track_btw(parent_sid: str, ephemeral_sid: str, stream_id: str,
-              question: str) -> None:
+              question: str) -> dict[str, Any]:
     with _lock:
-        _BTW_TRACKING[parent_sid] = {
+        record = {
+            "parent_session_id": parent_sid,
             "ephemeral_session_id": ephemeral_sid,
             "stream_id": stream_id,
             "question": question,
         }
+        _BTW_TRACKING[(parent_sid, ephemeral_sid, stream_id)] = record
+        return dict(record)
 
 
 def complete_background(parent_sid: str, task_id: str, answer: str) -> None:
@@ -81,7 +86,43 @@ def get_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
         return list(_BACKGROUND_TASKS.get(parent_sid, []))
 
 
-def cleanup_btw(parent_sid: str) -> dict[str, Any] | None:
-    """Remove and return btw tracking for a parent session."""
+def find_btw_owner(ephemeral_sid: str, stream_id: str) -> dict[str, Any] | None:
+    """Return the exact owned lifecycle record for an ephemeral stream."""
     with _lock:
-        return _BTW_TRACKING.pop(parent_sid, None)
+        for record in _BTW_TRACKING.values():
+            if (
+                record.get("ephemeral_session_id") == ephemeral_sid
+                and record.get("stream_id") == stream_id
+            ):
+                return dict(record)
+    return None
+
+
+def mark_btw_cleanup_pending(
+    parent_sid: str,
+    ephemeral_sid: str,
+    stream_id: str,
+    residuals: list[dict],
+) -> bool:
+    """Keep the exact owner visible as a retryable in-process residual."""
+    with _lock:
+        current = _BTW_TRACKING.get((parent_sid, ephemeral_sid, stream_id))
+        if not current:
+            return False
+        current["cleanup_pending"] = True
+        current["cleanup_residuals"] = list(residuals)
+        return True
+
+
+def cleanup_btw(
+    parent_sid: str,
+    ephemeral_sid: str,
+    stream_id: str,
+) -> dict[str, Any] | None:
+    """Compare-and-delete one exact parent/ephemeral/stream owner record."""
+    with _lock:
+        key = (parent_sid, ephemeral_sid, stream_id)
+        current = _BTW_TRACKING.get(key)
+        if not current:
+            return None
+        return _BTW_TRACKING.pop(key, None)
