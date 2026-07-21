@@ -10,6 +10,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import threading
 import time
 import uuid
@@ -2805,7 +2806,6 @@ class Session:
         from api.session_media import (
             assert_no_session_media_references,
             externalize_large_session_media,
-            inline_legacy_session_media_urls,
             verify_serialized_session_media_payload,
         )
 
@@ -2817,18 +2817,14 @@ class Session:
             },
             context="session payload outside messages/context_messages",
         )
-        # Compact references created by an unreleased experimental build are
-        # read only through the verifier, then written back as portable data
-        # URLs.  New externalization is disabled until private entries can be
-        # retired by immutable identity rather than mutable pathname.
-        hydrated_messages = inline_legacy_session_media_urls(
-            self.messages, self.session_id
+        # New private media creation is disabled. Do not silently migrate an
+        # experimental compact reference to inline JSON: its old namespace
+        # cannot be retired safely on this backend, so a successful save would
+        # strand private data and make later lifecycle cleanup non-convergent.
+        assert_no_session_media_references(
+            [self.messages, self.context_messages],
+            context="session save; use an explicit offline media migration",
         )
-        hydrated_context_messages = inline_legacy_session_media_urls(
-            self.context_messages, self.session_id
-        )
-        self.messages = hydrated_messages
-        self.context_messages = hydrated_context_messages
         externalize_large_session_media(self.messages, self.session_id)
         externalize_large_session_media(self.context_messages, self.session_id)
         # Write metadata fields first so load_metadata_only() can read them
@@ -2908,10 +2904,14 @@ class Session:
                     existing = json.loads(existing_text)
                     if not isinstance(existing, dict) or existing.get("session_id") != self.session_id:
                         raise RuntimeError("Existing session sidecar identity mismatch")
-                    # A backup remains a recovery publication candidate.  Do
-                    # not retain one that points at missing/corrupt private
-                    # media, even though the incoming sidecar is portable.
-                    verify_serialized_session_media_payload(existing, self.session_id)
+                    # A backup remains a recovery publication candidate. It
+                    # must be portable too: compact refs require an explicit
+                    # offline migration rather than silently retaining bytes
+                    # whose namespace cannot be retired safely.
+                    assert_no_session_media_references(
+                        existing,
+                        context="session backup; use an explicit offline media migration",
+                    )
                     existing_msg_count = len(existing.get('messages') or [])
                 except json.JSONDecodeError:
                     existing_msg_count = -1  # corrupt → always back up
@@ -3075,17 +3075,24 @@ class Session:
         with _session_publication_authority(sid):
             if not p.exists():
                 return None
-            _pre_read_sig = _sidecar_stat_signature(p)
             try:
-                data = _load_and_validate_session_payload(p, sid)
+                # Tokenless files have no persisted generation. Bind their
+                # lease to the exact regular inode read through this held
+                # no-follow descriptor, not to a pathname/time heuristic.
+                candidate = _load_and_validate_session_payload(p, sid)
+                if candidate.get("publication_incarnation"):
+                    data = candidate
+                    _post_read_sig = None
+                else:
+                    data, _post_read_sig = _read_tokenless_sidecar_with_signature(p, sid)
             except (OSError, ValueError, json.JSONDecodeError):
                 logger.warning("Rejecting invalid or identity-mismatched session sidecar for %s", sid)
                 return None
-            _post_read_sig = _sidecar_stat_signature(p)
-            if _pre_read_sig is None or _post_read_sig is None or _pre_read_sig != _post_read_sig:
-                logger.warning("Session sidecar changed during validated load for %s", sid)
-                return None
             data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+            # A tokenless payload was read from this exact held descriptor;
+            # modern payloads still use the current no-follow regular-file
+            # signature for the legacy metadata cache below.
+            _pre_read_sig = _post_read_sig or _sidecar_stat_signature(p)
             session = cls(**data)
             if not data.get("publication_incarnation"):
                 _register_validated_legacy_session_generation(session, _post_read_sig)
@@ -5428,11 +5435,46 @@ def _sidecar_stat_signature(path):
     cached entry keyed by this signature is auto-invalidated on the next write.
     """
     try:
-        st = path.stat()
+        st = os.stat(path, follow_symlinks=False)
     except OSError:
         return None
-    return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
-            int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return (
+        str(path),
+        int(st.st_dev),
+        int(st.st_ino),
+        int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
+        int(st.st_size),
+        int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))),
+    )
+
+
+def _read_tokenless_sidecar_with_signature(path: Path, expected_session_id: str) -> tuple[dict, tuple]:
+    """Read one regular sidecar through a held no-follow descriptor."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("Tokenless legacy sidecars require no-follow file descriptors")
+    fd = os.open(str(path), os.O_RDONLY | nofollow)
+    try:
+        held = os.fstat(fd)
+        if not stat.S_ISREG(held.st_mode):
+            raise ValueError("Tokenless legacy sidecar is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read()
+        signature = (
+            str(path),
+            int(held.st_dev),
+            int(held.st_ino),
+            int(getattr(held, 'st_mtime_ns', int(held.st_mtime * 1_000_000_000))),
+            int(held.st_size),
+            int(getattr(held, 'st_ctime_ns', int(held.st_ctime * 1_000_000_000))),
+        )
+        return _validate_session_payload_identity(
+            json.loads(raw), expected_session_id, source_name=path.name
+        ), signature
+    finally:
+        os.close(fd)
 
 
 def _legacy_sidecar_facts_get(sid):

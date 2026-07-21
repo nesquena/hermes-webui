@@ -247,10 +247,13 @@ prune, rollback, and recovery unsafe.
 `webui-media://<sha256>.<ext>` remains a read-only compatibility format for
 sidecars written by an earlier experimental build. The reader anchors the
 directory handles, rejects symlink components, and verifies extension/MIME,
-raster magic, and SHA-256 before it expands a reference to a data URL. A normal
-`Session.save()` writes that verified value back inline; duplicate, branch,
-`/btw`, and compression continuation do the same before the destination can
-commit. Missing or corrupt media fails closed and leaves the current sidecar
+raster magic, and SHA-256 before it expands a reference to a data URL. It is
+not a persistence compatibility path: `Session.save()`, backup/recovery,
+duplicate, branch, `/btw`, and compression continuation reject a compact
+reference before a destination can commit. An operator must run an explicit
+offline migration which reads and verifies the legacy blob, writes an inline
+payload, then retires the old namespace using an identity-bound backend.
+Missing or corrupt media also fails closed and leaves the current sidecar
 untouched. Portable imports continue to reject private references.
 
 No automatic write, clone, migration, prune, or deletion operation creates a
@@ -264,10 +267,10 @@ path; it requires an identity-bound backend/operator migration. The generic
 
 Session publication and deletion share permanent per-SID cross-process and
 in-process locks plus an incarnation token. Tokenless legacy loads hold that
-authority from signature validation through lease registration, and a save
-rechecks the bound sidecar signature immediately before publishing. Backups,
-focused recovery, and compression-source restore verify every private reference
-before they can retain or publish their payload.
+authority from no-follow regular-FD validation through lease registration, and
+a save rechecks the bound device/inode signature immediately before publishing.
+Backups, focused recovery, and compression-source restore validate the exact
+bytes they will retain or publish and reject every private reference.
 
 ### 4.3 SSE Streaming Engine
 

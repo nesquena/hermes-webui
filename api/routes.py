@@ -14428,18 +14428,6 @@ def handle_post(handler, parsed) -> bool:
             try:
                 from api.session_media import (
                     clone_session_media_references,
-                    inline_legacy_session_media_urls,
-                )
-
-                # Older experimental sidecars may still contain compact refs.
-                # Copy their verified bytes into portable history before the
-                # new session is reserved; disabled externalization must never
-                # create destination private media.
-                copied_session.messages = inline_legacy_session_media_urls(
-                    copied_session.messages, session.session_id
-                )
-                copied_session.context_messages = inline_legacy_session_media_urls(
-                    copied_session.context_messages, session.session_id
                 )
 
                 with reserve_session_destination(copied_session.session_id) as reservation:
@@ -15197,14 +15185,6 @@ def handle_post(handler, parsed) -> bool:
         try:
             from api.session_media import (
                 clone_session_media_references,
-                inline_legacy_session_media_urls,
-            )
-
-            branch.messages = inline_legacy_session_media_urls(
-                branch.messages, source.session_id
-            )
-            branch.context_messages = inline_legacy_session_media_urls(
-                branch.context_messages, source.session_id
             )
 
             with reserve_session_destination(branch.session_id) as reservation:
@@ -20890,12 +20870,6 @@ def _handle_btw(handler, body):
     try:
         from api.session_media import (
             clone_session_media_references,
-            inline_legacy_session_media_urls,
-        )
-
-        ephemeral.messages = inline_legacy_session_media_urls(ephemeral.messages, s.session_id)
-        ephemeral.context_messages = inline_legacy_session_media_urls(
-            ephemeral.context_messages, s.session_id
         )
 
         with reserve_session_destination(ephemeral.session_id) as reservation:

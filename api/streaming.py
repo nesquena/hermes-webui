@@ -4174,11 +4174,7 @@ def _clone_session_media_for_compression_rotation(s, old_sid: str, new_sid: str)
     try:
         from api.session_media import (
             clone_session_media_references,
-            inline_legacy_session_media_urls,
         )
-
-        s.messages = inline_legacy_session_media_urls(s.messages, old_sid)
-        s.context_messages = inline_legacy_session_media_urls(s.context_messages, old_sid)
 
         clone_session_media_references(
             [s.messages, s.context_messages],
@@ -4215,6 +4211,14 @@ def _publish_compression_continuation(
         "parent_session_id": getattr(s, "parent_session_id", None),
         "profile": getattr(s, "profile", None),
     }
+    # The continuation works on the live Session object, not a throwaway
+    # clone.  Disk rollback alone is insufficient: a failed clone/publish
+    # must not leave callers holding a transcript that differs from the
+    # restored old sidecar.
+    saved_transcript = (
+        copy.deepcopy(getattr(s, "messages", None)),
+        copy.deepcopy(getattr(s, "context_messages", None)),
+    )
     from api.models import (
         SESSION_DIR as live_session_dir,
         _INDEX_WRITE_LOCK,
@@ -4445,6 +4449,7 @@ def _publish_compression_continuation(
         s.pre_compression_snapshot = saved_identity["pre_compression_snapshot"]
         s.parent_session_id = saved_identity["parent_session_id"]
         s.profile = saved_identity["profile"]
+        s.messages, s.context_messages = saved_transcript
         source_restored = False
         if intent is None or intent.get("phase") in {"initializing", "prepared"}:
             # Source/destination mutation is forbidden before the reserved
