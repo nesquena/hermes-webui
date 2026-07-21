@@ -6495,6 +6495,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
+        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        default_model_is_explicit = False
+        if isinstance(model_cfg, str):
+            default_model_is_explicit = bool(model_cfg.strip())
+        elif isinstance(model_cfg, dict):
+            default_model_is_explicit = bool(str(model_cfg.get("default") or "").strip())
+        default_model_is_explicit = default_model_is_explicit or bool(
+            os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+        )
         groups = []
 
         def _norm_model_id(model_id: str) -> str:
@@ -7846,24 +7855,50 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     for m in g.get(bucket_name, [])
                 }
                 if _norm_model_id(default_model) not in all_ids_norm:
-                    skip_nous_default_injection = active_provider == "nous" and any(
-                        (g.get("provider_id") or "") == "nous"
-                        for g in groups
-                    )
-                    # Nous picker groups intentionally contain only routable
-                    # @nous: entries; a bare default model would create a
-                    # duplicate Nous group or contaminate the live catalog.
-                    if not skip_nous_default_injection:
-                        label = _get_label_for_model(default_model, groups)
+                    label = _get_label_for_model(default_model, groups)
+                    target_model_id = default_model
+                    injected = False
+                    if active_provider == "nous":
+                        target_model_id = str(default_model or "").strip()
+                        if target_model_id and not target_model_id.startswith("@nous:"):
+                            target_model_id = f"@nous:{target_model_id}"
+                        label = _get_label_for_model(target_model_id, groups)
+                        # A bare built-in default is not a Nous catalog model.
+                        # Explicit config/env defaults are user intent and stay
+                        # visible, but always with the @nous: routing prefix.
+                        if not default_model_is_explicit:
+                            injected = True
+                        for g in groups:
+                            if injected or (g.get("provider_id") or "") != "nous":
+                                continue
+                            combined_models = list(g.get("models") or []) + list(g.get("extra_models") or [])
+                            combined_models.insert(0, {"id": target_model_id, "label": label})
+                            visible_models, extra_models = _split_picker_overflow_models(
+                                combined_models,
+                                selected_model_id=target_model_id,
+                                provider_id="nous",
+                            )
+                            g["models"] = visible_models
+                            if extra_models:
+                                g["extra_models"] = extra_models
+                                g["provider"] = (
+                                    f"{_PROVIDER_DISPLAY.get('nous', 'Nous Portal')} "
+                                    f"({len(visible_models)} of {len(visible_models) + len(extra_models)})"
+                                )
+                            else:
+                                g.pop("extra_models", None)
+                                g["provider"] = _PROVIDER_DISPLAY.get("nous", "Nous Portal")
+                            injected = True
+                            break
+                    if not injected:
                         target_display = (
                             _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
                             if active_provider
                             else ""
                         )
-                        injected = False
                         for g in groups:
                             if target_display and g.get("provider", "").lower() == target_display:
-                                g["models"].insert(0, {"id": default_model, "label": label})
+                                g["models"].insert(0, {"id": target_model_id, "label": label})
                                 injected = True
                                 break
                         if not injected and groups:
@@ -7871,7 +7906,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 {
                                     "provider": "Default",
                                     "provider_id": active_provider or "default",
-                                    "models": [{"id": default_model, "label": label}],
+                                    "models": [{"id": target_model_id, "label": label}],
                                 }
                             )
 
