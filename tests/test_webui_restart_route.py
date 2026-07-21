@@ -77,6 +77,24 @@ def test_restart_route_rejects_concurrent_restart_without_scheduling_helper(monk
     assert scheduled == []
 
 
+def test_restart_helper_releases_lock_when_ctl_cannot_be_spawned(monkeypatch):
+    class _InlineThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(routes.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(routes.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no bash")))
+
+    assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False)
+    routes._schedule_webui_restart()
+
+    assert routes._WEBUI_RESTART_LOCK.acquire(blocking=False), "failed helper must not permanently block retries"
+    routes._WEBUI_RESTART_LOCK.release()
+
+
 def test_ctl_managed_webui_requires_current_process_pid_in_pid_file(monkeypatch, tmp_path):
     pid_file = tmp_path / "webui.pid"
     monkeypatch.setenv("HERMES_WEBUI_PID_FILE", str(pid_file))
