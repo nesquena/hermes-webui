@@ -7846,26 +7846,34 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     for m in g.get(bucket_name, [])
                 }
                 if _norm_model_id(default_model) not in all_ids_norm:
-                    label = _get_label_for_model(default_model, groups)
-                    target_display = (
-                        _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
-                        if active_provider
-                        else ""
+                    skip_nous_default_injection = active_provider == "nous" and any(
+                        (g.get("provider_id") or "") == "nous"
+                        for g in groups
                     )
-                    injected = False
-                    for g in groups:
-                        if target_display and g.get("provider", "").lower() == target_display:
-                            g["models"].insert(0, {"id": default_model, "label": label})
-                            injected = True
-                            break
-                    if not injected and groups:
-                        groups.append(
-                            {
-                                "provider": "Default",
-                                "provider_id": active_provider or "default",
-                                "models": [{"id": default_model, "label": label}],
-                            }
+                    # Nous picker groups intentionally contain only routable
+                    # @nous: entries; a bare default model would create a
+                    # duplicate Nous group or contaminate the live catalog.
+                    if not skip_nous_default_injection:
+                        label = _get_label_for_model(default_model, groups)
+                        target_display = (
+                            _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
+                            if active_provider
+                            else ""
                         )
+                        injected = False
+                        for g in groups:
+                            if target_display and g.get("provider", "").lower() == target_display:
+                                g["models"].insert(0, {"id": default_model, "label": label})
+                                injected = True
+                                break
+                        if not injected and groups:
+                            groups.append(
+                                {
+                                    "provider": "Default",
+                                    "provider_id": active_provider or "default",
+                                    "models": [{"id": default_model, "label": label}],
+                                }
+                            )
 
         # Post-process: ensure model IDs are globally unique across groups.
         # When multiple providers expose the same bare model ID, prefix
