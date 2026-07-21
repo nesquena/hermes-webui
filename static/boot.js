@@ -3225,8 +3225,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
-    // It caused scroll-up flicker on long sessions, so it's off for everyone
-    // unless explicitly opted in; long transcripts render in full by default.
+    // #4346 Phase B (footer-jitter suppression during virtual-scroll
+    // measurement re-renders) resolved the scroll-up flicker root cause,
+    // but virtualization remains opt-in until battle-tested further.
+    // Users can explicitly enable it via Settings → virtualize_transcript.
     window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
