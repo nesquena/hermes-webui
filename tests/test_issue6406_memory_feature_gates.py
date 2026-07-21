@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import api.profiles
 import api.routes as routes
 import pytest
+from tests.js_source_extract import extract_function
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -46,103 +47,57 @@ def _write(section, captured):
     return captured.get("error")
 
 
-def _panel_rows(data):
-    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-    sections_start = panels.index("const MEMORY_SECTIONS = [")
-    sections_end = panels.index("];", sections_start) + 2
-    helper_start = panels.index("function _memorySectionMeta(key)")
-    helper_end = panels.index("function _memorySectionLabel", helper_start)
-    loop_start = panels.index("for (const s of MEMORY_SECTIONS) {")
-    loop_end = panels.index("    if (_currentMemorySection && _memoryMode !== 'edit')", loop_start)
-    script = (
-        "const sections = " + json.dumps(panels[sections_start:sections_end]) + ";\n"
-        "const helper = " + json.dumps(panels[helper_start:helper_end]) + ";\n"
-        "const loop = " + json.dumps(panels[loop_start:loop_end].rsplit("    }", 1)[0]) + ";\n"
-        "let _memoryData = " + json.dumps(data) + ";\n"
-        + r"""
-const nodes = {memoryPanel: {appended: [], innerHTML: '', appendChild(node) { this.appended.push(node); }}};
-const panel = nodes.memoryPanel;
-let _currentMemorySection = 'memory';
-const document = {createElement() { return {innerHTML: '', title: '', classList: {add() {}}}; }};
-function _memorySectionLabel(meta) { return meta.key; }
-function _memorySectionPath() { return ''; }
-function li() { return ''; }
-function esc(value) { return String(value); }
-function openMemorySection() {}
-eval(sections + "\n" + helper + "\nfunction renderRows() {" + loop + "}\nrenderRows();");
-console.log(JSON.stringify(nodes.memoryPanel.appended.map(button => button.innerHTML.replace(/<[^>]+>/g, ''))));
-"""
+def _panels_source():
+    return (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+
+def _extract_js_const_array(source, name):
+    start = source.index(f"const {name} = [")
+    end = source.index("];", start) + 2
+    return source[start:end]
+
+
+def _extract_panel_function(source, name):
+    try:
+        return extract_function(source, name, prefix="async function")
+    except AssertionError:
+        return extract_function(source, name)
+
+
+def _panel_driver_source():
+    panels = _panels_source()
+    sections = _extract_js_const_array(panels, "MEMORY_SECTIONS")
+    functions = "\n".join(
+        _extract_panel_function(panels, name)
+        for name in [
+            "_memorySectionMeta",
+            "_memorySectionEnabled",
+            "_renderMemoryEmpty",
+            "loadMemory",
+            "openMemorySection",
+            "editCurrentMemory",
+            "submitMemorySave",
+        ]
     )
-    completed = subprocess.run([NODE, "-e", script], capture_output=True, text=True)
-    assert completed.returncode == 0, completed.stderr
-    return json.loads(completed.stdout)
+    return (
+        sections
+        + "\n"
+        + functions
+        + "\n"
+        + _PANEL_DRIVER_BODY
+    )
 
 
-_PANEL_DRIVER = r"""
-const fs = require('fs');
-const src = fs.readFileSync(process.argv[1], 'utf8');
+@pytest.fixture(scope="session")
+def panel_driver_path(tmp_path_factory):
+    path = tmp_path_factory.mktemp("memory-panel-driver") / "panel_driver.js"
+    path.write_text(_panel_driver_source(), encoding="utf-8")
+    return path
+
+
+_PANEL_DRIVER_BODY = r"""
 const scenario = process.argv[2];
-
-function extractFunc(name) {
-  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
-  if (start < 0) throw new Error(name + ' not found');
-  const braceStart = src.indexOf('{', start);
-  let depth = 0;
-  let inString = null;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-  for (let i = braceStart; i < src.length; i++) {
-    const ch = src[i];
-    const next = i + 1 < src.length ? src[i + 1] : '';
-    if (inLineComment) {
-      if (ch === '\n') inLineComment = false;
-      continue;
-    }
-    if (inBlockComment) {
-      if (ch === '*' && next === '/') {
-        inBlockComment = false;
-        i++;
-      }
-      continue;
-    }
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === inString) inString = null;
-      continue;
-    }
-    if (ch === '/' && next === '/') {
-      inLineComment = true;
-      i++;
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      inBlockComment = true;
-      i++;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      inString = ch;
-      continue;
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return src.slice(start, i + 1);
-    }
-  }
-  throw new Error(name + ' brace scan failed');
-}
-
-function extractConst(name) {
-  const start = src.indexOf('const ' + name + ' = [');
-  if (start < 0) throw new Error(name + ' not found');
-  const end = src.indexOf('];', start);
-  if (end < 0) throw new Error(name + ' terminator not found');
-  return src.slice(start, end + 2);
-}
+let payload = JSON.parse(process.argv[3] || '{}');
 
 function makeClassList(owner) {
   return {
@@ -251,32 +206,34 @@ global._setMemoryHeaderButtons = (mode) => {
   nodes.mainMemory._header.style.display = mode === 'empty' ? 'none' : 'flex';
 };
 
-let payload = null;
 const writes = [];
 global.api = async (url, opts) => {
   if (url === '/api/memory' || url.startsWith('/api/memory?')) return payload;
   if (url === '/api/memory/write') {
     writes.push(JSON.parse(opts.body));
+    if (scenario === 'save_refresh_disabled') {
+      payload = {
+        memory_enabled: true,
+        user_profile_enabled: false,
+        external_notes_enabled: true,
+        memory: 'memory body',
+        user: '',
+        soul: '',
+        project_context: '',
+      };
+    }
     return {};
   }
   throw new Error('unexpected url: ' + url);
 };
 
-eval(extractConst('MEMORY_SECTIONS').replace('const MEMORY_SECTIONS', 'var MEMORY_SECTIONS'));
-for (const name of [
-  '_memorySectionMeta',
-  '_memorySectionEnabled',
-  '_renderMemoryEmpty',
-  'loadMemory',
-  'openMemorySection',
-  'editCurrentMemory',
-  'submitMemorySave',
-]) {
-  eval(extractFunc(name));
-}
-
 function rowLabels() {
   return nodes.memoryPanel.children.map((node) => node.innerHTML.replace(/<[^>]+>/g, ''));
+}
+
+async function runRows() {
+  await loadMemory(false);
+  return rowLabels();
 }
 
 async function runStaleReset() {
@@ -362,8 +319,40 @@ async function runGuards() {
   };
 }
 
+async function runSaveRefreshDisabled() {
+  payload = {
+    memory_enabled: true,
+    user_profile_enabled: true,
+    external_notes_enabled: true,
+    memory: 'memory body',
+    user: 'user body',
+    soul: '',
+    project_context: '',
+  };
+  _memoryData = payload;
+  const allowed = makeEl();
+  await openMemorySection('user', allowed);
+  nodes.memEditContent.value = 'changed';
+  await submitMemorySave();
+  return {
+    section: _currentMemorySection,
+    mode: _memoryMode,
+    title: nodes.memoryDetailTitle.textContent,
+    body: nodes.memoryDetailBody.innerHTML,
+    bodyDisplay: nodes.memoryDetailBody.style.display,
+    emptyDisplay: nodes.memoryDetailEmpty.style.display,
+    headerDisplay: nodes.mainMemory._header.style.display,
+    renderDetailCalls: global.__renderDetailCalls.slice(),
+    writes,
+  };
+}
+
 (async () => {
-  const out = scenario === 'stale_reset' ? await runStaleReset() : await runGuards();
+  let out;
+  if (scenario === 'rows') out = await runRows();
+  else if (scenario === 'stale_reset') out = await runStaleReset();
+  else if (scenario === 'save_refresh_disabled') out = await runSaveRefreshDisabled();
+  else out = await runGuards();
   process.stdout.write(JSON.stringify(out));
 })().catch((err) => {
   console.error(err && err.stack ? err.stack : String(err));
@@ -372,11 +361,23 @@ async function runGuards() {
 """
 
 
-def _panel_behavior(scenario: str) -> dict:
+def _panel_rows(panel_driver_path, data):
     completed = subprocess.run(
-        [NODE, "-e", _PANEL_DRIVER, str(REPO_ROOT / "static" / "panels.js"), scenario],
+        [NODE, str(panel_driver_path), "rows", json.dumps(data)],
         capture_output=True,
         text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def _panel_behavior(panel_driver_path, scenario: str) -> dict:
+    completed = subprocess.run(
+        [NODE, str(panel_driver_path), scenario, "{}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
@@ -450,23 +451,23 @@ def test_soul_project_context_and_external_notes_remain_available(tmp_path, monk
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for panel row coverage")
-def test_panel_rows_follow_memory_feature_flags():
-    assert _panel_rows({
+def test_panel_rows_follow_memory_feature_flags(panel_driver_path):
+    assert _panel_rows(panel_driver_path, {
         "memory_enabled": False,
         "user_profile_enabled": False,
         "external_notes_enabled": True,
     }) == ["soul", "project_context", "external_notes"]
-    assert _panel_rows({
+    assert _panel_rows(panel_driver_path, {
         "memory_enabled": False,
         "user_profile_enabled": True,
         "external_notes_enabled": True,
     }) == ["user", "soul", "project_context", "external_notes"]
-    assert _panel_rows({
+    assert _panel_rows(panel_driver_path, {
         "memory_enabled": True,
         "user_profile_enabled": False,
         "external_notes_enabled": True,
     }) == ["memory", "soul", "project_context", "external_notes"]
-    assert _panel_rows({
+    assert _panel_rows(panel_driver_path, {
         "memory_enabled": True,
         "user_profile_enabled": True,
         "external_notes_enabled": True,
@@ -474,13 +475,13 @@ def test_panel_rows_follow_memory_feature_flags():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for panel row coverage")
-def test_missing_payload_flags_leave_sections_visible():
-    assert _panel_rows({"external_notes_enabled": False}) == ["memory", "user", "soul", "project_context"]
+def test_missing_payload_flags_leave_sections_visible(panel_driver_path):
+    assert _panel_rows(panel_driver_path, {"external_notes_enabled": False}) == ["memory", "user", "soul", "project_context"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for panel behavior coverage")
-def test_disabled_section_refresh_clears_stale_detail_state():
-    out = _panel_behavior("stale_reset")
+def test_disabled_section_refresh_clears_stale_detail_state(panel_driver_path):
+    out = _panel_behavior(panel_driver_path, "stale_reset")
     assert out["section"] is None
     assert out["mode"] == "empty"
     assert out["title"] == ""
@@ -493,8 +494,8 @@ def test_disabled_section_refresh_clears_stale_detail_state():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for panel behavior coverage")
-def test_open_edit_and_save_guards_respect_disabled_sections():
-    out = _panel_behavior("guards")
+def test_open_edit_and_save_guards_respect_disabled_sections(panel_driver_path):
+    out = _panel_behavior(panel_driver_path, "guards")
     assert out["blockedState"] == {
         "current": None,
         "renderDetailCalls": [],
@@ -513,3 +514,17 @@ def test_open_edit_and_save_guards_respect_disabled_sections():
     assert out["writes"] == [{"section": "user", "content": "changed"}]
     assert out["toastCalls"] == 1
     assert out["finalRenderDetailCalls"] == ["user", "user"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for panel behavior coverage")
+def test_save_refresh_does_not_restore_disabled_detail_state(panel_driver_path):
+    out = _panel_behavior(panel_driver_path, "save_refresh_disabled")
+    assert out["section"] is None
+    assert out["mode"] == "empty"
+    assert out["title"] == ""
+    assert out["body"] == ""
+    assert out["bodyDisplay"] == "none"
+    assert out["emptyDisplay"] == ""
+    assert out["headerDisplay"] == "none"
+    assert out["renderDetailCalls"] == ["user"]
+    assert out["writes"] == [{"section": "user", "content": "changed"}]

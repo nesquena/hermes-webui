@@ -5535,6 +5535,7 @@ function closeMemoryEdit() { cancelMemoryEdit(); }
 
 async function submitMemorySave() {
   if (!_currentMemorySection) return;
+  const section = _currentMemorySection;
   const meta = _memorySectionMeta(_currentMemorySection);
   if (!_memorySectionEnabled(meta) || meta.readOnly) return;
   const ta = $('memEditContent');
@@ -5545,7 +5546,9 @@ async function submitMemorySave() {
     await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: _currentMemorySection, content: ta.value})});
     showToast(t('memory_saved'));
     await loadMemory(true);
-    _renderMemoryDetail(_currentMemorySection);
+    if (_currentMemorySection === section && _currentMemorySection) {
+      _renderMemoryDetail(_currentMemorySection);
+    }
   } catch(e) {
     if (errEl) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
   }
