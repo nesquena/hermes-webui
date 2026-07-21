@@ -1312,6 +1312,44 @@ class TestGetProviders:
         assert entry["has_key"] is True
         assert entry["key_source"] == "config_yaml"
 
+    def test_build_provider_entry_logged_out_oauth_normalizes_key_source(self, monkeypatch, tmp_path):
+        """Logged-out OAuth cards cannot claim an OAuth credential source."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(
+            prov,
+            "_PROVIDER_DISPLAY",
+            {"openai-codex": "OpenAI Codex"},
+        )
+        monkeypatch.setattr(prov, "_PROVIDER_MODELS", {"openai-codex": []})
+        monkeypatch.setattr(
+            prov,
+            "_OAUTH_PROVIDERS",
+            frozenset({"openai-codex"}),
+        )
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
+        monkeypatch.setattr(
+            sys.modules["hermes_cli.auth"],
+            "get_auth_status",
+            lambda _pid: {"logged_in": False},
+        )
+
+        entry = prov._build_provider_entry(
+            provider_id="openai-codex",
+            initial_has_key=False,
+            providers_cfg={},
+            active_profile_name="",
+            request_thread_env={},
+            block_process_env_fallback=False,
+        )
+
+        assert entry is not None
+        assert entry["has_key"] is False
+        assert entry["key_source"] == "none"
+
     def test_build_provider_entry_cleans_up_request_context_after_setup_error(self, monkeypatch, tmp_path):
         """Partial request-context setup failure must not leave thread-local/profile residue."""
         _install_fake_hermes_cli(monkeypatch)

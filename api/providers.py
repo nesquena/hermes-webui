@@ -3159,7 +3159,7 @@ def _build_provider_entry(
             "base_url": provider_base_url,
             "is_plugin_provider": _is_plugin,
             "is_oauth": is_oauth,
-            "key_source": key_source,
+            "key_source": key_source if has_key else "none",
             "auth_error": auth_error,
             "models": models,
             # models_total reflects the complete catalog size (e.g. 396 for
