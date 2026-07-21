@@ -262,7 +262,11 @@ destination claim. Shared index and tombstone RMW operations and sharded
 cleanup-residual writes have their own cross-process file locks and random
 exclusive staging names. Session, index, tombstone, cleanup residual, and
 destructive directory-entry changes are not acknowledged until their
-containing-directory durability barrier succeeds.
+containing-directory durability barrier succeeds. File unlink and directory
+removal use type-aware commit guards on the held quarantined inode and verify
+through that still-open handle that the exact inode lost its final link; an
+entry replaced after the earlier traversal check is retained and reported as a
+retryable integrity failure.
 Deletion retires the active lease and tombstones publication before removing
 artifacts; an intentional same-SID recreation receives a new lease, so an old
 `Session` in this or another process remains stale even after the SID becomes

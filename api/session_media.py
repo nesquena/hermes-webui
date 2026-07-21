@@ -188,6 +188,36 @@ def _assert_regular_entry_still_names_fd(
         raise SessionMediaIntegrityError("Private media file changed during operation")
 
 
+def _unlink_quarantined_regular_entry(
+    parent_fd: int,
+    name: str,
+    entry_fd: int,
+) -> None:
+    """Commit unlink only for the regular inode held in private quarantine."""
+    _assert_regular_entry_still_names_fd(parent_fd, name, entry_fd)
+    os.unlink(name, dir_fd=parent_fd)
+    _fsync_dir(parent_fd)
+    if os.fstat(entry_fd).st_nlink != 0:
+        raise SessionMediaIntegrityError(
+            "Private media file replacement prevented exact removal"
+        )
+
+
+def _rmdir_quarantined_directory_entry(
+    parent_fd: int,
+    name: str,
+    entry_fd: int,
+) -> None:
+    """Commit rmdir only for the empty directory inode held in quarantine."""
+    _assert_entry_still_names_fd(parent_fd, name, entry_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+    _fsync_dir(parent_fd)
+    if os.fstat(entry_fd).st_nlink != 0:
+        raise SessionMediaIntegrityError(
+            "Private media directory replacement prevented exact removal"
+        )
+
+
 def _assert_private_handles(state_fd: int, media_fd: int, session_fd: int, sid: str) -> None:
     _assert_entry_still_names_fd(state_fd, _PRIVATE_ROOT_NAME, media_fd)
     _assert_entry_still_names_fd(media_fd, sid, session_fd)
@@ -821,16 +851,18 @@ def _remove_tree_at(parent_fd: int, name: str, *, expected_fd: int | None = None
                         quarantine_name,
                         entry_fd,
                     )
-                    os.unlink(quarantine_name, dir_fd=child_fd)
-                    _fsync_dir(child_fd)
+                    _unlink_quarantined_regular_entry(
+                        child_fd,
+                        quarantine_name,
+                        entry_fd,
+                    )
             finally:
                 os.close(entry_fd)
         # Keep the authoritative handle open through the last identity check
         # and rmdir. In particular, never close it and then resolve ``name``
         # again as the old implementation did.
         _assert_entry_still_names_fd(parent_fd, name, child_fd)
-        os.rmdir(name, dir_fd=parent_fd)
-        _fsync_dir(parent_fd)
+        _rmdir_quarantined_directory_entry(parent_fd, name, child_fd)
     finally:
         if owns_fd and child_fd is not None:
             os.close(child_fd)
@@ -966,8 +998,11 @@ def prune_session_media(session_id: str, retained_values) -> int:
                                 quarantine,
                                 entry_fd,
                             )
-                            os.unlink(quarantine, dir_fd=directory_fd)
-                            _fsync_dir(directory_fd)
+                            _unlink_quarantined_regular_entry(
+                                directory_fd,
+                                quarantine,
+                                entry_fd,
+                            )
                             removed += 1
                     finally:
                         os.close(entry_fd)
