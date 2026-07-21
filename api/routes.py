@@ -15025,10 +15025,9 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            try:
-                delete_composer_draft_sidecar(sid)
-            except Exception:
-                logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+            if not delete_composer_draft_sidecar(sid):
+                logger.debug("Failed to unlink draft sidecar for %s", sid)
+                return bad(handler, "Failed to clear the session draft", status=500)
         try:
             prune_session_from_index(sid)
         except Exception:
@@ -20786,8 +20785,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                         SESSIONS.pop(sid, None)
                     p.unlink(missing_ok=True)
                     p.with_suffix('.json.bak').unlink(missing_ok=True)
-                    delete_composer_draft_sidecar(sid)
-                    cleaned += 1
+                    if delete_composer_draft_sidecar(sid):
+                        cleaned += 1
                     phase1_removed_ids.add(sid)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
@@ -20882,8 +20881,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 with LOCK:
                     in_memory_owner = sid in SESSIONS
                 if not owner_exists and not in_memory_owner:
-                    delete_composer_draft_sidecar(sid)
-                    cleaned += 1
+                    if delete_composer_draft_sidecar(sid):
+                        cleaned += 1
     except Exception:
         logger.debug("Failed to clean up draft-sidecar orphans", exc_info=True)
 

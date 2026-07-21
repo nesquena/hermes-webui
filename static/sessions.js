@@ -223,7 +223,7 @@ function _saveComposerDraft(sid, text, files) {
       body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
     }).then(() => {
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+    }).catch(e => console.warn('draft save failed', e));
   }, _DRAFT_SAVE_DELAY_MS);
 }
 
@@ -273,7 +273,7 @@ function _saveComposerDraftNow(sid, text, files) {
     body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  }).catch(e => console.warn('draft save failed', e));
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -345,7 +345,7 @@ function _clearComposerDraft(sid, text, files) {
       confirmed && typeof confirmed.text === 'string' ? confirmed.text : '',
       confirmed && Array.isArray(confirmed.files) ? confirmed.files : [],
     );
-  }).catch(() => {});
+  }).catch(e => console.warn('draft clear failed', e));
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
