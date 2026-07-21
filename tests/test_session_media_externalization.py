@@ -1714,21 +1714,34 @@ def test_tombstone_read_modify_write_is_serialized_across_processes(
     }
 
 
-def test_corrupt_deleted_tombstone_fails_closed_for_session_publication(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "corrupt_bytes",
+    [
+        b"{partial",
+        json.dumps({"version": 999, "ids": ["some-deleted-session"]}).encode(),
+    ],
+    ids=["invalid-json", "future-version"],
+)
+def test_corrupt_deleted_tombstone_isolated_by_destination_reservation(
+    tmp_path, monkeypatch, corrupt_bytes
 ):
     _configure_session_state(tmp_path, monkeypatch)
-    models._webui_deleted_session_tombstone_file().write_bytes(b"{partial")
+    tombstone_path = models._webui_deleted_session_tombstone_file()
+    tombstone_path.write_bytes(corrupt_bytes)
     sid = "corrupt-tombstone-publication"
 
-    with pytest.raises(ValueError, match="deleted-session tombstone"):
+    with pytest.raises(RuntimeError, match="unreadable deleted-session authority"):
         Session(session_id=sid).save(skip_index=True)
-    with pytest.raises(ValueError, match="deleted-session tombstone"):
-        with models.reserve_session_destination(sid):
-            pytest.fail("a corrupt authority file must prevent reservation")
 
-    assert not (models.SESSION_DIR / f"{sid}.json").exists()
+    reserved = Session(session_id=sid)
+    with models.reserve_session_destination(sid) as reservation:
+        reservation.bind(reserved)
+        reserved.save(skip_index=True)
+        reservation.commit()
+
+    assert (models.SESSION_DIR / f"{sid}.json").exists()
     assert not models._session_incarnation_claim_file(sid).exists()
+    assert tombstone_path.read_bytes() == corrupt_bytes
 
 
 def test_import_index_failure_rolls_back_json_media_and_cache(tmp_path, monkeypatch):

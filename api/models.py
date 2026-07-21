@@ -420,6 +420,7 @@ def _session_publication_rejection_reason(
         if key in _SESSION_PUBLICATION_DELETED:
             return "deleted session"
     generation_token = getattr(generation, "token", None)
+    claim_token = None
     if _path_entry_exists(path):
         try:
             persisted = json.loads(path.read_bytes())
@@ -443,8 +444,27 @@ def _session_publication_rejection_reason(
             return "stale session generation"
     # A live sidecar beats a stale durable tombstone after restart. An absent
     # sidecar plus tombstone is authoritative and must reject a late save.
-    if not path.exists() and sid in _load_webui_deleted_session_tombstone():
-        return "deleted session"
+    #
+    # A malformed aggregate tombstone cannot be treated as empty: that would
+    # authorize a stale cross-process object after deletion. A matching,
+    # durable incarnation claim is the one safe exception. It proves an
+    # exclusive destination reservation intentionally recreated this SID, so
+    # corruption affecting an unrelated entry must not disable every new
+    # session first-save.
+    if not path.exists():
+        try:
+            deleted_session_ids = _load_webui_deleted_session_tombstone()
+        except (OSError, ValueError):
+            if claim_token != generation_token or claim_token is None:
+                return "unreadable deleted-session authority"
+            logger.warning(
+                "Ignoring unreadable deleted-session tombstone for newly reserved %s",
+                sid,
+                exc_info=True,
+            )
+            deleted_session_ids = frozenset()
+        if sid in deleted_session_ids:
+            return "deleted session"
     return None
 
 
@@ -801,7 +821,18 @@ class _SessionDestinationReservation:
                 self.generation.token,
             )
             self._claim_created = True
-            _clear_webui_deleted_session_tombstone(self.session_id)
+            try:
+                _clear_webui_deleted_session_tombstone(self.session_id)
+            except (OSError, ValueError):
+                # The just-persisted incarnation claim is durable and scoped
+                # to this exclusive reservation. Keep an unreadable aggregate
+                # tombstone in place for operator recovery; the matching claim
+                # lets only this intentional recreation publish through it.
+                logger.warning(
+                    "Could not clear deleted-session tombstone while reserving %s",
+                    self.session_id,
+                    exc_info=True,
+                )
             key = _session_publication_store_key(self.session_id)
             with _SESSION_PUBLICATION_LOCKS_GUARD:
                 _SESSION_PUBLICATION_GENERATIONS[key] = self.generation
