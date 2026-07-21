@@ -5548,9 +5548,11 @@ def _terminal_anchor_reconciliation_progress(session) -> dict:
         except (TypeError, ValueError):
             index_size = 0
             end_offset = 0
-        if index_size > 0:
+        generation = _terminal_anchor_reconciliation_generation(cursor.get("generation"))
+        if index_size > 0 and generation is not None and int(generation.get("size") or 0) == index_size:
             normalized_cursor = {
                 "index_size": index_size,
+                "generation": generation,
                 "end_offset": min(index_size, end_offset),
                 "updated_at": float(cursor.get("updated_at") or 0.0),
             }
@@ -5571,7 +5573,20 @@ def _terminal_anchor_reconciliation_stream_ids(session) -> set[str]:
     return set(_terminal_anchor_reconciliation_recent_ids_from_raw(raw))
 
 
-def _terminal_anchor_reconciliation_index_end_offset(progress: dict, index_size: int) -> int | None:
+def _terminal_anchor_reconciliation_generation(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    generation: dict[str, int] = {}
+    for key in ("dev", "ino", "size", "mtime_ns", "ctime_ns"):
+        try:
+            generation[key] = int(raw.get(key))
+        except (TypeError, ValueError):
+            return None
+    generation["size"] = max(0, generation["size"])
+    return generation
+
+
+def _terminal_anchor_reconciliation_cursor(progress: dict) -> dict | None:
     cursor = progress.get("index_cursor") if isinstance(progress, dict) else None
     if not isinstance(cursor, dict):
         return None
@@ -5580,33 +5595,74 @@ def _terminal_anchor_reconciliation_index_end_offset(progress: dict, index_size:
         end_offset = int(cursor.get("end_offset") or 0)
     except (TypeError, ValueError):
         return None
-    if cursor_index_size != int(index_size):
+    generation = _terminal_anchor_reconciliation_generation(cursor.get("generation"))
+    if cursor_index_size <= 0 or generation is None or int(generation.get("size") or 0) != cursor_index_size:
         return None
-    return max(0, min(int(index_size), end_offset))
+    return {
+        "index_size": cursor_index_size,
+        "generation": generation,
+        "end_offset": max(0, min(cursor_index_size, end_offset)),
+    }
+
+
+def _terminal_anchor_reconciliation_page_cursor(page: dict | None) -> dict | None:
+    if not isinstance(page, dict):
+        return None
+    generation = _terminal_anchor_reconciliation_generation(page.get("index_generation"))
+    next_end_offset = page.get("next_index_end_offset")
+    try:
+        index_size = int(page.get("index_size") or 0)
+        end_offset = int(next_end_offset)
+    except (TypeError, ValueError):
+        return None
+    if index_size <= 0 or generation is None or int(generation.get("size") or 0) != index_size:
+        return None
+    return {
+        "index_size": index_size,
+        "generation": generation,
+        "end_offset": max(0, min(index_size, end_offset)),
+    }
+
+
+def _terminal_anchor_reconciliation_cursors_equal(left: dict | None, right: dict | None) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    return (
+        int(left.get("index_size") or 0) == int(right.get("index_size") or 0)
+        and int(left.get("end_offset") or 0) == int(right.get("end_offset") or 0)
+        and _terminal_anchor_reconciliation_generation(left.get("generation"))
+        == _terminal_anchor_reconciliation_generation(right.get("generation"))
+    )
 
 
 def _terminal_anchor_reconciliation_set_cursor(
     progress: dict,
     *,
     index_size: int,
+    index_generation: object,
     end_offset: int | None,
 ) -> bool:
     if not isinstance(progress, dict) or int(index_size) <= 0 or end_offset is None:
         return False
+    generation = _terminal_anchor_reconciliation_generation(index_generation)
+    if generation is None:
+        return False
     bounded_index_size = max(0, int(index_size))
+    if int(generation.get("size") or 0) != bounded_index_size:
+        return False
     bounded_end_offset = max(0, min(int(index_size), int(end_offset)))
     existing = progress.get("index_cursor")
     if isinstance(existing, dict):
-        try:
-            if (
-                int(existing.get("index_size") or 0) == bounded_index_size
-                and int(existing.get("end_offset") or 0) == bounded_end_offset
-            ):
-                return False
-        except (TypeError, ValueError):
-            pass
+        next_cursor = {
+            "index_size": bounded_index_size,
+            "generation": generation,
+            "end_offset": bounded_end_offset,
+        }
+        if _terminal_anchor_reconciliation_cursors_equal(existing, next_cursor):
+            return False
     cursor = {
         "index_size": bounded_index_size,
+        "generation": generation,
         "end_offset": bounded_end_offset,
         "updated_at": time.time(),
     }
@@ -5658,31 +5714,37 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
         }
         progress = _terminal_anchor_reconciliation_progress(session)
         skip_stream_ids.update(_terminal_anchor_reconciliation_stream_ids(session))
-        index_size = terminal_run_index_size_for_session(sid)
-        index_end_offset = _terminal_anchor_reconciliation_index_end_offset(progress, index_size)
+        index_cursor = _terminal_anchor_reconciliation_cursor(progress)
     skip_stream_ids.update(active_stream_ids)
 
     pages: list[dict] = []
-    page_end_offset = index_end_offset
+    page_cursor = index_cursor
+    page_skip_stream_ids = set(skip_stream_ids)
     for _page_idx in range(_TERMINAL_ANCHOR_RECONCILIATION_MAX_PAGES):
         page = terminal_run_summary_page_for_session(
             sid,
             limit=64,
             max_candidates=64,
-            skip_run_ids=skip_stream_ids,
-            index_end_offset=page_end_offset,
+            skip_run_ids=page_skip_stream_ids,
+            index_cursor=page_cursor,
         )
         summaries = page.get("summaries") if isinstance(page, dict) else None
-        next_end_offset = page.get("next_index_end_offset") if isinstance(page, dict) else None
         if isinstance(page, dict):
             pages.append(page)
+        if isinstance(summaries, list):
+            page_skip_stream_ids.update(
+                str((summary or {}).get("run_id") or (summary or {}).get("stream_id") or "").strip()
+                for summary in summaries
+                if isinstance(summary, dict)
+            )
+        next_cursor = _terminal_anchor_reconciliation_page_cursor(page)
         if not isinstance(summaries, list) or not summaries:
-            if next_end_offset is None or next_end_offset == page_end_offset:
+            if next_cursor is None or _terminal_anchor_reconciliation_cursors_equal(page_cursor, next_cursor):
                 break
-        if next_end_offset in {None, page_end_offset}:
+        if next_cursor is None or _terminal_anchor_reconciliation_cursors_equal(page_cursor, next_cursor):
             break
-        page_end_offset = int(next_end_offset)
-        if page_end_offset <= 0:
+        page_cursor = next_cursor
+        if int(next_cursor.get("end_offset") or 0) <= 0:
             break
     if pages and not any(page.get("summaries") for page in pages) and not any(
         int(page.get("index_size") or 0) for page in pages
@@ -5698,6 +5760,7 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
                 {
                     "summaries": fallback_summaries,
                     "index_size": 0,
+                    "index_generation": None,
                     "next_index_end_offset": None,
                     "exhausted": True,
                 }
@@ -5716,6 +5779,7 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             if _terminal_anchor_reconciliation_set_cursor(
                 progress,
                 index_size=index_size,
+                index_generation=page.get("index_generation"),
                 end_offset=next_end_offset,
             ):
                 changed = True
@@ -10579,7 +10643,6 @@ from api.run_journal import (
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
-    terminal_run_index_size_for_session,
     terminal_run_summary_page_for_session,
     terminal_run_summaries_for_session,
 )

@@ -3470,6 +3470,185 @@ def test_terminal_reconciliation_cursor_advances_past_invalid_index_pages(
     assert 0 <= cursor["end_offset"] < cursor["index_size"]
 
 
+def test_terminal_reconciliation_append_barrier_does_not_skip_new_terminal(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.run_journal import append_run_event
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    session_id = "session-terminal-append-race"
+    invalid_stream = "stream-terminal-invalid"
+    valid_stream = "stream-terminal-valid"
+    messages = [
+        {"role": "user", "content": "finish work"},
+        {"role": "assistant", "content": "finished answer", "_ts": 2.0},
+    ]
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    append_run_event(
+        session_id,
+        invalid_stream,
+        "done",
+        {"message": "missing target"},
+        session_dir=tmp_path,
+        created_at=1.0,
+    )
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        terminal_anchor_reconciliation={},
+        save_calls=0,
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+    assert not session.anchor_activity_scenes
+    assert session.terminal_anchor_reconciliation["index_cursor"]["end_offset"] == 0
+
+    original_page = routes.terminal_run_summary_page_for_session
+    state = {"appended": False}
+
+    def append_before_page(session_id_arg, **kwargs):
+        if not state["appended"]:
+            state["appended"] = True
+            append_run_event(
+                session_id,
+                valid_stream,
+                "reasoning",
+                {"text": "checking"},
+                session_dir=tmp_path,
+                created_at=2.0,
+            )
+            append_run_event(
+                session_id,
+                valid_stream,
+                "token",
+                {"text": "finished answer"},
+                session_dir=tmp_path,
+                created_at=3.0,
+            )
+            append_run_event(
+                session_id,
+                valid_stream,
+                "done",
+                {
+                    "terminal_message_target": {
+                        "version": "terminal_message_target_v1",
+                        "session_id": session_id,
+                        "run_id": valid_stream,
+                        "stream_id": valid_stream,
+                        "message_index": 1,
+                        "message_ref": _client_anchor_scene_message_ref(messages[1]),
+                    },
+                    "session": {
+                        "session_id": session_id,
+                        "message_count": len(messages),
+                        "messages": messages,
+                    },
+                },
+                session_dir=tmp_path,
+                created_at=4.0,
+            )
+        return original_page(session_id_arg, **kwargs)
+
+    monkeypatch.setattr(routes, "terminal_run_summary_page_for_session", append_before_page)
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    records_by_stream = {
+        record["stream_id"]: record
+        for record in session.anchor_activity_scenes.values()
+        if isinstance(record, dict)
+    }
+    assert records_by_stream[valid_stream]["message_index"] == 1
+
+
+def test_terminal_reconciliation_advances_past_over_cap_index_tail(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.run_journal import append_run_event
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    session_id = "session-terminal-overcap-tail"
+    valid_stream = "stream-terminal-valid"
+    messages = [
+        {"role": "user", "content": "finish work"},
+        {"role": "assistant", "content": "finished answer", "_ts": 2.0},
+    ]
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    append_run_event(
+        session_id,
+        valid_stream,
+        "reasoning",
+        {"text": "checking"},
+        session_dir=tmp_path,
+        created_at=1.0,
+    )
+    append_run_event(
+        session_id,
+        valid_stream,
+        "token",
+        {"text": "finished answer"},
+        session_dir=tmp_path,
+        created_at=2.0,
+    )
+    append_run_event(
+        session_id,
+        valid_stream,
+        "done",
+        {
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": session_id,
+                "run_id": valid_stream,
+                "stream_id": valid_stream,
+                "message_index": 1,
+                "message_ref": _client_anchor_scene_message_ref(messages[1]),
+            },
+            "session": {
+                "session_id": session_id,
+                "message_count": len(messages),
+                "messages": messages,
+            },
+        },
+        session_dir=tmp_path,
+        created_at=3.0,
+    )
+    index_path = tmp_path / "_run_journal" / session_id / "_terminal_runs.jsonl"
+    with index_path.open("ab") as fh:
+        fh.write(b'{"version":1,"oversized":"' + (b"x" * (600 * 1024)) + b'"}')
+
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        terminal_anchor_reconciliation={},
+        save_calls=0,
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    records_by_stream = {
+        record["stream_id"]: record
+        for record in session.anchor_activity_scenes.values()
+        if isinstance(record, dict)
+    }
+    assert records_by_stream[valid_stream]["message_index"] == 1
+
+
 @pytest.mark.parametrize("terminal_event", ["cancel", "apperror"])
 def test_public_session_get_materializes_writer_terminal_target_for_detached_cancel_and_error(
     tmp_path,

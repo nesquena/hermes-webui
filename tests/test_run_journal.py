@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 
+import api.run_journal as run_journal
 from api.run_journal import (
     RunJournalWriter,
     append_run_event,
@@ -13,6 +14,14 @@ from api.run_journal import (
     terminal_run_summary_page_for_session,
     terminal_run_summaries_for_session,
 )
+
+
+def _terminal_page_cursor(page):
+    return {
+        "index_size": page["index_size"],
+        "generation": page["index_generation"],
+        "end_offset": page["next_index_end_offset"],
+    }
 
 
 def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
@@ -298,7 +307,7 @@ def test_terminal_run_summaries_rejects_malformed_index_authority(tmp_path):
     assert [summary["run_id"] for summary in summaries] == ["run_good"]
 
 
-def test_terminal_run_summaries_fail_closed_on_single_over_cap_index_row(tmp_path):
+def test_terminal_run_summaries_advances_past_single_over_cap_index_tail(tmp_path):
     append_run_event("session_1", "run_good", "token", {"text": "ok"}, session_dir=tmp_path)
     append_run_event("session_1", "run_good", "done", {"session": {}}, session_dir=tmp_path)
     index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
@@ -307,7 +316,104 @@ def test_terminal_run_summaries_fail_closed_on_single_over_cap_index_row(tmp_pat
 
     summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
 
-    assert summaries == []
+    assert [summary["run_id"] for summary in summaries] == ["run_good"]
+
+
+def test_terminal_run_index_append_reframes_after_malformed_tail(tmp_path):
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_bytes(b'{"version":1,"oversized":"' + (b"x" * (600 * 1024)) + b'"}')
+
+    append_run_event("session_1", "run_good", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_good", "done", {"session": {}}, session_dir=tmp_path)
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
+
+    assert [summary["run_id"] for summary in summaries] == ["run_good"]
+
+
+def test_terminal_run_summary_page_cursor_invalidates_same_size_replacement(tmp_path):
+    append_run_event("session_1", "run_001", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_001", "done", {"session": {}}, session_dir=tmp_path)
+    first = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+    )
+    assert [summary["run_id"] for summary in first["summaries"]] == ["run_001"]
+    cursor = _terminal_page_cursor(first)
+
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    original = index_path.read_bytes()
+    replacement = original.replace(b"run_001", b"run_002")
+    assert len(replacement) == len(original)
+    replacement_path = index_path.with_name("replacement-terminal-index.jsonl")
+    replacement_path.write_bytes(replacement)
+    os.replace(replacement_path, index_path)
+
+    second = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+        index_cursor=cursor,
+    )
+
+    assert [summary["run_id"] for summary in second["summaries"]] == ["run_002"]
+
+
+def test_terminal_run_summary_page_cursor_restarts_after_append_during_paging(tmp_path):
+    for idx in range(4):
+        run_id = f"run_{idx:03d}"
+        append_run_event("session_1", run_id, "token", {"text": "ok"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+
+    first = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+    )
+    assert [summary["run_id"] for summary in first["summaries"]] == ["run_003"]
+    cursor = _terminal_page_cursor(first)
+
+    append_run_event("session_1", "run_004", "token", {"text": "new"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_004", "done", {"session": {}}, session_dir=tmp_path)
+
+    second = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=2,
+        skip_run_ids={"run_003"},
+        index_cursor=cursor,
+    )
+
+    assert [summary["run_id"] for summary in second["summaries"]] == ["run_004"]
+
+
+def test_terminal_run_index_compacts_under_bounded_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES", 1)
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_MAX_ROWS", 5)
+
+    for idx in range(12):
+        run_id = f"run_{idx:03d}"
+        append_run_event("session_1", run_id, "token", {"text": "ok"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    rows = index_path.read_text(encoding="utf-8").splitlines()
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=5)
+
+    assert len(rows) <= 5
+    assert [summary["run_id"] for summary in summaries] == [
+        "run_011",
+        "run_010",
+        "run_009",
+        "run_008",
+        "run_007",
+    ]
 
 
 def test_terminal_run_summaries_uses_bounded_legacy_summary_fallback(tmp_path, monkeypatch):
@@ -376,7 +482,7 @@ def test_terminal_run_summary_pages_advance_with_compact_index_cursor(tmp_path):
         session_dir=tmp_path,
         limit=64,
         max_candidates=64,
-        index_end_offset=first["next_index_end_offset"],
+        index_cursor=_terminal_page_cursor(first),
     )
 
     first_ids = [summary["run_id"] for summary in first["summaries"]]

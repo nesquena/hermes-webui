@@ -48,6 +48,7 @@ _RUN_EVENTS_MAX_BYTES = 2 * 1024 * 1024
 _RUN_EVENTS_MAX_ROWS = 2048
 _TERMINAL_INDEX_MAX_BYTES = 512 * 1024
 _TERMINAL_INDEX_MAX_ROWS = 1024
+_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES = _TERMINAL_INDEX_MAX_BYTES * 2
 _SNAPSHOT_ARGS_MAX_ITEMS = 64
 _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
@@ -403,13 +404,28 @@ def _append_terminal_run_index(
     line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     created_file = not path.exists()
+    compacted = False
     with _lock_for(path):
+        needs_separator = False
+        try:
+            if path.stat().st_size > 0:
+                read_fd = os.open(path, os.O_RDONLY)
+                try:
+                    os.lseek(read_fd, -1, os.SEEK_END)
+                    needs_separator = os.read(read_fd, 1) != b"\n"
+                finally:
+                    os.close(read_fd)
+        except OSError:
+            needs_separator = False
         fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            if needs_separator:
+                fh.write("\n")
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
-    if created_file:
+        compacted = _compact_terminal_run_index_locked(path)
+    if created_file or compacted:
         _fsync_parent_dir(path)
 
 
@@ -428,39 +444,166 @@ def terminal_run_index_size_for_session(
         return 0
 
 
+def _terminal_index_generation_from_stat(stat_result) -> dict[str, int]:
+    return {
+        "dev": int(stat_result.st_dev),
+        "ino": int(stat_result.st_ino),
+        "size": max(0, int(stat_result.st_size)),
+        "mtime_ns": int(stat_result.st_mtime_ns),
+        "ctime_ns": int(stat_result.st_ctime_ns),
+    }
+
+
+def _terminal_index_generation_from_cursor(cursor: dict | None) -> dict[str, int] | None:
+    if not isinstance(cursor, dict):
+        return None
+    raw = cursor.get("generation")
+    if not isinstance(raw, dict):
+        return None
+    generation: dict[str, int] = {}
+    for key in ("dev", "ino", "size", "mtime_ns", "ctime_ns"):
+        try:
+            generation[key] = int(raw.get(key))
+        except (TypeError, ValueError):
+            return None
+    generation["size"] = max(0, generation["size"])
+    return generation
+
+
+def _terminal_index_cursor_end_offset(cursor: dict | None, index_size: int) -> int | None:
+    if not isinstance(cursor, dict):
+        return None
+    try:
+        end_offset = int(cursor.get("end_offset"))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(max(0, int(index_size)), end_offset))
+
+
 def _terminal_index_window(
     path: Path,
     *,
     max_bytes: int,
     end_offset: int | None = None,
-) -> tuple[int, int, bytes] | None:
+    index_cursor: dict | None = None,
+) -> dict | None:
     try:
-        size = path.stat().st_size
+        fd = os.open(path, os.O_RDONLY)
     except OSError:
         return None
-    try:
-        end = size if end_offset is None else max(0, min(int(end_offset), int(size)))
-    except (TypeError, ValueError):
-        end = size
-    if end <= 0:
-        return (0, 0, b"")
-    byte_limit = max(0, int(max_bytes))
-    start = max(0, end - byte_limit)
-    try:
-        with path.open("rb") as fh:
+    with os.fdopen(fd, "rb", closefd=True) as fh:
+        try:
+            generation = _terminal_index_generation_from_stat(os.fstat(fh.fileno()))
+        except OSError:
+            return None
+        size = generation["size"]
+        cursor_generation = _terminal_index_generation_from_cursor(index_cursor)
+        if cursor_generation is not None and cursor_generation == generation:
+            cursor_end = _terminal_index_cursor_end_offset(index_cursor, size)
+            end = size if cursor_end is None else cursor_end
+        else:
+            try:
+                end = size if end_offset is None else max(0, min(int(end_offset), int(size)))
+            except (TypeError, ValueError):
+                end = size
+        if end <= 0:
+            return {
+                "data_start": 0,
+                "read_end": 0,
+                "data": b"",
+                "index_generation": generation,
+                "index_size": size,
+                "next_end_offset": None,
+                "exhausted": True,
+            }
+        byte_limit = max(0, int(max_bytes))
+        start = max(0, end - byte_limit)
+        try:
             fh.seek(start)
             data = fh.read(end - start)
-    except FileNotFoundError:
-        return None
+        except OSError:
+            return None
     if start and data:
         newline = data.find(b"\n")
         if newline < 0:
-            # The tail begins inside a row larger than the allowed window. Treat
-            # it as unavailable instead of buffering forward to find its end.
-            return (end, end, b"")
+            # The tail begins inside a row larger than the allowed window. Skip
+            # this bounded extent instead of buffering forward to find its end;
+            # the next page can continue before ``start``.
+            return {
+                "data_start": end,
+                "read_end": end,
+                "data": b"",
+                "index_generation": generation,
+                "index_size": size,
+                "next_end_offset": start,
+                "exhausted": start <= 0,
+            }
         start += newline + 1
         data = data[newline + 1 :]
-    return (start, end, data)
+    return {
+        "data_start": start,
+        "read_end": end,
+        "data": data,
+        "index_generation": generation,
+        "index_size": size,
+        "next_end_offset": None,
+        "exhausted": start <= 0,
+    }
+
+
+def _terminal_index_entry_page(
+    path: Path,
+    *,
+    max_bytes: int,
+    max_rows: int,
+    end_offset: int | None = None,
+    index_cursor: dict | None = None,
+) -> dict | None:
+    window = _terminal_index_window(
+        path,
+        max_bytes=max_bytes,
+        end_offset=end_offset,
+        index_cursor=index_cursor,
+    )
+    if window is None:
+        return None
+    start = int(window.get("data_start") or 0)
+    data = window.get("data") if isinstance(window.get("data"), bytes) else b""
+    rows: list[tuple[int, int, bytes]] = []
+    pos = 0
+    while pos < len(data):
+        newline = data.find(b"\n", pos)
+        if newline < 0:
+            raw = data[pos:]
+            row_start = start + pos
+            row_end = start + len(data)
+            pos = len(data)
+        else:
+            raw = data[pos:newline]
+            row_start = start + pos
+            row_end = start + newline + 1
+            pos = newline + 1
+        rows.append((row_start, row_end, raw))
+    parsed_rows: list[tuple[int, int, dict | None]] = []
+    row_limit = max(0, int(max_rows))
+    if row_limit > 0:
+        for row_start, row_end, raw in reversed(rows[-row_limit:]):
+            if not raw.strip():
+                parsed_rows.append((row_start, row_end, None))
+                continue
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                parsed_rows.append((row_start, row_end, None))
+                continue
+            parsed_rows.append((row_start, row_end, parsed if isinstance(parsed, dict) else None))
+    return {
+        "rows": parsed_rows,
+        "index_generation": window.get("index_generation"),
+        "index_size": int(window.get("index_size") or 0),
+        "next_index_end_offset": window.get("next_end_offset"),
+        "exhausted": bool(window.get("exhausted")),
+    }
 
 
 def _terminal_index_entry_rows(
@@ -469,40 +612,19 @@ def _terminal_index_entry_rows(
     max_bytes: int,
     max_rows: int,
     end_offset: int | None = None,
+    index_cursor: dict | None = None,
 ):
-    window = _terminal_index_window(path, max_bytes=max_bytes, end_offset=end_offset)
-    if window is None:
+    page = _terminal_index_entry_page(
+        path,
+        max_bytes=max_bytes,
+        max_rows=max_rows,
+        end_offset=end_offset,
+        index_cursor=index_cursor,
+    )
+    if page is None:
         return
-    start, _end, data = window
-    rows: list[tuple[int, int, bytes]] = []
-    pos = 0
-    while pos < len(data):
-        newline = data.find(b"\n", pos)
-        if newline < 0:
-            raw = data[pos:]
-            row_end = start + len(data)
-            pos = len(data)
-        else:
-            raw = data[pos:newline]
-            row_end = start + newline + 1
-            pos = newline + 1
-        rows.append((row_end - len(raw) - (0 if newline < 0 else 1), row_end, raw))
-    row_limit = max(0, int(max_rows))
-    if row_limit <= 0:
-        return
-    for row_start, row_end, raw in reversed(rows[-row_limit:]):
-        if not raw.strip():
-            yield row_start, row_end, None
-            continue
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            yield row_start, row_end, None
-            continue
-        if isinstance(parsed, dict):
-            yield row_start, row_end, parsed
-        else:
-            yield row_start, row_end, None
+    for row_start, row_end, parsed in page.get("rows") or []:
+        yield row_start, row_end, parsed
 
 
 def _iter_terminal_index_entries(
@@ -838,6 +960,52 @@ def _terminal_index_summary_from_entry(
     }
 
 
+def _compact_terminal_run_index_locked(path: Path) -> bool:
+    try:
+        current_size = int(path.stat().st_size)
+    except OSError:
+        return False
+    if current_size <= _TERMINAL_INDEX_COMPACT_TRIGGER_BYTES:
+        return False
+    page = _terminal_index_entry_page(
+        path,
+        max_bytes=_TERMINAL_INDEX_MAX_BYTES,
+        max_rows=_TERMINAL_INDEX_MAX_ROWS,
+    )
+    if page is None:
+        return False
+    session_id = path.parent.name
+    retained: list[bytes] = []
+    for _row_start, _row_end, entry in reversed(page.get("rows") or []):
+        if not isinstance(entry, dict):
+            continue
+        summary = _terminal_index_summary_from_entry(
+            entry,
+            session_id=session_id,
+            session_root=path.parent,
+        )
+        if summary is None:
+            continue
+        retained.append(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+    if not retained:
+        return False
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("wb") as fh:
+            for row in retained[-_TERMINAL_INDEX_MAX_ROWS:]:
+                fh.write(row)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def terminal_run_summary_page_for_session(
     session_id: str,
     *,
@@ -846,6 +1014,7 @@ def terminal_run_summary_page_for_session(
     max_candidates: int = 64,
     skip_run_ids: Iterable[str] | None = None,
     index_end_offset: int | None = None,
+    index_cursor: dict | None = None,
 ) -> dict:
     """Return one bounded page of terminal summaries plus compact index cursor metadata."""
     try:
@@ -854,6 +1023,7 @@ def terminal_run_summary_page_for_session(
         return {
             "summaries": [],
             "index_size": 0,
+            "index_generation": None,
             "next_index_end_offset": None,
             "exhausted": True,
         }
@@ -863,6 +1033,7 @@ def terminal_run_summary_page_for_session(
         return {
             "summaries": [],
             "index_size": 0,
+            "index_generation": None,
             "next_index_end_offset": None,
             "exhausted": True,
         }
@@ -881,24 +1052,17 @@ def terminal_run_summary_page_for_session(
     next_index_end_offset: int | None = None
 
     index_path = _terminal_index_path(sid, session_dir=root)
-    index_size = terminal_run_index_size_for_session(sid, session_dir=root)
-    if index_size > 0 and index_end_offset is not None:
-        try:
-            if int(index_end_offset) <= 0:
-                return {
-                    "summaries": [],
-                    "index_size": index_size,
-                    "next_index_end_offset": 0,
-                    "exhausted": True,
-                }
-        except (TypeError, ValueError):
-            pass
-    for row_start, _row_end, entry in _terminal_index_entry_rows(
+    index_page = _terminal_index_entry_page(
         index_path,
         max_bytes=_TERMINAL_INDEX_MAX_BYTES,
         max_rows=max(max_candidates * 4, _TERMINAL_INDEX_MAX_ROWS),
         end_offset=index_end_offset,
-    ) or []:
+        index_cursor=index_cursor,
+    )
+    index_size = int((index_page or {}).get("index_size") or 0)
+    index_generation = (index_page or {}).get("index_generation")
+    next_index_end_offset = (index_page or {}).get("next_index_end_offset")
+    for row_start, _row_end, entry in (index_page or {}).get("rows") or []:
         next_index_end_offset = row_start
         if not isinstance(entry, dict):
             inspected += 1
@@ -925,6 +1089,7 @@ def terminal_run_summary_page_for_session(
         return {
             "summaries": summaries,
             "index_size": index_size,
+            "index_generation": index_generation,
             "next_index_end_offset": next_index_end_offset,
             "exhausted": next_index_end_offset in {None, 0},
         }
@@ -932,6 +1097,7 @@ def terminal_run_summary_page_for_session(
         return {
             "summaries": [],
             "index_size": index_size,
+            "index_generation": index_generation,
             "next_index_end_offset": 0,
             "exhausted": True,
         }
@@ -943,6 +1109,7 @@ def terminal_run_summary_page_for_session(
         return {
             "summaries": summaries,
             "index_size": index_size,
+            "index_generation": index_generation,
             "next_index_end_offset": None,
             "exhausted": True,
         }
@@ -983,6 +1150,7 @@ def terminal_run_summary_page_for_session(
     return {
         "summaries": summaries,
         "index_size": index_size,
+        "index_generation": index_generation,
         "next_index_end_offset": None,
         "exhausted": True,
     }
@@ -1003,15 +1171,50 @@ def terminal_run_summaries_for_session(
     advance through invalid settled terminals without an unbounded directory
     scan.
     """
-    page = terminal_run_summary_page_for_session(
-        session_id,
-        session_dir=session_dir,
-        limit=limit,
-        max_candidates=max_candidates,
-        skip_run_ids=skip_run_ids,
-    )
-    summaries = page.get("summaries") if isinstance(page, dict) else []
-    return summaries if isinstance(summaries, list) else []
+    try:
+        wanted = max(1, min(int(limit), 64))
+    except (TypeError, ValueError):
+        wanted = 16
+    summaries: list[dict] = []
+    seen: set[str] = set()
+    cursor: dict | None = None
+    base_skip_run_ids = {str(run_id or "").strip() for run_id in (skip_run_ids or [])}
+    for _page_idx in range(8):
+        page = terminal_run_summary_page_for_session(
+            session_id,
+            session_dir=session_dir,
+            limit=wanted,
+            max_candidates=max_candidates,
+            skip_run_ids=base_skip_run_ids.union(seen),
+            index_cursor=cursor,
+        )
+        page_summaries = page.get("summaries") if isinstance(page, dict) else []
+        if isinstance(page_summaries, list):
+            for summary in page_summaries:
+                run_id = str((summary or {}).get("run_id") or "").strip()
+                if not run_id or run_id in seen:
+                    continue
+                seen.add(run_id)
+                summaries.append(summary)
+                if len(summaries) >= wanted:
+                    return summaries
+        if not isinstance(page, dict) or page.get("exhausted"):
+            break
+        generation = page.get("index_generation")
+        next_end_offset = page.get("next_index_end_offset")
+        try:
+            index_size = int(page.get("index_size") or 0)
+            end_offset = int(next_end_offset)
+        except (TypeError, ValueError):
+            break
+        if not isinstance(generation, dict) or index_size <= 0 or end_offset < 0:
+            break
+        cursor = {
+            "index_size": index_size,
+            "generation": generation,
+            "end_offset": min(index_size, end_offset),
+        }
+    return summaries
 
 
 def read_session_run_events(
