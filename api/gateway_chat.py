@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -614,7 +615,70 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
-        return error_payload
+    return error_payload
+
+
+def _gateway_anchor_scene_message_ref(message) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or ""))
+            else:
+                parts.append(str(part or ""))
+        content_text = "\n".join(parts)
+    else:
+        content_text = str(content or "")
+    payload = {
+        "role": str(message.get("role") or ""),
+        "content": " ".join(content_text.split()),
+        "timestamp": message.get("_ts") or message.get("timestamp") or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _gateway_terminal_message_target_from_session_payload(
+    session_id: str,
+    stream_id: str,
+    session_payload: dict,
+) -> dict | None:
+    if not isinstance(session_payload, dict):
+        return None
+    target_session_id = str(session_payload.get("session_id") or "").strip()
+    if target_session_id != str(session_id or "").strip():
+        return None
+    messages = (
+        session_payload.get("messages")
+        if isinstance(session_payload.get("messages"), list)
+        else []
+    )
+    message_count = session_payload.get("message_count")
+    if not isinstance(message_count, int) or isinstance(message_count, bool) or message_count <= 0:
+        return None
+    message_index = message_count - 1
+    if message_index < 0 or message_index >= len(messages):
+        return None
+    message = messages[message_index]
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    message_ref = _gateway_anchor_scene_message_ref(message)
+    if not message_ref:
+        return None
+    run_id = str(stream_id or "").strip()
+    if not run_id:
+        return None
+    return {
+        "version": "terminal_message_target_v1",
+        "session_id": target_session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "message_index": message_index,
+        "message_ref": message_ref,
+    }
 
 
 def _settle_gateway_terminal_payload(
@@ -708,10 +772,18 @@ def _settle_gateway_terminal_payload_locked(
         session.save()
     except Exception:
         logger.debug("Failed to persist gateway terminal payload settlement", exc_info=True)
-    payload["session"] = redact_session_data(
+    session_payload = redact_session_data(
         _session_payload_with_full_messages(session, tool_calls=[])
     )
+    payload["session"] = session_payload
     payload["session_id"] = session.session_id
+    terminal_target = _gateway_terminal_message_target_from_session_payload(
+        session_id,
+        stream_id,
+        session_payload,
+    )
+    if terminal_target:
+        payload["terminal_message_target"] = terminal_target
     return payload
 
 
@@ -728,9 +800,33 @@ def _settle_gateway_terminal_event_payload(
         data = data.copy()
         data.setdefault("session_id", session_id)
     if event not in {"cancel", "error", "apperror"}:
+        if event == "done" and isinstance(data, dict) and isinstance(data.get("session"), dict):
+            payload = dict(data)
+            payload.setdefault(
+                "terminal_message_target",
+                _gateway_terminal_message_target_from_session_payload(
+                    session_id,
+                    stream_id,
+                    payload["session"],
+                ),
+            )
+            if payload.get("terminal_message_target") is None:
+                payload.pop("terminal_message_target", None)
+            return payload
         return data
     payload = data if isinstance(data, dict) else {}
     if isinstance(payload.get("session"), dict):
+        payload = dict(payload)
+        payload.setdefault(
+            "terminal_message_target",
+            _gateway_terminal_message_target_from_session_payload(
+                session_id,
+                stream_id,
+                payload["session"],
+            ),
+        )
+        if payload.get("terminal_message_target") is None:
+            payload.pop("terminal_message_target", None)
         return payload
     if isinstance(payload.get("terminal_disposition"), dict):
         return payload

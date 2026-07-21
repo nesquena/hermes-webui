@@ -138,7 +138,7 @@ def test_terminal_run_summaries_for_session_returns_bounded_newest_terminals(tmp
     ]
 
 
-def test_terminal_run_summaries_can_scan_past_skipped_candidate_window(tmp_path):
+def test_terminal_run_summaries_skips_resolved_before_candidate_budget(tmp_path):
     append_run_event("session_1", "run_old", "token", {"text": "old"}, session_dir=tmp_path)
     append_run_event("session_1", "run_old", "done", {"session": {}}, session_dir=tmp_path)
     old_path = tmp_path / "_run_journal" / "session_1" / "run_old.jsonl"
@@ -160,17 +160,36 @@ def test_terminal_run_summaries_can_scan_past_skipped_candidate_window(tmp_path)
         max_candidates=64,
         skip_run_ids=skipped_run_ids,
     )
-    scanned = terminal_run_summaries_for_session(
+
+    assert [summary["run_id"] for summary in bounded] == ["run_old"]
+
+
+def test_terminal_run_summaries_bounds_unresolved_summary_parses(tmp_path, monkeypatch):
+    for idx in range(80):
+        run_id = f"run_{idx:03d}"
+        append_run_event("session_1", run_id, "token", {"text": "new"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+        path = tmp_path / "_run_journal" / "session_1" / f"{run_id}.jsonl"
+        os.utime(path, (10.0 + idx, 10.0 + idx))
+
+    calls = []
+    original_latest_run_summary = latest_run_summary
+
+    def counted_latest_run_summary(session_id, run_id, *, session_dir=None):
+        calls.append(run_id)
+        return original_latest_run_summary(session_id, run_id, session_dir=session_dir)
+
+    monkeypatch.setattr("api.run_journal.latest_run_summary", counted_latest_run_summary)
+
+    summaries = terminal_run_summaries_for_session(
         "session_1",
         session_dir=tmp_path,
-        limit=1,
+        limit=64,
         max_candidates=64,
-        skip_run_ids=skipped_run_ids,
-        scan_all_candidates=True,
     )
 
-    assert bounded == []
-    assert [summary["run_id"] for summary in scanned] == ["run_old"]
+    assert len(summaries) == 64
+    assert len(calls) == 64
 
 
 def test_latest_summary_reuses_unchanged_journal_summary_without_reparsing(tmp_path, monkeypatch):

@@ -582,14 +582,13 @@ def terminal_run_summaries_for_session(
     limit: int = 16,
     max_candidates: int = 64,
     skip_run_ids: Iterable[str] | None = None,
-    scan_all_candidates: bool = False,
 ) -> list[dict]:
     """Return newest terminal run summaries for one session.
 
     ``skip_run_ids`` lets callers exclude already-resolved or active streams
-    before the bounded summary parse. With ``scan_all_candidates`` this provides
-    pagination-like progress for reconciliation without a durable cursor: newest
-    resolved entries no longer permanently hide older unresolved terminals.
+    before the bounded summary parse, so durable reconciliation records can
+    advance through invalid settled terminals without an unbounded directory
+    scan.
     """
     try:
         sid = _validate_id(session_id, "session_id")
@@ -620,15 +619,13 @@ def terminal_run_summaries_for_session(
         candidates.append((mtime, run_id, path))
     skip_run_ids = {str(run_id or "").strip() for run_id in (skip_run_ids or [])}
     ordered_candidates = sorted(candidates, reverse=True)
-    if not scan_all_candidates:
-        ordered_candidates = ordered_candidates[:max_candidates]
     summaries: list[dict] = []
     inspected = 0
     for _mtime, run_id, path in ordered_candidates:
         if run_id in skip_run_ids:
             continue
         inspected += 1
-        if not scan_all_candidates and inspected > max_candidates:
+        if inspected > max_candidates:
             break
         summary = latest_run_summary(sid, run_id, session_dir=root)
         if not summary.get("terminal"):
