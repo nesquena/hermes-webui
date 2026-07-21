@@ -242,8 +242,7 @@ def _activate_session_publication_generation(session) -> _SessionPublicationGene
     """Bind *session* to a fresh lease for an intentional SID recreation."""
     sid = str(getattr(session, "session_id", "") or "")
     with _get_session_publication_lock(sid):
-        pending_cleanup = _load_session_cleanup_residuals()
-        if sid in pending_cleanup:
+        if _session_has_cleanup_residual(sid):
             raise RuntimeError(
                 f"Refusing to recreate session {sid!r} while cleanup residuals remain"
             )
@@ -905,28 +904,58 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
             logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
 
 
-def _session_cleanup_residual_file() -> Path:
-    return SESSION_DIR / "_session_cleanup_residuals.json"
+def _session_cleanup_residual_dir() -> Path:
+    return SESSION_DIR / "_session_cleanup_residuals"
+
+
+def _session_cleanup_residual_file(session_id: str) -> Path:
+    sid = str(session_id or "")
+    if not is_safe_session_id(sid):
+        raise ValueError("Invalid session_id")
+    return _session_cleanup_residual_dir() / f"{sid}.json"
+
+
+def _session_has_cleanup_residual(session_id: str) -> bool:
+    """Return whether one SID has a retry marker, failing closed per SID.
+
+    Residual authority is deliberately sharded by session ID. A corrupt or
+    future-version record therefore blocks recreation of its owning SID but
+    cannot make every unrelated new-session path unavailable.
+    """
+    path = _session_cleanup_residual_file(session_id)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not inspect cleanup residuals for session {session_id!r}"
+        ) from exc
+    return True
 
 
 def _load_session_cleanup_residuals() -> dict[str, dict]:
-    path = _session_cleanup_residual_file()
-    if not path.exists():
+    root = _session_cleanup_residual_dir()
+    try:
+        paths = list(root.glob("*.json"))
+    except OSError:
+        raise
+    if not paths:
         return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or raw.get("version") != SESSION_CLEANUP_RESIDUAL_VERSION:
-        raise ValueError("Invalid session cleanup residual manifest")
-    entries = raw.get("sessions")
-    if not isinstance(entries, dict):
-        raise ValueError("Invalid session cleanup residual entries")
     validated = {}
-    for raw_sid, record in entries.items():
-        sid = str(raw_sid or "")
-        if not is_safe_session_id(sid) or not isinstance(record, dict):
+    for path in paths:
+        sid = path.stem
+        raw = json.loads(path.read_bytes())
+        if (
+            not is_safe_session_id(sid)
+            or not isinstance(raw, dict)
+            or raw.get("version") != SESSION_CLEANUP_RESIDUAL_VERSION
+            or raw.get("session_id") != sid
+        ):
             raise ValueError("Invalid session cleanup residual entry")
-        items = record.get("residuals")
-        delete_state_db = record.get("delete_state_db")
-        durable_tombstone = record.get("durable_tombstone")
+        items = raw.get("residuals")
+        delete_state_db = raw.get("delete_state_db")
+        durable_tombstone = raw.get("durable_tombstone")
         if (
             not isinstance(items, list)
             or not isinstance(delete_state_db, bool)
@@ -955,28 +984,26 @@ def _persist_session_cleanup_residuals(
 ) -> None:
     """Persist retryable artifact names until an idempotent cleanup succeeds."""
     sid = str(session_id or "")
-    path = _session_cleanup_residual_file()
+    path = _session_cleanup_residual_file(sid)
     with _SESSION_CLEANUP_RESIDUAL_LOCK:
-        entries = _load_session_cleanup_residuals()
-        if residuals:
-            entries[sid] = {
-                "residuals": list(residuals),
-                "delete_state_db": bool(delete_state_db),
-                "durable_tombstone": bool(durable_tombstone),
-            }
-        else:
-            entries.pop(sid, None)
-        if not entries:
+        if not residuals:
             path.unlink(missing_ok=True)
             return
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        root = _session_cleanup_residual_dir()
+        root.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(
             f".tmp.{os.getpid()}.{threading.current_thread().ident}"
         )
         try:
             with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump(
-                    {"version": SESSION_CLEANUP_RESIDUAL_VERSION, "sessions": entries},
+                    {
+                        "version": SESSION_CLEANUP_RESIDUAL_VERSION,
+                        "session_id": sid,
+                        "residuals": list(residuals),
+                        "delete_state_db": bool(delete_state_db),
+                        "durable_tombstone": bool(durable_tombstone),
+                    },
                     handle,
                     ensure_ascii=False,
                     indent=2,
