@@ -1150,7 +1150,7 @@ def delete_session_artifacts(
         try:
             prune_session_from_index(sid)
             if SESSION_INDEX_FILE.exists():
-                rows = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+                rows = json.loads(SESSION_INDEX_FILE.read_bytes())
                 if not isinstance(rows, list) or any(
                     isinstance(row, dict) and row.get("session_id") == sid
                     for row in rows
