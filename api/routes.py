@@ -5194,9 +5194,6 @@ def _build_share_metadata_sidecar(
             value = getattr(snapshot_session, attr, None)
         if value is not None:
             setattr(session, attr, value)
-    with reserve_session_destination(session.session_id) as reservation:
-        reservation.bind(session)
-        reservation.commit()
     return session
 
 
@@ -14117,9 +14114,16 @@ def handle_post(handler, parsed) -> bool:
                 snapshot_session,
                 cli_meta=cli_meta,
             )
-        persisted_session.share_token = share_meta["share_token"]
-        persisted_session.share_created_at = share_meta["share_created_at"]
-        persisted_session.save(touch_updated_at=False)
+            with reserve_session_destination(sid) as reservation:
+                reservation.bind(persisted_session)
+                persisted_session.share_token = share_meta["share_token"]
+                persisted_session.share_created_at = share_meta["share_created_at"]
+                persisted_session.save(touch_updated_at=False)
+                reservation.commit()
+        else:
+            persisted_session.share_token = share_meta["share_token"]
+            persisted_session.share_created_at = share_meta["share_created_at"]
+            persisted_session.save(touch_updated_at=False)
         _publish_session_list_changed(
             "session_share_create",
             profile=getattr(persisted_session, "profile", None),
@@ -14161,12 +14165,24 @@ def handle_post(handler, parsed) -> bool:
                 snapshot_session,
                 cli_meta=cli_meta,
             )
-            target_session.share_token = token
-            target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
-        revoke_share(target_session)
-        target_session.share_token = None
-        target_session.share_created_at = None
-        target_session.save(touch_updated_at=False)
+            with reserve_session_destination(sid) as reservation:
+                reservation.bind(target_session)
+                target_session.share_token = token
+                target_session.share_created_at = getattr(
+                    snapshot_session,
+                    "share_created_at",
+                    None,
+                )
+                revoke_share(target_session)
+                target_session.share_token = None
+                target_session.share_created_at = None
+                target_session.save(touch_updated_at=False)
+                reservation.commit()
+        else:
+            revoke_share(target_session)
+            target_session.share_token = None
+            target_session.share_created_at = None
+            target_session.save(touch_updated_at=False)
         _publish_session_list_changed(
             "session_share_revoke",
             profile=getattr(target_session, "profile", None),
