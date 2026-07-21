@@ -59,10 +59,15 @@ function makeSelect(options, initialValue) {
   Object.defineProperty(sel, 'value', {
     get() { return this._value || ''; },
     set(v) {
-      this._value = v;
       const idx = this.options.findIndex(o => o.value === v);
       this.selectedIndex = idx;
-      this.selectedOptions = idx >= 0 ? [this.options[idx]] : [];
+      if (idx >= 0) {
+        this._value = v;
+        this.selectedOptions = [this.options[idx]];
+      } else {
+        this._value = '';
+        this.selectedOptions = [];
+      }
     }
   });
   Object.defineProperty(sel, 'innerHTML', {
@@ -136,12 +141,21 @@ const document = {
     return {tagName: upper, value: '', textContent: '', title: '', dataset: {}, parentElement: null};
   },
 };
-const localStorage = {getItem(){return null;}, setItem(){}, removeItem(){}};
+const args = JSON.parse(process.argv[3]);
+const localStorageData = Object.assign({}, args.localStorage || {});
+const localStorage = {
+  getItem(key) {
+    return Object.prototype.hasOwnProperty.call(localStorageData, key) ? localStorageData[key] : null;
+  },
+  setItem(key, value) { localStorageData[key] = String(value); },
+  removeItem(key) { delete localStorageData[key]; },
+};
 const window = {_defaultModel: null, _activeProvider: null, _configuredModelBadges: {}};
 let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
-window._provisionalBootModelSelection = '';
+const MODEL_STATE_KEY = 'hermes-webui-model-state';
+window._provisionalBootModelSelection = null;
 
 function settingsDefaultModelHasExplicitSourceForTest(s) {
   if (!s || !Object.prototype.hasOwnProperty.call(s, 'default_model_has_explicit_source')) return true;
@@ -158,10 +172,33 @@ function hydrateBootDefaultModelFromSettingsForTest(s) {
   window._defaultModelEligibleForFreshBoot = hasExplicitSource;
   const sel = $('modelSelect');
   if (!hasExplicitSource) {
-    window._provisionalBootModelSelection = sel && sel.value ? String(sel.value) : '';
+    let selectedState = null;
+    if (sel && sel.value) {
+      try {
+        selectedState = typeof _modelStateForSelect === 'function'
+          ? _modelStateForSelect(sel, sel.value)
+          : {model: String(sel.value || ''), model_provider: null};
+      } catch (_) {
+        selectedState = {model: String(sel.value || ''), model_provider: null};
+      }
+    }
+    const selectedOpt = sel && sel.selectedOptions && sel.selectedOptions[0];
+    const selectedHasExplicitUiOwnership = !!(
+      selectedOpt && selectedOpt.dataset && selectedOpt.dataset.custom
+    );
+    const persistedState = typeof _readPersistedModelState === 'function'
+      ? _readPersistedModelState()
+      : null;
+    const persistedOwnsSelection = typeof _modelStateMatches === 'function'
+      ? _modelStateMatches(selectedState, persistedState)
+      : !!(selectedState && persistedState && String(selectedState.model || '') === String(persistedState.model || '')
+        && String(selectedState.model_provider || '') === String(persistedState.model_provider || ''));
+    window._provisionalBootModelSelection = (selectedState && !persistedOwnsSelection && !selectedHasExplicitUiOwnership)
+      ? selectedState
+      : null;
     return;
   }
-  window._provisionalBootModelSelection = '';
+  window._provisionalBootModelSelection = null;
   if (sel && typeof _applyModelToDropdown === 'function') {
     const existingDefaultOpt = Array.from(sel.options).find(o => o.value === defaultModel);
     if (existingDefaultOpt && window._activeProvider && !existingDefaultOpt.dataset.provider) {
@@ -183,14 +220,15 @@ function hydrateBootDefaultModelFromSettingsForTest(s) {
 for (const name of [
   '_modelCatalogHasRealProviderModels', '_shouldApplyModelPayloadDefault',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
-  '_captureModelDropdownSelection', '_findModelInDropdown', '_refreshOpenModelDropdown',
+  '_captureModelDropdownSelection', '_modelStateMatches',
+  '_readPersistedModelState', '_writePersistedModelState', '_clearPersistedModelState',
+  '_findModelInDropdown', '_refreshOpenModelDropdown',
   '_applyModelToDropdown', '_ensureModelOptionInDropdown',
   '_reconcileModelDropdownSelection', 'populateModelDropdown'
 ]) {
   eval(extractFunc(name));
 }
 
-const args = JSON.parse(process.argv[3]);
 apiModels = args.apiModels;
 modelSelect = makeSelect(args.initialOptions, args.initialValue);
 var S = {session: args.session || null};
@@ -207,10 +245,46 @@ fetch = async function(url) {
   throw new Error('unexpected fetch ' + href);
 };
 
+function applyBootSavedStateForTest() {
+  const sessionModelState = S.session && S.session.model
+    ? {model: S.session.model, model_provider: S.session.model_provider || null}
+    : null;
+  const savedState = (typeof _readPersistedModelState === 'function')
+    ? _readPersistedModelState()
+    : null;
+  const defaultWinsFreshBoot = !!window._defaultModel && window._defaultModelEligibleForFreshBoot !== false;
+  const stateToApply = sessionModelState || (!defaultWinsFreshBoot ? savedState : null);
+  const savedModel = stateToApply && stateToApply.model;
+  if (savedModel && $('modelSelect')) {
+    let applied = (typeof _applyModelToDropdown === 'function')
+      ? (sessionModelState
+        ? _applyModelToDropdown(sessionModelState.model, $('modelSelect'), sessionModelState.model_provider || null)
+        : _applyModelToDropdown(savedState.model, $('modelSelect'), savedState.model_provider || null))
+      : null;
+    if (!applied && sessionModelState && typeof _ensureModelOptionInDropdown === 'function') {
+      applied = _ensureModelOptionInDropdown(sessionModelState.model, $('modelSelect'), sessionModelState.model_provider || null);
+    } else if (!applied && !sessionModelState && savedState && savedState.model_provider && typeof _ensureModelOptionInDropdown === 'function') {
+      applied = _ensureModelOptionInDropdown(savedState.model, $('modelSelect'), savedState.model_provider || null);
+    }
+    if (!applied) $('modelSelect').value = stateToApply.model;
+    if (!applied && !sessionModelState && $('modelSelect').value !== stateToApply.model) {
+      if (typeof _clearPersistedModelState === 'function') _clearPersistedModelState();
+      else {
+        localStorage.removeItem('hermes-webui-model');
+        localStorage.removeItem('hermes-webui-model-state');
+      }
+    } else if (typeof syncModelChip === 'function') syncModelChip();
+  }
+}
+
 populateModelDropdown(args.opts || {}).then(() => {
+  if (args.applyBootSavedState) applyBootSavedStateForTest();
   process.stdout.write(JSON.stringify({
     selectValue: modelSelect.value,
     selectedProvider: modelSelect.selectedOptions[0] ? _getOptionProviderId(modelSelect.selectedOptions[0]) : null,
+    selectedState: modelSelect.value && typeof _modelStateForSelect === 'function'
+      ? _modelStateForSelect(modelSelect, modelSelect.value)
+      : null,
     optionValues: modelSelect.options.map(o => o.value),
     defaultModel: window._defaultModel,
     defaultModelHasExplicitSource: window._defaultModelHasExplicitSource,
@@ -218,6 +292,7 @@ populateModelDropdown(args.opts || {}).then(() => {
     provisionalBootModelSelection: window._provisionalBootModelSelection,
     badgeKeys: Object.keys(window._configuredModelBadges || {}),
     activeProvider: window._activeProvider,
+    localStorage: localStorageData,
     calls,
   }));
 }).catch(err => {
@@ -256,8 +331,10 @@ def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
 def test_boot_marks_nonexplicit_static_selection_provisional():
     block = _boot_default_apply_snippet()
 
-    assert "window._provisionalBootModelSelection=sel&&sel.value?String(sel.value):'';" in block
-    assert "window._provisionalBootModelSelection='';" in block
+    assert "const persistedState=(typeof _readPersistedModelState==='function')" in block
+    assert "const persistedOwnsSelection=typeof _modelStateMatches==='function'" in block
+    assert "window._provisionalBootModelSelection=(selectedState&&!persistedOwnsSelection&&!selectedHasExplicitUiOwnership)" in block
+    assert "window._provisionalBootModelSelection=null;" in block
     assert "if(!hasExplicitSource)" in block
     assert "if(!hasExplicitSource) return;" not in block
 
@@ -341,8 +418,9 @@ def test_save_settings_drops_derived_default_model_metadata(monkeypatch, tmp_pat
 
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "let previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
-    assert "const provisionalBootSelection=String(window._provisionalBootModelSelection||'');" in UI_JS
-    assert "window._provisionalBootModelSelection='';" in UI_JS
+    assert "const rawProvisionalBootSelection=window._provisionalBootModelSelection||null;" in UI_JS
+    assert "const persistedState=(typeof _readPersistedModelState==='function')?_readPersistedModelState():null;" in UI_JS
+    assert "window._provisionalBootModelSelection=null;" in UI_JS
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
     snippet = _reconcile_selection_snippet()
     assert "preferProfileDefaultOnFreshBoot" in snippet
@@ -359,6 +437,14 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "_ensureModelOptionInDropdown(modelId, sel, providerId)" in snippet
     assert "_readPersistedModelState()" not in snippet
     assert "localStorage.getItem('hermes-webui-model')" not in snippet
+
+
+def test_model_select_onchange_retires_provisional_boot_marker():
+    start = BOOT_JS.index("$('modelSelect').onchange=async()=>{")
+    end = BOOT_JS.index("if(typeof _writePersistedModelState==='function')", start)
+    block = BOOT_JS[start:end]
+
+    assert "window._provisionalBootModelSelection=null;" in block
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -447,6 +533,91 @@ def test_settings_boot_then_model_refresh_does_not_recreate_nonexplicit_provider
     assert all(fallback_model not in key for key in got["badgeKeys"])
     assert got["defaultModelHasExplicitSource"] is False
     assert got["defaultModelEligibleForFreshBoot"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_boot_preserves_provider_owned_persisted_model_matching_static_option(
+    populate_driver_path,
+):
+    persisted_model = "openai/gpt-5.4-mini"
+    persisted_provider = "openai"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value=None,
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        settings={
+            "default_model": "fallback/model-that-is-not-in-provider-catalog",
+            "default_model_provider": "safe",
+            "default_model_has_explicit_source": False,
+        },
+        api_default_model="fallback/model-that-is-not-in-provider-catalog",
+        api_default_model_has_explicit_source=False,
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
+        ],
+        initial_options=[
+            {"provider": persisted_provider, "value": persisted_model, "label": persisted_model},
+        ],
+        local_storage=_persisted_model_storage(persisted_model, persisted_provider),
+        apply_boot_saved_state=True,
+    )
+
+    assert got["selectedState"] == {
+        "model": persisted_model,
+        "model_provider": persisted_provider,
+    }
+    assert got["selectedProvider"] == persisted_provider
+    assert got["selectValue"]
+    assert got["provisionalBootModelSelection"] is None
+    assert got["localStorage"]["hermes-webui-model"] == persisted_model
+    assert json.loads(got["localStorage"]["hermes-webui-model-state"]) == {
+        "model": persisted_model,
+        "model_provider": persisted_provider,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_boot_provisional_marker_does_not_steal_same_model_under_different_provider(
+    populate_driver_path,
+):
+    persisted_model = "gpt-5.4-mini"
+    persisted_provider = "custom:work"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value=None,
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        settings={
+            "default_model": "fallback/model-that-is-not-in-provider-catalog",
+            "default_model_provider": "safe",
+            "default_model_has_explicit_source": False,
+        },
+        api_default_model="fallback/model-that-is-not-in-provider-catalog",
+        api_default_model_has_explicit_source=False,
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
+        ],
+        initial_options=[
+            {"provider": "openai", "value": persisted_model, "label": persisted_model},
+        ],
+        local_storage=_persisted_model_storage(persisted_model, persisted_provider),
+        apply_boot_saved_state=True,
+    )
+
+    assert got["selectedState"] == {
+        "model": persisted_model,
+        "model_provider": persisted_provider,
+    }
+    assert got["selectedProvider"] == persisted_provider
+    assert got["selectValue"]
+    assert not any(value == persisted_model for value in got["optionValues"])
+    assert got["provisionalBootModelSelection"] is None
+    assert got["localStorage"]["hermes-webui-model"] == persisted_model
+    assert json.loads(got["localStorage"]["hermes-webui-model-state"]) == {
+        "model": persisted_model,
+        "model_provider": persisted_provider,
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -574,6 +745,8 @@ def _run_populate_driver(
     api_groups: list[dict] | None = None,
     initial_options: list[dict] | None = None,
     settings: dict | None = None,
+    local_storage: dict | None = None,
+    apply_boot_saved_state: bool = False,
 ):
     groups = api_groups if api_groups is not None else [
         {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
@@ -599,6 +772,8 @@ def _run_populate_driver(
         "opts": opts,
         "session": session,
         "settings": settings,
+        "localStorage": local_storage or {},
+        "applyBootSavedState": apply_boot_saved_state,
     }
     assert NODE is not None
     result = subprocess.run(
@@ -612,10 +787,19 @@ def _run_populate_driver(
     return json.loads(result.stdout)
 
 
+def _persisted_model_storage(model: str, provider: str | None) -> dict:
+    return {
+        "hermes-webui-model": model,
+        "hermes-webui-model-state": json.dumps(
+            {"model": model, "model_provider": provider}
+        ),
+    }
+
+
 def _boot_default_apply_snippet() -> str:
-    marker = "// Fresh page boot must prefer an explicit profile/server default"
+    marker = "function _hydrateBootDefaultModelFromSettings"
     start = BOOT_JS.index(marker)
-    return BOOT_JS[start - 260 : start + 700]
+    return BOOT_JS[start : BOOT_JS.index("(async()=>", start)]
 
 
 def _reconcile_selection_snippet() -> str:

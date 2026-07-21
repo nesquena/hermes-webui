@@ -2814,7 +2814,7 @@ let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 window._defaultModelHasExplicitSource=!!window._defaultModelHasExplicitSource;
 window._defaultModelEligibleForFreshBoot=window._defaultModelEligibleForFreshBoot!==false;
-window._provisionalBootModelSelection=window._provisionalBootModelSelection||'';
+window._provisionalBootModelSelection=window._provisionalBootModelSelection||null;
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
@@ -2959,6 +2959,13 @@ function _captureModelDropdownSelection(sel){
     if(state&&state.model) return state;
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
+}
+function _modelStateMatches(a,b){
+  return !!(
+    a&&b&&a.model&&b.model&&
+    String(a.model||'')===String(b.model||'')&&
+    String(a.model_provider||'')===String(b.model_provider||'')
+  );
 }
 function _modelProviderForSend(modelId){
   const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
@@ -3482,12 +3489,16 @@ async function populateModelDropdown(opts={}){
       return; // no server groups and no configured fallback
     }
     let previousSelection=_captureModelDropdownSelection(sel);
-    const provisionalBootSelection=String(window._provisionalBootModelSelection||'');
+    const rawProvisionalBootSelection=window._provisionalBootModelSelection||null;
+    const provisionalBootSelection=typeof rawProvisionalBootSelection==='string'
+      ? {model:rawProvisionalBootSelection,model_provider:null}
+      : rawProvisionalBootSelection;
     if(opts&&opts.preferProfileDefaultOnFreshBoot&&provisionalBootSelection){
-      if(previousSelection&&String(previousSelection.model||'')===provisionalBootSelection){
+      const persistedState=(typeof _readPersistedModelState==='function')?_readPersistedModelState():null;
+      if(_modelStateMatches(previousSelection,provisionalBootSelection)&&!_modelStateMatches(persistedState,provisionalBootSelection)){
         previousSelection=null;
       }
-      window._provisionalBootModelSelection='';
+      window._provisionalBootModelSelection=null;
     }
     // Clear existing options
     sel.innerHTML='';

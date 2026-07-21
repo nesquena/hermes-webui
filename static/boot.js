@@ -2193,6 +2193,7 @@ function _applySessionContextMetadataUpdate(data){
 }
 
 $('modelSelect').onchange=async()=>{
+  window._provisionalBootModelSelection=null;
   const selectedModel=$('modelSelect').value;
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
@@ -3225,10 +3226,33 @@ function _hydrateBootDefaultModelFromSettings(s){
   window._defaultModelEligibleForFreshBoot=hasExplicitSource;
   const sel=$('modelSelect');
   if(!hasExplicitSource){
-    window._provisionalBootModelSelection=sel&&sel.value?String(sel.value):'';
+    let selectedState=null;
+    if(sel&&sel.value){
+      try{
+        selectedState=typeof _modelStateForSelect==='function'
+          ? _modelStateForSelect(sel,sel.value)
+          : {model:String(sel.value||''),model_provider:null};
+      }catch(_){
+        selectedState={model:String(sel.value||''),model_provider:null};
+      }
+    }
+    const selectedOpt=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+    const selectedHasExplicitUiOwnership=!!(
+      selectedOpt&&selectedOpt.dataset&&selectedOpt.dataset.custom
+    );
+    const persistedState=(typeof _readPersistedModelState==='function')
+      ? _readPersistedModelState()
+      : null;
+    const persistedOwnsSelection=typeof _modelStateMatches==='function'
+      ? _modelStateMatches(selectedState,persistedState)
+      : !!(selectedState&&persistedState&&String(selectedState.model||'')===String(persistedState.model||'')
+        &&String(selectedState.model_provider||'')===String(persistedState.model_provider||''));
+    window._provisionalBootModelSelection=(selectedState&&!persistedOwnsSelection&&!selectedHasExplicitUiOwnership)
+      ? selectedState
+      : null;
     return;
   }
-  window._provisionalBootModelSelection='';
+  window._provisionalBootModelSelection=null;
   if(sel&&typeof _applyModelToDropdown==='function'){
     // Fresh page boot must prefer an explicit profile/server default over
     // stale browser-persisted model state. Non-explicit fallback defaults
@@ -3616,18 +3640,21 @@ function _hydrateBootDefaultModelFromSettings(s){
     const stateToApply=sessionModelState||(!defaultWinsFreshBoot?savedState:null);
     const savedModel=stateToApply&&stateToApply.model;
     if(savedModel && $('modelSelect')){
-      const applied=(typeof _applyModelToDropdown==='function')
+      let applied=(typeof _applyModelToDropdown==='function')
         ? (sessionModelState
           ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
           : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
         : null;
-      if(!applied) $('modelSelect').value=stateToApply.model;
       // If the value didn't take (model not in list), clear the bad pref only
       // for persisted browser preferences. Active sessions remain authoritative.
       if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
-        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
+        applied=_ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
       }
-      else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
+      else if(!applied&&!sessionModelState&&savedState&&savedState.model_provider&&typeof _ensureModelOptionInDropdown==='function'){
+        applied=_ensureModelOptionInDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null);
+      }
+      if(!applied) $('modelSelect').value=stateToApply.model;
+      if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
         else {
           localStorage.removeItem('hermes-webui-model');
