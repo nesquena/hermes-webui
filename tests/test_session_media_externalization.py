@@ -1192,6 +1192,46 @@ def test_corrupt_cleanup_record_blocks_only_its_own_session(
         models._load_session_cleanup_residuals()
 
 
+def test_cleanup_retries_valid_records_while_reporting_corrupt_peer(
+    tmp_path,
+    monkeypatch,
+):
+    _configure_session_state(tmp_path, monkeypatch)
+    valid_sid = "valid-retry-record"
+    corrupt_sid = "corrupt-retry-record"
+    _stub_delete_route_dependencies(
+        monkeypatch,
+        Session(session_id=valid_sid),
+        tmp_path,
+    )
+    for sid in (valid_sid, corrupt_sid):
+        models._persist_session_cleanup_residuals(
+            sid,
+            [{"artifact": "session_json"}],
+            durable_tombstone=True,
+            delete_state_db=True,
+        )
+    corrupt_path = models._session_cleanup_residual_file(corrupt_sid)
+    corrupt_path.write_bytes(b"{partial")
+    captured = _capture_route(monkeypatch)
+
+    routes._handle_sessions_cleanup(_FakeHandler("/api/sessions/cleanup"), {})
+
+    assert captured["status"] == 500
+    assert captured["ok"]["cleaned"] == 1
+    assert not models._session_cleanup_residual_file(valid_sid).exists()
+    assert corrupt_path.read_bytes() == b"{partial"
+    assert {
+        item.get("session_id") for item in captured["ok"]["residuals"]
+    } == {corrupt_sid}
+    assert captured["ok"]["residuals"][0]["artifacts"][0]["artifact"] == (
+        "cleanup_residual_record"
+    )
+    valid, invalid = models._scan_session_cleanup_residuals()
+    assert valid == {}
+    assert [item.get("session_id") for item in invalid] == [corrupt_sid]
+
+
 def test_cleanup_route_uses_generation_aware_deletion(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     stale = Session(session_id="cleanup-stale-save", title="Untitled")
