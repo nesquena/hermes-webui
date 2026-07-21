@@ -256,7 +256,7 @@ def test_new_sessions_keep_large_native_media_inline(tmp_path, monkeypatch):
     assert not session_media._session_media_dir(session.session_id).exists()
 
 
-def test_existing_compact_reference_is_verified_then_saved_inline(tmp_path, monkeypatch):
+def test_existing_compact_reference_refuses_implicit_persistence_migration(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
     session = Session(
@@ -273,13 +273,12 @@ def test_existing_compact_reference_is_verified_then_saved_inline(tmp_path, monk
     session.messages = [compact]
     session.context_messages = [compact]
 
-    session.save(skip_index=True)
+    original_sidecar = session.path.read_bytes()
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="explicit offline media migration"):
+        session.save(skip_index=True)
 
-    payload = json.loads(session.path.read_text(encoding="utf-8"))
-    assert "webui-media://" not in json.dumps(payload)
-    assert payload["messages"][0]["content"][1]["image_url"]["url"].startswith(
-        "data:image/png;base64,"
-    )
+    assert session.path.read_bytes() == original_sidecar
+    assert (media_dir / filename).read_bytes() == raw
 
 
 def test_quarantine_without_residual_blocks_same_sid_reservation(tmp_path, monkeypatch):
@@ -308,7 +307,7 @@ def test_save_refuses_to_retain_backup_with_missing_private_media(tmp_path, monk
     expected_bytes = session.path.read_bytes()
     session.messages = [{"role": "user", "content": "replacement"}]
 
-    with pytest.raises(session_media.SessionMediaIntegrityError, match="missing"):
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="explicit offline media migration"):
         session.save(skip_index=True)
 
     assert session.path.read_bytes() == expected_bytes
@@ -359,6 +358,34 @@ def test_legacy_loader_cannot_register_then_overwrite_recovered_sidecar(tmp_path
 
     with pytest.raises(RuntimeError, match="unvalidated session generation"):
         loaded["session"].save(skip_index=True)
+    assert path.read_bytes() == replacement
+
+
+def test_tokenless_legacy_loader_rejects_symlink_and_inode_replacement(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    sid = "legacy-nofollow-sidecar"
+    path = session_dir / f"{sid}.json"
+    original = json.dumps(
+        {"session_id": sid, "messages": [{"role": "user", "content": "original"}]}
+    ).encode("utf-8")
+    replacement = json.dumps(
+        {"session_id": sid, "messages": [{"role": "user", "content": "replacement"}]}
+    ).encode("utf-8")
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(replacement)
+    path.symlink_to(outside)
+
+    assert Session.load(sid) is None
+
+    path.unlink()
+    path.write_bytes(original)
+    loaded = Session.load(sid)
+    assert loaded is not None
+    path.replace(path.with_suffix(".old"))
+    path.write_bytes(replacement)
+
+    with pytest.raises(RuntimeError, match="unvalidated session generation"):
+        loaded.save(skip_index=True)
     assert path.read_bytes() == replacement
 
 
@@ -490,7 +517,7 @@ def test_id_copy_failure_does_not_commit_dangling_session(path, tmp_path, monkey
     assert destination_id not in models.SESSIONS
 
 
-def test_duplicate_clones_externalized_media_before_session_commit(tmp_path, monkeypatch):
+def test_duplicate_rejects_legacy_compact_media_without_publishing_destination(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     raw, data_url = _large_png_data_url()
     source = Session(
@@ -501,6 +528,7 @@ def test_duplicate_clones_externalized_media_before_session_commit(tmp_path, mon
     )
     source.save(skip_index=True)
     models.SESSIONS[source.session_id] = source
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
@@ -510,13 +538,11 @@ def test_duplicate_clones_externalized_media_before_session_commit(tmp_path, mon
 
     routes.handle_post(_FakeHandler("/api/session/duplicate"), urlparse("/api/session/duplicate"))
 
-    assert "bad" not in captured
-    destination_id = captured["ok"]["session"]["session_id"]
-    destination = Session.load(destination_id)
-    _assert_destination_media_is_independent(destination, source.session_id, raw, data_url)
+    assert captured["bad"] == ("Could not copy session media", 500)
+    assert len(models.SESSIONS) == 1
 
 
-def test_branch_clones_externalized_media_before_session_commit(tmp_path, monkeypatch):
+def test_branch_rejects_legacy_compact_media_without_publishing_destination(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     raw, data_url = _large_png_data_url()
     source = Session(
@@ -527,6 +553,7 @@ def test_branch_clones_externalized_media_before_session_commit(tmp_path, monkey
     )
     source.save(skip_index=True)
     models.SESSIONS[source.session_id] = source
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
@@ -536,10 +563,8 @@ def test_branch_clones_externalized_media_before_session_commit(tmp_path, monkey
 
     routes.handle_post(_FakeHandler("/api/session/branch"), urlparse("/api/session/branch"))
 
-    assert "bad" not in captured
-    destination_id = captured["ok"]["session_id"]
-    destination = Session.load(destination_id)
-    _assert_destination_media_is_independent(destination, source.session_id, raw, data_url)
+    assert captured["bad"] == ("Could not copy session media", 500)
+    assert len(models.SESSIONS) == 1
 
 
 @pytest.mark.parametrize(
@@ -927,7 +952,7 @@ def test_legacy_attachment_media_is_verified_and_migrated(tmp_path, monkeypatch)
     assert not (tmp_path / "session-media" / "legacy-session" / filename).exists()
 
 
-def test_btw_clones_media_before_new_session_is_published(tmp_path, monkeypatch):
+def test_btw_rejects_legacy_compact_media_without_publishing_destination(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     raw, data_url = _large_png_data_url()
     source = Session(
@@ -937,6 +962,7 @@ def test_btw_clones_media_before_new_session_is_published(tmp_path, monkeypatch)
     )
     source.save(skip_index=True)
     models.SESSIONS[source.session_id] = source
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
     monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: source)
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
@@ -959,17 +985,8 @@ def test_btw_clones_media_before_new_session_is_published(tmp_path, monkeypatch)
         {"session_id": source.session_id, "question": "What is in the image?"},
     )
 
-    assert "bad" not in captured
-    destination_id = captured["ok"]["session_id"]
-    destination = Session.load(destination_id)
-    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
-        session_media.remove_session_media(source.session_id)
-    hydrated = session_media.hydrate_session_media_urls(
-        destination.context_messages,
-        destination_id,
-    )
-    assert hydrated[0]["content"][1]["image_url"]["url"] == data_url
-    assert next(session_media._session_media_dir(destination_id).iterdir()).read_bytes() == raw
+    assert captured["bad"] == ("Could not publish side-question session", 500)
+    assert set(models.SESSIONS) == {source.session_id}
 
 
 def test_export_import_inlines_verified_media_and_establishes_new_ownership(tmp_path, monkeypatch):
@@ -1113,11 +1130,10 @@ def test_clone_rolls_back_when_post_yield_directory_identity_check_fails(
 
 def test_btw_thread_start_failure_rolls_back_all_ephemeral_ownership(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
-    _raw, data_url = _large_png_data_url()
     source = Session(
         session_id="btw-failure-source",
-        messages=[_image_message(data_url)],
-        context_messages=[_image_message(data_url)],
+        messages=[{"role": "user", "content": "ordinary history"}],
+        context_messages=[{"role": "user", "content": "ordinary history"}],
     )
     source.save(skip_index=True)
     models.SESSIONS[source.session_id] = source
@@ -1154,11 +1170,7 @@ def test_btw_thread_start_failure_rolls_back_all_ephemeral_ownership(tmp_path, m
     from api.background import find_btw_owner
 
     owner = find_btw_owner(destination_id, stream_id)
-    assert owner is not None
-    assert owner["cleanup_pending"] is True
-    assert owner["cleanup_residuals"] == [
-        {"artifact": "session_media", "error": "SessionMediaIntegrityError"}
-    ]
+    assert owner is None
 
 
 def test_missing_anchored_capabilities_fail_closed_without_persisting_private_refs(
@@ -2360,15 +2372,18 @@ def test_clear_durably_removes_backup_and_private_media(tmp_path, monkeypatch):
 
     assert captured["status"] == 500
     assert captured["ok"]["error"] == "Session clear incomplete"
-    assert {item["artifact"] for item in captured["ok"]["residuals"]} == {
-        "session_media"
+    assert {item["artifact"] for item in captured["ok"]["residuals"]} >= {
+        "session_json",
+        "session_json_verification",
     }
-    assert not session.path.with_suffix(".json.bak").exists()
-    assert not session_media._session_media_dir(session.session_id).exists()
-    assert len(list((tmp_path / "session-media").glob(".delete-*"))) == 1
+    # The old namespace remains an owner (canonical or quarantine), so the
+    # clear operation cannot report success or allow same-SID reuse.
+    with pytest.raises(models.SessionDestinationCollisionError):
+        with models.reserve_session_destination(session.session_id):
+            pass
 
 
-def test_clear_retires_backup_and_media_even_when_live_transcript_is_already_empty(
+def test_save_refuses_to_create_backup_from_legacy_compact_media(
     tmp_path, monkeypatch
 ):
     _configure_session_state(tmp_path, monkeypatch)
@@ -2379,31 +2394,18 @@ def test_clear_retires_backup_and_media_even_when_live_transcript_is_already_emp
         context_messages=[_image_message(data_url)],
     )
     session.save(skip_index=True)
+    original_sidecar = session.path.read_bytes()
     session.messages = []
     session.context_messages = []
-    session.save(skip_index=True)
-    backup = session.path.with_suffix(".json.bak")
-    assert backup.exists()
-    assert session_media._session_media_dir(session.session_id).exists()
-    models.SESSIONS[session.session_id] = session
-    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": session.session_id})
-    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
-    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
-    monkeypatch.setattr(routes.api_config, "_evict_session_agent", lambda _sid: None)
-    captured = _capture_route(monkeypatch)
 
-    routes.handle_post(_FakeHandler("/api/session/clear"), urlparse("/api/session/clear"))
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="session backup"):
+        session.save(skip_index=True)
 
-    assert captured["status"] == 500
-    assert {item["artifact"] for item in captured["ok"]["residuals"]} == {
-        "session_media"
-    }
-    assert not backup.exists()
-    assert not session_media._session_media_dir(session.session_id).exists()
+    assert session.path.read_bytes() == original_sidecar
+    assert not session.path.with_suffix(".json.bak").exists()
 
 
-def test_truncate_prunes_only_media_unreachable_from_live_or_backup(tmp_path, monkeypatch):
+def test_truncate_refuses_legacy_compact_media_without_pruning_namespace(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     _raw_a, data_url_a = _large_png_data_url(b"a")
     _raw_b, data_url_b = _large_png_data_url(b"b")
@@ -2421,13 +2423,12 @@ def test_truncate_prunes_only_media_unreachable_from_live_or_backup(tmp_path, mo
     from api.session_ops import truncate_session_at_keep
 
     truncate_session_at_keep(session, 1)
-    session.save(skip_index=True, prune_media=True)
+    original_sidecar = session.path.read_bytes()
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="explicit offline media migration"):
+        session.save(skip_index=True, prune_media=True)
 
-    files = {path.name for path in session_media._session_media_dir(session.session_id).iterdir()}
-    assert stray_name not in files
-    # The removed second message remains reachable from the recovery backup.
-    assert len([name for name in files if not name.startswith(".prune-")]) == 2
-    assert len([name for name in files if name.startswith(".prune-")]) == 1
+    assert session.path.read_bytes() == original_sidecar
+    assert (session_media._session_media_dir(session.session_id) / stray_name).exists()
 
 
 def test_truncate_does_not_report_committed_write_as_failed_when_prune_fails(
@@ -2542,7 +2543,7 @@ def test_save_rejects_private_ref_in_non_image_transcript_path(tmp_path, monkeyp
 
     with pytest.raises(
         session_media.SessionMediaIntegrityError,
-        match="outside an image part",
+        match="explicit offline media migration",
     ):
         session.save(skip_index=True)
 
@@ -2569,7 +2570,7 @@ def test_save_rejects_image_shaped_private_ref_in_message_metadata(
 
     with pytest.raises(
         session_media.SessionMediaIntegrityError,
-        match="outside an image part",
+        match="explicit offline media migration",
     ):
         session.save(skip_index=True)
 

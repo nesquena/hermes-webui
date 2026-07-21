@@ -163,7 +163,7 @@ def _stage_compression_transaction_source(
     if not _path_entry_exists(sidecar):
         raise RuntimeError("Compression source sidecar is missing")
     sidecar_bytes = sidecar.read_bytes()
-    _read_recovery_payload(sidecar, old_sid)
+    _read_recovery_payload_bytes(sidecar_bytes, old_sid, source_name=sidecar.name)
     index_existed = _path_entry_exists(index)
     index_bytes = index.read_bytes() if index_existed else b""
     intent = {
@@ -236,6 +236,12 @@ def _restore_compression_transaction_source(
         payload = backup.read_bytes()
         if hashlib.sha256(payload).hexdigest() != record["sha256"]:
             raise RuntimeError("Compression source backup digest mismatch")
+        if key == "sidecar":
+            _read_recovery_payload_bytes(
+                payload,
+                validated["old_session_id"],
+                source_name=backup.name,
+            )
         _durable_replace_bytes(targets[key], payload)
 
 
@@ -249,11 +255,21 @@ def _retire_compression_transaction(session_dir: Path, new_sid: str) -> None:
 
 
 def _read_recovery_payload(path: Path, expected_sid: str) -> dict:
-    from api.models import _load_and_validate_session_payload
-    from api.session_media import verify_serialized_session_media_payload
+    return _read_recovery_payload_bytes(
+        path.read_bytes(), expected_sid, source_name=path.name
+    )
 
-    payload = _load_and_validate_session_payload(path, expected_sid)
-    verify_serialized_session_media_payload(payload, expected_sid)
+def _read_recovery_payload_bytes(payload_bytes: bytes, expected_sid: str, *, source_name: str) -> dict:
+    from api.models import _validate_session_payload_identity
+    from api.session_media import assert_no_session_media_references
+
+    payload = _validate_session_payload_identity(
+        json.loads(payload_bytes), expected_sid, source_name=source_name
+    )
+    assert_no_session_media_references(
+        payload,
+        context="recovery payload; use an explicit offline media migration",
+    )
     return payload
 
 
@@ -581,27 +597,18 @@ def _recover_session_under_authority(session_path: Path) -> dict:
     if status["recommend"] != "restore":
         return {**status, "restored": False}
     bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix(f'.json.recover.tmp.{uuid.uuid4().hex}')
     try:
         # Validate the backup's embedded identity before it can replace the
         # current sidecar or influence any media namespace decision.
-        _read_recovery_payload(bak_path, session_path.stem)
-        shutil.copyfile(bak_path, tmp_path)
-        _read_recovery_payload(tmp_path, session_path.stem)
-        with open(tmp_path, 'rb') as handle:
-            os.fsync(handle.fileno())
-        tmp_path.replace(session_path)
-        from api.models import _fsync_parent_directory
+        backup_bytes = bak_path.read_bytes()
+        _read_recovery_payload_bytes(
+            backup_bytes, session_path.stem, source_name=bak_path.name
+        )
+        from api.models import _durable_replace_bytes
 
-        _fsync_parent_directory(session_path)
-    except OSError as exc:
-        logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _durable_replace_bytes(session_path, backup_bytes)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("recover_session: restore failed for %s: %s", session_path, exc)
         return {**status, "restored": False, "error": str(exc)}
     try:
         from api.config import SESSION_DIR

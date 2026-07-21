@@ -223,6 +223,7 @@ def test_compression_failure_after_source_archival_restores_exact_source(
     models.SESSIONS[old_sid] = session
     source_before = session.path.read_bytes()
     index_before = models.SESSION_INDEX_FILE.read_bytes()
+    transcript_before = copy.deepcopy((session.messages, session.context_messages))
     observed = {}
 
     def fail_after_archive(_session, source_sid, _destination_sid):
@@ -231,6 +232,8 @@ def test_compression_failure_after_source_archival_restores_exact_source(
         )
         observed["source_archived"] = archived["pre_compression_snapshot"] is True
         observed["runtime_cleared"] = archived["active_stream_id"] is None
+        _session.messages[:] = [{"role": "user", "content": "mutated before failure"}]
+        _session.context_messages[:] = [{"role": "assistant", "content": "mutated before failure"}]
         raise OSError("injected post-archive failure")
 
     monkeypatch.setattr(
@@ -256,6 +259,7 @@ def test_compression_failure_after_source_archival_restores_exact_source(
     assert session.pending_attachments == [{"name": "pending.txt"}]
     assert session.pending_started_at == 123.0
     assert session.pending_user_source == "webui"
+    assert (session.messages, session.context_messages) == transcript_before
     assert not (session_dir / f"{new_sid}.json").exists()
     assert not session_media._session_media_dir(new_sid).exists()
     assert not (session_dir / "_compression_transactions" / f"{new_sid}.json").exists()

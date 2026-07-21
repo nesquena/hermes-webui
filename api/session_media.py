@@ -538,10 +538,10 @@ def _read_verified_media_reference(session_id: str, filename: str) -> tuple[str,
             try:
                 with _open_legacy_session(legacy_path) as legacy_fd:
                     mime, raw = _read_and_verify_at(legacy_fd, filename)
-                # Compatibility is deliberately read-only.  Publishing a new
+                # Compatibility is deliberately read-only. Publishing a new
                 # private copy would recreate the retirement problem this
-                # module now fails closed on; Session.save() instead inlines
-                # the verified bytes into the next durable sidecar write.
+                # module now fails closed on; persisted migration requires an
+                # explicit offline tool with a safe retirement backend.
                 return mime, raw
             except FileNotFoundError:
                 continue
@@ -858,13 +858,6 @@ def hydrate_session_media_urls(value, session_id: str):
     visit(hydrated)
     assert_no_session_media_references(hydrated, context="hydrated session history")
     return hydrated
-
-
-def inline_legacy_session_media_urls(value, session_id: str):
-    """Migrate compact refs only when present, preserving ordinary object identity."""
-    if not _collect_reference_filenames(value):
-        return value
-    return hydrate_session_media_urls(value, session_id)
 
 
 def _remove_tree_at(parent_fd: int, name: str, *, expected_fd: int | None = None) -> None:

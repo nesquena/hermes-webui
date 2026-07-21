@@ -112,6 +112,30 @@ def test_foreign_backup_identity_is_rejected_before_recovery_replace(tmp_path):
     assert live.read_bytes() == before
 
 
+def test_compact_media_backup_is_rejected_before_recovery_replace(tmp_path):
+    sid = "compact-backup"
+    live = _write_session(tmp_path, sid, messages=1)
+    before = live.read_bytes()
+    compact = {
+        "session_id": sid,
+        "messages": [
+            {
+                "role": "user",
+                "content": "webui-media://" + ("0" * 64) + ".png",
+            }
+        ],
+    }
+    live.with_suffix(".json.bak").write_text(json.dumps(compact), encoding="utf-8")
+
+    status = inspect_session_recovery_status(live)
+    result = recover_session(live)
+
+    assert status["bak_messages"] == -1
+    assert status["recommend"] == "no_action"
+    assert result["restored"] is False
+    assert live.read_bytes() == before
+
+
 def test_startup_finalizes_durable_published_compression_intent(tmp_path, monkeypatch):
     import api.models as models
 
