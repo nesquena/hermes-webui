@@ -8422,6 +8422,7 @@ function _appearancePayloadFromUi(){
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
+    skip_delete_confirm: !!($('settingsSkipDeleteConfirm')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
     project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
     ..._structuredCodeViewFromUi(),
@@ -8539,6 +8540,7 @@ async function _autosaveAppearanceSettings(payload){
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
+    window._skipDeleteConfirm=!!(saved&&saved.skip_delete_confirm);
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
@@ -9000,6 +9002,15 @@ async function loadSettingsPanel(){
         window._renderUserMarkdown=this.checked;
         if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
         if(typeof renderMessages==='function') renderMessages();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const skipDeleteConfirmCb=$('settingsSkipDeleteConfirm');
+    if(skipDeleteConfirmCb){
+      skipDeleteConfirmCb.checked=!!settings.skip_delete_confirm;
+      window._skipDeleteConfirm=skipDeleteConfirmCb.checked;
+      skipDeleteConfirmCb.onchange=function(){
+        window._skipDeleteConfirm=this.checked;
         _scheduleAppearanceAutosave();
       };
     }

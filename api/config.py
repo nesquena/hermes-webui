@@ -9178,6 +9178,7 @@ _SETTINGS_DEFAULTS = {
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
     "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
+    "skip_delete_confirm": False,  # skip confirmation when deleting sessions
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "hide_composer_attach": False,  # hide attach button in composer footer
     "hide_composer_saved_prompts": False,  # hide saved prompts button in composer footer
@@ -9496,6 +9497,7 @@ _SETTINGS_BOOL_KEYS = {
     "session_endless_scroll",
     "transparent_stream_event_timestamps",
     "auto_scroll_follow",
+    "skip_delete_confirm",
     "worklog_details_expanded_default",
     "auth_disabled_acknowledged",
     "hide_composer_attach",

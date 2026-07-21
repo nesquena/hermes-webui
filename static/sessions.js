@@ -8973,12 +8973,15 @@ async function removeWorktree(session){
 
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
-  const ok=await showConfirmDialog({
-    message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
-    confirmLabel:t('delete_title'),
-    danger:true
-  });
-  if(!ok)return false;
+  const skipConfirm=window._skipDeleteConfirm;
+  if(!skipConfirm){
+    const ok=await showConfirmDialog({
+      message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
+      confirmLabel:t('delete_title'),
+      danger:true
+    });
+    if(!ok)return false;
+  }
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
