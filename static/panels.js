@@ -5231,8 +5231,8 @@ let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'project_conte
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
 const MEMORY_SECTIONS = [
-  { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
-  { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
+  { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain', enabledField: 'memory_enabled' },
+  { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user', enabledField: 'user_profile_enabled' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
   { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
   { key: 'external_notes', labelKey: 'external_notes_sources', emptyKey: 'external_notes_empty', iconKey: 'book-open' },
@@ -5240,6 +5240,12 @@ const MEMORY_SECTIONS = [
 
 function _memorySectionMeta(key) {
   return MEMORY_SECTIONS.find(s => s.key === key) || MEMORY_SECTIONS[0];
+}
+
+function _memorySectionEnabled(meta, data = _memoryData) {
+  if (meta.key === 'external_notes') return !data || data.external_notes_enabled === true;
+  if (!meta.enabledField) return true;
+  return !data || typeof data[meta.enabledField] !== 'boolean' || data[meta.enabledField];
 }
 
 function _memorySectionLabel(meta) {
@@ -5295,6 +5301,20 @@ function _setMemoryHeaderButtons(mode) {
   }
   else if (mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); show(cancelBtn); show(saveBtn); }
   else { if (header) header.style.display = 'none'; hide(editBtn); hide(cancelBtn); hide(saveBtn); }
+}
+
+function _renderMemoryEmpty() {
+  const title = $('memoryDetailTitle');
+  const body = $('memoryDetailBody');
+  const empty = $('memoryDetailEmpty');
+  if (title) title.textContent = '';
+  if (body) {
+    body.innerHTML = '';
+    body.style.display = 'none';
+  }
+  if (empty) empty.style.display = '';
+  _memoryMode = 'empty';
+  _setMemoryHeaderButtons('empty');
 }
 
 function _renderExternalNotesSources() {
@@ -5487,7 +5507,7 @@ async function previewExternalNote(source, id) {
 }
 
 async function openMemorySection(section, el) {
-  if (section === 'external_notes' && _memoryData && !_memoryData.external_notes_enabled) return;
+  if (!_memorySectionEnabled(_memorySectionMeta(section))) return;
   _currentMemorySection = section;
   document.querySelectorAll('#memoryPanel .side-menu-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
@@ -5500,7 +5520,7 @@ async function openMemorySection(section, el) {
 
 function editCurrentMemory() {
   const meta = _memorySectionMeta(_currentMemorySection);
-  if (!_currentMemorySection || _currentMemorySection === 'external_notes' || meta.readOnly) return;
+  if (!_currentMemorySection || !_memorySectionEnabled(meta) || _currentMemorySection === 'external_notes' || meta.readOnly) return;
   _renderMemoryEdit(_currentMemorySection);
 }
 
@@ -5515,7 +5535,8 @@ function closeMemoryEdit() { cancelMemoryEdit(); }
 
 async function submitMemorySave() {
   if (!_currentMemorySection) return;
-  if (_memorySectionMeta(_currentMemorySection).readOnly) return;
+  const meta = _memorySectionMeta(_currentMemorySection);
+  if (!_memorySectionEnabled(meta) || meta.readOnly) return;
   const ta = $('memEditContent');
   const errEl = $('memEditError');
   if (!ta) return;
@@ -7386,7 +7407,8 @@ async function loadMemory(force) {
       : '/api/memory';
     const data = await api(memoryUrl);
     _memoryData = data;
-    if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
+    const resetDisabledSection = _currentMemorySection && !_memorySectionEnabled(_memorySectionMeta(_currentMemorySection), data);
+    if (resetDisabledSection) {
       _currentMemorySection = null;
     }
     if (_currentMemorySection === 'external_notes') {
@@ -7396,6 +7418,8 @@ async function loadMemory(force) {
       panel.innerHTML = '';
       for (const s of MEMORY_SECTIONS) {
         if (s.key === 'external_notes' && !_memoryData.external_notes_enabled) continue;
+        if (s.key === 'memory' && _memoryData.memory_enabled === false) continue;
+        if (s.key === 'user' && _memoryData.user_profile_enabled === false) continue;
         const el = document.createElement('button');
         el.type = 'button';
         el.className = 'side-menu-item';
@@ -7409,6 +7433,8 @@ async function loadMemory(force) {
     }
     if (_currentMemorySection && _memoryMode !== 'edit') {
       _renderMemoryDetail(_currentMemorySection);
+    } else if (resetDisabledSection || !_currentMemorySection) {
+      _renderMemoryEmpty();
     }
   } catch(e) {
     if (panel) panel.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;

@@ -20498,6 +20498,7 @@ def _read_active_project_context(workspace: Path | None) -> dict:
 
 
 def _handle_memory_read(handler, parsed=None):
+    memory_enabled, user_profile_enabled = _memory_feature_flags()
     try:
         from api.profiles import get_active_hermes_home
 
@@ -20511,12 +20512,12 @@ def _handle_memory_read(handler, parsed=None):
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file.exists()
+        if memory_enabled and mem_file.exists()
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file.exists()
+        if user_profile_enabled and user_file.exists()
         else ""
     )
     soul = (
@@ -20538,12 +20539,14 @@ def _handle_memory_read(handler, parsed=None):
             "project_context_path": project_context["path"],
             "project_context_name": project_context.get("name", ""),
             "project_context_workspace": project_context["workspace"],
-            "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
-            "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "memory_mtime": mem_file.stat().st_mtime if memory_enabled and mem_file.exists() else None,
+            "user_mtime": user_file.stat().st_mtime if user_profile_enabled and user_file.exists() else None,
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
             "external_notes_enabled": _external_notes_sources_enabled(),
+            "memory_enabled": memory_enabled,
+            "user_profile_enabled": user_profile_enabled,
         },
     )
 
@@ -25389,8 +25392,13 @@ def _handle_memory_write(handler, body):
     except ImportError:
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
-    mem_dir.mkdir(parents=True, exist_ok=True)
     section = body["section"]
+    memory_enabled, user_profile_enabled = _memory_feature_flags()
+    if section == "memory" and not memory_enabled:
+        return bad(handler, "Memory is disabled", 403)
+    if section == "user" and not user_profile_enabled:
+        return bad(handler, "User profile is disabled", 403)
+    mem_dir.mkdir(parents=True, exist_ok=True)
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
@@ -26085,6 +26093,20 @@ def _external_notes_sources_enabled(config_data: dict | None = None) -> bool:
         cfg.get("webui_external_notes_sources")
         or cfg.get("external_notes_sources")
         or cfg.get("notes_sources_drawer")
+    )
+
+
+def _memory_feature_flags() -> tuple[bool, bool]:
+    config_data = get_config()
+    memory_config = config_data.get("memory") if isinstance(config_data, dict) else None
+    if not isinstance(memory_config, dict):
+        memory_config = {}
+    return tuple(
+        value if isinstance(value, bool) else _webui_truthy(value)
+        for value in (
+            memory_config.get("memory_enabled", True),
+            memory_config.get("user_profile_enabled", True),
+        )
     )
 
 
