@@ -1744,6 +1744,59 @@ def test_corrupt_deleted_tombstone_isolated_by_destination_reservation(
     assert tombstone_path.read_bytes() == corrupt_bytes
 
 
+@pytest.mark.parametrize("path", ["/api/share/create", "/api/share/revoke"])
+def test_external_share_sidecar_save_failure_releases_destination_claim(
+    path, tmp_path, monkeypatch
+):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    sid = "external-share-sidecar"
+    snapshot = Session(
+        session_id=sid,
+        title="External share",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "share me"}],
+    )
+    snapshot.share_token = "existing-share-token" if path.endswith("revoke") else None
+    snapshot.share_created_at = 123.0
+    share_meta = {
+        "share_token": "created-share-token",
+        "share_title": "External share",
+        "share_message_count": 1,
+        "share_created_at": 123.0,
+        "share_updated_at": 124.0,
+    }
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid})
+    monkeypatch.setattr(
+        routes,
+        "_resolve_share_session_pair",
+        lambda _sid, _handler: (snapshot, None, {}),
+    )
+    monkeypatch.setattr(routes, "create_or_refresh_share", lambda _session: share_meta)
+    monkeypatch.setattr(routes, "revoke_share", lambda _session: True)
+    monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *_args, **_kwargs: None)
+    captured = _capture_route(monkeypatch)
+    original_save = Session.save
+
+    def fail_save(_session, *args, **kwargs):
+        raise OSError("injected share sidecar save failure")
+
+    monkeypatch.setattr(Session, "save", fail_save)
+    with pytest.raises(OSError, match="injected share sidecar save failure"):
+        routes.handle_post(_FakeHandler(path), urlparse(path))
+
+    assert not models._session_incarnation_claim_file(sid).exists()
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid not in models._active_destination_reservations()
+
+    monkeypatch.setattr(Session, "save", original_save)
+    routes.handle_post(_FakeHandler(path), urlparse(path))
+
+    assert captured["status"] == 200
+    assert (session_dir / f"{sid}.json").exists()
+    assert not models._session_incarnation_claim_file(sid).exists()
+
+
 def test_import_index_failure_rolls_back_json_media_and_cache(tmp_path, monkeypatch):
     _configure_session_state(tmp_path, monkeypatch)
     _raw, data_url = _large_png_data_url()

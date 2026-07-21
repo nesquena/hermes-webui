@@ -285,9 +285,12 @@ or publish a dangling ref.
 New-session lineage operations exclusively reserve the destination SID and
 prove its sidecar, media, attachment, journal, index, cache, and runtime
 namespaces unowned before publishing. Duplicate, branch, `/btw`, portable JSON
-import, focused recovery, and compression continuation creation use this same
-publish-or-rollback transaction. Rollback removes only artifacts created while
-that reservation is held. Before compression mutates either identity, it holds
+import, focused recovery, compression continuation creation, and external-session
+share metadata sidecars use this same publish-or-rollback transaction. Share
+create/revoke holds the reservation through sidecar save, so a failed save
+cannot retain an incarnation claim that blocks future share operations.
+Rollback removes only artifacts created while that reservation is held. Before
+compression mutates either identity, it holds
 both SID authorities plus the global index writer, records durable intent, and
 stores digest-bound exact-byte backups of the source sidecar and index. It then
 archives the source, publishes the continuation JSON/index, and migrates cache,
