@@ -5010,9 +5010,10 @@ def _configured_model_badges_from_static_catalog(
     *,
     active_provider: str | None,
     default_model: str,
+    default_model_has_explicit_source: bool,
 ) -> dict[str, dict[str, str]]:
     configured_entries: list[dict[str, str]] = []
-    if active_provider and default_model:
+    if active_provider and default_model and default_model_has_explicit_source:
         configured_entries.append(
             {
                 "provider": active_provider,
@@ -5172,6 +5173,7 @@ def _minimal_static_models_catalog() -> dict:
         return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
+            "default_model_has_explicit_source": _default_model_has_explicit_source(cfg),
             "configured_model_badges": {},
             "groups": groups,
             "aliases": {},
@@ -5181,6 +5183,7 @@ def _minimal_static_models_catalog() -> dict:
         return {
             "active_provider": None,
             "default_model": "",
+            "default_model_has_explicit_source": False,
             "configured_model_badges": {},
             "groups": [],
             "aliases": {},
@@ -5541,10 +5544,12 @@ def _static_models_catalog_without_live_probes() -> dict:
         return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
+            "default_model_has_explicit_source": default_model_has_explicit_source,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
                 groups,
                 active_provider=active_provider,
                 default_model=default_model,
+                default_model_has_explicit_source=default_model_has_explicit_source,
             ),
             "groups": groups,
             "aliases": model_aliases,
@@ -5716,7 +5721,7 @@ def _current_webui_version() -> str | None:
 # guarantees that even if a future release accidentally reuses the same
 # WebUI version string (or a debug build doesn't have a version), a structural
 # change still invalidates the cache.
-_MODELS_CACHE_SCHEMA_VERSION = 3
+_MODELS_CACHE_SCHEMA_VERSION = 4
 
 
 _models_cache_path = STATE_DIR / "models_cache.json"
@@ -5977,12 +5982,19 @@ def _is_valid_models_cache(cache: object) -> bool:
     """
     if not isinstance(cache, dict):
         return False
-    if not {"active_provider", "default_model", "configured_model_badges", "groups"}.issubset(cache):
+    if not {
+        "active_provider",
+        "default_model",
+        "default_model_has_explicit_source",
+        "configured_model_badges",
+        "groups",
+    }.issubset(cache):
         return False
     active_provider = cache.get("active_provider")
     return (
         (active_provider is None or isinstance(active_provider, str))
         and isinstance(cache.get("default_model"), str)
+        and isinstance(cache.get("default_model_has_explicit_source"), bool)
         and isinstance(cache.get("configured_model_badges"), dict)
         and isinstance(cache.get("groups"), list)
     )
@@ -6068,6 +6080,7 @@ def _load_models_cache_from_disk() -> dict | None:
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
+            "default_model_has_explicit_source": cache["default_model_has_explicit_source"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": (
@@ -6136,6 +6149,7 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
+            "default_model_has_explicit_source": cache["default_model_has_explicit_source"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": aliases,
@@ -6168,6 +6182,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             "_source_fingerprint": _models_cache_source_fingerprint(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
+            "default_model_has_explicit_source": cache["default_model_has_explicit_source"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
         }
@@ -6551,9 +6566,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     s = stripped or s
             return s.replace("-", ".")
 
-        def _build_configured_model_badges() -> dict[str, dict[str, str]]:
+        def _build_configured_model_badges(
+            *,
+            default_model_has_explicit_source: bool,
+        ) -> dict[str, dict[str, str]]:
             configured_entries: list[dict[str, str]] = []
-            if active_provider and default_model:
+            if active_provider and default_model and default_model_has_explicit_source:
                 configured_entries.append(
                     {
                         "provider": active_provider,
@@ -7888,6 +7906,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 "models": [{"id": default_model, "label": label}],
                             }
                         )
+                    elif not injected:
+                        groups.append(
+                            {
+                                "provider": "Default",
+                                "provider_id": "default",
+                                "models": [{"id": default_model, "label": label}],
+                            }
+                        )
 
         # Post-process: ensure model IDs are globally unique across groups.
         # When multiple providers expose the same bare model ID, prefix
@@ -7951,7 +7977,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return {
             "active_provider": active_provider,
             "default_model": default_model,
-            "configured_model_badges": _build_configured_model_badges(),
+            "default_model_has_explicit_source": default_model_has_explicit_source,
+            "configured_model_badges": _build_configured_model_badges(
+                default_model_has_explicit_source=default_model_has_explicit_source,
+            ),
             "groups": groups,
             "aliases": model_aliases,
         }

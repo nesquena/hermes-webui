@@ -126,9 +126,11 @@ let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
 
 for (const name of [
+  '_modelCatalogHasRealProviderModels', '_shouldApplyModelPayloadDefault',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_captureModelDropdownSelection', '_findModelInDropdown', '_refreshOpenModelDropdown',
-  '_applyModelToDropdown', '_reconcileModelDropdownSelection', 'populateModelDropdown'
+  '_applyModelToDropdown', '_ensureModelOptionInDropdown',
+  '_reconcileModelDropdownSelection', 'populateModelDropdown'
 ]) {
   eval(extractFunc(name));
 }
@@ -150,7 +152,10 @@ populateModelDropdown(args.opts || {}).then(() => {
   process.stdout.write(JSON.stringify({
     selectValue: modelSelect.value,
     selectedProvider: modelSelect.selectedOptions[0] ? _getOptionProviderId(modelSelect.selectedOptions[0]) : null,
+    optionValues: modelSelect.options.map(o => o.value),
     defaultModel: window._defaultModel,
+    defaultModelHasExplicitSource: window._defaultModelHasExplicitSource,
+    defaultModelEligibleForFreshBoot: window._defaultModelEligibleForFreshBoot,
     activeProvider: window._activeProvider,
     calls,
   }));
@@ -181,15 +186,8 @@ def test_boot_settings_applies_default_without_deleting_browser_model_state():
 def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
     assert "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({" in BOOT_JS
     assert "preferProfileDefaultOnFreshBoot:true" in BOOT_JS
-    # #2726 invariant: boot path must keep profile/server default ahead of stale
-    # browser-persisted state when a default exists. Post-#2716 cherry-pick onto
-    # post-stage-batch11 master uses `stateToApply` pattern rather than the
-    # original `allowBootSavedModelOverride` variable name. Semantics preserved —
-    # check for the actual gate predicate that's equivalent.
-    assert (
-        "const allowBootSavedModelOverride=!window._defaultModel" in BOOT_JS
-        or "!window._defaultModel?savedState:null" in BOOT_JS
-    ), "boot.js missing the !window._defaultModel gate for saved-state override"
+    assert "const defaultWinsFreshBoot=!!window._defaultModel&&window._defaultModelEligibleForFreshBoot!==false;" in BOOT_JS
+    assert "const stateToApply=sessionModelState||(!defaultWinsFreshBoot?savedState:null);" in BOOT_JS
 
 
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
@@ -202,6 +200,7 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     # partially-rebuilt catalog is injected as a custom option instead of the
     # browser silently snapping the <select> to its first <option>. The
     # branch ORDER + per-branch model/provider arguments are unchanged.
+    assert "_shouldApplyModelPayloadDefault(data)" in snippet
     assert "_applyOrEnsure(data.default_model, data.active_provider||null)" in snippet
     assert "_applyOrEnsure(activeSession.model, activeSession.model_provider||null)" in snippet
     assert "_applyOrEnsure(previousState.model, previousState.model_provider||null)" in snippet
@@ -235,6 +234,56 @@ def test_boot_model_refresh_prefers_profile_default_over_stale_selection(populat
 
     assert got["selectValue"] == "@safe:gpt-4o-mini"
     assert got["selectedProvider"] == "safe"
+    assert got["defaultModelHasExplicitSource"] is True
+    assert got["defaultModelEligibleForFreshBoot"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_boot_model_refresh_does_not_synthesize_nonexplicit_fallback_when_catalog_has_models(
+    populate_driver_path,
+):
+    fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value="@expensive:gpt-5.5",
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        api_default_model=fallback_model,
+        api_default_model_has_explicit_source=False,
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
+            {"provider": "Expensive", "provider_id": "expensive", "models": [{"id": "@expensive:gpt-5.5", "label": "GPT-5.5"}]},
+        ],
+    )
+
+    assert got["selectValue"] == "@expensive:gpt-5.5"
+    assert fallback_model not in got["optionValues"]
+    assert f"@safe:{fallback_model}" not in got["optionValues"]
+    assert got["defaultModelHasExplicitSource"] is False
+    assert got["defaultModelEligibleForFreshBoot"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_boot_model_refresh_keeps_emergency_fallback_when_catalog_has_no_provider_models(
+    populate_driver_path,
+):
+    fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value="@expensive:gpt-5.5",
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        api_default_model=fallback_model,
+        api_default_model_has_explicit_source=False,
+        api_active_provider="safe",
+        api_groups=[],
+        initial_options=[],
+    )
+
+    assert got["selectValue"] == fallback_model
+    assert fallback_model in got["optionValues"]
+    assert got["defaultModelHasExplicitSource"] is False
+    assert got["defaultModelEligibleForFreshBoot"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -265,11 +314,12 @@ def test_non_boot_refresh_does_not_reapply_default_when_previous_model_disappear
         ],
     )
 
-    # The old value is gone, so the browser/select fallback can land on the
-    # refreshed first option. The important invariant is that the profile default
-    # is not reapplied as a special policy outside fresh boot.
-    assert got["selectValue"] == "@safe:gpt-4o-mini"
-    assert got["selectedProvider"] == "safe"
+    # The old value is gone from the refreshed catalog, but non-boot refreshes
+    # preserve the live in-page selection by injecting it instead of snapping
+    # to the profile default.
+    assert got["selectValue"] == "@removed:gpt-old"
+    assert got["selectedProvider"] == "removed"
+    assert "@removed:gpt-old" in got["optionValues"]
 
 
 def _run_populate_driver(
@@ -278,10 +328,13 @@ def _run_populate_driver(
     initial_value: str,
     opts: dict,
     session: dict | None,
+    api_default_model: str = "@safe:gpt-4o-mini",
+    api_default_model_has_explicit_source: bool = True,
+    api_active_provider: str = "safe",
     api_groups: list[dict] | None = None,
     initial_options: list[dict] | None = None,
 ):
-    groups = api_groups or [
+    groups = api_groups if api_groups is not None else [
         {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
         {"provider": "Expensive", "provider_id": "expensive", "models": [{"id": "@expensive:gpt-5.5", "label": "GPT-5.5"}]},
         {"provider": "Work", "provider_id": "work", "models": [{"id": "@work:glm-5.1", "label": "GLM-5.1"}]},
@@ -289,14 +342,16 @@ def _run_populate_driver(
     payload = {
         "initialValue": initial_value,
         "initialOptions": initial_options
-        or [
+        if initial_options is not None
+        else [
             {"provider": "expensive", "value": "@expensive:gpt-5.5", "label": "GPT-5.5"},
             {"provider": "safe", "value": "@safe:gpt-4o-mini", "label": "GPT-4o mini"},
             {"provider": "work", "value": "@work:glm-5.1", "label": "GLM-5.1"},
         ],
         "apiModels": {
-            "active_provider": "safe",
-            "default_model": "@safe:gpt-4o-mini",
+            "active_provider": api_active_provider,
+            "default_model": api_default_model,
+            "default_model_has_explicit_source": api_default_model_has_explicit_source,
             "configured_model_badges": {},
             "groups": groups,
         },

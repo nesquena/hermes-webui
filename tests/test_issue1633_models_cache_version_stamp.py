@@ -52,6 +52,7 @@ def _shape_cache():
     return {
         "active_provider": "anthropic",
         "default_model": "claude-sonnet-4.6",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {"foo": "bar"},
         "groups": [{"name": "Anthropic", "models": ["claude-sonnet-4.6"]}],
     }
@@ -353,6 +354,7 @@ def test_docker_update_scenario_invalidates_old_cache(isolated_cache, with_runti
     old_cache = {
         "active_provider": "nous",
         "default_model": "anthropic/claude-sonnet-4.6",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {"anthropic/claude-sonnet-4.6": "Anthropic"},
         # The pre-fix Nous group with only 4 models (the v0.50.281 bug)
         "groups": [{"name": "Nous Portal", "models": ["a", "b", "c", "d"]}],

@@ -2812,9 +2812,30 @@ window.addEventListener('visibilitychange',()=>{
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
+window._defaultModelHasExplicitSource=!!window._defaultModelHasExplicitSource;
+window._defaultModelEligibleForFreshBoot=window._defaultModelEligibleForFreshBoot!==false;
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
+
+function _modelCatalogHasRealProviderModels(data){
+  const groups=data&&Array.isArray(data.groups)?data.groups:[];
+  for(const group of groups){
+    const providerName=String(group&&group.provider||'').trim().toLowerCase();
+    const providerId=String(group&&group.provider_id||'').trim().toLowerCase();
+    if(providerName==='default'||providerId==='default') continue;
+    for(const bucket of ['models','extra_models']){
+      const models=Array.isArray(group&&group[bucket])?group[bucket]:[];
+      if(models.some(m=>m&&String(m.id||'').trim())) return true;
+    }
+  }
+  return false;
+}
+function _shouldApplyModelPayloadDefault(data){
+  if(!data||!data.default_model) return false;
+  if(data.default_model_has_explicit_source===true) return true;
+  return !_modelCatalogHasRealProviderModels(data);
+}
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -2988,7 +3009,7 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
     return _applyModelToDropdown(modelId, sel, providerId);
   };
 
-  if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
+  if(shouldApplyBootDefault && _shouldApplyModelPayloadDefault(data) && !(activeSession&&activeSession.model)){
     return _applyOrEnsure(data.default_model, data.active_provider||null);
   }
   if(activeSession&&activeSession.model){
@@ -3404,6 +3425,8 @@ async function populateModelDropdown(opts={}){
     if(requestSeq!==_modelDropdownRequestSeq) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
+    window._defaultModelHasExplicitSource=data.default_model_has_explicit_source===true;
+    window._defaultModelEligibleForFreshBoot=_shouldApplyModelPayloadDefault(data);
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
     // Keep g.extra_models label hydration in this function for /model and tail selections.

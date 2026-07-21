@@ -139,6 +139,17 @@ def _scrub_provider_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+def _catalog_model_ids(data: dict) -> set[str]:
+    ids: set[str] = set()
+    for group in data.get("groups", []):
+        for bucket in ("models", "extra_models"):
+            for model in group.get(bucket, []) or []:
+                model_id = str(model.get("id") or "").strip()
+                if model_id:
+                    ids.add(model_id)
+    return ids
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Section 1 — _build_nous_featured_set helper invariants
 # ────────────────────────────────────────────────────────────────────────
@@ -328,6 +339,117 @@ class TestApiModelsLargeCatalog:
                 f"Provider label should include '({_NOUS_FEATURED_TARGET} of "
                 f"{len(catalog)})' for capped catalogs, got {grp['provider']!r}."
             )
+        finally:
+            restore()
+
+
+class TestApiModelsCatalogDefaults:
+    """Catalog defaults must distinguish explicit user config from fallback."""
+
+    def test_live_provider_only_catalog_suppresses_fallback_default_badge(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _scrub_provider_env(monkeypatch)
+        fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+        catalog = ["anthropic/claude-opus-4.7", "openai/gpt-5.5"]
+        _install_fake_hermes_cli(monkeypatch, nous_ids=catalog)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(config, "DEFAULT_MODEL", fallback_model)
+
+        restore = _swap_in_test_config({"model": {"provider": "nous"}})
+        try:
+            data = config.get_available_models()
+            badges = data.get("configured_model_badges", {})
+            ids = _catalog_model_ids(data)
+
+            assert data.get("default_model") == fallback_model
+            assert data.get("default_model_has_explicit_source") is False
+            assert fallback_model not in ids
+            assert f"@nous:{fallback_model}" not in ids
+            assert fallback_model not in badges
+            assert f"@nous:{fallback_model}" not in badges
+        finally:
+            restore()
+
+    def test_static_provider_only_catalog_suppresses_fallback_default_badge(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _scrub_provider_env(monkeypatch)
+        fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(config, "DEFAULT_MODEL", fallback_model)
+
+        restore = _swap_in_test_config({"model": {"provider": "nous"}})
+        try:
+            data = config._static_models_catalog_without_live_probes()
+            badges = data.get("configured_model_badges", {})
+            ids = _catalog_model_ids(data)
+
+            assert data.get("default_model") == fallback_model
+            assert data.get("default_model_has_explicit_source") is False
+            assert fallback_model not in ids
+            assert f"@nous:{fallback_model}" not in ids
+            assert fallback_model not in badges
+            assert f"@nous:{fallback_model}" not in badges
+        finally:
+            restore()
+
+    def test_explicit_default_stays_in_live_and_static_catalogs(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _scrub_provider_env(monkeypatch)
+        explicit_model = "fallback/model-that-is-explicitly-configured"
+        catalog = ["anthropic/claude-opus-4.7", "openai/gpt-5.5"]
+        _install_fake_hermes_cli(monkeypatch, nous_ids=catalog)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        restore = _swap_in_test_config(
+            {"model": {"provider": "nous", "default": explicit_model}}
+        )
+        try:
+            live = config.get_available_models()
+            static = config._static_models_catalog_without_live_probes()
+
+            for data in (live, static):
+                ids = _catalog_model_ids(data)
+                badges = data.get("configured_model_badges", {})
+                assert data.get("default_model_has_explicit_source") is True
+                assert explicit_model in ids or f"@nous:{explicit_model}" in ids
+                assert explicit_model in badges or f"@nous:{explicit_model}" in badges
+        finally:
+            restore()
+
+    def test_empty_provider_catalog_keeps_emergency_fallback(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _scrub_provider_env(monkeypatch)
+        fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+        _install_fake_hermes_cli(
+            monkeypatch,
+            nous_ids=[],
+            auth_status_logged_in=True,
+        )
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(config, "DEFAULT_MODEL", fallback_model)
+
+        restore = _swap_in_test_config({"model": {"provider": "nous"}})
+        try:
+            data = config.get_available_models()
+            assert data.get("default_model") == fallback_model
+            assert data.get("default_model_has_explicit_source") is False
+            assert fallback_model in _catalog_model_ids(data)
+            assert not [
+                group for group in data.get("groups", [])
+                if group.get("provider_id") == "nous" and group.get("provider") != "Default"
+            ]
         finally:
             restore()
 

@@ -16,6 +16,7 @@ def _catalog(label: str) -> dict:
     return {
         "active_provider": "openai",
         "default_model": label,
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {},
         "groups": [
             {

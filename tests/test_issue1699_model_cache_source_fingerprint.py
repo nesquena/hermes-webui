@@ -28,6 +28,7 @@ def _valid_models_cache(provider_id: str, model_id: str) -> dict:
     return {
         "active_provider": provider_id,
         "default_model": model_id,
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {
             model_id: {"role": "primary", "label": "Primary", "provider": provider_id}
         },

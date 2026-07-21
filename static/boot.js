@@ -3596,7 +3596,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // Active sessions are authoritative. On fresh boot without a restored
     // session, keep the profile/server default ahead of stale browser model
     // state when a default exists.
-    const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
+    const defaultWinsFreshBoot=!!window._defaultModel&&window._defaultModelEligibleForFreshBoot!==false;
+    const stateToApply=sessionModelState||(!defaultWinsFreshBoot?savedState:null);
     const savedModel=stateToApply&&stateToApply.model;
     if(savedModel && $('modelSelect')){
       const applied=(typeof _applyModelToDropdown==='function')

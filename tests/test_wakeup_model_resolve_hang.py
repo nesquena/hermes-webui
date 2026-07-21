@@ -188,6 +188,7 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
         return {
             "active_provider": "anthropic",
             "default_model": "anthropic/claude-sonnet-4",
+            "default_model_has_explicit_source": True,
             "configured_model_badges": {},
             "groups": [],
         }
@@ -209,9 +210,21 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
     )
     # The fallback must be a structurally valid, usable catalog.
     assert isinstance(result, dict)
-    for k in ("active_provider", "default_model", "configured_model_badges", "groups"):
+    for k in (
+        "active_provider",
+        "default_model",
+        "default_model_has_explicit_source",
+        "configured_model_badges",
+        "groups",
+    ):
         assert k in result, f"fallback catalog missing {k!r}"
     assert isinstance(result["groups"], list)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not cfg._cache_build_in_progress:
+            break
+        time.sleep(0.01)
+    assert cfg._cache_build_in_progress is False
 
 
 def test_minimal_static_catalog_is_network_free(monkeypatch):
@@ -228,7 +241,11 @@ def test_minimal_static_catalog_is_network_free(monkeypatch):
     )
     out = cfg._minimal_static_models_catalog()
     assert set(out) >= {
-        "active_provider", "default_model", "configured_model_badges", "groups"
+        "active_provider",
+        "default_model",
+        "default_model_has_explicit_source",
+        "configured_model_badges",
+        "groups",
     }
     assert isinstance(out["groups"], list)
 
