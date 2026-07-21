@@ -196,6 +196,224 @@ def test_compression_registry_failure_rolls_back_all_migrations_before_commit(
             live_config.ACTIVE_RUNS.pop(stream_id, None)
 
 
+def test_compression_failure_after_source_archival_restores_exact_source(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    models.SESSIONS.clear()
+    old_sid = "compression-archive-old"
+    new_sid = "compression-archive-new"
+    stream_id = "compression-archive-stream"
+    session = Session(
+        session_id=old_sid,
+        messages=[{"role": "user", "content": "history"}],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "continue"
+    session.pending_attachments = [{"name": "pending.txt"}]
+    session.pending_started_at = 123.0
+    session.pending_user_source = "webui"
+    session.save()
+    models.SESSIONS[old_sid] = session
+    source_before = session.path.read_bytes()
+    index_before = models.SESSION_INDEX_FILE.read_bytes()
+    observed = {}
+
+    def fail_after_archive(_session, source_sid, _destination_sid):
+        archived = json.loads(
+            (session_dir / f"{source_sid}.json").read_text(encoding="utf-8")
+        )
+        observed["source_archived"] = archived["pre_compression_snapshot"] is True
+        observed["runtime_cleared"] = archived["active_stream_id"] is None
+        raise OSError("injected post-archive failure")
+
+    monkeypatch.setattr(
+        streaming,
+        "_clone_session_media_for_compression_rotation",
+        fail_after_archive,
+    )
+
+    with pytest.raises(OSError, match="post-archive failure"):
+        streaming._publish_compression_continuation(
+            session,
+            old_sid,
+            new_sid,
+            None,
+        )
+
+    assert observed == {"source_archived": True, "runtime_cleared": True}
+    assert session.path.read_bytes() == source_before
+    assert models.SESSION_INDEX_FILE.read_bytes() == index_before
+    assert session.session_id == old_sid
+    assert session.active_stream_id == stream_id
+    assert session.pending_user_message == "continue"
+    assert session.pending_attachments == [{"name": "pending.txt"}]
+    assert session.pending_started_at == 123.0
+    assert session.pending_user_source == "webui"
+    assert not (session_dir / f"{new_sid}.json").exists()
+    assert not session_media._session_media_dir(new_sid).exists()
+    assert not (session_dir / "_compression_transactions" / f"{new_sid}.json").exists()
+
+
+def test_streaming_rotation_failure_after_source_archival_restores_transaction(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    models.SESSIONS.clear()
+    streaming.SESSIONS.clear()
+    streaming.STREAMS.clear()
+    streaming.AGENT_INSTANCES.clear()
+    streaming.SESSION_AGENT_LOCKS.clear()
+    old_sid = "compression-integration-old"
+    new_sid = "compression-integration-new"
+    stream_id = "compression-integration-stream"
+    session = Session(
+        session_id=old_sid,
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "history"}],
+        context_messages=[{"role": "user", "content": "history"}],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "continue"
+    session.pending_attachments = [{"name": "pending.txt"}]
+    session.pending_started_at = 123.0
+    session.pending_user_source = "webui"
+    session.save()
+    models.SESSIONS[old_sid] = session
+    streaming.SESSIONS[old_sid] = session
+    event_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = event_queue
+    observed = {}
+
+    class FakeAgent:
+        def __init__(self, session_id=None, stream_delta_callback=None, **_kwargs):
+            self.session_id = session_id
+            self.stream_delta_callback = stream_delta_callback
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            self.session_id = new_sid
+            return {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": kwargs.get("persist_user_message", ""),
+                    },
+                    {"role": "assistant", "content": "continued"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            return None
+
+    def fail_after_archive(_session, source_sid, destination_sid):
+        archived = json.loads(
+            (session_dir / f"{source_sid}.json").read_text(encoding="utf-8")
+        )
+        observed["archived_before_failure"] = (
+            archived["pre_compression_snapshot"] is True
+            and archived["active_stream_id"] is None
+        )
+        media_dir = session_media._session_media_dir(destination_sid)
+        media_dir.mkdir(parents=True)
+        (media_dir / "staged.png").write_bytes(b"staged")
+        raise OSError("integration failure after source archival")
+
+    real_publish = streaming._publish_compression_continuation
+
+    def checked_publish(*args, **kwargs):
+        source_before = (session_dir / f"{old_sid}.json").read_bytes()
+        index_before = models.SESSION_INDEX_FILE.read_bytes()
+        runtime_before = (
+            session.session_id,
+            session.active_stream_id,
+            session.pending_user_message,
+            copy.deepcopy(session.pending_attachments),
+            session.pending_started_at,
+            session.pending_user_source,
+        )
+        try:
+            return real_publish(*args, **kwargs)
+        except OSError:
+            observed["source_exact"] = (
+                (session_dir / f"{old_sid}.json").read_bytes() == source_before
+            )
+            observed["index_exact"] = (
+                models.SESSION_INDEX_FILE.read_bytes() == index_before
+            )
+            observed["runtime_exact"] = runtime_before == (
+                session.session_id,
+                session.active_stream_id,
+                session.pending_user_message,
+                session.pending_attachments,
+                session.pending_started_at,
+                session.pending_user_source,
+            )
+            observed["destination_retired"] = (
+                not (session_dir / f"{new_sid}.json").exists()
+                and not session_media._session_media_dir(new_sid).exists()
+            )
+            raise
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
+    with monkeypatch.context() as patcher:
+        patcher.setattr(streaming, "get_session", lambda _sid: session)
+        patcher.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+        patcher.setattr(
+            streaming,
+            "resolve_model_provider",
+            lambda *_args, **_kwargs: ("gpt-4o", "openai", None),
+        )
+        patcher.setattr(
+            streaming,
+            "_clone_session_media_for_compression_rotation",
+            fail_after_archive,
+        )
+        patcher.setattr(
+            streaming,
+            "_publish_compression_continuation",
+            checked_publish,
+        )
+        patcher.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
+        patcher.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+        patcher.setitem(sys.modules, "hermes_state", fake_hermes_state)
+        streaming._run_agent_streaming(
+            session_id=old_sid,
+            msg_text="continue",
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    assert observed == {
+        "archived_before_failure": True,
+        "source_exact": True,
+        "index_exact": True,
+        "runtime_exact": True,
+        "destination_retired": True,
+    }
+
+
 def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_errors_on_continuation(
     tmp_path, monkeypatch
 ):

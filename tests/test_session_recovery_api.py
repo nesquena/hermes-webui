@@ -1,6 +1,8 @@
 import json
 
 from api.session_recovery import (
+    _advance_compression_transaction,
+    _stage_compression_transaction_source,
     audit_session_recovery,
     inspect_session_recovery_status,
     recover_incomplete_compression_transactions,
@@ -179,3 +181,141 @@ def test_startup_rolls_back_prepared_compression_claim_without_sidecar(
     assert result == {"finalized": 0, "rolled_back": 1, "residuals": []}
     assert not intent.exists()
     assert not models._session_incarnation_claim_file(sid).exists()
+
+
+def test_startup_rolls_back_v2_compression_and_restores_exact_source(
+    tmp_path, monkeypatch
+):
+    import api.models as models
+    import api.session_media as session_media
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    old_sid = "compression-v2-recover-old"
+    new_sid = "compression-v2-recover-new"
+    source = models.Session(
+        session_id=old_sid,
+        messages=[{"role": "user", "content": "original"}],
+    )
+    source.save()
+    source_before = source.path.read_bytes()
+    index_before = models.SESSION_INDEX_FILE.read_bytes()
+    intent = _stage_compression_transaction_source(tmp_path, old_sid, new_sid)
+    token = "b" * 32
+    models._persist_session_incarnation_claim(new_sid, token)
+    intent = _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "reserved",
+        token=token,
+    )
+
+    archived = json.loads(source_before)
+    archived["pre_compression_snapshot"] = True
+    archived["active_stream_id"] = None
+    models._durable_replace_bytes(
+        source.path,
+        json.dumps(archived, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    intent = _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "source_archived",
+    )
+    destination = {
+        "session_id": new_sid,
+        "publication_incarnation": token,
+        "parent_session_id": old_sid,
+        "messages": [{"role": "user", "content": "continuation"}],
+    }
+    models._durable_replace_bytes(
+        tmp_path / f"{new_sid}.json",
+        json.dumps(destination, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    media_dir = session_media._session_media_dir(new_sid)
+    media_dir.mkdir(parents=True)
+    (media_dir / "orphan.png").write_bytes(b"orphan")
+    _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "sidecar_published",
+    )
+
+    result = recover_incomplete_compression_transactions(tmp_path)
+
+    assert result == {"finalized": 0, "rolled_back": 1, "residuals": []}
+    assert source.path.read_bytes() == source_before
+    assert models.SESSION_INDEX_FILE.read_bytes() == index_before
+    assert not (tmp_path / f"{new_sid}.json").exists()
+    assert not media_dir.exists()
+    assert not models._session_incarnation_claim_file(new_sid).exists()
+    transaction_dir = tmp_path / "_compression_transactions"
+    assert not list(transaction_dir.iterdir())
+
+
+def test_startup_finalizes_v2_committed_compression_transaction(
+    tmp_path, monkeypatch
+):
+    import api.models as models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    old_sid = "compression-v2-finalize-old"
+    new_sid = "compression-v2-finalize-new"
+    source = models.Session(
+        session_id=old_sid,
+        messages=[{"role": "user", "content": "original"}],
+    )
+    source.save()
+    intent = _stage_compression_transaction_source(tmp_path, old_sid, new_sid)
+    token = "c" * 32
+    models._persist_session_incarnation_claim(new_sid, token)
+    intent = _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "reserved",
+        token=token,
+    )
+    archived = json.loads(source.path.read_bytes())
+    archived["pre_compression_snapshot"] = True
+    models._durable_replace_bytes(
+        source.path,
+        json.dumps(archived, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    intent = _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "source_archived",
+    )
+    destination = {
+        "session_id": new_sid,
+        "publication_incarnation": token,
+        "parent_session_id": old_sid,
+        "messages": [{"role": "user", "content": "continuation"}],
+    }
+    models._durable_replace_bytes(
+        tmp_path / f"{new_sid}.json",
+        json.dumps(destination, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    intent = _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "sidecar_published",
+    )
+    _advance_compression_transaction(
+        tmp_path,
+        intent,
+        "migrations_complete",
+    )
+
+    result = recover_incomplete_compression_transactions(tmp_path)
+
+    assert result == {"finalized": 1, "rolled_back": 0, "residuals": []}
+    assert json.loads(source.path.read_bytes())["pre_compression_snapshot"] is True
+    assert (tmp_path / f"{new_sid}.json").exists()
+    rows = json.loads(models.SESSION_INDEX_FILE.read_bytes())
+    assert any(row["session_id"] == new_sid for row in rows)
+    assert models._read_session_incarnation_claim(new_sid) == token
+    transaction_dir = tmp_path / "_compression_transactions"
+    assert not list(transaction_dir.iterdir())
