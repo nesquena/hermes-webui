@@ -1843,18 +1843,38 @@ function extractFunc(name){
   return src.slice(start, i);
 }
 const htmlRegistry = new Map();
+const snapshotRegistry = new Map();
 class FakeElement {
   constructor(tag='div'){
     this.tagName = String(tag).toUpperCase();
     this.children = [];
     this.parentNode = null;
     this.attributes = Object.create(null);
-    this._styleColor = '';
+    this.dataset = Object.create(null);
+    this._styleValues = Object.create(null);
     this.style = {};
     const self = this;
     Object.defineProperty(this.style, 'color', {
-      get(){ return self._styleColor; },
-      set(value){ self._recordWrite('style'); self._styleColor=String(value ?? ''); },
+      get(){ return self._styleValues.color || ''; },
+      set(value){ self._recordWrite('style'); self._styleValues.color=String(value ?? ''); },
+    });
+    Object.defineProperty(this.style, 'opacity', {
+      get(){ return self._styleValues.opacity || ''; },
+      set(value){ self._recordWrite('style'); self._styleValues.opacity=String(value ?? ''); },
+    });
+    Object.defineProperty(this.style, 'cssText', {
+      get(){ return Object.entries(self._styleValues).filter(([,value])=>value !== '').map(([name,value])=>`${name}: ${value};`).join(' '); },
+      set(value){
+        self._recordWrite('style');
+        self._styleValues = Object.create(null);
+        String(value ?? '').split(';').forEach(part=>{
+          const index=part.indexOf(':');
+          if(index < 0) return;
+          const name=part.slice(0,index).trim();
+          const item=part.slice(index+1).trim();
+          if(name) self._styleValues[name]=item;
+        });
+      },
     });
     this._title = '';
     this.onclick = null;
@@ -1862,6 +1882,8 @@ class FakeElement {
     this._innerHTML = '';
     this._textContent = '';
     this._classes = new Set();
+    this.id = '';
+    this.content = this.tagName === 'TEMPLATE' ? { firstElementChild:null } : null;
     this.classList = {
       add(...names){ names.forEach(name=>self._classes.add(name)); },
       remove(...names){ names.forEach(name=>self._classes.delete(name)); },
@@ -1875,6 +1897,16 @@ class FakeElement {
     };
   }
   get parentElement(){ return this.parentNode; }
+  cloneNode(deep){
+    const clone=new FakeElement(this.tagName);
+    clone.className=this.className;
+    clone._innerHTML=this._innerHTML;
+    clone._textContent=this._textContent;
+    clone.style.cssText=this.style.cssText;
+    Object.entries(this.attributes).forEach(([name,value])=>clone.setAttribute(name,value));
+    if(deep) this.children.forEach(child=>clone.appendChild(child.cloneNode(true)));
+    return clone;
+  }
   get isConnected(){
     let node = this;
     while(node){
@@ -1887,8 +1919,17 @@ class FakeElement {
   set title(value){ this._recordWrite('title'); this._title=String(value ?? ''); }
   get className(){ return Array.from(this._classes).join(' '); }
   set className(value){ this._classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
-  get innerHTML(){ return this._innerHTML; }
+  get innerHTML(){
+    if(this.tagName === 'TEMPLATE') return this._templateHtml || '';
+    return this._innerHTML;
+  }
   set innerHTML(value){
+    if(this.tagName === 'TEMPLATE'){
+      this._templateHtml=String(value ?? '');
+      const stored=snapshotRegistry.get(this._templateHtml);
+      this.content.firstElementChild=stored ? stored.cloneNode(true) : null;
+      return;
+    }
     this._recordWrite('innerHTML');
     this.children.forEach(child=>{ child.parentNode=null; });
     this._innerHTML = String(value ?? '');
@@ -1915,6 +1956,11 @@ class FakeElement {
     this._recordWrite(name === 'aria-label' ? 'aria-label' : `attribute:${name}`);
     this.attributes[String(name)] = String(value);
     if(name === 'title') this.title = String(value);
+    if(name === 'id') this.id = String(value);
+    if(String(name).startsWith('data-')){
+      const key=String(name).slice(5).replace(/-([a-z])/g,(_,char)=>char.toUpperCase());
+      this.dataset[key]=String(value);
+    }
   }
   getAttribute(name){ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
   getAttributeNames(){ return Object.keys(this.attributes); }
@@ -1922,6 +1968,11 @@ class FakeElement {
     this._recordWrite(name === 'aria-label' ? 'aria-label' : `attribute:${name}`);
     delete this.attributes[name];
     if(name === 'title') this.title = '';
+    if(name === 'id') this.id = '';
+    if(String(name).startsWith('data-')){
+      const key=String(name).slice(5).replace(/-([a-z])/g,(_,char)=>char.toUpperCase());
+      delete this.dataset[key];
+    }
   }
   appendChild(child){ if(child.parentNode) child.remove(); child.parentNode = this; this.children.push(child); return child; }
   insertBefore(child, ref){
@@ -1939,6 +1990,31 @@ class FakeElement {
     const index = siblings.indexOf(this);
     if(index >= 0) siblings.splice(index, 1);
     this.parentNode = null;
+  }
+  replaceWith(replacement){
+    if(!this.parentNode) return;
+    const siblings=this.parentNode.children;
+    const index=siblings.indexOf(this);
+    if(replacement.parentNode) replacement.remove();
+    if(index >= 0){
+      siblings[index]=replacement;
+      replacement.parentNode=this.parentNode;
+      this.parentNode=null;
+    }
+  }
+  _serialize(){
+    const attrs=Object.entries(this.attributes);
+    if(this.id&&!Object.prototype.hasOwnProperty.call(this.attributes,'id')) attrs.push(['id',this.id]);
+    if(this.className&&!Object.prototype.hasOwnProperty.call(this.attributes,'class')) attrs.push(['class',this.className]);
+    if(this.style.cssText) attrs.push(['style',this.style.cssText]);
+    const attrText=attrs.map(([name,value])=>` ${name}="${String(value)}"`).join('');
+    const content=this.children.length ? this.children.map(child=>child._serialize()).join('') : this.innerHTML;
+    return `<${this.tagName.toLowerCase()}${attrText}>${content}</${this.tagName.toLowerCase()}>`;
+  }
+  get outerHTML(){
+    const html=this._serialize();
+    snapshotRegistry.set(html,this.cloneNode(true));
+    return html;
   }
   select(){}
   querySelector(selector){ return this.querySelectorAll(selector)[0] || null; }
@@ -2002,6 +2078,7 @@ function reconcileToolRow(version, original){
     const copy = element('span', 'transparent-event-copy');
     copy.innerHTML = original.html;
     copy.style.color = original.color;
+    copy.style.opacity = original.opacity || '';
     copy.setAttribute('title', original.title);
     copy.setAttribute('aria-label', original.aria);
     const toggle = element('span', 'tool-card-toggle');
@@ -2078,7 +2155,20 @@ global.showToast = (message, duration, type)=>toasts.push({ message, duration, t
 global._redactToolTargetLabel = value=>String(value).replace(/secret-token/g, '[REDACTED]');
 global._wireTransparentHeaderToggle = ()=>{};
 global._setTransparentCardOpen = (card, open)=>card.classList.toggle('open', !!open);
+global.INFLIGHT = Object.create(null);
+global.S = { session:{ session_id:'snapshot-session' } };
+global.requestAnimationFrame = (fn)=>fn();
+global._rehydrateTransparentStreamDom = ()=>{};
+global.normalizeLiveActivityGroupPlacement = ()=>{};
+global._dedupeLiveProcessedWorklogAnchors = ()=>{};
+global.placeLiveToolCardsHost = ()=>{};
+global._postProcessWithAnchorSuppression = ()=>{};
+global.$ = (id)=>document.body.querySelector(`[id="${id}"]`);
 
+eval(extractFunc('snapshotLiveTurnHtmlForSession'));
+eval(extractFunc('_liveAssistantSegmentTextLength'));
+eval(extractFunc('_mergeRestoredLiveAssistantSegment'));
+eval(extractFunc('restoreLiveTurnHtmlForSession'));
 eval(extractFunc('_showTransparentCopiedFeedback'));
 eval(extractFunc('_copyEventToClipboard'));
 eval(extractFunc('_attachCopyButton'));
@@ -2101,6 +2191,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
   const replacement = element('button', classes);
   replacement.innerHTML = original.html;
   replacement.style.color = original.color;
+  replacement.style.opacity = original.opacity || '';
   replacement.setAttribute('title', original.title);
   replacement.setAttribute('aria-label', original.aria);
   oldCopy.remove();
@@ -2117,11 +2208,14 @@ function replaceCopyControl(header, oldCopy, classes, original){
   _attachCopyButton(tool.header);
   tool.copy.innerHTML = '<svg data-original="tool-copy"></svg>';
   tool.copy.style.color = 'rgb(1, 2, 3)';
+  tool.copy.style.opacity = '0.28';
   tool.copy.setAttribute('title', 'Original tool title');
   tool.copy.setAttribute('aria-label', 'Original tool aria');
   const original = {
     html:tool.copy.innerHTML,
     color:tool.copy.style.color,
+    opacity:tool.copy.style.opacity,
+    styleCssText:tool.copy.style.cssText,
     title:tool.copy.title,
     titleAttr:tool.copy.getAttribute('title'),
     aria:tool.copy.getAttribute('aria-label'),
@@ -2135,6 +2229,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
     check:tool.copy.innerHTML.includes('data-icon="check"'),
     title:tool.copy.title,
     aria:tool.copy.getAttribute('aria-label'),
+    opacity:tool.copy.style.opacity,
     duration:firstTimer.ms,
     stopped:firstEvent.stopped,
     prevented:firstEvent.prevented,
@@ -2151,6 +2246,8 @@ function replaceCopyControl(header, oldCopy, classes, original){
   const restored = {
     html:tool.copy.innerHTML,
     color:tool.copy.style.color,
+    opacity:tool.copy.style.opacity,
+    styleCssText:tool.copy.style.cssText,
     title:tool.copy.title,
     titleAttr:tool.copy.getAttribute('title'),
     aria:tool.copy.getAttribute('aria-label'),
@@ -2161,15 +2258,19 @@ function replaceCopyControl(header, oldCopy, classes, original){
   const candidate = thinkingRow('candidate reasoning');
   _rehydrateTransparentLiveRow(thinking.row, candidate.row, { expanded:false });
   const thinkingControls = thinking.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn');
+  thinking.copy.style.opacity = '0.4';
+  const thinkingOriginalStyle = thinking.copy.style.cssText;
   thinking.copy.onclick(eventProbe());
   await settle();
   const thinkingState = {
     count:thinkingControls.length,
     bound:typeof thinking.copy.onclick === 'function' && typeof thinking.copy.onkeydown === 'function',
     check:thinking.copy.innerHTML.includes('data-icon="check"'),
+    opacity:thinking.copy.style.opacity,
     copied:writes[writes.length - 1],
   };
   runTimer(Array.from(timers.keys())[0]);
+  const thinkingRestoredStyle = thinking.copy.style.cssText;
 
   clipboardMode = 'failure';
   fallbackResult = true;
@@ -2208,6 +2309,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
     color:'rgb(3, 4, 5)',
     title:'Existing title',
     aria:'Existing aria',
+    opacity:'0.28',
   });
   document.body.appendChild(race.row);
   _attachCopyButton(race.header);
@@ -2221,6 +2323,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
     color:'rgb(7, 8, 9)',
     title:'Replacement before success title',
     aria:'Replacement before success aria',
+    opacity:'0.31',
   });
   _refreshTransparentLiveRow(race.row, candidateBeforeSuccess.row);
   race.card = race.row.querySelector('.tool-card');
@@ -2242,12 +2345,14 @@ function replaceCopyControl(header, oldCopy, classes, original){
     check:race.copy.innerHTML.includes('data-icon="check"'),
     title:race.copy.title,
     aria:race.copy.getAttribute('aria-label'),
+    opacity:race.copy.style.opacity,
   };
   const candidateDuringFeedback = reconcileToolRow('replacement-during-feedback', {
     html:'<svg data-original="replacement-during-feedback"></svg>',
     color:'rgb(11, 12, 13)',
     title:'Replacement during feedback title',
     aria:'Replacement during feedback aria',
+    opacity:'0.33',
   });
   _refreshTransparentLiveRow(race.row, candidateDuringFeedback.row);
   race.card = race.row.querySelector('.tool-card');
@@ -2257,6 +2362,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
     check:race.copy.innerHTML.includes('data-icon="check"'),
     title:race.copy.title,
     aria:race.copy.getAttribute('aria-label'),
+    opacity:race.copy.style.opacity,
   };
   clipboardMode = 'success';
   race.copy.onclick(eventProbe());
@@ -2293,6 +2399,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
     color:'rgb(14, 15, 16)',
     title:'Thinking replacement title',
     aria:'Thinking replacement aria',
+    opacity:'0.36',
   });
   deferredClipboardResolve();
   await settle();
@@ -2300,8 +2407,82 @@ function replaceCopyControl(header, oldCopy, classes, original){
     count:thinkingRace.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn').length,
     bound:typeof thinkingRace.copy.onclick === 'function' && typeof thinkingRace.copy.onkeydown === 'function',
     check:thinkingRace.copy.innerHTML.includes('data-icon="check"'),
+    opacity:thinkingRace.copy.style.opacity,
   };
   runTimer(thinkingRace.row._transparentCopiedFeedback.timer);
+
+  // Real snapshot/restore lifecycle with two simultaneous feedback controls.
+  const msgInner = element('div', 'msg-inner');
+  msgInner.setAttribute('id', 'msgInner');
+  const liveTurn = element('div', 'assistant-turn');
+  liveTurn.setAttribute('id', 'liveAssistantTurn');
+  liveTurn.setAttribute('data-session-id', 'snapshot-session');
+  const snapshotTool = toolRow();
+  const snapshotThinking = thinkingRow('snapshot reasoning');
+  liveTurn.appendChild(snapshotTool.row);
+  liveTurn.appendChild(snapshotThinking.row);
+  msgInner.appendChild(liveTurn);
+  document.body.appendChild(msgInner);
+  _attachCopyButton(snapshotTool.header);
+  _attachCopyButton(snapshotThinking.header);
+  snapshotTool.copy.innerHTML = '<svg data-original="snapshot-tool-copy"></svg>';
+  snapshotTool.copy.style.cssText = 'color: rgb(21, 22, 23); opacity: 0.28; border-width: 2px;';
+  snapshotTool.copy.setAttribute('title', 'Snapshot tool title');
+  snapshotTool.copy.setAttribute('aria-label', 'Snapshot tool aria');
+  snapshotThinking.copy.innerHTML = '<svg data-original="snapshot-thinking-copy"></svg>';
+  snapshotThinking.copy.style.cssText = 'opacity: 0.42; padding-left: 3px;';
+  snapshotThinking.copy.removeAttribute('title');
+  snapshotThinking.copy.removeAttribute('aria-label');
+  const snapshotToolNormalStyle = snapshotTool.copy.style.cssText;
+  const snapshotThinkingNormalStyle = snapshotThinking.copy.style.cssText;
+  _showTransparentCopiedFeedback(snapshotTool.copy, snapshotTool.row);
+  _showTransparentCopiedFeedback(snapshotThinking.copy, snapshotThinking.row);
+  const snapshotToolTimer = snapshotTool.row._transparentCopiedFeedback.timer;
+  const snapshotThinkingTimer = snapshotThinking.row._transparentCopiedFeedback.timer;
+  INFLIGHT['snapshot-session'] = {};
+  snapshotLiveTurnHtmlForSession('snapshot-session');
+  const storedSnapshot = INFLIGHT['snapshot-session'].liveTurnHtml;
+  const liveAfterSnapshot = {
+    toolCheck:snapshotTool.copy.innerHTML.includes('data-icon="check"'),
+    thinkingCheck:snapshotThinking.copy.innerHTML.includes('data-icon="check"'),
+    toolTitle:snapshotTool.copy.getAttribute('title'),
+    toolAria:snapshotTool.copy.getAttribute('aria-label'),
+    toolOpacity:snapshotTool.copy.style.opacity,
+    thinkingOpacity:snapshotThinking.copy.style.opacity,
+    toolFeedback:!!snapshotTool.row._transparentCopiedFeedback,
+    thinkingFeedback:!!snapshotThinking.row._transparentCopiedFeedback,
+    toolNormalSaved:!!snapshotTool.copy._transparentCopiedFeedbackNormal,
+    thinkingNormalSaved:!!snapshotThinking.copy._transparentCopiedFeedbackNormal,
+  };
+  const restoreResult = restoreLiveTurnHtmlForSession('snapshot-session');
+  const restoredTurn = $('liveAssistantTurn');
+  const restoredControls = restoredTurn.querySelectorAll('.transparent-event-copy,.thinking-copy-btn');
+  const restoredSnapshotState = {
+    count:restoredControls.length,
+    toolHtml:restoredControls[0].innerHTML,
+    toolStyle:restoredControls[0].style.cssText,
+    toolTitle:restoredControls[0].getAttribute('title'),
+    toolAria:restoredControls[0].getAttribute('aria-label'),
+    thinkingHtml:restoredControls[1].innerHTML,
+    thinkingStyle:restoredControls[1].style.cssText,
+    thinkingTitle:restoredControls[1].getAttribute('title'),
+    thinkingAria:restoredControls[1].getAttribute('aria-label'),
+  };
+  const expiryDetachedWrites = [];
+  snapshotTool.copy._trackDetachedWrites = expiryDetachedWrites;
+  snapshotThinking.copy._trackDetachedWrites = expiryDetachedWrites;
+  let snapshotExpiryThrew = false;
+  try{
+    runTimer(snapshotToolTimer);
+    runTimer(snapshotThinkingTimer);
+  }catch(_){ snapshotExpiryThrew = true; }
+  const afterSnapshotExpiry = {
+    toolFeedback:!!snapshotTool.row._transparentCopiedFeedback,
+    thinkingFeedback:!!snapshotThinking.row._transparentCopiedFeedback,
+    detachedWrites:expiryDetachedWrites,
+    threw:snapshotExpiryThrew,
+    restoredStillNormal:restoredControls[0].innerHTML.includes('snapshot-tool-copy') && restoredControls[1].innerHTML.includes('snapshot-thinking-copy'),
+  };
 
   process.stdout.write(JSON.stringify({
     firstState,
@@ -2311,6 +2492,8 @@ function replaceCopyControl(header, oldCopy, classes, original){
     staleTimerIgnored,
     payload:writes[0],
     thinkingState,
+    thinkingOriginalStyle,
+    thinkingRestoredStyle,
     fallbackSuccess,
     failure,
     emptyCopySkipped,
@@ -2326,6 +2509,15 @@ function replaceCopyControl(header, oldCopy, classes, original){
       activationDidNotToggle:beforeSuccess.stopped && beforeSuccess.prevented && headerToggleCount === 0,
     },
     thinkingReplacementRace:thinkingRaceCheck,
+    snapshotLifecycle:{
+      storedSnapshot,
+      snapshotToolNormalStyle,
+      snapshotThinkingNormalStyle,
+      liveAfterSnapshot,
+      restoreResult,
+      restoredSnapshotState,
+      afterSnapshotExpiry,
+    },
   }));
 })().catch(error=>{ console.error(error); process.exit(1); });
 """
@@ -2334,6 +2526,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
         "check": True,
         "title": "Copied",
         "aria": "Copied",
+        "opacity": "1",
         "duration": 1500,
         "stopped": True,
         "prevented": True,
@@ -2351,8 +2544,10 @@ function replaceCopyControl(header, oldCopy, classes, original){
         "count": 1,
         "bound": True,
         "check": True,
+        "opacity": "1",
         "copied": "transparent reasoning",
     }
+    assert data["thinkingRestoredStyle"] == data["thinkingOriginalStyle"]
     assert data["fallbackSuccess"] == {"check": True, "toast": "Copied"}
     assert data["failure"] == {
         "check": False,
@@ -2367,11 +2562,13 @@ function replaceCopyControl(header, oldCopy, classes, original){
             "check": True,
             "title": "Copied",
             "aria": "Copied",
+            "opacity": "1",
         },
         "inheritedDuringFeedback": {
             "check": True,
             "title": "Copied",
             "aria": "Copied",
+            "opacity": "1",
         },
         "latestRaceTimerDuration": 1500,
         "staleTimerDidNotClearLatest": True,
@@ -2393,4 +2590,45 @@ function replaceCopyControl(header, oldCopy, classes, original){
         "count": 1,
         "bound": True,
         "check": True,
+        "opacity": "1",
+    }
+    snapshot = data["snapshotLifecycle"]
+    assert "snapshot-tool-copy" in snapshot["storedSnapshot"]
+    assert "snapshot-thinking-copy" in snapshot["storedSnapshot"]
+    assert 'title="Snapshot tool title"' in snapshot["storedSnapshot"]
+    assert 'aria-label="Snapshot tool aria"' in snapshot["storedSnapshot"]
+    assert "Copied" not in snapshot["storedSnapshot"]
+    assert 'data-icon="check"' not in snapshot["storedSnapshot"]
+    assert "var(--accent)" not in snapshot["storedSnapshot"]
+    assert "opacity: 1" not in snapshot["storedSnapshot"]
+    assert snapshot["liveAfterSnapshot"] == {
+        "toolCheck": True,
+        "thinkingCheck": True,
+        "toolTitle": "Copied",
+        "toolAria": "Copied",
+        "toolOpacity": "1",
+        "thinkingOpacity": "1",
+        "toolFeedback": True,
+        "thinkingFeedback": True,
+        "toolNormalSaved": True,
+        "thinkingNormalSaved": True,
+    }
+    assert snapshot["restoreResult"] is True
+    assert snapshot["restoredSnapshotState"] == {
+        "count": 2,
+        "toolHtml": '<svg data-original="snapshot-tool-copy"></svg>',
+        "toolStyle": snapshot["snapshotToolNormalStyle"],
+        "toolTitle": "Snapshot tool title",
+        "toolAria": "Snapshot tool aria",
+        "thinkingHtml": '<svg data-original="snapshot-thinking-copy"></svg>',
+        "thinkingStyle": snapshot["snapshotThinkingNormalStyle"],
+        "thinkingTitle": None,
+        "thinkingAria": None,
+    }
+    assert snapshot["afterSnapshotExpiry"] == {
+        "toolFeedback": False,
+        "thinkingFeedback": False,
+        "detachedWrites": [],
+        "threw": False,
+        "restoredStillNormal": True,
     }
