@@ -934,44 +934,85 @@ def _session_has_cleanup_residual(session_id: str) -> bool:
     return True
 
 
-def _load_session_cleanup_residuals() -> dict[str, dict]:
+def _read_session_cleanup_residual_record(path: Path) -> tuple[str, dict]:
+    sid = path.stem
+    if path.is_symlink():
+        raise ValueError("Invalid session cleanup residual symlink")
+    raw = json.loads(path.read_bytes())
+    if (
+        not is_safe_session_id(sid)
+        or not isinstance(raw, dict)
+        or raw.get("version") != SESSION_CLEANUP_RESIDUAL_VERSION
+        or raw.get("session_id") != sid
+    ):
+        raise ValueError("Invalid session cleanup residual entry")
+    items = raw.get("residuals")
+    delete_state_db = raw.get("delete_state_db")
+    durable_tombstone = raw.get("durable_tombstone")
+    if (
+        not isinstance(items, list)
+        or not isinstance(delete_state_db, bool)
+        or not isinstance(durable_tombstone, bool)
+    ):
+        raise ValueError("Invalid session cleanup residual policy")
+    if not all(
+        isinstance(item, dict) and isinstance(item.get("artifact"), str)
+        for item in items
+    ):
+        raise ValueError("Invalid session cleanup residual artifact")
+    return sid, {
+        "residuals": list(items),
+        "delete_state_db": delete_state_db,
+        "durable_tombstone": durable_tombstone,
+    }
+
+
+def _scan_session_cleanup_residuals() -> tuple[dict[str, dict], list[dict]]:
+    """Load valid SID records and report invalid records independently."""
     root = _session_cleanup_residual_dir()
     try:
-        paths = list(root.glob("*.json"))
-    except OSError:
-        raise
+        paths = sorted(
+            (path for path in root.iterdir() if path.suffix == ".json"),
+            key=lambda path: path.name,
+        )
+    except FileNotFoundError:
+        return {}, []
     if not paths:
-        return {}
+        return {}, []
     validated = {}
+    invalid = []
     for path in paths:
         sid = path.stem
-        raw = json.loads(path.read_bytes())
-        if (
-            not is_safe_session_id(sid)
-            or not isinstance(raw, dict)
-            or raw.get("version") != SESSION_CLEANUP_RESIDUAL_VERSION
-            or raw.get("session_id") != sid
-        ):
-            raise ValueError("Invalid session cleanup residual entry")
-        items = raw.get("residuals")
-        delete_state_db = raw.get("delete_state_db")
-        durable_tombstone = raw.get("durable_tombstone")
-        if (
-            not isinstance(items, list)
-            or not isinstance(delete_state_db, bool)
-            or not isinstance(durable_tombstone, bool)
-        ):
-            raise ValueError("Invalid session cleanup residual policy")
-        if not all(
-            isinstance(item, dict) and isinstance(item.get("artifact"), str)
-            for item in items
-        ):
-            raise ValueError("Invalid session cleanup residual artifact")
-        validated[sid] = {
-            "residuals": list(items),
-            "delete_state_db": delete_state_db,
-            "durable_tombstone": durable_tombstone,
-        }
+        try:
+            loaded_sid, policy = _read_session_cleanup_residual_record(path)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Could not read session cleanup residual record %s",
+                path,
+                exc_info=True,
+            )
+            failure = {
+                "artifacts": [
+                    {
+                        "artifact": "cleanup_residual_record",
+                        "error": type(exc).__name__,
+                    }
+                ]
+            }
+            if is_safe_session_id(sid):
+                failure["session_id"] = sid
+            invalid.append(failure)
+            continue
+        validated[loaded_sid] = policy
+    return validated, invalid
+
+
+def _load_session_cleanup_residuals() -> dict[str, dict]:
+    validated, invalid = _scan_session_cleanup_residuals()
+    if invalid:
+        raise ValueError(
+            f"Invalid session cleanup residual records: {len(invalid)}"
+        )
     return validated
 
 

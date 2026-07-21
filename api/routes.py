@@ -9412,7 +9412,7 @@ from api.models import (
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
-    _load_session_cleanup_residuals,
+    _scan_session_cleanup_residuals,
     _activate_session_publication_generation,
     _clear_webui_deleted_session_tombstone,
     delete_session_artifacts,
@@ -20594,10 +20594,12 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     phase1_removed_ids = set()
     cleanup_residuals = []
 
-    # Retry any previously incomplete destructive operation first. The durable
-    # manifest is keyed by SID and every cleanup step is idempotent.
+    # Retry any previously incomplete destructive operation first. Durable
+    # records are keyed by SID and every cleanup step is idempotent.
     try:
-        pending_cleanup = _load_session_cleanup_residuals()
+        pending_cleanup, invalid_cleanup_records = (
+            _scan_session_cleanup_residuals()
+        )
     except Exception as exc:
         logger.warning("Could not read session cleanup residual manifest", exc_info=True)
         return j(
@@ -20608,6 +20610,13 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             },
             status=500,
         )
+    cleanup_residuals.extend(invalid_cleanup_records)
+    reserved_cleanup_ids = set(pending_cleanup)
+    reserved_cleanup_ids.update(
+        item["session_id"]
+        for item in invalid_cleanup_records
+        if item.get("session_id")
+    )
     for sid, policy in pending_cleanup.items():
         result = delete_session_artifacts(
             sid,
@@ -20627,7 +20636,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         # A residual entry already owns this SID's retry lifecycle. Avoid a
         # second delete attempt in the same request (and duplicate residual
         # rows) when the retry above deliberately left its sidecar in place.
-        if p.stem in pending_cleanup:
+        if p.stem in reserved_cleanup_ids:
             continue
         try:
             s = Session.load(p.stem)
