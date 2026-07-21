@@ -50,6 +50,15 @@ HARNESS_JS_TEMPLATE = r"""
 const fs = require('fs');
 const msgSrc = fs.readFileSync(__MSG_SRC__, 'utf8');
 const uiSrc = fs.readFileSync(__UI_SRC__, 'utf8');
+let _extractSource = msgSrc;
+let _anchorProseSmdCache;
+let _anchorProseIncrementalNode;
+let _finalizeAnchorProseIncrementalNode;
+let _anchorSceneNodeForRow;
+
+function extractFunction(name){
+  return extractFn(_extractSource, name);
+}
 __EXTRACT_FN_JS__
 
 function createHarness(options={}){
@@ -206,12 +215,13 @@ function createHarness(options={}){
   global.renderMd = (text)=>String(text || '');
   global.esc = (value)=>String(value || '');
 
-  eval('var _anchorProseSmdCache = window._anchorProseSmdCache;');
-  eval(extractFn(msgSrc, '_anchorProseIncrementalNode'));
-  if(hasFunction(msgSrc, '_finalizeAnchorProseIncrementalNode')){
-    eval(extractFn(msgSrc, '_finalizeAnchorProseIncrementalNode'));
-  }
-  eval(extractFn(uiSrc, '_anchorSceneNodeForRow'));
+  _anchorProseSmdCache = cache;
+  window._anchorProseSmdCache = cache;
+  _extractSource = msgSrc;
+  eval(extractFunction('_anchorProseIncrementalNode'));
+  eval(extractFunction('_finalizeAnchorProseIncrementalNode'));
+  _extractSource = uiSrc;
+  eval(extractFunction('_anchorSceneNodeForRow'));
   window.__anchorProseIncrementalNode = _anchorProseIncrementalNode;
 
   return {
