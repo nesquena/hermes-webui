@@ -1023,6 +1023,10 @@ def redact_session_data(session_dict: dict) -> dict:
     from api.config import load_settings
     _enabled = bool(load_settings().get("api_redact_enabled", True))
     result = dict(session_dict)
+    # Process-local lifecycle authority is neither serializable nor part of any
+    # response/export contract. Keep it private even when callers pass a raw
+    # Session.__dict__ instead of Session.compact().
+    result.pop('_publication_generation', None)
     if isinstance(result.get('title'), str):
         result['title'] = _redact_text(result['title'], _enabled=_enabled)
     if 'messages' in result:

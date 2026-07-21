@@ -1574,18 +1574,37 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
-def _cleanup_ephemeral_session(session, *, stream_id: str | None = None) -> None:
+def _cleanup_ephemeral_session(
+    session=None,
+    *,
+    session_id: str | None = None,
+    stream_id: str | None = None,
+    parent_session_id: str | None = None,
+) -> dict:
     """Retire every resource owned by one transient ``/btw`` session."""
-    session_id = str(getattr(session, "session_id", "") or "")
-    parent_session_id = str(getattr(session, "parent_session_id", "") or "")
+    session_id = str(session_id or getattr(session, "session_id", "") or "")
     stream_id = str(stream_id or getattr(session, "active_stream_id", "") or "")
-    session.active_stream_id = None
-    session.pending_user_message = None
-    session.pending_attachments = []
-    session.pending_started_at = None
-    session.pending_user_source = None
-    with LOCK:
-        SESSIONS.pop(session_id, None)
+    parent_session_id = str(
+        parent_session_id or getattr(session, "parent_session_id", "") or ""
+    )
+    owner = None
+    try:
+        from api.background import find_btw_owner
+
+        owner = find_btw_owner(session_id, stream_id)
+    except Exception:
+        logger.debug("Failed to resolve ephemeral lifecycle owner", exc_info=True)
+    if owner and not parent_session_id:
+        parent_session_id = str(owner.get("parent_session_id") or "")
+    if session is None:
+        with LOCK:
+            session = SESSIONS.get(session_id)
+    if session is not None:
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
     if stream_id:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
@@ -1597,24 +1616,37 @@ def _cleanup_ephemeral_session(session, *, stream_id: str | None = None) -> None
             STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
         unregister_stream_owner(stream_id)
-    try:
-        Path(session.path).unlink(missing_ok=True)
-        Path(session.path).with_suffix(".json.bak").unlink(missing_ok=True)
-    except Exception:
-        logger.debug("Failed to remove ephemeral session JSON", exc_info=True)
-    try:
-        from api.session_media import remove_session_media
+        unregister_active_run(stream_id)
+    from api.models import delete_session_artifacts
 
-        remove_session_media(session_id)
-    except Exception:
-        logger.debug("Failed to remove ephemeral session media", exc_info=True)
+    cleanup = delete_session_artifacts(
+        session_id,
+        expected_generation=getattr(session, "_publication_generation", None),
+        durable_tombstone=True,
+        delete_state_db=True,
+    )
     if parent_session_id:
         try:
-            from api.background import cleanup_btw
+            from api.background import cleanup_btw, mark_btw_cleanup_pending
 
-            cleanup_btw(parent_session_id)
+            if cleanup["ok"]:
+                cleanup_btw(parent_session_id, session_id, stream_id)
+            else:
+                mark_btw_cleanup_pending(
+                    parent_session_id,
+                    session_id,
+                    stream_id,
+                    cleanup["residuals"],
+                )
         except Exception:
             logger.debug("Failed to remove ephemeral tracking", exc_info=True)
+    if not cleanup["ok"]:
+        logger.warning(
+            "Ephemeral session cleanup incomplete for %s: %s",
+            session_id,
+            cleanup["residuals"],
+        )
+    return cleanup
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -3951,9 +3983,21 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
+            saved_publication_generation = getattr(
+                s, "_publication_generation", None
+            )
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
             saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
+            # ``session_id`` and its publication lease are one authoritative
+            # identity. Compression normally reaches this helper while ``s``
+            # still carries the old lease, but direct recovery/test callers can
+            # supply an object already bound to the continuation SID. Bind the
+            # temporary snapshot write to the current old-SID incarnation and
+            # restore both fields together below.
+            from api.models import _session_publication_generation
+
+            s._publication_generation = _session_publication_generation(old_sid)
             s.pre_compression_snapshot = True
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
@@ -3983,6 +4027,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 )
             finally:
                 s.session_id = saved_sid
+                s._publication_generation = saved_publication_generation
                 s.pre_compression_snapshot = saved_snapshot
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
@@ -7102,10 +7147,16 @@ def _run_agent_streaming(
     _turn_route_provider = model_provider
     q = STREAMS.get(stream_id)
     if q is None:
-        # The stream was cancelled before the worker started; the route layer
-        # already registered the stream owner, so release it here to avoid
-        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
+        # Cancel-before-worker owns the same full ephemeral lifecycle as every
+        # later exit. Consume the exact parent/session/stream record rather than
+        # releasing only the stream-owner row and leaking durable artifacts.
+        if ephemeral:
+            _cleanup_ephemeral_session(
+                session_id=session_id,
+                stream_id=stream_id,
+            )
+        else:
+            unregister_stream_owner(stream_id)
         return
     register_active_run(
         stream_id,
@@ -9263,6 +9314,13 @@ def _run_agent_streaming(
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
                     _preserve_pre_compression_snapshot(s, old_sid)
+                    # Bind the continuation to a fresh SID lease only after the
+                    # old snapshot has finished its temporary old_sid save.
+                    # Later continuation saves then cannot be confused with an
+                    # old in-process object from a deleted/recreated identity.
+                    from api.models import _activate_session_publication_generation
+
+                    _activate_session_publication_generation(s)
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains

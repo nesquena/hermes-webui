@@ -196,11 +196,24 @@ _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 # load-modify-write/unlink sequence in both helpers.
 _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK = threading.Lock()
 _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK = threading.Lock()
+_SESSION_CLEANUP_RESIDUAL_LOCK = threading.Lock()
 _SESSION_PUBLICATION_LOCKS_GUARD = threading.Lock()
 _SESSION_PUBLICATION_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = (
     weakref.WeakValueDictionary()
 )
 _SESSION_PUBLICATION_DELETED: set[str] = set()
+
+
+class _SessionPublicationGeneration:
+    """Weakly-owned lease for one live in-process SID incarnation."""
+
+    def __init__(self) -> None:
+        self.token = uuid.uuid4().hex
+
+
+_SESSION_PUBLICATION_GENERATIONS: weakref.WeakValueDictionary[
+    str, _SessionPublicationGeneration
+] = weakref.WeakValueDictionary()
 
 
 def _get_session_publication_lock(session_id: str) -> threading.RLock:
@@ -214,24 +227,73 @@ def _get_session_publication_lock(session_id: str) -> threading.RLock:
         return lock
 
 
-def _mark_session_deleted_for_publication(session_id: str) -> None:
-    with _SESSION_PUBLICATION_LOCKS_GUARD:
-        _SESSION_PUBLICATION_DELETED.add(str(session_id or ""))
-
-
-def _unmark_session_deleted_for_publication(session_id: str) -> None:
-    with _SESSION_PUBLICATION_LOCKS_GUARD:
-        _SESSION_PUBLICATION_DELETED.discard(str(session_id or ""))
-
-
-def _session_is_deleted_for_publication(session_id: str, path: Path) -> bool:
+def _session_publication_generation(session_id: str) -> _SessionPublicationGeneration:
+    """Return the process-local lease shared by one live SID incarnation."""
     sid = str(session_id or "")
     with _SESSION_PUBLICATION_LOCKS_GUARD:
+        generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
+        if generation is None:
+            generation = _SessionPublicationGeneration()
+            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
+        return generation
+
+
+def _activate_session_publication_generation(session) -> _SessionPublicationGeneration:
+    """Bind *session* to a fresh lease for an intentional SID recreation."""
+    sid = str(getattr(session, "session_id", "") or "")
+    with _get_session_publication_lock(sid):
+        pending_cleanup = _load_session_cleanup_residuals()
+        if sid in pending_cleanup:
+            raise RuntimeError(
+                f"Refusing to recreate session {sid!r} while cleanup residuals remain"
+            )
+        generation = _SessionPublicationGeneration()
+        with _SESSION_PUBLICATION_LOCKS_GUARD:
+            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
+            _SESSION_PUBLICATION_DELETED.discard(sid)
+        session._publication_generation = generation
+        return generation
+
+
+def _mark_session_deleted_for_publication(
+    session_id: str,
+    *,
+    expected_generation: _SessionPublicationGeneration | None = None,
+) -> _SessionPublicationGeneration:
+    sid = str(session_id or "")
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
+        if generation is None:
+            generation = _SessionPublicationGeneration()
+            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
+        if expected_generation is not None and expected_generation != generation:
+            raise RuntimeError(f"Refusing to delete stale session generation {sid!r}")
+        _SESSION_PUBLICATION_DELETED.add(sid)
+        return generation
+
+
+def _session_publication_rejection_reason(
+    session_id: str,
+    path: Path,
+    generation: _SessionPublicationGeneration | None,
+) -> str | None:
+    sid = str(session_id or "")
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        current_generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
+        if (
+            generation is not None
+            and current_generation is not None
+            and generation != current_generation
+        ):
+            return "stale session generation"
         if sid in _SESSION_PUBLICATION_DELETED:
-            return True
+            return "deleted session"
     # A live sidecar beats a stale durable tombstone after restart. An absent
     # sidecar plus tombstone is authoritative and must reject a late save.
-    return not path.exists() and sid in _load_webui_deleted_session_tombstone()
+    if not path.exists() and sid in _load_webui_deleted_session_tombstone():
+        return "deleted session"
+    return None
+
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -587,6 +649,7 @@ WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP = 500
 WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_VERSION = 1
 WEBUI_DELETED_SESSION_TOMBSTONE_CAP = 1000
 WEBUI_DELETED_SESSION_TOMBSTONE_VERSION = 1
+SESSION_CLEANUP_RESIDUAL_VERSION = 2
 
 
 def _webui_zero_message_orphan_tombstone_file() -> "Path":
@@ -828,11 +891,6 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    # Explicit new-session/import paths call this before their first save.
-    # Retire the process-local deletion marker together with its durable peer
-    # so deliberately recreating the same identity remains supported. A stale
-    # worker cannot reach this helper because save rejects the marker first.
-    _unmark_session_deleted_for_publication(sid)
     with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
         current = set(_load_webui_deleted_session_tombstone())
         if sid not in current:
@@ -845,6 +903,319 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
             _webui_deleted_session_tombstone_file().unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
+
+
+def _session_cleanup_residual_file() -> Path:
+    return SESSION_DIR / "_session_cleanup_residuals.json"
+
+
+def _load_session_cleanup_residuals() -> dict[str, dict]:
+    path = _session_cleanup_residual_file()
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or raw.get("version") != SESSION_CLEANUP_RESIDUAL_VERSION:
+        raise ValueError("Invalid session cleanup residual manifest")
+    entries = raw.get("sessions")
+    if not isinstance(entries, dict):
+        raise ValueError("Invalid session cleanup residual entries")
+    validated = {}
+    for raw_sid, record in entries.items():
+        sid = str(raw_sid or "")
+        if not is_safe_session_id(sid) or not isinstance(record, dict):
+            raise ValueError("Invalid session cleanup residual entry")
+        items = record.get("residuals")
+        delete_state_db = record.get("delete_state_db")
+        durable_tombstone = record.get("durable_tombstone")
+        if (
+            not isinstance(items, list)
+            or not isinstance(delete_state_db, bool)
+            or not isinstance(durable_tombstone, bool)
+        ):
+            raise ValueError("Invalid session cleanup residual policy")
+        if not all(
+            isinstance(item, dict) and isinstance(item.get("artifact"), str)
+            for item in items
+        ):
+            raise ValueError("Invalid session cleanup residual artifact")
+        validated[sid] = {
+            "residuals": list(items),
+            "delete_state_db": delete_state_db,
+            "durable_tombstone": durable_tombstone,
+        }
+    return validated
+
+
+def _persist_session_cleanup_residuals(
+    session_id: str,
+    residuals: list[dict],
+    *,
+    durable_tombstone: bool,
+    delete_state_db: bool,
+) -> None:
+    """Persist retryable artifact names until an idempotent cleanup succeeds."""
+    sid = str(session_id or "")
+    path = _session_cleanup_residual_file()
+    with _SESSION_CLEANUP_RESIDUAL_LOCK:
+        entries = _load_session_cleanup_residuals()
+        if residuals:
+            entries[sid] = {
+                "residuals": list(residuals),
+                "delete_state_db": bool(delete_state_db),
+                "durable_tombstone": bool(durable_tombstone),
+            }
+        else:
+            entries.pop(sid, None)
+        if not entries:
+            path.unlink(missing_ok=True)
+            return
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+        )
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {"version": SESSION_CLEANUP_RESIDUAL_VERSION, "sessions": entries},
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            _safe_replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+
+def delete_session_artifacts(
+    session_id: str,
+    *,
+    expected_generation: _SessionPublicationGeneration | None = None,
+    durable_tombstone: bool = True,
+    delete_state_db: bool = True,
+) -> dict:
+    """Retire one SID incarnation and verify every private artifact is absent.
+
+    The publication lock covers the generation transition, durable tombstone,
+    filesystem cleanup, index mutation, and state.db cleanup. A same-SID
+    recreation cannot begin until this transaction releases the lock, and its
+    fresh generation prevents any old Session object from publishing later.
+    """
+    import shutil
+
+    sid = str(session_id or "")
+    if not is_safe_session_id(sid):
+        raise ValueError("Invalid session_id")
+    residuals: list[dict] = []
+
+    def residual(artifact: str, exc: BaseException | None = None) -> None:
+        item = {"artifact": artifact}
+        if exc is not None:
+            item["error"] = type(exc).__name__
+        if item not in residuals:
+            residuals.append(item)
+
+    retired_generation = None
+    with _get_session_publication_lock(sid):
+        retired_generation = _mark_session_deleted_for_publication(
+            sid,
+            expected_generation=expected_generation,
+        )
+        sidecar = SESSION_DIR / f"{sid}.json"
+        backup = sidecar.with_suffix(".json.bak")
+
+        if durable_tombstone:
+            try:
+                _record_webui_deleted_session_tombstone(sid)
+                if sid not in _load_webui_deleted_session_tombstone():
+                    residual("deleted_session_tombstone")
+            except Exception as exc:
+                residual("deleted_session_tombstone", exc)
+            # Do not remove the authoritative sidecar unless crash recovery is
+            # already guaranteed to remember this destructive intent.
+            if residuals:
+                try:
+                    _persist_session_cleanup_residuals(
+                        sid,
+                        residuals,
+                        durable_tombstone=durable_tombstone,
+                        delete_state_db=delete_state_db,
+                    )
+                except Exception as exc:
+                    residual("cleanup_residual_manifest", exc)
+                return {
+                    "ok": False,
+                    "session_id": sid,
+                    "residuals": residuals,
+                    "generation": retired_generation.token,
+                }
+
+        try:
+            from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
+
+            with ACTIVE_RUNS_LOCK:
+                active_run = any(
+                    str((entry or {}).get("session_id") or "") == sid
+                    for entry in ACTIVE_RUNS.values()
+                )
+        except Exception as exc:
+            residual("active_run_registry", exc)
+            active_run = True
+        if active_run:
+            residual("active_run")
+        if residuals:
+            try:
+                _persist_session_cleanup_residuals(
+                    sid,
+                    residuals,
+                    durable_tombstone=durable_tombstone,
+                    delete_state_db=delete_state_db,
+                )
+            except Exception as exc:
+                residual("cleanup_residual_manifest", exc)
+            return {
+                "ok": False,
+                "session_id": sid,
+                "residuals": residuals,
+                "generation": retired_generation.token,
+            }
+
+        for artifact, path in (("session_json", sidecar), ("session_backup", backup)):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as exc:
+                residual(artifact, exc)
+            if path.exists():
+                residual(artifact)
+
+        # Session.save() normally removes its own failed staging files, but a
+        # process crash can leave transcript-bearing JSON/backup temporaries.
+        # They are SID-scoped, so cleanup can remove and verify them without
+        # touching another session's in-flight publication.
+        temporary_patterns = (f"{sid}.tmp.*", f"{sid}.json.bak.tmp.*")
+        try:
+            for pattern in temporary_patterns:
+                for temp_path in SESSION_DIR.glob(pattern):
+                    temp_path.unlink(missing_ok=True)
+            if any(
+                any(SESSION_DIR.glob(pattern))
+                for pattern in temporary_patterns
+            ):
+                residual("session_temporary_files")
+        except Exception as exc:
+            residual("session_temporary_files", exc)
+
+        try:
+            from api.session_media import remove_session_media, _session_media_dir
+
+            remove_session_media(sid)
+            media_dir = _session_media_dir(sid)
+            if media_dir.exists():
+                residual("session_media")
+        except Exception as exc:
+            residual("session_media", exc)
+
+        try:
+            from api.upload import _session_attachment_dir
+
+            attachment_dir = _session_attachment_dir(sid)
+            if attachment_dir.exists():
+                shutil.rmtree(attachment_dir)
+            if attachment_dir.exists():
+                residual("attachments")
+        except Exception as exc:
+            residual("attachments", exc)
+
+        try:
+            from api.turn_journal import TURN_JOURNAL_DIR_NAME, delete_turn_journal
+
+            delete_turn_journal(sid, session_dir=SESSION_DIR)
+            turn_root = SESSION_DIR / TURN_JOURNAL_DIR_NAME
+            if list(turn_root.glob(f"{sid}~*.jsonl")) or (turn_root / f"{sid}.jsonl").exists():
+                residual("turn_journal")
+        except Exception as exc:
+            residual("turn_journal", exc)
+
+        try:
+            from api.run_journal import RUN_JOURNAL_DIR_NAME, delete_run_journal
+
+            delete_run_journal(sid, session_dir=SESSION_DIR)
+            if (SESSION_DIR / RUN_JOURNAL_DIR_NAME / sid).exists():
+                residual("run_journal")
+        except Exception as exc:
+            residual("run_journal", exc)
+
+        try:
+            prune_session_from_index(sid)
+            if SESSION_INDEX_FILE.exists():
+                rows = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+                if not isinstance(rows, list) or any(
+                    isinstance(row, dict) and row.get("session_id") == sid
+                    for row in rows
+                ):
+                    residual("session_index")
+        except Exception as exc:
+            residual("session_index", exc)
+
+        if delete_state_db:
+            try:
+                if not delete_cli_session(sid):
+                    residual("state_db")
+            except Exception as exc:
+                residual("state_db", exc)
+
+        try:
+            from api.config import (
+                SESSION_AGENT_LOCKS,
+                SESSION_AGENT_LOCKS_LOCK,
+                _evict_session_agent,
+            )
+
+            _evict_session_agent(sid)
+            with SESSION_AGENT_LOCKS_LOCK:
+                SESSION_AGENT_LOCKS.pop(sid, None)
+        except Exception as exc:
+            residual("agent_runtime_cache", exc)
+
+        try:
+            from api.background_process import forget_bg_task_completion_dedup
+
+            forget_bg_task_completion_dedup(sid)
+        except Exception as exc:
+            residual("background_completion_registry", exc)
+
+        try:
+            from api.terminal import close_terminal
+
+            close_terminal(sid)
+        except Exception as exc:
+            residual("terminal", exc)
+
+        try:
+            _persist_session_cleanup_residuals(
+                sid,
+                residuals,
+                durable_tombstone=durable_tombstone,
+                delete_state_db=delete_state_db,
+            )
+        except Exception as exc:
+            residual("cleanup_residual_manifest", exc)
+
+    # Do not pop a same-SID replacement that activated immediately after the
+    # publication lock was released. Cache eviction is generation-conditional.
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and getattr(cached, "_publication_generation", None) == retired_generation:
+            SESSIONS.pop(sid, None)
+
+    return {
+        "ok": not residuals,
+        "session_id": sid,
+        "residuals": residuals,
+        "generation": retired_generation.token,
+    }
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
@@ -1278,6 +1649,10 @@ class Session:
                  share_created_at=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        # Process-local incarnation lease. Every load of the current SID shares
+        # this token; an intentional same-SID recreation rotates it so old
+        # in-process Session objects can never regain publication authority.
+        self._publication_generation = _session_publication_generation(self.session_id)
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
         self.model = model
@@ -1399,9 +1774,14 @@ class Session:
     ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
-        if _session_is_deleted_for_publication(self.session_id, self.path):
+        rejection = _session_publication_rejection_reason(
+            self.session_id,
+            self.path,
+            getattr(self, "_publication_generation", None),
+        )
+        if rejection:
             raise RuntimeError(
-                f"Refusing to publish deleted session {self.session_id!r}"
+                f"Refusing to publish {rejection} {self.session_id!r}"
             )
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
@@ -1567,9 +1947,14 @@ class Session:
             # Delete and save share the publication lock, but keep the
             # authoritative deletion check directly adjacent to replace so a
             # future refactor cannot reintroduce a check-then-publish gap.
-            if _session_is_deleted_for_publication(self.session_id, self.path):
+            rejection = _session_publication_rejection_reason(
+                self.session_id,
+                self.path,
+                getattr(self, "_publication_generation", None),
+            )
+            if rejection:
                 raise RuntimeError(
-                    f"Refusing to publish deleted session {self.session_id!r}"
+                    f"Refusing to publish {rejection} {self.session_id!r}"
                 )
             _safe_replace(tmp, self.path)
         except Exception:
@@ -4787,6 +5172,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
+    _activate_session_publication_generation(s)
     # #4985: defensive — auto-generated uuids don't collide with the
     # tombstone, but if a future caller ever passes an explicit id that
     # was previously pruned, clear the entry so the new session isn't
@@ -6317,6 +6703,7 @@ def import_cli_session(
         updated_at=updated_at,
         parent_session_id=parent_session_id,
     )
+    _activate_session_publication_generation(s)
     # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
     # If that sid was previously tombstoned as a webui zero-message orphan,
     # clear the tombstone entry so the freshly-imported session is visible
@@ -9222,7 +9609,8 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
-        return False
+        # Idempotent deletion: an absent database cannot retain this session.
+        return stale_cleanup_complete
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:

@@ -245,22 +245,54 @@ extraction under `attachments/`; changing `HERMES_WEBUI_ATTACHMENT_DIR` does not
 move or change private-media authority. A deployment that moves WebUI state must
 move the complete `STATE_DIR` together.
 
-On platforms with `dir_fd` support, private-media reads and writes are anchored
-to opened directory handles and reject symlink components. Native Windows uses
-a capability-selected pathname backend with the same content verification,
-atomic publication, clone rollback, and removal contract. Both backends verify
-extension/MIME, raster magic, and SHA-256 before a reference can be retained.
-`Session.save()` and session deletion share a per-session publication lock:
-save verifies every retained reference immediately before JSON replacement,
-while deletion tombstones publication before removing JSON and media. A stale
-worker therefore cannot recreate a deleted session or publish a dangling ref.
+Private-media support is enabled only when every required handle-relative
+operation is available (`open`, `mkdir`, `stat`, `unlink`, `rmdir`, `link`,
+`replace`, and directory listing). Reads, writes, clone publication/rollback,
+and removal stay anchored to opened directory handles and reject symlink
+components. A platform without that complete contract (including native
+Windows today) keeps large data URLs inline and refuses to hydrate, clone, or
+remove a pre-existing compact reference; it never falls back to a pathname
+check followed by a separately resolved write or destructive removal.
+
+The anchored backend verifies extension/MIME, raster magic, and SHA-256 before
+a reference can be retained. `Session.save()` and destructive session cleanup
+share a per-session publication lock plus a process-local incarnation lease.
+Deletion retires the active lease and tombstones publication before removing
+artifacts; an intentional same-SID recreation receives a new lease, so an old
+in-process `Session` remains stale even after the SID becomes valid again.
+Save verifies every retained reference immediately before JSON replacement.
+A stale worker therefore cannot recreate a deleted session or publish a
+dangling ref.
 
 New-session lineage operations clone all referenced blobs transactionally
-before publishing the new session id. Ephemeral `/btw` sessions retire JSON,
-cache, stream ownership, tracking, and private media on success, cancellation,
-or startup failure. Model requests and portable exports must hydrate every
-reference through the strict reader and must reject any private URI that
-remains; plain JSON imports containing private URIs are rejected. Legacy files under
+before publishing the new session id. Duplicate and branch publication does
+not enter `SESSIONS` until media, JSON, and index publication succeed; any
+post-clone failure retires the destination and removes its JSON, index residue,
+and media namespace.
+
+Every destructive session path uses the same idempotent artifact cleanup. It
+verifies absence of JSON, backup and crashed-save temporaries, attachments,
+private media, turn/run journals, sidebar index state, and (where WebUI owns it)
+`state.db` state before returning success. Failures return machine-readable
+residual artifact names and persist
+`sessions/_session_cleanup_residuals.json` so a later delete or cleanup request
+can retry them. Each marker retains the original tombstone and `state.db`
+ownership policy, so retrying cleanup cannot turn a messaging-sidecar delete
+into deletion of the externally owned messaging transcript. The generic
+`/api/media` file server hard-denies the complete `session-media` subtree.
+
+Ephemeral `/btw` sessions register an exact
+`{parent_session_id, ephemeral_session_id, stream_id}` owner before the stream
+is exposed. Success, cancellation (including cancel-before-worker), and startup
+failure compare-and-delete only that owner and retire JSON/backup, cache,
+stream/active-owner maps, run/turn journals, agent locks/cache, state DB state,
+and private media. A failed retirement leaves both the durable residual marker
+and the matching in-process owner marked cleanup-pending; an older completion
+cannot erase a newer `/btw` owner for the same parent.
+
+Model requests and portable exports must hydrate every reference through the
+strict reader and must reject any private URI that remains; plain JSON imports
+containing private URIs are rejected. Legacy files under
 `attachments/<session_id>/session-media` are verified and migrated into the
 state-owned store on first read. Session deletion removes both upload and
 private-media namespaces.
