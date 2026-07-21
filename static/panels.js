@@ -2526,6 +2526,7 @@ function _kanbanRenderBoard(){
     board.innerHTML = _kanbanEmptyBoardHtml();
     return;
   }
+  board.classList.toggle('kanban-board-consolidated', !_kanbanLanesByProfile);
   const columns = _kanbanVisibleTasks();
   const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
