@@ -691,17 +691,9 @@ def main() -> None:
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
 
-    # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
-    # terminates the process WITHOUT unwinding the try/finally around
-    # serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
-    # fire-and-forget memory commits) would never run on the normal managed
-    # stop. Install a handler that requests an orderly shutdown so
-    # serve_forever() returns and the existing `finally` block drains cleanly.
-    #
-    # httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
-    # called from the thread running serve_forever() (it would deadlock), so we
-    # dispatch it from a short-lived helper thread. The handler is idempotent
-    # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
+    # ctl.sh uses SIGTERM, whose default handler skips this function's finally.
+    # Request orderly shutdown from a helper thread: shutdown() blocks until
+    # serve_forever() exits, and the event makes repeated signals idempotent.
     _shutdown_requested = threading.Event()
 
     def _request_shutdown(signum, _frame):
