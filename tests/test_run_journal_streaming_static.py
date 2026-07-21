@@ -31,11 +31,10 @@ def test_streaming_compacts_all_successful_agent_result_writebacks():
     settle_src = src[src.index("def _settle_result_messages("):]
     settle_src = settle_src[: settle_src.index("\n\ndef _current_turn_already_has_visible_assistant_answer(")]
 
-    # Normal completion plus both credential self-heal retry-success paths now
-    # route through one shared settlement helper, which owns the compaction.
-    assert "def _settle_result_messages(" in src
-    assert "_compact_session_image_parts_for_persistence(session)" in settle_src
-    assert run_src.count("_settle_result_messages(") == 3
+    # Normal completion plus both credential self-heal retry-success paths must
+    # each compact after committing their own result shape. The retries use
+    # different local variable names, so guard the durable invariant itself.
+    assert run_src.count("_compact_session_image_parts_for_persistence(s)") == 5
 
 
 def test_visible_process_echo_compare_ignores_all_whitespace():
