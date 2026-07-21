@@ -1872,6 +1872,87 @@ def test_media_final_replacement_is_not_removed(tmp_path, monkeypatch):
     assert (tmp_path / "session-media" / replacement_names[0]).is_dir()
 
 
+def test_media_directory_replacement_after_final_check_is_not_removed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    sid = "replace-after-directory-check"
+    session_media.externalize_large_session_media(messages, sid)
+    original_assert = session_media._assert_entry_still_names_fd
+    quarantine_prefix = session_media._deletion_quarantine_prefix(sid)
+    checked_quarantine = 0
+    replacement = []
+
+    def replace_after_final_check(parent_fd, name, child_fd):
+        nonlocal checked_quarantine
+        result = original_assert(parent_fd, name, child_fd)
+        if name.startswith(quarantine_prefix):
+            checked_quarantine += 1
+            if checked_quarantine == 2:
+                moved = name + ".moved"
+                os.rename(name, moved, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                os.mkdir(name, dir_fd=parent_fd)
+                replacement.append(name)
+        return result
+
+    monkeypatch.setattr(
+        session_media,
+        "_assert_entry_still_names_fd",
+        replace_after_final_check,
+    )
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="changed"):
+        session_media.remove_session_media(sid)
+
+    assert replacement
+    assert (tmp_path / "session-media" / replacement[0]).is_dir()
+    assert (tmp_path / "session-media" / f"{replacement[0]}.moved").is_dir()
+
+
+def test_prune_file_replacement_after_final_check_is_not_unlinked(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    sid = "replace-after-file-check"
+    session_media.externalize_large_session_media(messages, sid)
+    original_assert = session_media._assert_regular_entry_still_names_fd
+    replacement = []
+
+    def replace_after_final_check(parent_fd, name, entry_fd):
+        result = original_assert(parent_fd, name, entry_fd)
+        if name.startswith(".prune-") and not replacement:
+            moved = name + ".moved"
+            os.rename(name, moved, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(b"replacement")
+            replacement.append(name)
+        return result
+
+    monkeypatch.setattr(
+        session_media,
+        "_assert_regular_entry_still_names_fd",
+        replace_after_final_check,
+    )
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="changed"):
+        session_media.prune_session_media(sid, [])
+
+    assert replacement
+    media_dir = session_media._session_media_dir(sid)
+    assert (media_dir / replacement[0]).read_bytes() == b"replacement"
+    assert (media_dir / f"{replacement[0]}.moved").is_file()
+
+
 def test_unsupported_backend_detects_broken_private_root_symlink(tmp_path, monkeypatch):
     monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     (tmp_path / "missing-target").mkdir()
