@@ -5635,6 +5635,37 @@ def _terminal_anchor_reconciliation_cursors_equal(left: dict | None, right: dict
     )
 
 
+def _terminal_anchor_reconciliation_cursors_match(left: dict | None, right: dict | None) -> bool:
+    if left is None and right is None:
+        return True
+    return _terminal_anchor_reconciliation_cursors_equal(left, right)
+
+
+def _terminal_anchor_reconciliation_cursor_publish_allowed(
+    current: dict | None,
+    expected: dict | None,
+    candidate: dict | None,
+) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    if _terminal_anchor_reconciliation_cursors_match(current, expected):
+        return True
+    if not isinstance(current, dict):
+        return False
+    current_generation = _terminal_anchor_reconciliation_generation(current.get("generation"))
+    candidate_generation = _terminal_anchor_reconciliation_generation(candidate.get("generation"))
+    if current_generation != candidate_generation:
+        return False
+    try:
+        current_size = int(current.get("index_size") or 0)
+        candidate_size = int(candidate.get("index_size") or 0)
+        current_end = int(current.get("end_offset") or 0)
+        candidate_end = int(candidate.get("end_offset") or 0)
+    except (TypeError, ValueError):
+        return False
+    return candidate_size == current_size and candidate_end <= current_end
+
+
 def _terminal_anchor_reconciliation_set_cursor(
     progress: dict,
     *,
@@ -5658,6 +5689,13 @@ def _terminal_anchor_reconciliation_set_cursor(
             "generation": generation,
             "end_offset": bounded_end_offset,
         }
+        existing_generation = _terminal_anchor_reconciliation_generation(existing.get("generation"))
+        if (
+            existing_generation == generation
+            and int(existing.get("index_size") or 0) == bounded_index_size
+            and bounded_end_offset > int(existing.get("end_offset") or 0)
+        ):
+            return False
         if _terminal_anchor_reconciliation_cursors_equal(existing, next_cursor):
             return False
     cursor = {
@@ -5715,7 +5753,6 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
         progress = _terminal_anchor_reconciliation_progress(session)
         skip_stream_ids.update(_terminal_anchor_reconciliation_stream_ids(session))
         index_cursor = _terminal_anchor_reconciliation_cursor(progress)
-    skip_stream_ids.update(active_stream_ids)
 
     pages: list[dict] = []
     page_cursor = index_cursor
@@ -5726,10 +5763,12 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             limit=64,
             max_candidates=64,
             skip_run_ids=page_skip_stream_ids,
+            barrier_run_ids=active_stream_ids,
             index_cursor=page_cursor,
         )
         summaries = page.get("summaries") if isinstance(page, dict) else None
         if isinstance(page, dict):
+            page["_input_index_cursor"] = page_cursor
             pages.append(page)
         if isinstance(summaries, list):
             page_skip_stream_ids.update(
@@ -5753,7 +5792,7 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             sid,
             limit=64,
             max_candidates=64,
-            skip_run_ids=skip_stream_ids,
+            skip_run_ids=set(skip_stream_ids).union(active_stream_ids),
         )
         if fallback_summaries:
             pages = [
@@ -5769,6 +5808,7 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
         return False
 
     compaction_cursor: dict | None = None
+    materialized_changed = False
     with _get_session_agent_lock(sid):
         records = dict(_anchor_scene_records(session))
         progress = _terminal_anchor_reconciliation_progress(session)
@@ -5777,13 +5817,21 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             index_size = int(page.get("index_size") or 0)
             next_end_offset = page.get("next_index_end_offset")
             summaries = page.get("summaries") if isinstance(page.get("summaries"), list) else []
-            if _terminal_anchor_reconciliation_set_cursor(
-                progress,
-                index_size=index_size,
-                index_generation=page.get("index_generation"),
-                end_offset=next_end_offset,
+            candidate_cursor = _terminal_anchor_reconciliation_page_cursor(page)
+            current_cursor = _terminal_anchor_reconciliation_cursor(progress)
+            expected_cursor = page.get("_input_index_cursor") if isinstance(page.get("_input_index_cursor"), dict) else None
+            if _terminal_anchor_reconciliation_cursor_publish_allowed(
+                current_cursor,
+                expected_cursor,
+                candidate_cursor,
             ):
-                changed = True
+                if _terminal_anchor_reconciliation_set_cursor(
+                    progress,
+                    index_size=index_size,
+                    index_generation=page.get("index_generation"),
+                    end_offset=next_end_offset,
+                ):
+                    changed = True
             progress_streams = _terminal_anchor_reconciliation_stream_ids(session)
             for summary in summaries:
                 stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
@@ -5894,21 +5942,22 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
                     "updated_at": time.time(),
                 }
                 changed = True
-        if not changed:
-            return False
-        if len(records) > 256:
-            ordered = sorted(
-                records.items(),
-                key=lambda item: float((item[1] or {}).get("updated_at") or 0),
-            )
-            records = dict(ordered[-256:])
-        session.anchor_activity_scenes = records
-        session.terminal_anchor_reconciliation = progress
-        session.save(touch_updated_at=False, skip_index=True)
+        materialized_changed = changed
+        if changed:
+            if len(records) > 256:
+                ordered = sorted(
+                    records.items(),
+                    key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+                )
+                records = dict(ordered[-256:])
+            session.anchor_activity_scenes = records
+            session.terminal_anchor_reconciliation = progress
+            session.save(touch_updated_at=False, skip_index=True)
         compaction_cursor = _terminal_anchor_reconciliation_cursor(progress)
+    compacted = False
     if compaction_cursor is not None:
-        compact_terminal_run_index_for_session(sid, index_cursor=compaction_cursor)
-    return True
+        compacted = compact_terminal_run_index_for_session(sid, index_cursor=compaction_cursor)
+    return materialized_changed or compacted
 
 
 def _handle_session_anchor_scene(handler, body):

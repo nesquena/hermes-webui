@@ -522,10 +522,12 @@ def test_terminal_run_index_compaction_holds_process_barrier_against_append(
     assert page["next_index_end_offset"] == 0
 
     repo_root = Path(__file__).resolve().parents[1]
+    ready_path = tmp_path / "child-ready"
     child_code = (
         "import pathlib, sys\n"
         "from api.run_journal import append_run_event\n"
         "session_dir = pathlib.Path(sys.argv[1])\n"
+        "pathlib.Path(sys.argv[2]).write_text('ready', encoding='utf-8')\n"
         "append_run_event('session_1', 'run_child', 'token', {'text': 'ok'}, session_dir=session_dir)\n"
         "append_run_event('session_1', 'run_child', 'done', {'session': {}}, session_dir=session_dir)\n"
     )
@@ -534,14 +536,17 @@ def test_terminal_run_index_compaction_holds_process_barrier_against_append(
 
     def replace_after_child_blocks(src, dst):
         process = subprocess.Popen(
-            [sys.executable, "-c", child_code, str(tmp_path)],
+            [sys.executable, "-c", child_code, str(tmp_path), str(ready_path)],
             cwd=str(repo_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         processes.append(process)
-        time.sleep(0.2)
+        deadline = time.monotonic() + 5
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_path.exists(), "child append process did not reach the append barrier"
         return original_replace(src, dst)
 
     monkeypatch.setattr(run_journal.os, "replace", replace_after_child_blocks)
@@ -557,6 +562,56 @@ def test_terminal_run_index_compaction_holds_process_barrier_against_append(
 
     summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
     assert [summary["run_id"] for summary in summaries] == ["run_child"]
+
+
+def test_terminal_run_index_stale_compaction_cursor_preserves_new_append(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES", 1)
+
+    append_run_event("session_1", "run_old", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_old", "done", {"session": {}}, session_dir=tmp_path)
+    page = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+    )
+    cursor = _terminal_page_cursor(page)
+
+    append_run_event("session_1", "run_child", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_child", "done", {"session": {}}, session_dir=tmp_path)
+
+    assert not compact_terminal_run_index_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        index_cursor=cursor,
+    )
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=2)
+    assert [summary["run_id"] for summary in summaries] == ["run_child", "run_old"]
+
+
+def test_terminal_index_process_lock_uses_windows_locking_when_fcntl_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def locking(self, fd, mode, size):
+            self.calls.append((mode, size))
+
+    fake = FakeMsvcrt()
+    monkeypatch.setattr(run_journal, "_fcntl", None)
+    monkeypatch.setattr(run_journal, "_msvcrt", fake)
+
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    with run_journal._terminal_index_process_lock(index_path):
+        assert (tmp_path / "_run_journal" / "session_1" / "._terminal_runs.jsonl.lock").exists()
+
+    assert fake.calls == [(fake.LK_LOCK, 1), (fake.LK_UNLCK, 1)]
 
 
 def test_terminal_run_summaries_uses_bounded_legacy_summary_fallback(tmp_path, monkeypatch):

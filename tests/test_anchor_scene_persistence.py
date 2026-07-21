@@ -3569,6 +3569,201 @@ def test_terminal_reconciliation_append_barrier_does_not_skip_new_terminal(
     assert records_by_stream[valid_stream]["message_index"] == 1
 
 
+def test_terminal_reconciliation_active_terminal_blocks_ack_and_compaction(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    import api.run_journal as run_journal
+    from api.run_journal import append_run_event
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    session_id = "session-terminal-active-barrier"
+    stream_id = "stream-terminal-active"
+    messages = [
+        {"role": "user", "content": "finish work"},
+        {"role": "assistant", "content": "finished answer", "_ts": 2.0},
+    ]
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES", 1)
+    active_streams = {stream_id}
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set(active_streams))
+
+    append_run_event(
+        session_id,
+        stream_id,
+        "reasoning",
+        {"text": "checking"},
+        session_dir=tmp_path,
+        created_at=1.0,
+    )
+    append_run_event(
+        session_id,
+        stream_id,
+        "token",
+        {"text": "finished answer"},
+        session_dir=tmp_path,
+        created_at=2.0,
+    )
+    append_run_event(
+        session_id,
+        stream_id,
+        "done",
+        {
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": session_id,
+                "run_id": stream_id,
+                "stream_id": stream_id,
+                "message_index": 1,
+                "message_ref": _client_anchor_scene_message_ref(messages[1]),
+            },
+            "session": {
+                "session_id": session_id,
+                "message_count": len(messages),
+                "messages": messages,
+            },
+        },
+        session_dir=tmp_path,
+        created_at=3.0,
+    )
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        terminal_anchor_reconciliation={},
+        save_calls=0,
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert not session.anchor_activity_scenes
+    progress = session.terminal_anchor_reconciliation
+    assert progress["recent_stream_ids"] == []
+    cursor = progress["index_cursor"]
+    assert cursor["end_offset"] == cursor["index_size"]
+    index_path = tmp_path / "_run_journal" / session_id / "_terminal_runs.jsonl"
+    assert stream_id in index_path.read_text(encoding="utf-8")
+
+    active_streams.clear()
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    records_by_stream = {
+        record["stream_id"]: record
+        for record in session.anchor_activity_scenes.values()
+        if isinstance(record, dict)
+    }
+    assert records_by_stream[stream_id]["message_index"] == 1
+
+
+def test_terminal_reconciliation_cursor_publish_rejects_same_generation_rewind():
+    from api import routes
+
+    generation = {"dev": 1, "ino": 2, "size": 100, "mtime_ns": 3, "ctime_ns": 4}
+    progress = {
+        "version": routes._TERMINAL_ANCHOR_RECONCILIATION_VERSION,
+        "recent_stream_ids": [],
+        "index_cursor": {
+            "index_size": 100,
+            "generation": generation,
+            "end_offset": 10,
+        },
+    }
+
+    assert not routes._terminal_anchor_reconciliation_set_cursor(
+        progress,
+        index_size=100,
+        index_generation=generation,
+        end_offset=50,
+    )
+    assert progress["index_cursor"]["end_offset"] == 10
+    assert routes._terminal_anchor_reconciliation_set_cursor(
+        progress,
+        index_size=100,
+        index_generation=generation,
+        end_offset=5,
+    )
+    assert progress["index_cursor"]["end_offset"] == 5
+
+
+def test_terminal_reconciliation_cursor_publish_requires_expected_cursor_or_monotonic_progress():
+    from api import routes
+
+    generation = {"dev": 1, "ino": 2, "size": 100, "mtime_ns": 3, "ctime_ns": 4}
+    expected = {"index_size": 100, "generation": generation, "end_offset": 80}
+    current = {"index_size": 100, "generation": generation, "end_offset": 10}
+    rewind = {"index_size": 100, "generation": generation, "end_offset": 50}
+    advanced = {"index_size": 100, "generation": generation, "end_offset": 5}
+    replacement = {
+        "index_size": 100,
+        "generation": {"dev": 1, "ino": 9, "size": 100, "mtime_ns": 3, "ctime_ns": 4},
+        "end_offset": 5,
+    }
+
+    assert not routes._terminal_anchor_reconciliation_cursor_publish_allowed(current, expected, rewind)
+    assert routes._terminal_anchor_reconciliation_cursor_publish_allowed(current, expected, advanced)
+    assert not routes._terminal_anchor_reconciliation_cursor_publish_allowed(current, expected, replacement)
+
+
+def test_terminal_reconciliation_retries_compaction_without_scene_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    import api.run_journal as run_journal
+    from api.run_journal import append_run_event
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    session_id = "session-terminal-compact-retry"
+    stream_id = "stream-terminal-invalid"
+    messages = [
+        {"role": "user", "content": "finish work"},
+        {"role": "assistant", "content": "finished answer", "_ts": 2.0},
+    ]
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES", 1)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    append_run_event(
+        session_id,
+        stream_id,
+        "done",
+        {"message": "missing target"},
+        session_dir=tmp_path,
+        created_at=1.0,
+    )
+    calls = []
+
+    def compact_once_then_succeed(sid, *, index_cursor=None):
+        calls.append({"sid": sid, "index_cursor": index_cursor})
+        return len(calls) == 2
+
+    monkeypatch.setattr(routes, "compact_terminal_run_index_for_session", compact_once_then_succeed)
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        terminal_anchor_reconciliation={},
+        save_calls=0,
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+    assert session.save_calls == 1
+    assert len(calls) == 1
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert session.save_calls == 1
+    assert len(calls) == 2
+    assert calls[0]["index_cursor"] == calls[1]["index_cursor"]
+
+
 def test_terminal_reconciliation_advances_past_over_cap_index_tail(
     tmp_path,
     monkeypatch,

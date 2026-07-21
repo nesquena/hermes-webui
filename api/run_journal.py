@@ -6,7 +6,6 @@ the existing in-process streaming path without changing execution ownership.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import re
@@ -15,6 +14,16 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
+
+try:  # pragma: no cover - platform-specific imports.
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover
+    _fcntl = None
+
+try:  # pragma: no cover - platform-specific imports.
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover
+    _msvcrt = None
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 TERMINAL_RUN_INDEX_NAME = "_terminal_runs.jsonl"
@@ -101,14 +110,30 @@ def _terminal_index_process_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+        if _msvcrt is not None:
+            if os.fstat(lock_file.fileno()).st_size == 0:
+                lock_file.write(b"\0")
+            lock_file.seek(0)
+            _msvcrt.locking(  # type: ignore[attr-defined]
+                lock_file.fileno(), _msvcrt.LK_LOCK, 1  # type: ignore[attr-defined]
+            )
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(  # type: ignore[attr-defined]
+                    lock_file.fileno(), _msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                )
+            return
+        raise RuntimeError("cross-process terminal index locking is unavailable")
 
 
 def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -1062,6 +1087,7 @@ def terminal_run_summary_page_for_session(
     limit: int = 16,
     max_candidates: int = 64,
     skip_run_ids: Iterable[str] | None = None,
+    barrier_run_ids: Iterable[str] | None = None,
     index_end_offset: int | None = None,
     index_cursor: dict | None = None,
 ) -> dict:
@@ -1095,6 +1121,7 @@ def terminal_run_summary_page_for_session(
     except (TypeError, ValueError):
         max_candidates = 64
     skip_run_ids = {str(run_id or "").strip() for run_id in (skip_run_ids or [])}
+    barrier_run_ids = {str(run_id or "").strip() for run_id in (barrier_run_ids or [])}
     summaries: list[dict] = []
     seen_run_ids: set[str] = set()
     inspected = 0
@@ -1111,7 +1138,7 @@ def terminal_run_summary_page_for_session(
     index_size = int((index_page or {}).get("index_size") or 0)
     index_generation = (index_page or {}).get("index_generation")
     next_index_end_offset = (index_page or {}).get("next_index_end_offset")
-    for row_start, _row_end, entry in (index_page or {}).get("rows") or []:
+    for row_start, row_end, entry in (index_page or {}).get("rows") or []:
         next_index_end_offset = row_start
         if not isinstance(entry, dict):
             inspected += 1
@@ -1125,6 +1152,10 @@ def terminal_run_summary_page_for_session(
                 break
             continue
         run_id = str(summary.get("run_id") or "")
+        if run_id in barrier_run_ids:
+            next_index_end_offset = row_end
+            inspected += 1
+            break
         if run_id in skip_run_ids or run_id in seen_run_ids:
             continue
         seen_run_ids.add(run_id)
