@@ -1,11 +1,15 @@
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import api.run_journal as run_journal
 from api.run_journal import (
     RunJournalWriter,
     append_run_event,
+    compact_terminal_run_index_for_session,
     find_run_summary,
     latest_terminal_run_summary_for_session,
     latest_run_summary,
@@ -404,16 +408,155 @@ def test_terminal_run_index_compacts_under_bounded_policy(tmp_path, monkeypatch)
 
     index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
     rows = index_path.read_text(encoding="utf-8").splitlines()
-    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=5)
+    summaries = terminal_run_summaries_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=12,
+        max_candidates=12,
+    )
 
-    assert len(rows) <= 5
     assert [summary["run_id"] for summary in summaries] == [
         "run_011",
         "run_010",
         "run_009",
         "run_008",
         "run_007",
+        "run_006",
+        "run_005",
+        "run_004",
+        "run_003",
+        "run_002",
+        "run_001",
+        "run_000",
     ]
+    assert len(rows) == 12
+
+    first = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=5,
+        max_candidates=5,
+    )
+    assert [summary["run_id"] for summary in first["summaries"]] == [
+        "run_011",
+        "run_010",
+        "run_009",
+        "run_008",
+        "run_007",
+    ]
+    assert compact_terminal_run_index_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        index_cursor=_terminal_page_cursor(first),
+    )
+
+    remaining = terminal_run_summaries_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=12,
+        max_candidates=12,
+    )
+    assert [summary["run_id"] for summary in remaining] == [
+        "run_006",
+        "run_005",
+        "run_004",
+        "run_003",
+        "run_002",
+        "run_001",
+        "run_000",
+    ]
+
+
+def test_terminal_run_index_compaction_writes_marker_after_full_ack(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES", 1)
+
+    for idx in range(3):
+        run_id = f"run_{idx:03d}"
+        append_run_event("session_1", run_id, "token", {"text": "ok"}, session_dir=tmp_path)
+        append_run_event("session_1", run_id, "done", {"session": {}}, session_dir=tmp_path)
+
+    page = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=3,
+        max_candidates=3,
+    )
+    assert page["next_index_end_offset"] == 0
+    assert compact_terminal_run_index_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        index_cursor=_terminal_page_cursor(page),
+    )
+
+    index_path = tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl"
+    rows = [json.loads(row) for row in index_path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        {
+            "version": run_journal.TERMINAL_RUN_INDEX_COMPACTED_MARKER_VERSION,
+            "compacted": True,
+        }
+    ]
+    assert terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=3) == []
+
+    append_run_event("session_1", "run_new", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_new", "done", {"session": {}}, session_dir=tmp_path)
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
+    assert [summary["run_id"] for summary in summaries] == ["run_new"]
+
+
+def test_terminal_run_index_compaction_holds_process_barrier_against_append(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(run_journal, "_TERMINAL_INDEX_COMPACT_TRIGGER_BYTES", 1)
+
+    append_run_event("session_1", "run_old", "token", {"text": "ok"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_old", "done", {"session": {}}, session_dir=tmp_path)
+    page = terminal_run_summary_page_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        limit=1,
+        max_candidates=1,
+    )
+    assert page["next_index_end_offset"] == 0
+
+    repo_root = Path(__file__).resolve().parents[1]
+    child_code = (
+        "import pathlib, sys\n"
+        "from api.run_journal import append_run_event\n"
+        "session_dir = pathlib.Path(sys.argv[1])\n"
+        "append_run_event('session_1', 'run_child', 'token', {'text': 'ok'}, session_dir=session_dir)\n"
+        "append_run_event('session_1', 'run_child', 'done', {'session': {}}, session_dir=session_dir)\n"
+    )
+    processes = []
+    original_replace = os.replace
+
+    def replace_after_child_blocks(src, dst):
+        process = subprocess.Popen(
+            [sys.executable, "-c", child_code, str(tmp_path)],
+            cwd=str(repo_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(process)
+        time.sleep(0.2)
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(run_journal.os, "replace", replace_after_child_blocks)
+
+    assert compact_terminal_run_index_for_session(
+        "session_1",
+        session_dir=tmp_path,
+        index_cursor=_terminal_page_cursor(page),
+    )
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 0, stdout + stderr
+
+    summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
+    assert [summary["run_id"] for summary in summaries] == ["run_child"]
 
 
 def test_terminal_run_summaries_uses_bounded_legacy_summary_fallback(tmp_path, monkeypatch):

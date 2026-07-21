@@ -5,6 +5,8 @@ the existing in-process streaming path without changing execution ownership.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -16,6 +18,7 @@ from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 TERMINAL_RUN_INDEX_NAME = "_terminal_runs.jsonl"
+TERMINAL_RUN_INDEX_COMPACTED_MARKER_VERSION = "terminal_index_compacted_v1"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
@@ -90,6 +93,22 @@ def _lock_for(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _WRITER_LOCKS[key] = lock
         return lock
+
+
+@contextlib.contextmanager
+def _terminal_index_process_lock(path: Path):
+    """Serialize terminal-index append/replace across WebUI processes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -403,29 +422,29 @@ def _append_terminal_run_index(
     }
     line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    created_file = not path.exists()
-    compacted = False
+    created_file = False
     with _lock_for(path):
-        needs_separator = False
-        try:
-            if path.stat().st_size > 0:
-                read_fd = os.open(path, os.O_RDONLY)
-                try:
-                    os.lseek(read_fd, -1, os.SEEK_END)
-                    needs_separator = os.read(read_fd, 1) != b"\n"
-                finally:
-                    os.close(read_fd)
-        except OSError:
+        with _terminal_index_process_lock(path):
+            created_file = not path.exists()
             needs_separator = False
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            if needs_separator:
-                fh.write("\n")
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
-        compacted = _compact_terminal_run_index_locked(path)
-    if created_file or compacted:
+            try:
+                if path.stat().st_size > 0:
+                    read_fd = os.open(path, os.O_RDONLY)
+                    try:
+                        os.lseek(read_fd, -1, os.SEEK_END)
+                        needs_separator = os.read(read_fd, 1) != b"\n"
+                    finally:
+                        os.close(read_fd)
+            except OSError:
+                needs_separator = False
+            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                if needs_separator:
+                    fh.write("\n")
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
+    if created_file:
         _fsync_parent_dir(path)
 
 
@@ -960,49 +979,79 @@ def _terminal_index_summary_from_entry(
     }
 
 
-def _compact_terminal_run_index_locked(path: Path) -> bool:
+def _terminal_index_compacted_marker() -> bytes:
+    row = {
+        "version": TERMINAL_RUN_INDEX_COMPACTED_MARKER_VERSION,
+        "compacted": True,
+    }
+    return json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def compact_terminal_run_index_for_session(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+    index_cursor: dict | None = None,
+) -> bool:
+    """Drop only terminal-index rows durably acknowledged by reconciliation."""
     try:
-        current_size = int(path.stat().st_size)
-    except OSError:
+        path = _terminal_index_path(session_id, session_dir=session_dir)
+    except ValueError:
         return False
-    if current_size <= _TERMINAL_INDEX_COMPACT_TRIGGER_BYTES:
+    cursor_generation = _terminal_index_generation_from_cursor(index_cursor)
+    if cursor_generation is None or not isinstance(index_cursor, dict):
         return False
-    page = _terminal_index_entry_page(
-        path,
-        max_bytes=_TERMINAL_INDEX_MAX_BYTES,
-        max_rows=_TERMINAL_INDEX_MAX_ROWS,
-    )
-    if page is None:
-        return False
-    session_id = path.parent.name
-    retained: list[bytes] = []
-    for _row_start, _row_end, entry in reversed(page.get("rows") or []):
-        if not isinstance(entry, dict):
-            continue
-        summary = _terminal_index_summary_from_entry(
-            entry,
-            session_id=session_id,
-            session_root=path.parent,
-        )
-        if summary is None:
-            continue
-        retained.append(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-    if not retained:
-        return False
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        with tmp_path.open("wb") as fh:
-            for row in retained[-_TERMINAL_INDEX_MAX_ROWS:]:
-                fh.write(row)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, path)
-    except OSError:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
+        cursor_index_size = max(0, int(index_cursor.get("index_size") or 0))
+        cursor_end_offset = int(index_cursor.get("end_offset"))
+    except (TypeError, ValueError):
         return False
+    if cursor_index_size <= 0 or int(cursor_generation.get("size") or 0) != cursor_index_size:
+        return False
+
+    with _lock_for(path):
+        with _terminal_index_process_lock(path):
+            try:
+                read_fd = os.open(path, os.O_RDONLY)
+            except OSError:
+                return False
+            with os.fdopen(read_fd, "rb", closefd=True) as src:
+                try:
+                    current_generation = _terminal_index_generation_from_stat(os.fstat(src.fileno()))
+                except OSError:
+                    return False
+                current_size = int(current_generation.get("size") or 0)
+                if current_generation != cursor_generation:
+                    return False
+                if current_size <= _TERMINAL_INDEX_COMPACT_TRIGGER_BYTES:
+                    return False
+                end_offset = max(0, min(current_size, cursor_end_offset))
+                if end_offset >= current_size:
+                    return False
+                tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                try:
+                    with tmp_path.open("wb") as dst:
+                        if end_offset <= 0:
+                            dst.write(_terminal_index_compacted_marker())
+                        else:
+                            src.seek(0)
+                            remaining = end_offset
+                            while remaining > 0:
+                                chunk = src.read(min(_SESSION_REPLAY_READ_CHUNK_BYTES, remaining))
+                                if not chunk:
+                                    raise OSError("short terminal-index prefix read")
+                                dst.write(chunk)
+                                remaining -= len(chunk)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    os.replace(tmp_path, path)
+                    _fsync_parent_dir(path)
+                except OSError:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                    return False
     return True
 
 

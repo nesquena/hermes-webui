@@ -5768,6 +5768,7 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
     if not pages:
         return False
 
+    compaction_cursor: dict | None = None
     with _get_session_agent_lock(sid):
         records = dict(_anchor_scene_records(session))
         progress = _terminal_anchor_reconciliation_progress(session)
@@ -5904,6 +5905,9 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
         session.anchor_activity_scenes = records
         session.terminal_anchor_reconciliation = progress
         session.save(touch_updated_at=False, skip_index=True)
+        compaction_cursor = _terminal_anchor_reconciliation_cursor(progress)
+    if compaction_cursor is not None:
+        compact_terminal_run_index_for_session(sid, index_cursor=compaction_cursor)
     return True
 
 
@@ -10638,6 +10642,7 @@ from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_ena
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
+    compact_terminal_run_index_for_session,
     find_run_summary,
     read_run_events,
     read_session_run_events,
