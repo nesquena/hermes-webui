@@ -11848,6 +11848,10 @@ def _schedule_webui_restart() -> None:
                 stderr=subprocess.DEVNULL,
             )
         except OSError:
+            # The HTTP acknowledgement has already returned, so keep the
+            # current server usable and allow a subsequent retry if the helper
+            # itself could not be created.
+            _WEBUI_RESTART_LOCK.release()
             logger.exception("Unable to launch ctl.sh restart")
 
     threading.Thread(target=_restart, name="webui-managed-restart", daemon=True).start()
