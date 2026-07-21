@@ -14418,11 +14418,6 @@ def handle_post(handler, parsed) -> bool:
                     SESSIONS[copied_session.session_id] = copied_session
                     SESSIONS.move_to_end(copied_session.session_id)
                     _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                publish_session_list_changed(
-                    "session_duplicate",
-                    profile=getattr(copied_session, "profile", None),
-                    session_id=getattr(copied_session, "session_id", None),
-                )
             except Exception:
                 cleanup = delete_session_artifacts(
                     copied_session.session_id,
@@ -14438,6 +14433,11 @@ def handle_post(handler, parsed) -> bool:
                 )
                 return bad(handler, "Could not publish duplicated session", 500)
 
+            publish_session_list_changed(
+                "session_duplicate",
+                profile=getattr(copied_session, "profile", None),
+                session_id=getattr(copied_session, "session_id", None),
+            )
             return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
         except Exception as e:
             return bad(handler, str(e))
@@ -15174,12 +15174,6 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[branch.session_id] = branch
                 SESSIONS.move_to_end(branch.session_id)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-            if forked_messages:
-                publish_session_list_changed(
-                    "session_branch",
-                    profile=getattr(branch, "profile", None),
-                    session_id=getattr(branch, "session_id", None),
-                )
         except Exception:
             cleanup = delete_session_artifacts(
                 branch.session_id,
@@ -15195,6 +15189,12 @@ def handle_post(handler, parsed) -> bool:
             )
             return bad(handler, "Could not publish branched session", 500)
 
+        if forked_messages:
+            publish_session_list_changed(
+                "session_branch",
+                profile=getattr(branch, "profile", None),
+                session_id=getattr(branch, "session_id", None),
+            )
         return j(handler, {
             "session_id": branch.session_id,
             "title": branch_title,
