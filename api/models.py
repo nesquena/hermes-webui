@@ -254,6 +254,24 @@ def _durable_unlink(path: Path, *, missing_ok: bool = True) -> None:
     _fsync_directory(parent)
 
 
+def _durable_replace_bytes(path: Path, payload: bytes) -> None:
+    """Atomically replace one file and durably commit the exact byte payload."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_parent_directory(path.parent)
+    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _safe_replace(tmp, path)
+        _fsync_parent_directory(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
@@ -459,12 +477,26 @@ def _load_and_validate_session_payload(
     expected_session_id: str,
 ) -> dict:
     """Load one sidecar/backup without allowing its outer SID to redirect ownership."""
+    data = json.loads(path.read_bytes())
+    return _validate_session_payload_identity(
+        data,
+        expected_session_id,
+        source_name=path.name,
+    )
+
+
+def _validate_session_payload_identity(
+    data,
+    expected_session_id: str,
+    *,
+    source_name: str = "session payload",
+) -> dict:
+    """Bind one already-read payload to its authoritative outer SID."""
     sid = str(expected_session_id or "")
     if not is_safe_session_id(sid):
         raise ValueError("Invalid expected session_id")
-    data = json.loads(path.read_bytes())
     if not isinstance(data, dict):
-        raise ValueError(f"Invalid session payload: {path.name}")
+        raise ValueError(f"Invalid session payload: {source_name}")
     if data.get("session_id") != sid:
         raise ValueError(
             f"Session payload identity mismatch: expected {sid!r}, "
@@ -853,7 +885,12 @@ def reserve_session_destination(session_id: str) -> _SessionDestinationReservati
     return _SessionDestinationReservation(session_id)
 
 
-def rollback_reserved_session_destination(session_id: str, token: str) -> dict:
+def rollback_reserved_session_destination(
+    session_id: str,
+    token: str,
+    *,
+    durable_intent_path: Path | None = None,
+) -> dict:
     """Crash-recovery rollback that may remove only one proven incarnation."""
     sid = str(session_id or "")
     with _session_publication_authority(sid):
@@ -864,7 +901,21 @@ def rollback_reserved_session_destination(session_id: str, token: str) -> dict:
             persisted_token = payload.get("publication_incarnation")
         claim_token = _read_session_incarnation_claim(sid)
         observed = persisted_token or claim_token
-        if observed != token:
+        intent_authorizes_missing_incarnation = False
+        if observed is None and durable_intent_path is not None:
+            expected_intent = SESSION_DIR / "_compression_transactions" / f"{sid}.json"
+            if Path(durable_intent_path).absolute() != expected_intent.absolute():
+                raise RuntimeError("Compression rollback intent path mismatch")
+            raw_intent = json.loads(durable_intent_path.read_bytes())
+            intent_authorizes_missing_incarnation = (
+                isinstance(raw_intent, dict)
+                and raw_intent.get("version") == 2
+                and raw_intent.get("new_session_id") == sid
+                and raw_intent.get("incarnation_token") == token
+                and raw_intent.get("phase")
+                in {"reserved", "source_archived", "sidecar_published"}
+            )
+        if observed != token and not intent_authorizes_missing_incarnation:
             raise RuntimeError(
                 f"Refusing to roll back unproven session incarnation {sid!r}"
             )

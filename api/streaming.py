@@ -20,7 +20,6 @@ import threading
 import time
 import traceback
 import copy
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -4048,28 +4047,34 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(
+    s,
+    old_sid: str,
+    *,
+    strict: bool = False,
+    session_dir: Path | None = None,
+) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
-    old_path = SESSION_DIR / f'{old_sid}.json'
+    old_path = (session_dir or SESSION_DIR) / f'{old_sid}.json'
     if not old_path.exists():
+        if strict:
+            raise RuntimeError("Compression source sidecar is missing")
         return
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
@@ -4154,8 +4159,12 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 old_sid,
             )
     except OSError:
+        if strict:
+            raise
         logger.debug("Could not read old session file before preservation")
     except Exception:
+        if strict:
+            raise
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
 
 
@@ -4200,42 +4209,23 @@ def _publish_compression_continuation(
         "profile": getattr(s, "profile", None),
     }
     from api.models import (
-        _durable_unlink,
-        _fsync_parent_directory,
+        SESSION_DIR as live_session_dir,
+        _INDEX_WRITE_LOCK,
+        _cross_process_file_lock,
         _path_entry_exists,
+        _session_publication_authority,
         _session_incarnation_claim_file,
         reserve_session_destination,
     )
+    from api.session_recovery import (
+        _advance_compression_transaction,
+        _restore_compression_transaction_source,
+        _retire_compression_transaction,
+        _stage_compression_transaction_source,
+    )
     import api.config as live_config
 
-    intent_dir = SESSION_DIR / "_compression_transactions"
-    intent_path = intent_dir / f"{new_sid}.json"
-
-    def write_intent(phase: str, token: str) -> None:
-        intent_dir.mkdir(parents=True, exist_ok=True)
-        _fsync_parent_directory(intent_dir)
-        tmp = intent_path.with_suffix(f".tmp.{uuid.uuid4().hex}")
-        try:
-            with open(tmp, "x", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "version": 1,
-                        "old_session_id": old_sid,
-                        "new_session_id": new_sid,
-                        "incarnation_token": token,
-                        "phase": phase,
-                    },
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, intent_path)
-            _fsync_parent_directory(intent_path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+    intent = None
 
     registry_undo = []
     transaction_committed = False
@@ -4282,9 +4272,39 @@ def _publish_compression_continuation(
 
         registry_undo.append(undo)
 
+    transaction_authority = contextlib.ExitStack()
     try:
+        for locked_sid in sorted({old_sid, new_sid}):
+            transaction_authority.enter_context(
+                _session_publication_authority(locked_sid)
+            )
+        transaction_authority.enter_context(_INDEX_WRITE_LOCK)
+        transaction_authority.enter_context(
+            _cross_process_file_lock("session-index")
+        )
+        intent = _stage_compression_transaction_source(
+            live_session_dir,
+            old_sid,
+            new_sid,
+        )
         with reserve_session_destination(new_sid) as reservation:
-            write_intent("prepared", reservation.generation.token)
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "reserved",
+                token=reservation.generation.token,
+            )
+            _preserve_pre_compression_snapshot(
+                s,
+                old_sid,
+                strict=True,
+                session_dir=live_session_dir,
+            )
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "source_archived",
+            )
             _clone_session_media_for_compression_rotation(s, old_sid, new_sid)
             s.session_id = new_sid
             reservation.bind(s)
@@ -4298,7 +4318,11 @@ def _publish_compression_continuation(
             s.pre_compression_snapshot = False
             s.parent_session_id = old_sid
             s.save()
-            write_intent("sidecar_published", reservation.generation.token)
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "sidecar_published",
+            )
 
             with LOCK:
                 cached_old_session = SESSIONS.get(old_sid)
@@ -4378,11 +4402,15 @@ def _publish_compression_continuation(
             with LOCK:
                 SESSIONS.move_to_end(new_sid)
                 _evict_sessions_over_cap()
-            write_intent("migrations_complete", reservation.generation.token)
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "migrations_complete",
+            )
             reservation.commit()
             transaction_committed = True
         try:
-            _durable_unlink(intent_path)
+            _retire_compression_transaction(live_session_dir, new_sid)
         except Exception:
             # The transaction is already committed. Keep the complete intent
             # for startup recovery to verify/finalize; never roll back live
@@ -4410,12 +4438,44 @@ def _publish_compression_continuation(
         s.pre_compression_snapshot = saved_identity["pre_compression_snapshot"]
         s.parent_session_id = saved_identity["parent_session_id"]
         s.profile = saved_identity["profile"]
+        source_restored = False
+        if intent is None or intent.get("phase") in {"initializing", "prepared"}:
+            # Source/destination mutation is forbidden before the reserved
+            # phase, so partial staging can be retired without restoration.
+            try:
+                _retire_compression_transaction(live_session_dir, new_sid)
+                source_restored = True
+            except Exception:
+                logger.error(
+                    "Could not retire unstarted compression transaction for %s",
+                    new_sid,
+                    exc_info=True,
+                )
+        else:
+            try:
+                _restore_compression_transaction_source(live_session_dir, intent)
+                intent = _advance_compression_transaction(
+                    live_session_dir,
+                    intent,
+                    "source_restored",
+                )
+                source_restored = True
+            except Exception:
+                logger.error(
+                    "Could not restore compression source transaction %s -> %s",
+                    old_sid,
+                    new_sid,
+                    exc_info=True,
+                )
         if (
-            not _path_entry_exists(SESSION_DIR / f"{new_sid}.json")
+            source_restored
+            and intent is not None
+            and intent.get("phase") == "source_restored"
+            and not _path_entry_exists(live_session_dir / f"{new_sid}.json")
             and not _path_entry_exists(_session_incarnation_claim_file(new_sid))
         ):
             try:
-                _durable_unlink(intent_path)
+                _retire_compression_transaction(live_session_dir, new_sid)
             except Exception:
                 logger.error(
                     "Could not retire rolled-back compression intent for %s",
@@ -4423,6 +4483,8 @@ def _publish_compression_continuation(
                     exc_info=True,
                 )
         raise
+    finally:
+        transaction_authority.close()
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -9655,24 +9717,10 @@ def _run_agent_streaming(
                     old_sid = session_id
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
-                    # Preserve the original session file so the full pre-compression
-                    # history survives even when summarisation fails. The previous
-                    # implementation renamed old_sid.json → new_sid.json, which
-                    # destroyed the only persistent copy of the uncompressed history
-                    # before the new (possibly summary-only) session had been saved.
-                    # If the LLM summariser also failed, the user was left with zero
-                    # recoverable messages. (#2223)
-                    # ---
-                    # Archive the old session: write its current state to disk so
-                    # the full conversation history survives even when context
-                    # compression removes messages from the model's context. Skip
-                    # the write when the file already contains up-to-date data
-                    # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
-                    # Agent compression may have already created the
-                    # continuation row in state.db, but every WebUI-owned
-                    # namespace must still be unowned. Do not move cache/lock
-                    # ownership until the continuation is durably published.
+                    # The publication helper writes durable intent plus exact
+                    # source sidecar/index backups before archiving old_sid. It
+                    # then reserves and publishes the continuation, migrates all
+                    # runtime owners, and commits or restores the source bytes.
                     _publish_compression_continuation(
                         s,
                         old_sid,

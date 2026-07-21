@@ -278,12 +278,16 @@ prove its sidecar, media, attachment, journal, index, cache, and runtime
 namespaces unowned before publishing. Duplicate, branch, `/btw`, portable JSON
 import, focused recovery, and compression continuation creation use this same
 publish-or-rollback transaction. Rollback removes only artifacts created while
-that reservation is held. Compression records a durable transaction intent,
-publishes the continuation JSON/index, migrates cache, agent lock/cache, stream
-owner, active-run, and agent identity state while the reservation remains held,
-and commits only after every migration succeeds. Startup recovery finalizes a
-matching published incarnation or rolls back a prepared destination with no
-sidecar.
+that reservation is held. Before compression mutates either identity, it holds
+both SID authorities plus the global index writer, records durable intent, and
+stores digest-bound exact-byte backups of the source sidecar and index. It then
+archives the source, publishes the continuation JSON/index, and migrates cache,
+agent lock/cache, stream owner, active-run, and agent identity state while the
+reservation remains held. Commit occurs only after every migration succeeds.
+Any earlier failure restores the source bytes and runtime identity and removes
+the reserved destination. Startup recovery finalizes only a matching
+`migrations_complete` incarnation; every earlier durable phase restores the
+source and rolls back the destination deterministically.
 
 Every destructive session path uses the same idempotent artifact cleanup. It
 verifies absence of JSON, backup and crashed-save temporaries, attachments,
