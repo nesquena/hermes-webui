@@ -108,6 +108,12 @@ def _isolate_attachment_root(monkeypatch):
     monkeypatch.delenv("HERMES_WEBUI_ATTACHMENT_DIR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _exercise_legacy_private_media_backend(monkeypatch):
+    """Keep legacy-store fixtures executable while production creation is off."""
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", True)
+
+
 class _FakeHandler:
     def __init__(self, path):
         self.status = None
@@ -158,6 +164,8 @@ def _configure_session_state(tmp_path, monkeypatch):
     models._SESSION_PUBLICATION_LOCKS.clear()
     if hasattr(models, "_SESSION_PUBLICATION_GENERATIONS"):
         models._SESSION_PUBLICATION_GENERATIONS.clear()
+    if hasattr(models, "_SESSION_PUBLICATION_LEGACY_SIGNATURES"):
+        models._SESSION_PUBLICATION_LEGACY_SIGNATURES.clear()
     models._active_destination_reservations().clear()
     with routes.api_config.SESSION_AGENT_CACHE_LOCK:
         routes.api_config.SESSION_AGENT_CACHE.clear()
@@ -228,6 +236,130 @@ def test_externalize_and_hydrate_round_trip(tmp_path, monkeypatch):
     assert hydrated[0]["content"][1]["image_url"]["url"] == data_url
     # The persisted representation remains compact after model-call hydration.
     assert messages[0]["content"][1]["image_url"]["url"] == ref
+
+
+def test_new_sessions_keep_large_native_media_inline(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
+    _raw, data_url = _large_png_data_url()
+    session = Session(
+        session_id="inline-native-media",
+        messages=[_image_message(data_url)],
+        context_messages=[_image_message(data_url)],
+    )
+
+    session.save(skip_index=True)
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    assert payload["messages"][0]["content"][1]["image_url"]["url"] == data_url
+    assert payload["context_messages"][0]["content"][1]["image_url"]["url"] == data_url
+    assert not session_media._session_media_dir(session.session_id).exists()
+
+
+def test_existing_compact_reference_is_verified_then_saved_inline(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
+    session = Session(
+        session_id="legacy-inline-migration",
+        messages=[{"role": "user", "content": "seed"}],
+    )
+    session.save(skip_index=True)
+    raw, _data_url = _large_png_data_url()
+    filename = hashlib.sha256(raw).hexdigest() + ".png"
+    media_dir = session_media._session_media_dir("legacy-inline-migration")
+    media_dir.mkdir(parents=True)
+    (media_dir / filename).write_bytes(raw)
+    compact = _image_message("webui-media://" + filename)
+    session.messages = [compact]
+    session.context_messages = [compact]
+
+    session.save(skip_index=True)
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    assert "webui-media://" not in json.dumps(payload)
+    assert payload["messages"][0]["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
+
+
+def test_quarantine_without_residual_blocks_same_sid_reservation(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    sid = "quarantined-media-owner"
+    root = tmp_path / "session-media"
+    root.mkdir()
+    (root / (session_media._deletion_quarantine_prefix(sid) + "crashed")).mkdir()
+
+    with pytest.raises(models.SessionDestinationCollisionError, match="session_media_quarantine"):
+        with models.reserve_session_destination(sid):
+            pass
+
+
+def test_save_refuses_to_retain_backup_with_missing_private_media(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(session_media, "_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED", False)
+    session = Session(
+        session_id="broken-media-backup",
+        messages=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "second"}],
+    )
+    session.save(skip_index=True)
+    before = json.loads(session.path.read_text(encoding="utf-8"))
+    before["messages"] = [_image_message("webui-media://" + "0" * 64 + ".png"), {"role": "assistant", "content": "second"}]
+    session.path.write_text(json.dumps(before), encoding="utf-8")
+    expected_bytes = session.path.read_bytes()
+    session.messages = [{"role": "user", "content": "replacement"}]
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="missing"):
+        session.save(skip_index=True)
+
+    assert session.path.read_bytes() == expected_bytes
+    assert not session.path.with_suffix(".json.bak").exists()
+
+
+def test_legacy_loader_cannot_register_then_overwrite_recovered_sidecar(tmp_path, monkeypatch):
+    session_dir = _configure_session_state(tmp_path, monkeypatch)
+    sid = "legacy-load-recovery-race"
+    path = session_dir / f"{sid}.json"
+    path.write_text(
+        json.dumps({"session_id": sid, "messages": [{"role": "user", "content": "old"}]}),
+        encoding="utf-8",
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    replacement_written = threading.Event()
+    loaded = {}
+    original_register = models._register_validated_legacy_session_generation
+
+    def pause_registration(session, signature):
+        entered.set()
+        assert release.wait(5)
+        return original_register(session, signature)
+
+    monkeypatch.setattr(models, "_register_validated_legacy_session_generation", pause_registration)
+
+    loader = threading.Thread(target=lambda: loaded.setdefault("session", Session.load(sid)))
+    loader.start()
+    assert entered.wait(5)
+    replacement = json.dumps(
+        {"session_id": sid, "messages": [{"role": "user", "content": "recovered"}]}
+    ).encode("utf-8")
+
+    def replace_under_recovery_authority():
+        with models._session_publication_authority(sid):
+            models._durable_replace_bytes(path, replacement)
+            replacement_written.set()
+
+    recovery = threading.Thread(target=replace_under_recovery_authority)
+    recovery.start()
+    assert not replacement_written.wait(0.2)
+    release.set()
+    loader.join(5)
+    recovery.join(5)
+    assert loaded["session"] is not None
+    assert replacement_written.is_set()
+
+    with pytest.raises(RuntimeError, match="unvalidated session generation"):
+        loaded["session"].save(skip_index=True)
+    assert path.read_bytes() == replacement
 
 
 def test_save_compacts_both_visible_and_model_context(tmp_path, monkeypatch):
@@ -792,7 +924,7 @@ def test_legacy_attachment_media_is_verified_and_migrated(tmp_path, monkeypatch)
 
     hydrated = session_media.hydrate_session_media_urls(messages, "legacy-session")
     assert hydrated[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert (tmp_path / "session-media" / "legacy-session" / filename).read_bytes() == raw
+    assert not (tmp_path / "session-media" / "legacy-session" / filename).exists()
 
 
 def test_btw_clones_media_before_new_session_is_published(tmp_path, monkeypatch):
@@ -2410,7 +2542,7 @@ def test_save_rejects_private_ref_in_non_image_transcript_path(tmp_path, monkeyp
 
     with pytest.raises(
         session_media.SessionMediaIntegrityError,
-        match="outside an image part",
+        match="hydrated session history",
     ):
         session.save(skip_index=True)
 

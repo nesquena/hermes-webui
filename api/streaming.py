@@ -4169,9 +4169,15 @@ def _preserve_pre_compression_snapshot(
 
 
 def _clone_session_media_for_compression_rotation(s, old_sid: str, new_sid: str) -> None:
-    """Clone compact media before any compression identity state advances."""
+    """Migrate legacy compact media before compression changes identity."""
     try:
-        from api.session_media import clone_session_media_references
+        from api.session_media import (
+            clone_session_media_references,
+            hydrate_session_media_urls,
+        )
+
+        s.messages = hydrate_session_media_urls(s.messages, old_sid)
+        s.context_messages = hydrate_session_media_urls(s.context_messages, old_sid)
 
         clone_session_media_references(
             [s.messages, s.context_messages],

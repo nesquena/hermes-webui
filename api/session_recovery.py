@@ -155,7 +155,6 @@ def _stage_compression_transaction_source(
     from api.models import (
         _durable_replace_bytes,
         _path_entry_exists,
-        _validate_session_payload_identity,
     )
 
     paths = _compression_transaction_paths(session_dir, new_sid)
@@ -164,11 +163,7 @@ def _stage_compression_transaction_source(
     if not _path_entry_exists(sidecar):
         raise RuntimeError("Compression source sidecar is missing")
     sidecar_bytes = sidecar.read_bytes()
-    _validate_session_payload_identity(
-        json.loads(sidecar_bytes),
-        old_sid,
-        source_name=sidecar.name,
-    )
+    _read_recovery_payload(sidecar, old_sid)
     index_existed = _path_entry_exists(index)
     index_bytes = index.read_bytes() if index_existed else b""
     intent = {
@@ -255,8 +250,11 @@ def _retire_compression_transaction(session_dir: Path, new_sid: str) -> None:
 
 def _read_recovery_payload(path: Path, expected_sid: str) -> dict:
     from api.models import _load_and_validate_session_payload
+    from api.session_media import verify_serialized_session_media_payload
 
-    return _load_and_validate_session_payload(path, expected_sid)
+    payload = _load_and_validate_session_payload(path, expected_sid)
+    verify_serialized_session_media_payload(payload, expected_sid)
+    return payload
 
 
 def _msg_count(p: Path) -> int:

@@ -509,7 +509,13 @@ def _session_publication_rejection_reason(
             # be published only by an object returned through a validated load
             # path, which registers its otherwise process-local generation.
             # A bare constructor after restart has no such authority.
-            if current_generation is None or generation != current_generation:
+            signature = _SESSION_PUBLICATION_LEGACY_SIGNATURES.get(key)
+            if (
+                current_generation is None
+                or generation != current_generation
+                or signature is None
+                or _sidecar_stat_signature(path) != signature
+            ):
                 return "unvalidated session generation"
     else:
         try:
@@ -793,13 +799,12 @@ def _session_destination_owners(session_id: str) -> list[str]:
         _read_session_incarnation_claim(sid)
         owners.append("session_incarnation_claim")
 
-    from api.session_media import _session_media_dir
+    from api.session_media import session_media_destination_owners
     from api.upload import _session_attachment_dir
     from api.turn_journal import TURN_JOURNAL_DIR_NAME
     from api.run_journal import RUN_JOURNAL_DIR_NAME
 
-    if _path_entry_exists(_session_media_dir(sid)):
-        owners.append("session_media")
+    owners.extend(session_media_destination_owners(sid))
     if _path_entry_exists(_session_attachment_dir(sid)):
         owners.append("attachments")
     turn_root = SESSION_DIR / TURN_JOURNAL_DIR_NAME
@@ -2800,6 +2805,7 @@ class Session:
         from api.session_media import (
             assert_no_session_media_references,
             externalize_large_session_media,
+            hydrate_session_media_urls,
             verify_serialized_session_media_payload,
         )
 
@@ -2811,6 +2817,16 @@ class Session:
             },
             context="session payload outside messages/context_messages",
         )
+        # Compact references created by an unreleased experimental build are
+        # read only through the verifier, then written back as portable data
+        # URLs.  New externalization is disabled until private entries can be
+        # retired by immutable identity rather than mutable pathname.
+        hydrated_messages = hydrate_session_media_urls(self.messages, self.session_id)
+        hydrated_context_messages = hydrate_session_media_urls(
+            self.context_messages, self.session_id
+        )
+        self.messages = hydrated_messages
+        self.context_messages = hydrated_context_messages
         externalize_large_session_media(self.messages, self.session_id)
         externalize_large_session_media(self.context_messages, self.session_id)
         # Write metadata fields first so load_metadata_only() can read them
@@ -2890,6 +2906,10 @@ class Session:
                     existing = json.loads(existing_text)
                     if not isinstance(existing, dict) or existing.get("session_id") != self.session_id:
                         raise RuntimeError("Existing session sidecar identity mismatch")
+                    # A backup remains a recovery publication candidate.  Do
+                    # not retain one that points at missing/corrupt private
+                    # media, even though the incoming sidecar is portable.
+                    verify_serialized_session_media_payload(existing, self.session_id)
                     existing_msg_count = len(existing.get('messages') or [])
                 except json.JSONDecodeError:
                     existing_msg_count = -1  # corrupt → always back up
@@ -3047,32 +3067,26 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
-            return None
-        # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
-        # cache write is only committed if the file didn't change under us
-        # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
-        try:
-            data = _load_and_validate_session_payload(p, sid)
-        except (OSError, ValueError, json.JSONDecodeError):
-            logger.warning("Rejecting invalid or identity-mismatched session sidecar for %s", sid)
-            return None
-        # Do not attach a tokenless legacy lease to a sidecar that changed
-        # while it was being parsed. A caller can retry the complete validated
-        # load; accepting this snapshot would authorize an unknown replacement.
-        _post_read_sig = _sidecar_stat_signature(p)
-        if _pre_read_sig is None or _post_read_sig is None or _pre_read_sig != _post_read_sig:
-            logger.warning("Session sidecar changed during validated load for %s", sid)
-            return None
-        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-        session = cls(**data)
-        if not data.get("publication_incarnation"):
-            # Legacy sidecars have no durable incarnation token.  A complete,
-            # identity-validated load is the only safe way to establish their
-            # in-process authority; a bare ``Session(session_id=sid)`` must
-            # remain unable to adopt the same sidecar.
-            _register_validated_legacy_session_generation(session, _post_read_sig)
+        # The validation snapshot, tokenless-lease binding, and registry
+        # publication are one authority transaction.  A recovery replacement
+        # cannot land between validation and registration.
+        with _session_publication_authority(sid):
+            if not p.exists():
+                return None
+            _pre_read_sig = _sidecar_stat_signature(p)
+            try:
+                data = _load_and_validate_session_payload(p, sid)
+            except (OSError, ValueError, json.JSONDecodeError):
+                logger.warning("Rejecting invalid or identity-mismatched session sidecar for %s", sid)
+                return None
+            _post_read_sig = _sidecar_stat_signature(p)
+            if _pre_read_sig is None or _post_read_sig is None or _pre_read_sig != _post_read_sig:
+                logger.warning("Session sidecar changed during validated load for %s", sid)
+                return None
+            data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+            session = cls(**data)
+            if not data.get("publication_incarnation"):
+                _register_validated_legacy_session_generation(session, _post_read_sig)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
