@@ -461,6 +461,7 @@ global._decorateTransparentEventRow=(row,opts)=>{
 };
 global._rehydrateTransparentLiveRow=()=>{};
 global._sanitizeThinkingDisplayText=value=>String(value||'').trim();
+global._thinkingBodyHtml=value=>String(value||'').trim();
 global._firstValidTimestampSeconds=()=>null;
 
 eval(anchorsSrc);
@@ -548,8 +549,8 @@ function fallbackReasoningRows(){
 }
 function reasoningText(row){
   if(!row) return null;
-  const pre=row.querySelector&&row.querySelector('pre');
-  return pre?pre.textContent:row.textContent;
+  const body=row.querySelector&&row.querySelector('.thinking-card-body');
+  return body?body.textContent:row.textContent;
 }
 function applyProductionAnchorEvent(sourceEventType, data){
   const registry=window._liveAnchorRegistries&&window._liveAnchorRegistries.get('stream-1');

@@ -49,7 +49,7 @@ def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
     assert "function _copyThinkingText(btn){" in UI_JS
     assert "const copyBtn=`<button class=\"thinking-copy-btn\"" in UI_JS
     assert "event.stopPropagation();_copyThinkingText(this)" in UI_JS
-    assert "card.querySelector('.thinking-card-body pre')" in UI_JS
+    assert "card.querySelector('.thinking-card-body')" in UI_JS
     assert "_copyText(text).then(()=>{" in UI_JS
     assert "btn.innerHTML=li('check',12);" in UI_JS
     assert ".thinking-copy-btn{" in COMPACT_CSS
@@ -58,9 +58,24 @@ def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
 
 def test_live_thinking_updates_existing_card_body_in_place():
     assert "function _renderThinkingInto(row,text='')" in UI_JS
-    assert "row.querySelector('.thinking-card-body pre')" in UI_JS
-    assert "pre.textContent=clean" in UI_JS
+    assert "row.querySelector('.thinking-card-body')" in UI_JS
+    assert "body.innerHTML=html" in UI_JS
     assert "_renderThinkingInto(row,text);" in UI_JS
+
+
+def test_thinking_cards_use_the_markdown_renderer_for_codex_reasoning():
+    assert "function _thinkingBodyHtml(text='')" in UI_JS
+    helper = UI_JS.split("function _thinkingBodyHtml(text='')", 1)[1].split("function ", 1)[0]
+    assert "renderMd(clean)" in helper
+
+    for function_name in ("_thinkingCardHtml", "_thinkingMarkup", "_renderThinkingInto"):
+        body = UI_JS.split(f"function {function_name}", 1)[1].split("function ", 1)[0]
+        assert "_thinkingBodyHtml(" in body, (
+            f"{function_name} must share the reasoning Markdown renderer"
+        )
+
+    assert '<div class="thinking-card-body">${bodyHtml}</div>' in UI_JS
+    assert '<pre>${esc(clean)}</pre>' not in UI_JS
 
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():

@@ -394,7 +394,7 @@ const transparentRows = [
     'data-event-type':'thinking',
     'data-event-id':'run-renderer:1',
   }}, '', {{
-    '.thinking-card-body pre': {{textContent:'thinking'}},
+    '.thinking-card-body': {{textContent:'thinking'}},
     '.transparent-event-preview': {{textContent:'thinking'}},
   }}, ['transparent-event-row']),
   node({{
@@ -446,7 +446,7 @@ const matchingReconciliation = api.reconcileAssistantTurnAnchorRendererSnapshot(
 
 const compactRows = [
   node({{'data-worklog-reason-source':'reasoning'}}, '', {{
-    '.thinking-card-body pre': {{textContent:'compact thinking'}},
+    '.thinking-card-body': {{textContent:'compact thinking'}},
   }}, ['wl-reason']),
   node({{'data-tool-name':'terminal','data-tool-done':'false','data-tool-error':'false','data-live-tid':'tool-live'}}, '', {{
     '.tool-card-name': {{textContent:'terminal'}},

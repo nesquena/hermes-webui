@@ -7312,6 +7312,13 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  // Adjacent bold spans use four stars at the shared close/open boundary:
+  // **first****second**. Protect that boundary from the bold-italic (`***`)
+  // pass, which would otherwise consume stars from both spans and emit escaped,
+  // malformed nested tags. This shape is emitted by Codex reasoning summaries.
+  const _adjacentBoldBoundary='\x00BOLD_BOUNDARY\x00';
+  const _protectAdjacentBold=value=>String(value||'').replace(/(\S)\*\*\*\*(?=\S)/g,(_,lead)=>lead+'**'+_adjacentBoldBoundary+'**');
+  const _restoreAdjacentBold=value=>String(value||'').split(_adjacentBoldBoundary).join('');
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -7319,6 +7326,7 @@ function renderMd(raw){
     // Stash backtick code spans first so bold/italic never esc() their content
     const _code_stash=[];
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
+    t=_protectAdjacentBold(t);
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
@@ -7343,17 +7351,19 @@ function renderMd(raw){
     // by escaping bare < > that are not part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
-    return t;
+    return _restoreAdjacentBold(t);
   }
   // Stash <code> tags from the backtick pass above so the outer bold/italic
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
+  s=_protectAdjacentBold(s);
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
+  s=_restoreAdjacentBold(s);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
@@ -8489,8 +8499,8 @@ function copyMsg(btn){
 function _copyThinkingText(btn){
   const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
   if(!card)return;
-  const pre=card.querySelector('.thinking-card-body pre');
-  const text=pre?pre.textContent:'';
+  const body=card.querySelector('.thinking-card-body');
+  const text=body?body.textContent:'';
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;
@@ -10977,12 +10987,16 @@ function _restoreWorklogDetailDisclosureState(root, state){
     }
   });
 }
-function _thinkingCardHtml(text, open){
+function _thinkingBodyHtml(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
+  return clean?`<div class="thinking-card-markdown">${renderMd(clean)}</div>`:'';
+}
+function _thinkingCardHtml(text, open){
+  const bodyHtml=_thinkingBodyHtml(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body">${bodyHtml}</div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
@@ -11102,8 +11116,8 @@ function _copyEventToClipboard(row){
     }
     text=parts.join('\n');
   }else if(type==='thinking'){
-    const pre=row.querySelector('.thinking-card-body pre');
-    text=pre?pre.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
+    const body=row.querySelector('.thinking-card-body');
+    text=body?body.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
     label='thinking';
   }else{
     text=row.textContent||'';
@@ -13021,11 +13035,11 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const existingIsThinking = existingType === 'thinking' || (existing.classList&&existing.classList.contains('transparent-thinking-event'));
   const nodeIsThinking = nodeType === 'thinking' || (node.classList&&node.classList.contains('transparent-thinking-event'));
   if(!existingIsThinking || !nodeIsThinking) return false;
-  const existingPre = existing.querySelector('.thinking-card-body pre');
-  const nodePre = node.querySelector('.thinking-card-body pre');
-  if(!existingPre || !nodePre) return false;
-  const nextText = String(nodePre.textContent || '');
-  if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
+  const existingBody = existing.querySelector('.thinking-card-body');
+  const nodeBody = node.querySelector('.thinking-card-body');
+  if(!existingBody || !nodeBody) return false;
+  const nextText = String(nodeBody.textContent || '');
+  if(existingBody.innerHTML !== nodeBody.innerHTML) existingBody.innerHTML = nodeBody.innerHTML;
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
   const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
   if(typeof _decorateTransparentEventRow === 'function'){
@@ -18784,22 +18798,22 @@ function renderKatexBlocks(container,options){
 }
 
 function _thinkingMarkup(text=''){
-  const clean=_sanitizeThinkingDisplayText(text);
+  const bodyHtml=_thinkingBodyHtml(text);
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
-  return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+  return bodyHtml
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body">${bodyHtml}</div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function _renderThinkingInto(row,text=''){
   if(!row) return;
-  const clean=_sanitizeThinkingDisplayText(text);
-  if(!clean){
+  const html=_thinkingBodyHtml(text);
+  if(!html){
     row.innerHTML=_thinkingMarkup(text);
     return;
   }
-  const pre=row.querySelector('.thinking-card-body pre');
-  if(pre){
-    pre.textContent=clean;
+  const body=row.querySelector('.thinking-card-body');
+  if(body){
+    body.innerHTML=html;
     return;
   }
   row.innerHTML=_thinkingMarkup(text);

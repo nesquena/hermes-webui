@@ -101,6 +101,22 @@ def _render(driver_path, markdown: str) -> str:
     return result.stdout
 
 
+def test_codex_reasoning_adjacent_bold_summaries_render_as_markdown(driver_path):
+    raw = (
+        "**Evaluating doc sync strategies****Deciding repo docs ingestion model****"
+        "Planning dirtypages daemon for docs****Designing distributed repo syncing****"
+        "Designing metadata tagging policy**"
+    )
+
+    out = _render(driver_path, raw)
+
+    assert out.count("<strong>") == 5
+    assert "****" not in out
+    assert "**Evaluating" not in out
+    assert "&lt;strong" not in out
+    assert "BOLD_BOUNDARY" not in out
+
+
 
 class TestSessionInternalLinks:
     """Drive renderMd() so session:// hardening covers the real sanitizer path."""

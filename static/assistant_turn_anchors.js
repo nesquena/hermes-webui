@@ -1396,7 +1396,7 @@
     return _firstTextValue(
       _rendererSnapshotQueryText(row,'.transparent-event-preview'),
       _rendererSnapshotQueryText(row,'.transparent-event-thinking-preview'),
-      _rendererSnapshotQueryText(row,'.thinking-card-body pre'),
+      _rendererSnapshotQueryText(row,'.thinking-card-body'),
       _rendererSnapshotQueryText(row,'.tool-card-preview'),
       _rendererSnapshotQueryText(row,'.tool-card-result pre'),
       typeof row.textContent==='string'?row.textContent:''
