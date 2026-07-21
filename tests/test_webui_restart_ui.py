@@ -61,5 +61,5 @@ def test_restart_i18n_uses_english_keys_and_existing_locale_fallback():
         assert f"{key}:" in i18n
 
     locale_count = i18n.count("settings_label_shutdown:")
-    assert i18n.count("settings_btn_restart:") == 1
-    assert locale_count > 1, "Test assumes existing locale fallback is in use."
+    assert i18n.count("settings_btn_restart:") == locale_count
+    assert locale_count > 1, "Test assumes multiple locale bundles are present."
