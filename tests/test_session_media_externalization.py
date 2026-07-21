@@ -203,7 +203,8 @@ def _assert_destination_media_is_independent(destination, source_id, raw, data_u
     destination_files = list(session_media._session_media_dir(destination_id).iterdir())
     assert len(destination_files) == 1
     assert destination_files[0].read_bytes() == raw
-    session_media.remove_session_media(source_id)
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.remove_session_media(source_id)
     hydrated_messages = session_media.hydrate_session_media_urls(destination.messages, destination_id)
     hydrated_context = session_media.hydrate_session_media_urls(destination.context_messages, destination_id)
     assert hydrated_messages[0]["content"][1]["image_url"]["url"] == data_url
@@ -729,9 +730,13 @@ def test_remove_session_media_deletes_only_requested_namespace(tmp_path, monkeyp
     session_media.externalize_large_session_media(first, "delete-first")
     session_media.externalize_large_session_media(second, "keep-second")
 
-    session_media.remove_session_media("delete-first")
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.remove_session_media("delete-first")
 
     assert not session_media._session_media_dir("delete-first").exists()
+    quarantines = list((tmp_path / "session-media").glob(".delete-*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].is_dir()
     assert session_media._session_media_dir("keep-second").exists()
     assert session_media.hydrate_session_media_urls(second, "keep-second")
 
@@ -819,7 +824,8 @@ def test_btw_clones_media_before_new_session_is_published(tmp_path, monkeypatch)
     assert "bad" not in captured
     destination_id = captured["ok"]["session_id"]
     destination = Session.load(destination_id)
-    session_media.remove_session_media(source.session_id)
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.remove_session_media(source.session_id)
     hydrated = session_media.hydrate_session_media_urls(
         destination.context_messages,
         destination_id,
@@ -851,7 +857,8 @@ def test_export_import_inlines_verified_media_and_establishes_new_ownership(tmp_
     assert data_url in json.dumps(exported)
     assert "webui-media://" not in json.dumps(exported)
 
-    session_media.remove_session_media(source.session_id)
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.remove_session_media(source.session_id)
     captured = _capture_route(monkeypatch)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: path)
@@ -1008,7 +1015,12 @@ def test_btw_thread_start_failure_rolls_back_all_ephemeral_ownership(tmp_path, m
     assert destination_id not in routes.api_config.STREAM_SESSION_OWNERS.values()
     from api.background import find_btw_owner
 
-    assert find_btw_owner(destination_id, stream_id) is None
+    owner = find_btw_owner(destination_id, stream_id)
+    assert owner is not None
+    assert owner["cleanup_pending"] is True
+    assert owner["cleanup_residuals"] == [
+        {"artifact": "session_media", "error": "SessionMediaIntegrityError"}
+    ]
 
 
 def test_missing_anchored_capabilities_fail_closed_without_persisting_private_refs(
@@ -1058,7 +1070,7 @@ def test_ephemeral_cleanup_retires_json_cache_stream_tracking_and_media(tmp_path
     models.SESSIONS[session.session_id] = session
     routes.STREAMS[session.active_stream_id] = SimpleNamespace()
     routes.register_stream_owner(session.active_stream_id, session.session_id)
-    from api.background import cleanup_btw, track_btw
+    from api.background import find_btw_owner, track_btw
 
     track_btw(
         session.parent_session_id,
@@ -1074,11 +1086,12 @@ def test_ephemeral_cleanup_retires_json_cache_stream_tracking_and_media(tmp_path
     assert routes.stream_owner_session_id("btw-cleanup-stream") is None
     assert not session.path.exists()
     assert not session_media._session_media_dir(session.session_id).exists()
-    assert cleanup_btw(
-        session.parent_session_id,
-        session.session_id,
-        session.active_stream_id or "btw-cleanup-stream",
-    ) is None
+    owner = find_btw_owner(session.session_id, "btw-cleanup-stream")
+    assert owner is not None
+    assert owner["cleanup_pending"] is True
+    assert owner["cleanup_residuals"] == [
+        {"artifact": "session_media", "error": "SessionMediaIntegrityError"}
+    ]
 
 
 def test_delete_serializes_against_late_save_and_tombstones_publication(tmp_path, monkeypatch):
@@ -1124,7 +1137,11 @@ def test_delete_serializes_against_late_save_and_tombstones_publication(tmp_path
     delete_thread.join(timeout=5)
     save_thread.join(timeout=5)
 
-    assert captured["ok"]["ok"] is True
+    assert captured["status"] == 500
+    assert captured["ok"]["error"] == "Session cleanup incomplete"
+    assert {item["artifact"] for item in captured["ok"]["residuals"]} == {
+        "session_media"
+    }
     assert save_error and "deleted session" in str(save_error[0])
     assert not session.path.exists()
     assert not session_media._session_media_dir(session.session_id).exists()
@@ -1376,6 +1393,38 @@ def test_same_sid_recreation_does_not_authorize_old_session_object(tmp_path, mon
     with pytest.raises(RuntimeError, match="stale"):
         old.save(skip_index=True)
     assert "replacement" in replacement.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("cold_registry", [False, True], ids=["same-process", "cold-registry"])
+def test_bare_constructor_cannot_adopt_existing_publication_authority(
+    cold_registry, tmp_path, monkeypatch
+):
+    """Only validated loaders may receive a live sidecar's incarnation token."""
+    _configure_session_state(tmp_path, monkeypatch)
+    sid = "bare-constructor-authority"
+    owner = Session(
+        session_id=sid,
+        title="owner",
+        messages=[{"role": "user", "content": "keep"}],
+    )
+    owner.save()
+    sidecar_before = owner.path.read_bytes()
+    index_before = models.SESSION_INDEX_FILE.read_bytes()
+
+    if cold_registry:
+        models.SESSIONS.clear()
+        models._SESSION_PUBLICATION_GENERATIONS.clear()
+
+    unbound = Session(
+        session_id=sid,
+        title="rogue",
+        messages=[{"role": "user", "content": "overwrite"}],
+    )
+    with pytest.raises(RuntimeError, match="stale session generation"):
+        unbound.save()
+
+    assert owner.path.read_bytes() == sidecar_before
+    assert models.SESSION_INDEX_FILE.read_bytes() == index_before
 
 
 @pytest.mark.skipif(models._fcntl is None, reason="requires POSIX process locks")
@@ -1931,11 +1980,14 @@ def test_media_final_replacement_is_not_removed(tmp_path, monkeypatch):
         "_assert_entry_still_names_fd",
         replace_before_final_check,
     )
-    with pytest.raises(session_media.SessionMediaIntegrityError, match="changed"):
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
         session_media.remove_session_media("replace-race")
 
-    assert replacement_names
-    assert (tmp_path / "session-media" / replacement_names[0]).is_dir()
+    # Retirement stops at the first held child before a pathname deletion is
+    # attempted, so this outer directory check never becomes a delete race.
+    assert calls == 1
+    assert replacement_names == []
+    assert not session_media._session_media_dir("replace-race").exists()
 
 
 def test_media_directory_replacement_after_final_check_is_not_removed(
@@ -1946,6 +1998,7 @@ def test_media_directory_replacement_after_final_check_is_not_removed(
     messages = [_image_message(data_url)]
     sid = "replace-after-directory-check"
     session_media.externalize_large_session_media(messages, sid)
+    next(session_media._session_media_dir(sid).iterdir()).unlink()
     original_assert = session_media._assert_entry_still_names_fd
     quarantine_prefix = session_media._deletion_quarantine_prefix(sid)
     checked_quarantine = 0
@@ -2019,6 +2072,97 @@ def test_prune_file_replacement_after_final_check_is_not_unlinked(
     assert (media_dir / f"{replacement[0]}.moved").is_file()
 
 
+def test_prune_replacement_after_innermost_check_survives_retirement(
+    tmp_path, monkeypatch
+):
+    """The final held-FD check must not be followed by pathname unlink."""
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    sid = "replace-after-innermost-file-check"
+    session_media.externalize_large_session_media(messages, sid)
+    original_assert = session_media._assert_regular_entry_still_names_fd
+    checks = 0
+    replacement = []
+
+    def replace_after_innermost_check(parent_fd, name, entry_fd):
+        nonlocal checks
+        result = original_assert(parent_fd, name, entry_fd)
+        if name.startswith(".prune-"):
+            checks += 1
+            if checks == 2:
+                moved = name + ".moved"
+                os.rename(name, moved, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(b"replacement")
+                replacement.append(name)
+        return result
+
+    monkeypatch.setattr(
+        session_media,
+        "_assert_regular_entry_still_names_fd",
+        replace_after_innermost_check,
+    )
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.prune_session_media(sid, [])
+
+    assert checks == 2
+    assert replacement
+    media_dir = session_media._session_media_dir(sid)
+    assert (media_dir / replacement[0]).read_bytes() == b"replacement"
+    assert (media_dir / f"{replacement[0]}.moved").is_file()
+
+
+def test_directory_replacement_after_innermost_check_survives_retirement(
+    tmp_path, monkeypatch
+):
+    """The final held-FD check must not be followed by pathname rmdir."""
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    _raw, data_url = _large_png_data_url()
+    messages = [_image_message(data_url)]
+    sid = "replace-after-innermost-directory-check"
+    session_media.externalize_large_session_media(messages, sid)
+    next(session_media._session_media_dir(sid).iterdir()).unlink()
+    original_assert = session_media._assert_entry_still_names_fd
+    quarantine_prefix = session_media._deletion_quarantine_prefix(sid)
+    checks = 0
+    replacement = []
+
+    def replace_after_innermost_check(parent_fd, name, entry_fd):
+        nonlocal checks
+        result = original_assert(parent_fd, name, entry_fd)
+        if name.startswith(quarantine_prefix):
+            checks += 1
+            if checks == 3:
+                moved = name + ".moved"
+                os.rename(name, moved, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                os.mkdir(name, dir_fd=parent_fd)
+                replacement.append(name)
+        return result
+
+    monkeypatch.setattr(
+        session_media,
+        "_assert_entry_still_names_fd",
+        replace_after_innermost_check,
+    )
+
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.remove_session_media(sid)
+
+    assert checks == 3
+    assert replacement
+    media_root = tmp_path / "session-media"
+    assert (media_root / replacement[0]).is_dir()
+    assert (media_root / f"{replacement[0]}.moved").is_dir()
+
+
 def test_prune_exact_removal_allows_additional_hardlink(tmp_path, monkeypatch):
     monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     _raw, data_url = _large_png_data_url()
@@ -2030,8 +2174,10 @@ def test_prune_exact_removal_allows_additional_hardlink(tmp_path, monkeypatch):
     sibling = media_dir / "additional-hardlink.png"
     os.link(stored, sibling)
 
-    assert session_media.prune_session_media(sid, []) == 2
-    assert not list(media_dir.iterdir())
+    with pytest.raises(session_media.SessionMediaIntegrityError, match="retaining quarantine"):
+        session_media.prune_session_media(sid, [])
+    assert len(list(media_dir.glob(".prune-*"))) == 1
+    assert len([path for path in media_dir.iterdir() if not path.name.startswith(".prune-")]) == 1
 
 
 def test_unsupported_backend_detects_broken_private_root_symlink(tmp_path, monkeypatch):
@@ -2063,9 +2209,14 @@ def test_clear_durably_removes_backup_and_private_media(tmp_path, monkeypatch):
 
     routes.handle_post(_FakeHandler("/api/session/clear"), urlparse("/api/session/clear"))
 
-    assert captured["ok"]["ok"] is True
+    assert captured["status"] == 500
+    assert captured["ok"]["error"] == "Session clear incomplete"
+    assert {item["artifact"] for item in captured["ok"]["residuals"]} == {
+        "session_media"
+    }
     assert not session.path.with_suffix(".json.bak").exists()
     assert not session_media._session_media_dir(session.session_id).exists()
+    assert len(list((tmp_path / "session-media").glob(".delete-*"))) == 1
 
 
 def test_clear_retires_backup_and_media_even_when_live_transcript_is_already_empty(
@@ -2095,7 +2246,10 @@ def test_clear_retires_backup_and_media_even_when_live_transcript_is_already_emp
 
     routes.handle_post(_FakeHandler("/api/session/clear"), urlparse("/api/session/clear"))
 
-    assert captured["status"] == 200
+    assert captured["status"] == 500
+    assert {item["artifact"] for item in captured["ok"]["residuals"]} == {
+        "session_media"
+    }
     assert not backup.exists()
     assert not session_media._session_media_dir(session.session_id).exists()
 
@@ -2123,7 +2277,8 @@ def test_truncate_prunes_only_media_unreachable_from_live_or_backup(tmp_path, mo
     files = {path.name for path in session_media._session_media_dir(session.session_id).iterdir()}
     assert stray_name not in files
     # The removed second message remains reachable from the recovery backup.
-    assert len(files) == 2
+    assert len([name for name in files if not name.startswith(".prune-")]) == 2
+    assert len([name for name in files if name.startswith(".prune-")]) == 1
 
 
 def test_truncate_does_not_report_committed_write_as_failed_when_prune_fails(
