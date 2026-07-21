@@ -2015,6 +2015,45 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, sceneIdentity){
+  if(!event||typeof event!=='object') return '';
+  const sourceType=String(
+    event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
+  ).trim();
+  if(sourceType!==expectedType) return '';
+  const identity=(sceneIdentity&&typeof sceneIdentity==='object')?sceneIdentity:{};
+  const expectedSession=String(identity.sessionId||identity.session_id||'').trim();
+  const expectedStream=String(identity.streamId||identity.stream_id||'').trim();
+  const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
+  const eventSession=String(event.session_id||event.sessionId||'').trim();
+  const eventStream=String(event.stream_id||event.streamId||'').trim();
+  if(expectedSession&&eventSession!==expectedSession) return '';
+  if(expectedStream&&eventStream!==expectedStream) return '';
+  const eventId=String(event.event_id||event.lastEventId||event.last_event_id||'').trim();
+  const eventRunId=String(event.run_id||event.runId||'').trim();
+  let eventIdRunId='';
+  let eventIdSeq='';
+  if(eventId){
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt<=0||splitAt===eventId.length-1) return '';
+    eventIdRunId=eventId.slice(0,splitAt);
+    eventIdSeq=eventId.slice(splitAt+1);
+    if(!/^[1-9][0-9]*$/.test(eventIdSeq)) return '';
+  }
+  if(eventRunId&&eventIdRunId&&eventRunId!==eventIdRunId) return '';
+  const effectiveRunId=eventRunId||eventIdRunId;
+  if(expectedRun&&(!effectiveRunId||effectiveRunId!==expectedRun)) return '';
+  const hasSeq=event.seq!==undefined&&event.seq!==null&&event.seq!=='';
+  let seqText='';
+  if(hasSeq){
+    seqText=String(event.seq).trim();
+    if(!/^[1-9][0-9]*$/.test(seqText)) return '';
+    if(eventIdSeq&&seqText!==eventIdSeq) return '';
+  }
+  if(eventId) return `event:${eventId}`;
+  return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
+}
+
 function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry, scene, context){
   if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function'||!anchorRegistry) return false;
   if(!scene||scene.version!=='activity_scene_v1') return false;
@@ -2046,6 +2085,7 @@ function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry
         event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
       ).trim();
       if(sourceType!==expectedType) continue;
+      if(!_anchorOutcomeEnvelopeIdentityKey(event,expectedType,sceneIdentity.runId,sceneIdentity)) continue;
       let result=null;
       try{ result=anchorApi.applyAssistantTurnAnchorSourceEvent(anchorRegistry,event,outcomeContext); }catch(_){ continue; }
       if(result&&(result.applied||result.reason==='duplicate')) accepted=true;

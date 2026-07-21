@@ -3160,6 +3160,22 @@ def _run_journal_outcome_created_at(value):
     return _bounded_journal_outcome_string(value, limit=128)
 
 
+_RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS = 512
+_RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES = 128_000
+
+
+def _run_journal_outcome_encoded_size(outcome: dict) -> int:
+    return len(
+        json.dumps(
+            outcome,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
+
+
 def _run_journal_outcome_event(
     event: dict,
     *,
@@ -3222,7 +3238,12 @@ def _run_journal_outcome_event(
             return None
     if raw_run_id and event_id_run_id and raw_run_id != event_id_run_id:
         return None
-    run_id = raw_run_id or fallback_run_id or stream_id
+    expected_run_id = fallback_run_id or stream_id
+    if raw_run_id and expected_run_id and raw_run_id != expected_run_id:
+        return None
+    if event_id_run_id and expected_run_id and event_id_run_id != expected_run_id:
+        return None
+    run_id = raw_run_id or expected_run_id
     if event_id_run_id and event_id_run_id != run_id:
         return None
     event_id = f"{run_id}:{seq}"
@@ -3260,6 +3281,7 @@ def _run_journal_outcome_event(
     return {
         "source_event_type": event_name,
         "event_id": event_id,
+        "session_id": session_id,
         "run_id": run_id,
         "stream_id": stream_id,
         "seq": seq,
@@ -3366,6 +3388,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     event_run_ids: set[str] = set()
     malformed_envelope_run_id = False
     for event in events:
+        event_name = str(event.get("event") or event.get("type") or "")
+        if event_name in _RUN_JOURNAL_OUTCOME_EVENTS:
+            continue
         event_run_id, event_run_id_malformed = _run_journal_envelope_run_id_result(event)
         if event_run_id is not None:
             event_run_ids.add(event_run_id)
@@ -3377,7 +3402,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     run_id = (
         next(iter(event_run_ids))
         if not malformed_envelope_run_id and len(event_run_ids) == 1
-        else str(summary.get("run_id") or stream_id).strip()
+        else fallback_run_id
     )
 
     assistant_text = ""
@@ -3387,11 +3412,41 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     anchor_artifacts: list[dict] = []
     anchor_side_effects: list[dict] = []
     seen_outcome_event_ids: set[str] = set()
+    outcome_count = 0
+    outcome_encoded_bytes = 0
+    outcome_truncation: dict | None = None
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
     last_ts = None
     reasoning_first_tool_count: int | None = None
+
+    def append_outcome(target: list[dict], outcome: dict) -> None:
+        nonlocal outcome_count, outcome_encoded_bytes, outcome_truncation
+        if outcome_truncation is not None:
+            return
+        if outcome_count >= _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS:
+            outcome_truncation = {
+                "reason": "count",
+                "accepted_count": outcome_count,
+                "max_count": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS,
+                "accepted_bytes": outcome_encoded_bytes,
+                "max_bytes": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES,
+            }
+            return
+        encoded_size = _run_journal_outcome_encoded_size(outcome)
+        if outcome_encoded_bytes + encoded_size > _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES:
+            outcome_truncation = {
+                "reason": "bytes",
+                "accepted_count": outcome_count,
+                "max_count": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS,
+                "accepted_bytes": outcome_encoded_bytes,
+                "max_bytes": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES,
+            }
+            return
+        target.append(outcome)
+        outcome_count += 1
+        outcome_encoded_bytes += encoded_size
 
     def mark_boundary() -> int:
         nonlocal current_activity_burst_id
@@ -3481,12 +3536,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 event_name=event_name,
                 session_id=session_id,
                 stream_id=stream_id,
-                fallback_run_id=fallback_run_id,
+                fallback_run_id=run_id,
             )
             if outcome and outcome["event_id"] not in seen_outcome_event_ids:
                 seen_outcome_event_ids.add(outcome["event_id"])
                 target = anchor_artifacts if event_name == "artifact_reference" else anchor_side_effects
-                target.append(outcome)
+                append_outcome(target, outcome)
             continue
         if event_name == "token":
             text = str(payload.get("text") or "")
@@ -3917,52 +3972,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "side_effects": anchor_side_effects,
         },
     }
-    outcome_events = [*anchor_artifacts, *anchor_side_effects]
-    outcome_run_ids = {
-        str(outcome.get("run_id") or "").strip()
-        for outcome in outcome_events
-        if str(outcome.get("run_id") or "").strip()
-    }
-    stable_outcome_run_ids = {run_id for run_id in outcome_run_ids if run_id != stream_id}
-    scene_run_id = None
-    if len(outcome_run_ids) == 1:
-        scene_run_id = next(iter(outcome_run_ids))
-    elif len(stable_outcome_run_ids) == 1 and outcome_run_ids <= {
-        stream_id,
-        next(iter(stable_outcome_run_ids)),
-    }:
-        # Mixed journals can contain new stable-run outcome events beside legacy
-        # stream-id-only events. Normalize those legacy envelopes to the single
-        # stable run so frontend recovery does not filter half the outcome set.
-        scene_run_id = next(iter(stable_outcome_run_ids))
-        seen_normalized_event_ids: set[str] = set()
-        for collection in (anchor_artifacts, anchor_side_effects):
-            kept: list[dict] = []
-            for outcome in collection:
-                if str(outcome.get("run_id") or "").strip() == stream_id:
-                    outcome["run_id"] = scene_run_id
-                    outcome["event_id"] = f"{scene_run_id}:{outcome.get('seq')}"
-                event_id = str(outcome.get("event_id") or "").strip()
-                if event_id and event_id in seen_normalized_event_ids:
-                    continue
-                if event_id:
-                    seen_normalized_event_ids.add(event_id)
-                kept.append(outcome)
-            collection[:] = kept
-    if scene_run_id:
-        snapshot["anchor_activity_scene"]["identity"]["run_id"] = scene_run_id
-        if scene_run_id != stream_id:
-            for row in snapshot["anchor_activity_scene"]["activity_rows"]:
-                if not isinstance(row, dict):
-                    continue
-                if str(row.get("run_id") or "").strip() in {"", stream_id}:
-                    row["run_id"] = scene_run_id
-                identity = row.get("identity")
-                if isinstance(identity, dict) and str(identity.get("run_id") or "").strip() in {
-                    "",
-                    stream_id,
-                }:
-                    identity["run_id"] = scene_run_id
+    if outcome_truncation is not None:
+        snapshot["anchor_activity_scene"]["outcomes_truncated"] = outcome_truncation
     return snapshot
 
 

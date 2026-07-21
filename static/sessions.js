@@ -986,23 +986,44 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   _rememberObservedStreamingSession(s);
 }
 
-function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId='') {
+function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, sceneIdentity){
   if(!event||typeof event!=='object') return '';
   const sourceType=String(
     event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
   ).trim();
   if(sourceType!==expectedType) return '';
+  const identity=(sceneIdentity&&typeof sceneIdentity==='object')?sceneIdentity:{};
+  const expectedSession=String(identity.sessionId||identity.session_id||'').trim();
+  const expectedStream=String(identity.streamId||identity.stream_id||'').trim();
+  const eventSession=String(event.session_id||event.sessionId||'').trim();
+  const eventStream=String(event.stream_id||event.streamId||'').trim();
+  if(expectedSession&&eventSession!==expectedSession) return '';
+  if(expectedStream&&eventStream!==expectedStream) return '';
   const eventId=String(event.event_id||event.lastEventId||event.last_event_id||'').trim();
-  const eventRunId=String(event.run_id||'').trim();
-  const eventIdRunId=eventId.includes(':')?eventId.slice(0,eventId.lastIndexOf(':')):'';
+  const eventRunId=String(event.run_id||event.runId||'').trim();
+  let eventIdRunId='';
+  let eventIdSeq='';
+  if(eventId){
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt<=0||splitAt===eventId.length-1) return '';
+    eventIdRunId=eventId.slice(0,splitAt);
+    eventIdSeq=eventId.slice(splitAt+1);
+    if(!/^[1-9][0-9]*$/.test(eventIdSeq)) return '';
+  }
   if(eventRunId&&eventIdRunId&&eventRunId!==eventIdRunId) return '';
   const effectiveRunId=eventRunId||eventIdRunId;
-  const expectedRun=String(expectedRunId||'').trim();
+  const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
   if(expectedRun&&!effectiveRunId) return '';
   if(expectedRun&&effectiveRunId&&effectiveRunId!==expectedRun) return '';
-  if(eventId) return `event:${eventId}`;
   const hasSeq=event.seq!==undefined&&event.seq!==null&&event.seq!=='';
-  return effectiveRunId&&hasSeq?`run-seq:${effectiveRunId}:${String(event.seq)}`:'';
+  let seqText='';
+  if(hasSeq){
+    seqText=String(event.seq).trim();
+    if(!/^[1-9][0-9]*$/.test(seqText)) return '';
+    if(eventIdSeq&&seqText!==eventIdSeq) return '';
+  }
+  if(eventId) return `event:${eventId}`;
+  return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
 }
 
 function _anchorActivitySceneHasRecoveryState(scene) {
@@ -1139,9 +1160,9 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
   const mergeCollection=(journalEvents,cachedEvents,expectedType)=>{
     const merged=[];
     const seen=new Set();
-    for(const [events,expectedRun] of [[journalEvents,journalRun],[cachedEvents,cachedRun]]){
+    for(const [events,expectedRun,identity] of [[journalEvents,journalRun,journalIdentity],[cachedEvents,cachedRun,cachedIdentity]]){
       for(const event of (Array.isArray(events)?events:[])){
-        const identityKey=_anchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun);
+        const identityKey=_anchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
         if(!identityKey||seen.has(identityKey)) continue;
         seen.add(identityKey);
         merged.push(event);
