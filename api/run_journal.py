@@ -634,6 +634,8 @@ def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = N
     max_mtime = 0.0
     total_size = 0
     for path in session_root.glob("*.jsonl"):
+        if path.name == TERMINAL_RUN_INDEX_NAME:
+            continue
         try:
             st = path.stat()
         except OSError:
@@ -846,6 +848,8 @@ def read_session_run_events(
     retained_rows = 0
     retained_bytes = 0
     for path in sorted(session_root.glob("*.jsonl")) if session_root.exists() else []:
+        if path.name == TERMINAL_RUN_INDEX_NAME:
+            continue
         run_id = path.stem
         try:
             run_id = _validate_id(run_id, "run_id")

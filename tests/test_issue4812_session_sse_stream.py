@@ -120,6 +120,7 @@ def test_session_journal_replays_later_runs_after_cursor(tmp_path):
         seq=2,
         created_at=201.0,
     )
+    assert (tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl").exists()
     append_run_event(
         "session_2",
         "run_other",
