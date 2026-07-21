@@ -2163,6 +2163,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
+  // #6303: During reattach, clear the stale anchor registry from the prior
+  // stream connection. The old registry carries activity events with
+  // burst/segment counters from before the session switch, while INFLIGHT
+  // was freshly restored from the server's runtime journal snapshot with
+  // authoritative counters. A stale registry causes new SSE events to collide
+  // with old event identities, producing duplicate thinking rows, wrong tool
+  // ordering, or reused segment IDs. Clearing it forces the new closure to
+  // create a fresh registry that stays in sync with the restored counters.
+  if(reconnecting && typeof window!=='undefined' && window._liveAnchorRegistries && typeof window._liveAnchorRegistries.delete==='function'){
+    window._liveAnchorRegistries.delete(streamId);
+  }
   let assistantText='';
   let reasoningText='';
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();

@@ -2126,6 +2126,17 @@ async function loadSession(sid){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
+  // #6303: When the server's runtime journal snapshot wins over the local
+  // INFLIGHT cache (journalSnapshot===true), clear the stale anchor registry
+  // for this streamId. The old registry carries activity events with
+  // burst/segment counters that may not match the snapshot's authoritative
+  // counters, causing duplicate thinking rows, wrong tool ordering, or reused
+  // segment IDs on reattach. The corresponding clearing in attachLiveStream()
+  // handles the per-connection case; this guarantees the registry is fresh
+  // before _renderLiveAnchorActivitySceneForStream runs below.
+  if(INFLIGHT[sid]&&INFLIGHT[sid].journalSnapshot&&activeStreamId&&typeof window!=='undefined'&&window._liveAnchorRegistries&&typeof window._liveAnchorRegistries.delete==='function'){
+    window._liveAnchorRegistries.delete(activeStreamId);
+  }
 
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
