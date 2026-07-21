@@ -256,7 +256,10 @@ check followed by a separately resolved write or destructive removal.
 
 The anchored backend verifies extension/MIME, raster magic, and SHA-256 before
 a reference can be retained. `Session.save()` and destructive session cleanup
-share a per-session publication lock plus a process-local incarnation lease.
+share a permanent per-SID cross-process file lock, an in-process publication
+lock, and a process-local incarnation lease. Session, index, tombstone, cleanup
+residual, and destructive directory-entry changes are not acknowledged until
+their containing-directory durability barrier succeeds.
 Deletion retires the active lease and tombstones publication before removing
 artifacts; an intentional same-SID recreation receives a new lease, so an old
 in-process `Session` remains stale even after the SID becomes valid again.
@@ -264,11 +267,13 @@ Save verifies every retained reference immediately before JSON replacement.
 A stale worker therefore cannot recreate a deleted session or publish a
 dangling ref.
 
-New-session lineage operations clone all referenced blobs transactionally
-before publishing the new session id. Duplicate and branch publication does
-not enter `SESSIONS` until media, JSON, and index publication succeed; any
-post-clone failure retires the destination and removes its JSON, index residue,
-and media namespace.
+New-session lineage operations exclusively reserve the destination SID and
+prove its sidecar, media, attachment, journal, index, cache, and runtime
+namespaces unowned before publishing. Duplicate, branch, `/btw`, portable JSON
+import, focused recovery, and compression continuation creation use this same
+publish-or-rollback transaction. Rollback removes only artifacts created while
+that reservation is held. Compression publishes the continuation JSON/index
+before moving cache or agent-lock ownership.
 
 Every destructive session path uses the same idempotent artifact cleanup. It
 verifies absence of JSON, backup and crashed-save temporaries, attachments,
@@ -300,6 +305,14 @@ containing private URIs are rejected. Legacy files under
 `attachments/<session_id>/session-media` are verified and migrated into the
 state-owned store on first read. Session deletion removes both upload and
 private-media namespaces.
+
+Private-media deletion first atomically renames the exact held SID directory to
+a random quarantine entry, syncs the media parent, and deletes only that held
+quarantine identity. Truncate/retry/undo and backup restore prune blobs by
+reachability across both the live sidecar and any recovery backup. A successful
+clear removes its stale backup before removing the complete private-media
+namespace; an already-empty session with no prior clear generation keeps an
+independently recoverable backup.
 
 ### 4.3 SSE Streaming Engine
 

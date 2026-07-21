@@ -9414,6 +9414,8 @@ from api.models import (
     _load_webui_deleted_session_tombstone,
     _scan_session_cleanup_residuals,
     _activate_session_publication_generation,
+    reserve_session_destination,
+    _durable_unlink,
     _clear_webui_deleted_session_tombstone,
     delete_session_artifacts,
     ensure_cron_project,
@@ -14386,49 +14388,36 @@ def handle_post(handler, parsed) -> bool:
                 updated_at=time.time(),
             )
 
+            media_cloned = False
             try:
                 from api.session_media import clone_session_media_references
 
-                clone_session_media_references(
-                    [copied_session.messages, copied_session.context_messages],
-                    session.session_id,
-                    copied_session.session_id,
-                )
-            except (OSError, ValueError):
-                delete_session_artifacts(
-                    copied_session.session_id,
-                    expected_generation=getattr(copied_session, "_publication_generation", None),
-                    durable_tombstone=False,
-                    delete_state_db=False,
-                )
-                logger.warning(
-                    "Could not clone session media from %s to %s",
-                    session.session_id,
-                    copied_session.session_id,
-                    exc_info=True,
-                )
-                return bad(handler, "Could not copy session media", 500)
-
-            try:
-                # Persist JSON + index before exposing the destination in the
-                # cache. Any failure after media clone retires the whole new-ID
-                # transaction, including JSON, index residue, and private media.
-                copied_session.save()
-                with LOCK:
-                    SESSIONS[copied_session.session_id] = copied_session
-                    SESSIONS.move_to_end(copied_session.session_id)
-                    _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                with reserve_session_destination(copied_session.session_id) as reservation:
+                    reservation.bind(copied_session)
+                    clone_session_media_references(
+                        [copied_session.messages, copied_session.context_messages],
+                        session.session_id,
+                        copied_session.session_id,
+                    )
+                    media_cloned = True
+                    copied_session.save()
+                    with LOCK:
+                        SESSIONS[copied_session.session_id] = copied_session
+                        SESSIONS.move_to_end(copied_session.session_id)
+                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                    reservation.commit()
             except Exception:
-                cleanup = delete_session_artifacts(
-                    copied_session.session_id,
-                    expected_generation=getattr(copied_session, "_publication_generation", None),
-                    durable_tombstone=False,
-                    delete_state_db=False,
-                )
+                if not media_cloned:
+                    logger.warning(
+                        "Could not clone session media from %s to %s",
+                        session.session_id,
+                        copied_session.session_id,
+                        exc_info=True,
+                    )
+                    return bad(handler, "Could not copy session media", 500)
                 logger.warning(
-                    "Could not publish duplicated session %s; rollback residuals=%s",
+                    "Could not publish duplicated session %s",
                     copied_session.session_id,
-                    cleanup["residuals"],
                     exc_info=True,
                 )
                 return bad(handler, "Could not publish duplicated session", 500)
@@ -14929,6 +14918,7 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
             had_sidecar_messages = bool(s.messages or [])
+            prior_clear_generation = getattr(s, "clear_generation", None)
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
             # display + context arrays are emptied AND the truncation watermark is
@@ -14970,14 +14960,25 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
-            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
+            s.clear_generation = (
+                uuid.uuid4().hex
+                if had_sidecar_messages
+                else prior_clear_generation
+            )
+            destructive_clear = had_sidecar_messages or bool(prior_clear_generation)
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
             # again (#3542 lifecycle gap).
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
-            s.save()
+            clear_residuals = []
+            try:
+                s.save()
+            except Exception as exc:
+                clear_residuals.append(
+                    {"artifact": "session_json", "error": type(exc).__name__}
+                )
             persisted_clear = False
             try:
                 persisted = json.loads(s.path.read_text(encoding="utf-8"))
@@ -14995,11 +14996,33 @@ def handle_post(handler, parsed) -> bool:
                 )
             except (OSError, json.JSONDecodeError, ValueError):
                 logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)
-            if had_sidecar_messages and persisted_clear:
+            if not persisted_clear:
+                clear_residuals.append({"artifact": "session_json_verification"})
+            if persisted_clear and destructive_clear:
                 try:
-                    s.path.with_suffix('.json.bak').unlink(missing_ok=True)
-                except OSError:
+                    # The backup can retain references to the removed history;
+                    # commit its absence before deleting the media namespace.
+                    _durable_unlink(s.path.with_suffix('.json.bak'))
+                except Exception as exc:
+                    clear_residuals.append(
+                        {"artifact": "session_backup", "error": type(exc).__name__}
+                    )
                     logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
+                if not clear_residuals:
+                    try:
+                        from api.session_media import remove_session_media
+
+                        remove_session_media(sid)
+                    except Exception as exc:
+                        clear_residuals.append(
+                            {"artifact": "session_media", "error": type(exc).__name__}
+                        )
+            if clear_residuals:
+                return j(
+                    handler,
+                    {"error": "Session clear incomplete", "residuals": clear_residuals},
+                    status=500,
+                )
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
@@ -15037,7 +15060,7 @@ def handle_post(handler, parsed) -> bool:
             from api.session_ops import truncate_session_at_keep
 
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
-            s.save()
+            s.save(prune_media=True)
             logger.info(
                 "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
                 body["session_id"], old_msg_count, len(s.messages or []),
@@ -15143,48 +15166,38 @@ def handle_post(handler, parsed) -> bool:
             parent_session_id=source.session_id,
             session_source="fork",
         )
+        media_cloned = False
         try:
             from api.session_media import clone_session_media_references
 
-            clone_session_media_references(
-                [branch.messages, branch.context_messages],
-                source.session_id,
-                branch.session_id,
-            )
-        except (OSError, ValueError):
-            delete_session_artifacts(
-                branch.session_id,
-                expected_generation=getattr(branch, "_publication_generation", None),
-                durable_tombstone=False,
-                delete_state_db=False,
-            )
-            logger.warning(
-                "Could not clone session media from %s to %s",
-                source.session_id,
-                branch.session_id,
-                exc_info=True,
-            )
-            return bad(handler, "Could not copy session media", 500)
-        try:
-            # Persist only if there are messages (matches new_session pattern),
-            # and never cache a messageful branch before durable publication.
-            if forked_messages:
+            with reserve_session_destination(branch.session_id) as reservation:
+                reservation.bind(branch)
+                clone_session_media_references(
+                    [branch.messages, branch.context_messages],
+                    source.session_id,
+                    branch.session_id,
+                )
+                media_cloned = True
+                # Even an empty fork publishes its sidecar before becoming
+                # observable; otherwise the reservation has no durable owner.
                 branch.save()
-            with LOCK:
-                SESSIONS[branch.session_id] = branch
-                SESSIONS.move_to_end(branch.session_id)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                with LOCK:
+                    SESSIONS[branch.session_id] = branch
+                    SESSIONS.move_to_end(branch.session_id)
+                    _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                reservation.commit()
         except Exception:
-            cleanup = delete_session_artifacts(
-                branch.session_id,
-                expected_generation=getattr(branch, "_publication_generation", None),
-                durable_tombstone=False,
-                delete_state_db=False,
-            )
+            if not media_cloned:
+                logger.warning(
+                    "Could not clone session media from %s to %s",
+                    source.session_id,
+                    branch.session_id,
+                    exc_info=True,
+                )
+                return bad(handler, "Could not copy session media", 500)
             logger.warning(
-                "Could not publish branched session %s; rollback residuals=%s",
+                "Could not publish branched session %s",
                 branch.session_id,
-                cleanup["residuals"],
                 exc_info=True,
             )
             return bad(handler, "Could not publish branched session", 500)
@@ -20835,24 +20848,26 @@ def _handle_btw(handler, body):
     try:
         from api.session_media import clone_session_media_references
 
-        clone_session_media_references(
-            [ephemeral.messages, ephemeral.context_messages],
-            s.session_id,
-            ephemeral.session_id,
-        )
-    except (OSError, ValueError):
-        _cleanup_ephemeral_session(ephemeral)
+        with reserve_session_destination(ephemeral.session_id) as reservation:
+            reservation.bind(ephemeral)
+            clone_session_media_references(
+                [ephemeral.messages, ephemeral.context_messages],
+                s.session_id,
+                ephemeral.session_id,
+            )
+            ephemeral.save()
+            reservation.commit()
+    except Exception:
         logger.warning(
-            "Could not clone session media from %s to btw session %s",
+            "Could not publish btw session copied from %s to %s",
             s.session_id,
             ephemeral.session_id,
             exc_info=True,
         )
-        return bad(handler, "Could not copy session media", 500)
+        return bad(handler, "Could not publish side-question session", 500)
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
     try:
-        ephemeral.save()
         stream = create_stream_channel()
         thr = threading.Thread(
             target=_run_agent_streaming,
@@ -21924,15 +21939,17 @@ def _handle_session_compression_recovery_start(handler, body):
             copied_session.context_messages = []
             copied_session.composer_draft = {"text": "", "files": []}
             try:
-                copied_session.save()
+                with reserve_session_destination(copied_session.session_id) as reservation:
+                    reservation.bind(copied_session)
+                    copied_session.save()
+                    with LOCK:
+                        SESSIONS[copied_session.session_id] = copied_session
+                        SESSIONS.move_to_end(copied_session.session_id)
+                        _evict_sessions_over_cap()
+                    reservation.commit()
             except Exception as e:
                 logger.exception("failed to persist compression recovery session for %s", sid)
                 return bad(handler, f"Failed to start compression recovery: {_sanitize_error(e)}", 500)
-
-            with LOCK:
-                SESSIONS[copied_session.session_id] = copied_session
-                SESSIONS.move_to_end(copied_session.session_id)
-                _evict_sessions_over_cap()
             created = True
     if created:
         publish_session_list_changed(
@@ -25958,13 +25975,21 @@ def _handle_session_import(handler, body):
         profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
-    # Save first: Session.save externalizes portable inline media under the new
-    # id.  Only then may the imported session become observable from the cache.
-    s.save()
-    with LOCK:
-        SESSIONS[s.session_id] = s
-        SESSIONS.move_to_end(s.session_id)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    # Externalization, sidecar/index publication, and cache exposure are one
+    # reserved transaction. A failed save cannot orphan imported media, and a
+    # generated-ID collision cannot overwrite or roll back an existing owner.
+    try:
+        with reserve_session_destination(s.session_id) as reservation:
+            reservation.bind(s)
+            s.save()
+            with LOCK:
+                SESSIONS[s.session_id] = s
+                SESSIONS.move_to_end(s.session_id)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            reservation.commit()
+    except Exception as exc:
+        logger.warning("Could not publish imported session %s", s.session_id, exc_info=True)
+        return bad(handler, f"Could not import session: {_sanitize_error(exc)}", 500)
     publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 

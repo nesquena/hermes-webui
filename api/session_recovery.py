@@ -103,6 +103,9 @@ def _rebuild_recovery_session_index(session_dir: Path) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, index_path)
+        from api.models import _fsync_parent_directory
+
+        _fsync_parent_directory(index_path)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
@@ -355,7 +358,12 @@ def recover_session(session_path: Path) -> dict:
     tmp_path = session_path.with_suffix('.json.recover.tmp')
     try:
         shutil.copyfile(bak_path, tmp_path)
+        with open(tmp_path, 'rb') as handle:
+            os.fsync(handle.fileno())
         tmp_path.replace(session_path)
+        from api.models import _fsync_parent_directory
+
+        _fsync_parent_directory(session_path)
     except OSError as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:
@@ -363,6 +371,25 @@ def recover_session(session_path: Path) -> dict:
         except OSError:
             pass
         return {**status, "restored": False, "error": str(exc)}
+    try:
+        from api.config import SESSION_DIR
+        from api.session_media import prune_session_media
+
+        if session_path.parent.resolve() == Path(SESSION_DIR).resolve():
+            restored_payload = json.loads(session_path.read_bytes())
+            if (
+                isinstance(restored_payload, dict)
+                and restored_payload.get("session_id") == session_path.stem
+            ):
+                prune_session_media(session_path.stem, [restored_payload])
+    except Exception as exc:
+        logger.warning("recover_session: media prune failed for %s: %s", session_path, exc)
+        return {
+            **status,
+            "restored": True,
+            "media_cleanup_pending": True,
+            "error": str(exc),
+        }
     logger.warning(
         "recover_session: restored %s from .bak (live=%d → bak=%d messages). "
         "See #1558 for the data-loss class this guards against.",

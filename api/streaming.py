@@ -4178,6 +4178,49 @@ def _clone_session_media_for_compression_rotation(s, old_sid: str, new_sid: str)
         raise RuntimeError("Could not copy session media for compression continuation") from exc
 
 
+def _publish_compression_continuation(
+    s,
+    old_sid: str,
+    new_sid: str,
+    resolved_profile_name: str | None,
+) -> None:
+    """Durably publish a reserved continuation or restore the old identity."""
+    saved_identity = {
+        "session_id": s.session_id,
+        "publication_generation": getattr(s, "_publication_generation", None),
+        "pre_compression_snapshot": bool(
+            getattr(s, "pre_compression_snapshot", False)
+        ),
+        "parent_session_id": getattr(s, "parent_session_id", None),
+        "profile": getattr(s, "profile", None),
+    }
+    from api.models import reserve_session_destination
+
+    try:
+        with reserve_session_destination(new_sid) as reservation:
+            _clone_session_media_for_compression_rotation(s, old_sid, new_sid)
+            s.session_id = new_sid
+            reservation.bind(s)
+            if not s.profile and resolved_profile_name:
+                s.profile = resolved_profile_name
+                logger.info(
+                    "Stamped profile=%r on continuation session %s after compression",
+                    resolved_profile_name,
+                    new_sid,
+                )
+            s.pre_compression_snapshot = False
+            s.parent_session_id = old_sid
+            s.save()
+            reservation.commit()
+    except Exception:
+        s.session_id = saved_identity["session_id"]
+        s._publication_generation = saved_identity["publication_generation"]
+        s.pre_compression_snapshot = saved_identity["pre_compression_snapshot"]
+        s.parent_session_id = saved_identity["parent_session_id"]
+        s.profile = saved_identity["profile"]
+        raise
+
+
 def _maybe_schedule_title_refresh(session, put_event, agent):
     """Check if the session is due for an adaptive title refresh and schedule it."""
     refresh_interval = _get_title_refresh_interval()
@@ -9407,30 +9450,7 @@ def _run_agent_streaming(
                 if _agent_sid and _agent_sid != session_id:
                     old_sid = session_id
                     new_sid = _agent_sid
-                    # Compact media references are session-relative. Give the
-                    # continuation verified ownership before changing the
-                    # authoritative id, compression state, or committing any
-                    # continuation JSON. A failure leaves all three on old_sid.
-                    _clone_session_media_for_compression_rotation(s, old_sid, new_sid)
                     _compression_origin_session_id = old_sid
-                    _compression_continuation_session_id = new_sid
-                    s.session_id = new_sid
-                    # Carry profile identity across the compression boundary.
-                    # Without this, s.profile stays None on the continuation
-                    # session. On the next request, _run_agent_streaming calls
-                    # get_hermes_home_for_profile(getattr(s, 'profile', None))
-                    # which falls back to the default profile's HERMES_HOME.
-                    # Memory writes then land in the wrong profile's MEMORY.md.
-                    # Stamping here also ensures s.save() persists a non-null
-                    # profile field to the continuation session's JSON file,
-                    # covering the case where the session is later evicted from
-                    # SESSIONS and reconstructed from disk via Session.load().
-                    if not s.profile and _resolved_profile_name:
-                        s.profile = _resolved_profile_name
-                        logger.info(
-                            "Stamped profile=%r on continuation session %s after compression",
-                            _resolved_profile_name, new_sid,
-                        )
                     # Preserve the original session file so the full pre-compression
                     # history survives even when summarisation fails. The previous
                     # implementation renamed old_sid.json → new_sid.json, which
@@ -9445,31 +9465,17 @@ def _run_agent_streaming(
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
                     _preserve_pre_compression_snapshot(s, old_sid)
-                    # Bind the continuation to a fresh SID lease only after the
-                    # old snapshot has finished its temporary old_sid save.
-                    # Later continuation saves then cannot be confused with an
-                    # old in-process object from a deleted/recreated identity.
-                    from api.models import _activate_session_publication_generation
-
-                    _activate_session_publication_generation(s)
-                    # The continuation is the live/tip session, not another archived
-                    # snapshot. If the in-memory object was itself loaded from a
-                    # pre-compression snapshot (possible on repeated compression chains
-                    # or stale-cache repair paths), _preserve_pre_compression_snapshot()
-                    # intentionally restores that old flag; clear it before saving the
-                    # new continuation so sidebar/discoverability code does not hide the
-                    # session that owns the completed turn.
-                    s.pre_compression_snapshot = False
-                    # Always link the continuation session to its immediate predecessor
-                    # (the preserved snapshot). This OVERRIDES any prior
-                    # parent_session_id because the new continuation IS the next link
-                    # in the chain: traversal walks new → old → old.parent → ... root.
-                    # Stage-353 Opus SHOULD-FIX: previous `if not s.parent_session_id`
-                    # guard skipped this stamp on fork-of-fork compressions, so a
-                    # subsequent traversal from the new continuation would jump
-                    # over the just-preserved snapshot back to the original fork
-                    # parent, losing access to the recoverable history in old_sid.json.
-                    s.parent_session_id = old_sid
+                    # Agent compression may have already created the
+                    # continuation row in state.db, but every WebUI-owned
+                    # namespace must still be unowned. Do not move cache/lock
+                    # ownership until the continuation is durably published.
+                    _publish_compression_continuation(
+                        s,
+                        old_sid,
+                        new_sid,
+                        _resolved_profile_name,
+                    )
+                    _compression_continuation_session_id = new_sid
                     with LOCK:
                         cached_old_session = SESSIONS.pop(old_sid, None)
                         if cached_old_session is not None and cached_old_session is not s:
