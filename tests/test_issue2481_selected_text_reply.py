@@ -127,6 +127,8 @@ def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
     assert "<!-- hermes-selected-context -->" in ui
     assert "only blocks carrying the internal marker get custom treatment" in ui
     assert "position:fixed" in css
+    assert "visibility:hidden" in css
+    assert "visibility:visible" in css
     assert "pointer-events:none" in css
     assert "pointer-events:auto" in css
     assert "border:1px solid var(--border2)" in css
@@ -165,6 +167,20 @@ def test_selected_text_reply_button_has_user_select_none():
         r'\.selected-text-action-group\{[^}]*user-select:none[^}]*\}', css
     )
     assert rule_match, ".selected-text-action-group base rule must include user-select:none"
+
+
+def test_selected_text_reply_button_is_hidden_from_keyboard_navigation_until_visible():
+    css = read("static/style.css")
+    hidden_match = re.search(
+        r'\.selected-text-action-group\{[^}]*visibility:hidden[^}]*transition:visibility 0s linear \.12s,opacity \.12s ease,transform \.12s ease[^}]*\}',
+        css,
+    )
+    visible_match = re.search(
+        r'\.selected-text-action-group\.visible\{[^}]*visibility:visible[^}]*transition-delay:0s[^}]*\}',
+        css,
+    )
+    assert hidden_match, "hidden action group must stay out of the tab order until the fade completes"
+    assert visible_match, "visible action group must restore visibility immediately when selection returns"
 
 
 def test_sent_selected_context_blocks_are_rendered_without_enabling_user_markdown():
