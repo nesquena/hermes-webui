@@ -472,6 +472,13 @@ def _session_publication_rejection_reason(
             return "session identity mismatch"
         if persisted_token and persisted_token != generation_token:
             return "stale session generation"
+        if not persisted_token:
+            # Legacy sidecars predate persisted incarnation tokens. They may
+            # be published only by an object returned through a validated load
+            # path, which registers its otherwise process-local generation.
+            # A bare constructor after restart has no such authority.
+            if current_generation is None or generation != current_generation:
+                return "unvalidated session generation"
     else:
         try:
             claim_token = _read_session_incarnation_claim(sid)
@@ -770,8 +777,23 @@ def _session_destination_owners(session_id: str) -> list[str]:
         owners.append("run_journal")
 
     if _path_entry_exists(SESSION_INDEX_FILE):
-        with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
-            rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+        try:
+            with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
+                rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+        except (OSError, ValueError, json.JSONDecodeError):
+            # The index is an acceleration structure, not the authority for
+            # ownership. Rebuild it from validated sidecars before deciding a
+            # new destination is free; treating a corrupt index as empty
+            # would fail open, while permanently rejecting every new SID
+            # would turn a recoverable cache failure into an outage.
+            try:
+                _write_session_index()
+                with _INDEX_WRITE_LOCK, _cross_process_file_lock("session-index"):
+                    rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "Cannot rebuild the session index while reserving a destination"
+                ) from exc
         if not isinstance(rows, list):
             raise RuntimeError("Cannot reserve a SID while the session index is invalid")
         if any(isinstance(row, dict) and row.get("session_id") == sid for row in rows):
@@ -2400,7 +2422,13 @@ def _load_session_from_path(path: Path) -> "Session | None":
         logger.warning("Rejecting invalid or identity-mismatched session sidecar: %s", path)
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-    return Session(**data)
+    session = Session(**data)
+    if not data.get("publication_incarnation"):
+        # A legacy payload has no durable token. Register only after its path
+        # and embedded SID have been validated above, never from a constructor
+        # that merely names the same SID.
+        _register_published_session_generation(session)
+    return session
 
 
 def _lookup_index_message_count(session_id):
@@ -3006,6 +3034,12 @@ class Session:
             return None
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        if not data.get("publication_incarnation"):
+            # Legacy sidecars have no durable incarnation token.  A complete,
+            # identity-validated load is the only safe way to establish their
+            # in-process authority; a bare ``Session(session_id=sid)`` must
+            # remain unable to adopt the same sidecar.
+            _register_published_session_generation(session)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching

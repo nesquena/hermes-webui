@@ -45,19 +45,15 @@ def make_session(created_list):
 
 def _make_session_visible(sid):
     from api.models import Session
-    from tests.conftest import TEST_WORKSPACE
 
-    session = Session(
-        session_id=sid,
-        title="regression-test-delete-R8",
-        workspace=str(TEST_WORKSPACE),
-        model="test",
-        created_at=time.time(),
-        updated_at=time.time(),
-        profile="default",
-        messages=[{"role": "user", "content": "visible row", "timestamp": time.time()}],
-        tool_calls=[],
-    )
+    # The server owns the fresh SID's publication lease. Reload that validated
+    # sidecar before changing it instead of constructing a second writer for
+    # the same persisted generation.
+    session = Session.load(sid)
+    assert session is not None
+    session.title = "regression-test-delete-R8"
+    session.messages = [{"role": "user", "content": "visible row", "timestamp": time.time()}]
+    session.tool_calls = []
     session.save(touch_updated_at=False)
 
 

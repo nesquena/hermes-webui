@@ -36,6 +36,7 @@ def mock_env(tmp_path, monkeypatch):
     import api.config as config_mod
     import api.routes as routes
     import api.models as models
+    import api.session_media as session_media
 
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
@@ -53,7 +54,11 @@ def mock_env(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "SESSIONS", {})
     monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
     monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+    models._SESSION_PUBLICATION_DELETED.clear()
+    models._SESSION_PUBLICATION_GENERATIONS.clear()
+    models._active_destination_reservations().clear()
     monkeypatch.setattr(
         "api.upload._session_attachment_dir",
         lambda sid: tmp_path / "attachments" / sid,
@@ -359,13 +364,14 @@ def test_cleanup_index_rewritten_when_phase1_removed_files(mock_env):
         {"session_id": "sess-orphan", "title": "Untitled", "message_count": 0},
     ])
 
-    routes._handle_sessions_cleanup(_fake_handler(), {}, zero_only=False)
+    handler = _fake_handler()
+    routes._handle_sessions_cleanup(handler, {}, zero_only=False)
 
     # Phase 1 unlinked the file.  Phase 2 removed the stale index entry.
     # Phase 3 skipped because Phase 2 already cleaned the index.
     # Index exists with zero entries (clean).
     assert index_file.exists()
-    assert _read_index(index_file) == []
+    assert _read_index(index_file) == [], _fake_handler_result(handler)
 
 
 def test_cleanup_phase1_repairs_corrupt_index_through_shared_deletion(mock_env):

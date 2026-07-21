@@ -1763,20 +1763,19 @@ def test_get_session_reloads_when_cached_session_lags_disk(monkeypatch, tmp_path
     cached.pending_user_message = "next prompt"
     models.SESSIONS[sid] = cached
 
-    newer = models.Session(
-        session_id=sid,
-        title="Reconcile",
-        workspace=str(tmp_path),
-        model="test-model",
-        messages=old_messages + [
-            {"role": "user", "content": "new user", "timestamp": 1002.0},
-            {"role": "assistant", "content": "new final answer", "timestamp": 1003.0},
-        ],
-        created_at=1000.0,
-        updated_at=1003.0,
-        active_stream_id="stream-cache-lags-disk",
-        pending_user_message="next prompt",
-    )
+    newer = models.Session.load(sid)
+    assert newer is not None
+    newer.title = "Reconcile"
+    newer.workspace = str(tmp_path)
+    newer.model = "test-model"
+    newer.messages = old_messages + [
+        {"role": "user", "content": "new user", "timestamp": 1002.0},
+        {"role": "assistant", "content": "new final answer", "timestamp": 1003.0},
+    ]
+    newer.created_at = 1000.0
+    newer.updated_at = 1003.0
+    newer.active_stream_id = "stream-cache-lags-disk"
+    newer.pending_user_message = "next prompt"
     newer.save(touch_updated_at=False)
 
     loaded = models.get_session(sid)

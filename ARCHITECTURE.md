@@ -337,8 +337,11 @@ Private-media deletion first atomically renames the exact held SID directory to
 a random quarantine entry under the cross-process SID authority and syncs the
 media parent. Because current POSIX/Python backends cannot retire a held inode
 without a pathname race, recursive retirement keeps child and SID quarantine
-entries and reports a retryable integrity residual instead of deleting an
-unrelated replacement. Truncate/retry/undo and backup restore prune blobs by
+entries and reports an integrity residual instead of deleting an unrelated
+replacement. A retry detects the existing SID-specific quarantine and leaves
+it in place rather than recursively creating further quarantine entries;
+operators can retain that durable authority until an identity-bound retirement
+backend is available. Truncate/retry/undo and backup restore prune blobs by
 reachability across both the live sidecar and any recovery backup. A successful
 clear removes its stale backup and then removes or reachability-prunes the
 private-media namespace, including when the live transcript was already empty;

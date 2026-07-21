@@ -900,9 +900,21 @@ def remove_session_media(session_id: str) -> None:
                 media_fd, _ = _open_child_dir(state_fd, _PRIVATE_ROOT_NAME, create=False)
                 try:
                     quarantine_prefix = _deletion_quarantine_prefix(sid)
-                    for entry_name in os.listdir(media_fd):
-                        if entry_name.startswith(quarantine_prefix):
-                            _remove_tree_at(media_fd, entry_name)
+                    existing_quarantines = [
+                        entry_name
+                        for entry_name in os.listdir(media_fd)
+                        if entry_name.startswith(quarantine_prefix)
+                    ]
+                    if existing_quarantines:
+                        # A prior call already detached this SID from its
+                        # public namespace. Retrying a pathname deletion of
+                        # that held quarantine would reintroduce the same
+                        # identity race (and recursively create more
+                        # quarantines). Preserve the single durable retry
+                        # authority and make the incomplete cleanup explicit.
+                        raise SessionMediaIntegrityError(
+                            "Exact private media retirement is unavailable; retaining quarantine"
+                        )
                     try:
                         session_fd = os.open(
                             sid,

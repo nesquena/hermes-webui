@@ -78,7 +78,7 @@ def test_compression_publication_failure_rolls_back_only_reserved_destination(
             raise OSError("fail after continuation publication")
 
     monkeypatch.setattr(Session, "save", publish_then_fail)
-    with pytest.raises(OSError, match="continuation publication"):
+    with pytest.raises(RuntimeError, match="Could not roll back reserved session"):
         streaming._publish_compression_continuation(session, old_sid, new_sid, None)
 
     assert session.session_id == old_sid
@@ -86,6 +86,10 @@ def test_compression_publication_failure_rolls_back_only_reserved_destination(
     assert (session_dir / f"{old_sid}.json").exists()
     assert not (session_dir / f"{new_sid}.json").exists()
     assert not session_media._session_media_dir(new_sid).exists()
+    # A final unlink cannot be bound to the held inode on this backend.  The
+    # destination SID remains blocked by a durable retry record instead of
+    # deleting a replacement that raced the quarantine check.
+    assert models._session_cleanup_residual_file(new_sid).exists()
 
 
 def test_compression_destination_collision_never_overwrites_existing_owner(
@@ -353,7 +357,7 @@ def test_streaming_rotation_failure_after_source_archival_restores_transaction(
         )
         try:
             return real_publish(*args, **kwargs)
-        except OSError:
+        except RuntimeError:
             observed["source_exact"] = (
                 (session_dir / f"{old_sid}.json").read_bytes() == source_before
             )
@@ -372,6 +376,9 @@ def test_streaming_rotation_failure_after_source_archival_restores_transaction(
                 not (session_dir / f"{new_sid}.json").exists()
                 and not session_media._session_media_dir(new_sid).exists()
             )
+            observed["destination_retryable"] = models._session_cleanup_residual_file(
+                new_sid
+            ).exists()
             raise
 
     fake_hermes_state = types.ModuleType("hermes_state")
@@ -411,6 +418,7 @@ def test_streaming_rotation_failure_after_source_archival_restores_transaction(
         "index_exact": True,
         "runtime_exact": True,
         "destination_retired": True,
+        "destination_retryable": True,
     }
 
 
@@ -560,7 +568,10 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     destination_files = list(session_media._session_media_dir(new_sid).iterdir())
     assert len(destination_files) == 1
     assert destination_files[0].read_bytes() == image_raw
-    session_media.remove_session_media(old_sid)
+    with pytest.raises(session_media.SessionMediaIntegrityError):
+        session_media.remove_session_media(old_sid)
+    assert not session_media._session_media_dir(old_sid).exists()
+    assert models._session_cleanup_residual_file(old_sid).exists() is False
     continuation = Session.load(new_sid)
     hydrated_messages = session_media.hydrate_session_media_urls(continuation.messages, new_sid)
     assert image_data_url in json.dumps(hydrated_messages)
