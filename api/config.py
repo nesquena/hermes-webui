@@ -6971,9 +6971,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # config key (e.g. ``x-ai`` in providers, ``google`` in
                 # config.yaml) matches credential evidence reported under the
                 # agent's canonical alias (``xai``, ``gemini``) (#6338).
+                # Normalise detected_providers entries into the same
+                # alias-resolved namespace as _canonical so that a WebUI
+                # canonical form in detected_providers (e.g. ``x-ai`` added
+                # by a prior loop iteration) also matches (#6338).
+                _resolved_detected = {
+                    _resolve_provider_alias(_pid) for _pid in detected_providers
+                }
                 _already_credentialed = (
-                    _resolve_provider_alias(_canonical) in detected_providers
-                    or _canonical in detected_providers
+                    _resolve_provider_alias(_canonical) in _resolved_detected
+                    or _canonical in _resolved_detected
                 )
                 _admit_as_known = _is_known_provider and _already_credentialed
                 if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
