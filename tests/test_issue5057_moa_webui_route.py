@@ -85,6 +85,34 @@ def test_config_snapshot_source_fingerprint_matches_non_profile_snapshot(
     assert source_fingerprint["config_yaml"] == fingerprint_a
 
 
+def test_config_snapshot_source_fingerprint_retries_until_stable_after_exhaustion(
+    monkeypatch, tmp_path
+):
+    """Retry exhaustion cannot fall through to an unchecked snapshot/fingerprint pair."""
+    from api import config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("chat_backend: alpha\n", encoding="utf-8")
+    current_version = {"value": "alpha"}
+    replacements = iter(("bravo", "charlie", "delta"))
+
+    def fingerprint(_path):
+        return {"path": str(config_path), "version": current_version["value"]}
+
+    def snapshot(_path):
+        snapshot_version = current_version["value"]
+        current_version["value"] = next(replacements, current_version["value"])
+        return {"chat_backend": snapshot_version}
+
+    monkeypatch.setattr(config, "_models_cache_file_fingerprint", fingerprint)
+    monkeypatch.setattr(config, "_expanded_config_snapshot_from_path", snapshot)
+
+    snapshot_data, config_fingerprint = config._config_yaml_fingerprint_stable(config_path)
+
+    assert snapshot_data["chat_backend"] == "delta"
+    assert config_fingerprint["version"] == "delta"
+
+
 def _install_fake_moa_config(monkeypatch, *, default_preset="moa-default", usage_text="Usage: /moa <prompt>"):
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
     # monkeypatch.setattr restores the REAL hermes_cli.__path__ on teardown;

@@ -547,16 +547,18 @@ def _expanded_config_snapshot_from_path(config_path: Path) -> dict:
     return snapshot
 
 
+_CONFIG_YAML_FINGERPRINT_STABLE_ATTEMPTS = 5
+
+
 def _config_yaml_fingerprint_stable(config_path: Path) -> tuple[dict, dict]:
     """Return one expanded config snapshot plus a matching stat fingerprint."""
-    for _ in range(2):
+    for _ in range(_CONFIG_YAML_FINGERPRINT_STABLE_ATTEMPTS):
         before = _models_cache_file_fingerprint(config_path)
         snapshot = _expanded_config_snapshot_from_path(config_path)
         after = _models_cache_file_fingerprint(config_path)
         if before == after:
             return snapshot, after
-    snapshot = _expanded_config_snapshot_from_path(config_path)
-    return snapshot, _models_cache_file_fingerprint(config_path)
+    raise RuntimeError("config.yaml changed while reading its cache fingerprint")
 
 
 def get_config_snapshot_with_source_fingerprint() -> tuple[dict, dict]:
