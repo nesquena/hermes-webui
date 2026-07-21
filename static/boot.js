@@ -3867,12 +3867,17 @@ async function restartServer() {
 
 async function _waitForServerRestart() {
   const maxAttempts = 30;
+  let observedUnavailable = false;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       await api('/health', { timeoutMs: 1000, retries: 0, timeoutToast: false, redirect401: false });
-      window.location.reload();
-      return;
-    } catch (_) {}
+      if (observedUnavailable) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {
+      observedUnavailable = true;
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   _showServerRestarting(typeof t === 'function' ? t('settings_restart_timeout_message') : 'The server did not return in time. Start it manually, then refresh this page.');
