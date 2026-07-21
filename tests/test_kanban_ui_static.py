@@ -815,6 +815,27 @@ def test_kanban_review_feedback_static_ui_fixes_exist():
     assert "kanban-stats-grid" in PANELS
 
 
+def test_kanban_modal_mobile_responsive_css():
+    """On narrow phones (<=640px) a tall kanban modal must stay reachable: the
+    overlay scrolls (overflow-y:auto) and safe-centers its content
+    (align-items:safe center) so an overflowing modal is never clipped above
+    the fold where its top can't be scrolled back into view."""
+    # There are several `.kanban-modal-overlay{...}` rules (skin override, base
+    # desktop, and the mobile <=640px override, which is last in the file).
+    # Match against COMPACT_STYLE — whitespace-stripped, like the sibling CSS
+    # tests — and take the last rule to isolate the mobile override, instead of
+    # depending on brittle @media-block bracket matching.
+    overlay_rules = re.findall(r"\.kanban-modal-overlay\{([^}]*)\}", COMPACT_STYLE)
+    assert overlay_rules, "no .kanban-modal-overlay rule found in style.css"
+    mobile = overlay_rules[-1]
+    assert "overflow-y:auto" in mobile, f"mobile overlay must be scrollable. Got: {mobile}"
+    # `align-items:safe center` compacts to `align-items:safecenter`.
+    assert "align-items:safecenter" in mobile, (
+        f"mobile overlay must safe-center its content so an overflowing modal "
+        f"is never clipped above the fold. Got: {mobile}"
+    )
+
+
 def test_kanban_task_detail_renderer_executes_with_log_and_formats_feedback():
     import json
     import subprocess
