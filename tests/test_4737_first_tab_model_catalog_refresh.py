@@ -222,8 +222,10 @@ def driver_path(tmp_path_factory):
     return str(path)
 
 
-def _run(driver_path, scenario):
-    marker = "async function populateModelDropdown("
+def _extract_function_source(name):
+    marker = f"function {name}("
+    if name == "populateModelDropdown":
+        marker = "async function populateModelDropdown("
     start = UI_JS.index(marker)
     paren_depth = 1
     idx = start + len(marker)
@@ -245,10 +247,19 @@ def _run(driver_path, scenario):
         elif char == "}":
             depth -= 1
             if depth == 0:
-                fn_source = UI_JS[start : idx + 1]
-                break
+                return UI_JS[start : idx + 1]
     else:
-        raise AssertionError("could not extract populateModelDropdown")
+        raise AssertionError(f"could not extract {name}")
+
+
+def _run(driver_path, scenario):
+    fn_source = "\n".join(
+        [
+            _extract_function_source("_modelCatalogHasRealProviderModels"),
+            _extract_function_source("_shouldApplyModelPayloadDefault"),
+            _extract_function_source("populateModelDropdown"),
+        ]
+    )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as handle:
         handle.write(fn_source)
         fn_source_path = handle.name
