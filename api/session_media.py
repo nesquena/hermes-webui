@@ -195,9 +195,12 @@ def _unlink_quarantined_regular_entry(
 ) -> None:
     """Commit unlink only for the regular inode held in private quarantine."""
     _assert_regular_entry_still_names_fd(parent_fd, name, entry_fd)
+    links_before = os.fstat(entry_fd).st_nlink
+    if links_before < 1:
+        raise SessionMediaIntegrityError("Private media file has no removable link")
     os.unlink(name, dir_fd=parent_fd)
     _fsync_dir(parent_fd)
-    if os.fstat(entry_fd).st_nlink != 0:
+    if os.fstat(entry_fd).st_nlink != links_before - 1:
         raise SessionMediaIntegrityError(
             "Private media file replacement prevented exact removal"
         )
