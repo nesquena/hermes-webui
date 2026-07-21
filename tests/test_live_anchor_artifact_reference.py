@@ -266,6 +266,86 @@ def test_anchor_artifact_budget_counts_serialized_list_framing():
     assert len(encoded) <= MAX_ANCHOR_ARTIFACT_BYTES
 
 
+def test_oversize_strings_reject_before_utf8_size(tmp_path, monkeypatch):
+    import api.artifact_references as artifact_references
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "guarded.md"
+    huge_result_scalar = "x" * (artifact_references._MAX_RESULT_BYTES + 1)
+    huge_tool_call_id = "t" * (artifact_references._MAX_TOOL_CALL_ID_BYTES + 1)
+    huge_payload_path = "p" * (artifact_references._MAX_PATH_BYTES + 1)
+    protected = {huge_result_scalar, huge_tool_call_id, huge_payload_path}
+    original_utf8_size = artifact_references._utf8_size
+
+    def guarded_utf8_size(value):
+        if value in protected:
+            raise AssertionError("_utf8_size should not receive over-character-limit input")
+        return original_utf8_size(value)
+
+    monkeypatch.setattr(artifact_references, "_utf8_size", guarded_utf8_size)
+
+    assert artifact_references.derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
+        {
+            "bytes_written": 1,
+            "resolved_path": str(target),
+            "padding": huge_result_scalar,
+        },
+        workspace,
+        tool_call_id="call-result-guard",
+    ) == []
+    assert artifact_references.derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
+        json.dumps({"bytes_written": 1, "resolved_path": str(target)}),
+        workspace,
+        tool_call_id=huge_tool_call_id,
+    ) == []
+    assert artifact_references.anchor_artifact_event_from_payload({
+        "kind": "workspace_file",
+        "path": huge_payload_path,
+        "source_tool": "write_file",
+    }) is None
+
+
+def test_structured_result_gate_rejects_cycles_and_excessive_depth(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "nested.md"
+
+    cyclic = {
+        "bytes_written": 1,
+        "resolved_path": str(target),
+    }
+    cyclic["self"] = cyclic
+    assert derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
+        cyclic,
+        workspace,
+        tool_call_id="call-cycle",
+    ) == []
+
+    deeply_nested = {
+        "bytes_written": 1,
+        "resolved_path": str(target),
+    }
+    cursor = deeply_nested
+    for _idx in range(300):
+        child = {}
+        cursor["child"] = child
+        cursor = child
+    assert derive_file_artifact_references(
+        "write_file",
+        {"path": str(target)},
+        deeply_nested,
+        workspace,
+        tool_call_id="call-deep",
+    ) == []
+
+
 def test_successful_patch_can_fall_back_to_v4a_targets(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -433,10 +513,8 @@ def test_frontend_routes_artifact_sse_to_anchor_without_repainting_worklog():
 @pytest.mark.skipif(NODE is None, reason="node is required for browser artifact budget coverage")
 def test_frontend_anchor_registry_counts_artifact_list_framing():
     script = f"""
-const fs=require('fs');
-const src=fs.readFileSync({json.dumps(str(REPO / "static" / "assistant_turn_anchors.js"))},'utf8');
 global.window=globalThis;
-eval(src);
+require({json.dumps(str(REPO / "static" / "assistant_turn_anchors.js"))});
 const anchors=globalThis.HermesAssistantTurnAnchors;
 const registry=anchors.createAssistantTurnAnchorRegistry({{session_id:'s',run_id:'r',stream_id:'r'}});
 for(let idx=0; idx<64; idx++){{

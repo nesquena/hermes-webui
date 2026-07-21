@@ -39,6 +39,7 @@ _ANCHOR_ARTIFACT_EVENT_STRING_LIMITS = {
     'stream_id': 512,
 }
 _INVALID_OWNER_CLAIM = object()
+_MAX_JSON_NESTING = 256
 
 
 def _utf8_size(value: str) -> int:
@@ -56,23 +57,115 @@ def _bounded_clean_string(value, limit: int) -> str | None:
         return None
     if not isinstance(value, str):
         return None
-    if not value or _utf8_size(value) > limit:
+    if not value or len(value) > limit or _utf8_size(value) > limit:
         return None
     if value != value.strip():
         return None
     return value
 
 
+def _json_string_size(value: str, remaining: int) -> int | None:
+    total = 2  # surrounding quotes
+    if len(value) + total > remaining:
+        return None
+    for ch in value:
+        code = ord(ch)
+        if ch in {'"', '\\'} or ch in {'\b', '\t', '\n', '\f', '\r'}:
+            total += 2
+        elif code < 0x20:
+            total += 6
+        else:
+            total += len(ch.encode('utf-8', 'surrogatepass'))
+        if total > remaining:
+            return None
+    return total
+
+
+def _json_scalar_size(value, remaining: int) -> int | None:
+    if value is None:
+        return 4 if remaining >= 4 else None
+    if value is True:
+        return 4 if remaining >= 4 else None
+    if value is False:
+        return 5 if remaining >= 5 else None
+    if isinstance(value, str):
+        return _json_string_size(value, remaining)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(',', ':'),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+        size = len(encoded)
+        return size if size <= remaining else None
+    return None
+
+
 def _json_within_bytes(value, limit: int) -> bool:
     total = 0
-    encoder = json.JSONEncoder(ensure_ascii=False, separators=(',', ':'))
-    try:
-        for chunk in encoder.iterencode(value):
-            total += _utf8_size(chunk)
-            if total > limit:
+    active: set[int] = set()
+    stack = [('value', value, 0)]
+
+    def add(size: int) -> bool:
+        nonlocal total
+        total += size
+        return total <= limit
+
+    while stack:
+        kind, item, depth = stack.pop()
+        if kind == 'bytes':
+            if not add(item):
                 return False
-    except (TypeError, ValueError, OverflowError):
-        return False
+            continue
+        if kind == 'exit':
+            active.discard(item)
+            if not add(depth):
+                return False
+            continue
+
+        if depth > _MAX_JSON_NESTING:
+            return False
+        if isinstance(item, dict):
+            oid = id(item)
+            if oid in active:
+                return False
+            active.add(oid)
+            if not add(1):  # {
+                return False
+            stack.append(('exit', oid, 1))  # }
+            items = list(item.items())
+            for idx in range(len(items) - 1, -1, -1):
+                key, child = items[idx]
+                if not isinstance(key, str):
+                    return False
+                stack.append(('value', child, depth + 1))
+                stack.append(('bytes', 1, 0))  # :
+                stack.append(('value', key, depth + 1))
+                if idx > 0:
+                    stack.append(('bytes', 1, 0))  # ,
+            continue
+        if isinstance(item, (list, tuple)):
+            oid = id(item)
+            if oid in active:
+                return False
+            active.add(oid)
+            if not add(1):  # [
+                return False
+            stack.append(('exit', oid, 1))  # ]
+            for idx in range(len(item) - 1, -1, -1):
+                stack.append(('value', item[idx], depth + 1))
+                if idx > 0:
+                    stack.append(('bytes', 1, 0))  # ,
+            continue
+
+        remaining = limit - total
+        size = _json_scalar_size(item, remaining)
+        if size is None or not add(size):
+            return False
     return True
 
 
@@ -213,6 +306,7 @@ def derive_file_artifact_references(
         if (
             not isinstance(tool_call_id, str)
             or not tool_call_id
+            or len(tool_call_id) > _MAX_TOOL_CALL_ID_BYTES
             or _utf8_size(tool_call_id) > _MAX_TOOL_CALL_ID_BYTES
             or tool_call_id != tool_call_id.strip()
         ):
