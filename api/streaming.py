@@ -8227,14 +8227,13 @@ def _run_agent_streaming(
                     time.sleep(_delay)
                     _last_silent_failure = True
                     continue
-                else:
-                    # Either succeeded, not a silent failure, or retries exhausted
-                    if _last_silent_failure and _retry_state["attempt"] >= _retry_state["max_retries"]:
-                        logger.warning(
-                            f"[PROVIDER-RETRY] Session {s.session_id} exhausted all retries "
-                            f"for silent provider failure"
-                        )
-                    break
+                # Either succeeded, not a silent failure, or retries exhausted
+                if _last_silent_failure and _retry_state["attempt"] >= _retry_state["max_retries"]:
+                    logger.warning(
+                        f"[PROVIDER-RETRY] Session {s.session_id} exhausted all retries "
+                        f"for silent provider failure"
+                    )
+                break
             _flush_reasoning_buffer()
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
