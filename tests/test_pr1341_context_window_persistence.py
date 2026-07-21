@@ -75,7 +75,8 @@ def test_session_init_accepts_context_fields():
     """Session.__init__ must accept the three fields as named kwargs."""
     src = MODELS.read_text(encoding="utf-8")
     # The init signature spans many lines — read the full def block
-    init_match = re.search(r"def __init__\(self,(.*?)\):", src, re.DOTALL)
+    session_src = src[src.index("class Session:"):]
+    init_match = re.search(r"def __init__\(self,(.*?)\):", session_src, re.DOTALL)
     assert init_match, "Session.__init__ signature not found"
     sig = init_match.group(1)
     assert "context_length" in sig, "Session.__init__ must accept context_length"

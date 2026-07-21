@@ -51,7 +51,7 @@ def _read_recovery_payload(path: Path, expected_sid: str) -> dict:
     return _load_and_validate_session_payload(path, expected_sid)
 
 
-def _msg_count(p: Path, expected_sid: str) -> int:
+def _msg_count(p: Path) -> int:
     """Return the number of messages in a session JSON file, or -1 on read/parse error.
 
     Returns -1 for any non-session-shape file:
@@ -62,6 +62,11 @@ def _msg_count(p: Path, expected_sid: str) -> int:
       The startup recovery scanner globs ``*.json`` and would otherwise
       crash on the first non-dict file it encounters.
     """
+    expected_sid = (
+        p.name[: -len(".json.bak")]
+        if p.name.endswith(".json.bak")
+        else p.stem
+    )
     try:
         data = _read_recovery_payload(p, expected_sid)
     except (OSError, json.JSONDecodeError, ValueError):
@@ -304,7 +309,7 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     }
     """
     bak_path = session_path.with_suffix('.json.bak')
-    live_count = _msg_count(session_path, session_path.stem)
+    live_count = _msg_count(session_path)
     if not bak_path.exists():
         return {
             "session_id": session_path.stem,
@@ -312,7 +317,7 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
             "bak_messages": -1,
             "recommend": "no_backup",
         }
-    bak_count = _msg_count(bak_path, session_path.stem)
+    bak_count = _msg_count(bak_path)
     if bak_count > live_count:
         if (
             _session_records_clear_sentinel(session_path, bak_path)
@@ -456,7 +461,7 @@ def _orphaned_backup_live_paths(
         if live_path.name.startswith('_') or live_path.exists():
             continue
         session_id = live_path.stem
-        if _msg_count(bak_path, session_id) < 0:
+        if _msg_count(bak_path) < 0:
             continue
         # A WebUI session the user deleted must not be resurrected from its
         # surviving .bak on the next boot (#5498). Use the DURABLE tombstone
@@ -852,7 +857,7 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         if live_path.exists() or live_path.name.startswith('_'):
             continue
         session_id = live_path.stem
-        bak_messages = _msg_count(bak_path, session_id)
+        bak_messages = _msg_count(bak_path)
         if bak_messages < 0:
             items.append(_new_audit_item(
                 session_id, "malformed_orphan_backup", "unsafe_to_repair", "manual_review", -1, bak_messages
@@ -901,7 +906,7 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         for session_id in sorted(live_ids - index_ids):
             items.append(_new_audit_item(
                 session_id, "index_missing_entry", "repairable", "rebuild_index",
-                _msg_count(session_dir / f"{session_id}.json", session_id), -1,
+                _msg_count(session_dir / f"{session_id}.json"), -1,
             ))
 
     for row in state_db_missing_rows:
@@ -944,7 +949,7 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         journal = read_turn_journal(session_id, session_dir=session_dir)
         states, _ = derive_turn_journal_states(journal.get('events') or [])
         live_path = session_dir / f"{session_id}.json"
-        live_messages = _msg_count(live_path, session_id)
+        live_messages = _msg_count(live_path)
         existing_user_messages: set[str] = set()
         try:
             payload = _read_recovery_payload(live_path, session_id)

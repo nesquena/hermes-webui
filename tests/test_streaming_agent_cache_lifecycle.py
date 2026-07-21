@@ -112,7 +112,11 @@ def test_identity_mismatch_cache_evictions_close_entries_outside_cache_lock():
     lines = src.splitlines()
     for marker in close_markers:
         close_idx = next(i for i, line in enumerate(lines) if marker in line)
-        lock_idx = max(i for i, line in enumerate(lines[:close_idx]) if "with SESSION_AGENT_CACHE_LOCK:" in line)
+        lock_idx = max(
+            i
+            for i, line in enumerate(lines[:close_idx])
+            if "SESSION_AGENT_CACHE_LOCK:" in line
+        )
         lock_indent = len(lines[lock_idx]) - len(lines[lock_idx].lstrip())
         between = lines[lock_idx + 1:close_idx]
         assert any(

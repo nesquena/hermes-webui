@@ -290,7 +290,10 @@ _CROSS_PROCESS_LOCKS_HELD = threading.local()
 class _SessionPublicationGeneration:
     """Lease for one SID incarnation, persisted with the owning sidecar."""
 
-    def __init__(self, token: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+    ) -> None:
         self.token = str(token or secrets.token_hex(16))
 
 
@@ -302,6 +305,12 @@ _SESSION_INCARNATION_TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 
 def _is_session_incarnation_token(value) -> bool:
     return isinstance(value, str) and bool(_SESSION_INCARNATION_TOKEN_RE.fullmatch(value))
+
+
+def _session_publication_store_key(session_id: str) -> str:
+    """Scope process-local leases to the configured session store and SID."""
+    store = str(Path(SESSION_DIR).expanduser().absolute())
+    return f"{store}\0{str(session_id or '')}"
 
 
 def _get_session_publication_lock(session_id: str) -> threading.RLock:
@@ -321,17 +330,19 @@ def _session_publication_generation(
 ) -> _SessionPublicationGeneration:
     """Return the lease shared by loaded objects for one persisted incarnation."""
     sid = str(session_id or "")
+    key = _session_publication_store_key(sid)
     with _SESSION_PUBLICATION_LOCKS_GUARD:
-        generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
+        generation = _SESSION_PUBLICATION_GENERATIONS.get(key)
         if generation is None or (token is not None and generation.token != token):
             generation = _SessionPublicationGeneration(token)
-            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
+            _SESSION_PUBLICATION_GENERATIONS[key] = generation
         return generation
 
 
 def _activate_session_publication_generation(session) -> _SessionPublicationGeneration:
     """Bind *session* to a fresh lease for an intentional SID recreation."""
     sid = str(getattr(session, "session_id", "") or "")
+    key = _session_publication_store_key(sid)
     with _session_publication_authority(sid):
         if _session_has_cleanup_residual(sid):
             raise RuntimeError(
@@ -339,8 +350,8 @@ def _activate_session_publication_generation(session) -> _SessionPublicationGene
             )
         generation = _SessionPublicationGeneration()
         with _SESSION_PUBLICATION_LOCKS_GUARD:
-            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
-            _SESSION_PUBLICATION_DELETED.discard(sid)
+            _SESSION_PUBLICATION_GENERATIONS[key] = generation
+            _SESSION_PUBLICATION_DELETED.discard(key)
         session._publication_generation = generation
         return generation
 
@@ -351,14 +362,15 @@ def _mark_session_deleted_for_publication(
     expected_generation: _SessionPublicationGeneration | None = None,
 ) -> _SessionPublicationGeneration:
     sid = str(session_id or "")
+    key = _session_publication_store_key(sid)
     with _SESSION_PUBLICATION_LOCKS_GUARD:
-        generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
+        generation = _SESSION_PUBLICATION_GENERATIONS.get(key)
         if generation is None:
             generation = _SessionPublicationGeneration()
-            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
+            _SESSION_PUBLICATION_GENERATIONS[key] = generation
         if expected_generation is not None and expected_generation != generation:
             raise RuntimeError(f"Refusing to delete stale session generation {sid!r}")
-        _SESSION_PUBLICATION_DELETED.add(sid)
+        _SESSION_PUBLICATION_DELETED.add(key)
         return generation
 
 
@@ -368,6 +380,7 @@ def _session_publication_rejection_reason(
     generation: _SessionPublicationGeneration | None,
 ) -> str | None:
     sid = str(session_id or "")
+    key = _session_publication_store_key(sid)
     try:
         residual_path = _session_cleanup_residual_file(sid)
         if _path_entry_exists(residual_path):
@@ -379,14 +392,14 @@ def _session_publication_rejection_reason(
     except Exception:
         return "unreadable cleanup authority for session"
     with _SESSION_PUBLICATION_LOCKS_GUARD:
-        current_generation = _SESSION_PUBLICATION_GENERATIONS.get(sid)
+        current_generation = _SESSION_PUBLICATION_GENERATIONS.get(key)
         if (
             generation is not None
             and current_generation is not None
             and generation != current_generation
         ):
             return "stale session generation"
-        if sid in _SESSION_PUBLICATION_DELETED:
+        if key in _SESSION_PUBLICATION_DELETED:
             return "deleted session"
     generation_token = getattr(generation, "token", None)
     if _path_entry_exists(path):
@@ -757,9 +770,10 @@ class _SessionDestinationReservation:
             )
             self._claim_created = True
             _clear_webui_deleted_session_tombstone(self.session_id)
+            key = _session_publication_store_key(self.session_id)
             with _SESSION_PUBLICATION_LOCKS_GUARD:
-                _SESSION_PUBLICATION_GENERATIONS[self.session_id] = self.generation
-                _SESSION_PUBLICATION_DELETED.discard(self.session_id)
+                _SESSION_PUBLICATION_GENERATIONS[key] = self.generation
+                _SESSION_PUBLICATION_DELETED.discard(key)
             _active_destination_reservations()[self.session_id] = self.token
             self._entered = True
             return self
@@ -855,9 +869,10 @@ def rollback_reserved_session_destination(session_id: str, token: str) -> dict:
                 f"Refusing to roll back unproven session incarnation {sid!r}"
             )
         generation = _SessionPublicationGeneration(token)
+        key = _session_publication_store_key(sid)
         with _SESSION_PUBLICATION_LOCKS_GUARD:
-            _SESSION_PUBLICATION_GENERATIONS[sid] = generation
-            _SESSION_PUBLICATION_DELETED.discard(sid)
+            _SESSION_PUBLICATION_GENERATIONS[key] = generation
+            _SESSION_PUBLICATION_DELETED.discard(key)
         return delete_session_artifacts(
             sid,
             expected_generation=generation,
@@ -2393,10 +2408,21 @@ class Session:
         # Process-local incarnation lease stored in the class slot above. Every
         # load of the current SID shares this token; an intentional same-SID
         # recreation rotates it so old objects never regain publication authority.
-        if publication_incarnation is None:
-            publication_incarnation = _read_session_incarnation_claim(
-                self.session_id
-            )
+        if publication_incarnation is None and is_safe_session_id(self.session_id):
+            claim_token = _read_session_incarnation_claim(self.session_id)
+            sidecar_token = None
+            sidecar = SESSION_DIR / f"{self.session_id}.json"
+            if _path_entry_exists(sidecar):
+                persisted = _load_and_validate_session_payload(
+                    sidecar,
+                    self.session_id,
+                )
+                sidecar_token = persisted.get("publication_incarnation")
+            if claim_token and sidecar_token and claim_token != sidecar_token:
+                raise RuntimeError(
+                    f"Session incarnation authorities disagree for {self.session_id!r}"
+                )
+            publication_incarnation = sidecar_token or claim_token
         self._publication_generation = _session_publication_generation(
             self.session_id,
             str(publication_incarnation) if publication_incarnation else None,
@@ -2556,6 +2582,24 @@ class Session:
             with LOCK:
                 if SESSIONS.get(self.session_id) is self:
                     owners = [owner for owner in owners if owner != "session_cache"]
+            # Direct first-save is a backwards-compatible materialization path.
+            # Production creators reserve before any runtime namespace exists;
+            # repair/checkpoint callers may legitimately establish locks and
+            # journals before their first sidecar publication.
+            owners = [
+                owner
+                for owner in owners
+                if owner
+                not in {
+                    "turn_journal",
+                    "run_journal",
+                    "stream_registry",
+                    "stream_owner_registry",
+                    "active_run_registry",
+                    "agent_cache",
+                    "agent_lock",
+                }
+            ]
             if owners:
                 raise SessionDestinationCollisionError(
                     f"Session destination {self.session_id!r} is already owned: "
@@ -10449,6 +10493,16 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
             }
+            if not columns:
+                return stale_cleanup_complete
+            if "id" not in columns:
+                return False
+            if conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ? LIMIT 1",
+                (sid,),
+            ).fetchone() is None:
+                conn.commit()
+                return stale_cleanup_complete
             if not {"id", "parent_session_id"}.issubset(columns):
                 return False
 

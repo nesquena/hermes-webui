@@ -69,7 +69,7 @@ def test_compression_cache_migration_never_moves_unverified_cached_object_to_new
 
     assert "SESSIONS[new_sid] = SESSIONS.pop(old_sid)" not in streaming_src
     assert "cached_old_session is not s" in streaming_src
-    assert "SESSIONS[new_sid] = s" in streaming_src
+    assert "mutate(SESSIONS, new_sid, s, LOCK)" in streaming_src
 
 
 def test_cached_agent_session_identity_matches_requested_sid():

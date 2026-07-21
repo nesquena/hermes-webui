@@ -4301,9 +4301,9 @@ def _publish_compression_continuation(
             write_intent("sidecar_published", reservation.generation.token)
 
             with LOCK:
-                old_cached = SESSIONS.get(old_sid)
-            if old_cached is not None and old_cached is not s:
-                cached_old_sid = str(getattr(old_cached, "session_id", "") or "")
+                cached_old_session = SESSIONS.get(old_sid)
+            if cached_old_session is not None and cached_old_session is not s:
+                cached_old_sid = str(getattr(cached_old_session, "session_id", "") or "")
                 if cached_old_sid == old_sid:
                     raise RuntimeError("Compression source cache owner changed")
             mutate(SESSIONS, new_sid, s, LOCK)
@@ -4317,6 +4317,12 @@ def _publish_compression_continuation(
             if cached_entry is not None:
                 cached_agent = cached_entry[0]
                 if not _cached_agent_matches_session(cached_agent, new_sid):
+                    _cached_entry = cached_entry
+                    with live_config.SESSION_AGENT_CACHE_LOCK:
+                        if live_config.SESSION_AGENT_CACHE.get(old_sid) is _cached_entry:
+                            live_config.SESSION_AGENT_CACHE.pop(old_sid, None)
+                    _skipped_agent_migration_entry = _cached_entry
+                    _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
                     raise RuntimeError("Compression cached-agent identity mismatch")
                 mutate(
                     live_config.SESSION_AGENT_CACHE,

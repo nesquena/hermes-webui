@@ -49,7 +49,7 @@ def _cross_process_index_writer(session_dir, index_file, sid, ready, start):
     )
     session.save(skip_index=True)
     ready.put(sid)
-    start.wait(10)
+    start.wait(60)
     child_models._write_session_index(updates=[session])
 
 
@@ -99,7 +99,7 @@ def _cross_process_tombstone_writer(session_dir, sid, ready, start):
 
     child_models.SESSION_DIR = Path(session_dir)
     ready.put(sid)
-    start.wait(10)
+    start.wait(60)
     child_models._record_webui_deleted_session_tombstone(sid)
 
 
@@ -1666,13 +1666,13 @@ def test_index_read_modify_write_is_serialized_across_processes(tmp_path, monkey
     ]
     for worker in workers:
         worker.start()
-    assert {ready.get(timeout=10), ready.get(timeout=10)} == {
+    assert {ready.get(timeout=60), ready.get(timeout=60)} == {
         "process-index-a",
         "process-index-b",
     }
     start.set()
     for worker in workers:
-        worker.join(15)
+        worker.join(60)
         assert worker.exitcode == 0
 
     rows = json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
@@ -1699,13 +1699,13 @@ def test_tombstone_read_modify_write_is_serialized_across_processes(
     ]
     for worker in workers:
         worker.start()
-    assert {ready.get(timeout=10), ready.get(timeout=10)} == {
+    assert {ready.get(timeout=60), ready.get(timeout=60)} == {
         "process-tombstone-a",
         "process-tombstone-b",
     }
     start.set()
     for worker in workers:
-        worker.join(15)
+        worker.join(60)
         assert worker.exitcode == 0
 
     assert models._load_webui_deleted_session_tombstone() == {

@@ -169,6 +169,25 @@ def _assert_entry_still_names_fd(parent_fd: int, name: str, child_fd: int) -> No
         raise SessionMediaIntegrityError("Private media directory changed during operation")
 
 
+def _assert_regular_entry_still_names_fd(
+    parent_fd: int,
+    name: str,
+    entry_fd: int,
+) -> None:
+    held = os.fstat(entry_fd)
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise SessionMediaIntegrityError(
+            "Private media file changed during operation"
+        ) from exc
+    if not stat.S_ISREG(current.st_mode) or (held.st_dev, held.st_ino) != (
+        current.st_dev,
+        current.st_ino,
+    ):
+        raise SessionMediaIntegrityError("Private media file changed during operation")
+
+
 def _assert_private_handles(state_fd: int, media_fd: int, session_fd: int, sid: str) -> None:
     _assert_entry_still_names_fd(state_fd, _PRIVATE_ROOT_NAME, media_fd)
     _assert_entry_still_names_fd(media_fd, sid, session_fd)
@@ -785,18 +804,23 @@ def _remove_tree_at(parent_fd: int, name: str, *, expected_fd: int | None = None
                     dst_dir_fd=child_fd,
                 )
                 _fsync_dir(child_fd)
-                _assert_entry_still_names_fd(
-                    child_fd,
-                    quarantine_name,
-                    entry_fd,
-                )
                 if stat.S_ISDIR(held.st_mode):
+                    _assert_entry_still_names_fd(
+                        child_fd,
+                        quarantine_name,
+                        entry_fd,
+                    )
                     _remove_tree_at(
                         child_fd,
                         quarantine_name,
                         expected_fd=entry_fd,
                     )
                 else:
+                    _assert_regular_entry_still_names_fd(
+                        child_fd,
+                        quarantine_name,
+                        entry_fd,
+                    )
                     os.unlink(quarantine_name, dir_fd=child_fd)
                     _fsync_dir(child_fd)
             finally:
@@ -937,7 +961,7 @@ def prune_session_media(session_id: str, retained_values) -> int:
                                 dst_dir_fd=directory_fd,
                             )
                             _fsync_dir(directory_fd)
-                            _assert_entry_still_names_fd(
+                            _assert_regular_entry_still_names_fd(
                                 directory_fd,
                                 quarantine,
                                 entry_fd,
