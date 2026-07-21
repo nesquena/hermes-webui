@@ -1,0 +1,4 @@
+# PR 6239: Provider retry for silent failures
+# Applied on: Tue Jul 21 16:10:52 NZST 2026
+# Repository: nesquena/hermes-webui
+# Branch: fix/provider-retry-on-no-response
