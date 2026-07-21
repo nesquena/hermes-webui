@@ -3223,8 +3223,12 @@ function _hydrateBootDefaultModelFromSettings(s){
   window._defaultModel=defaultModel;
   window._defaultModelHasExplicitSource=hasExplicitSource;
   window._defaultModelEligibleForFreshBoot=hasExplicitSource;
-  if(!hasExplicitSource) return;
   const sel=$('modelSelect');
+  if(!hasExplicitSource){
+    window._provisionalBootModelSelection=sel&&sel.value?String(sel.value):'';
+    return;
+  }
+  window._provisionalBootModelSelection='';
   if(sel&&typeof _applyModelToDropdown==='function'){
     // Fresh page boot must prefer an explicit profile/server default over
     // stale browser-persisted model state. Non-explicit fallback defaults

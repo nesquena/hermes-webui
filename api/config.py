@@ -9394,11 +9394,19 @@ def persisted_speech_settings_keys() -> list[str]:
     return sorted(_extract_persisted_speech_keys(_read_raw_settings_file()))
 
 
+_SETTINGS_DERIVED_MODEL_KEYS = {
+    "default_model",
+    "default_model_provider",
+    "default_model_has_explicit_source",
+}
+
+
 def _settings_payload_for_write(settings: dict, persisted_speech_keys: set[str]) -> dict:
     persisted = {
         k: v
         for k, v in settings.items()
-        if k not in {"default_model", _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD}
+        if k not in _SETTINGS_DERIVED_MODEL_KEYS
+        and k != _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD
     }
     for speech_key in _SETTINGS_SPEECH_KEYS:
         if speech_key not in persisted_speech_keys:
@@ -9423,6 +9431,7 @@ def load_settings() -> dict:
                 k: v
                 for k, v in stored.items()
                 if k not in _SETTINGS_LEGACY_DROP_KEYS
+                and k not in _SETTINGS_DERIVED_MODEL_KEYS
                 and k != _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD
             }
         )

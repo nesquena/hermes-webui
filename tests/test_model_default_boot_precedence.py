@@ -26,29 +26,28 @@ NODE = shutil.which("node")
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
-const boot = fs.readFileSync(process.argv[3], 'utf8');
 
-function extractFunc(name, source = ui) {
+function extractFunc(name) {
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const start = source.search(re);
+  const start = ui.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let openParen = source.indexOf('(', start);
+  let openParen = ui.indexOf('(', start);
   let i = openParen + 1;
   let parenDepth = 1;
-  while (parenDepth > 0 && i < source.length) {
-    if (source[i] === '(') parenDepth++;
-    else if (source[i] === ')') parenDepth--;
+  while (parenDepth > 0 && i < ui.length) {
+    if (ui[i] === '(') parenDepth++;
+    else if (ui[i] === ')') parenDepth--;
     i++;
   }
-  i = source.indexOf('{', i);
+  i = ui.indexOf('{', i);
   let depth = 1;
   i++;
-  while (depth > 0 && i < source.length) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}') depth--;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
     i++;
   }
-  return source.slice(start, i);
+  return ui.slice(start, i);
 }
 
 const calls = {syncModelChip: 0, renderModelDropdown: 0, positionModelDropdown: 0, liveFetches: []};
@@ -104,7 +103,7 @@ function makeSelect(options, initialValue) {
     group.children.push(opt);
     sel.appendChild(group);
   }
-  sel.value = initialValue || '';
+  if (initialValue !== null && initialValue !== undefined) sel.value = initialValue;
   return sel;
 }
 
@@ -142,6 +141,44 @@ const window = {_defaultModel: null, _activeProvider: null, _configuredModelBadg
 let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
+window._provisionalBootModelSelection = '';
+
+function settingsDefaultModelHasExplicitSourceForTest(s) {
+  if (!s || !Object.prototype.hasOwnProperty.call(s, 'default_model_has_explicit_source')) return true;
+  return s.default_model_has_explicit_source === true;
+}
+function hydrateBootDefaultModelFromSettingsForTest(s) {
+  if (!s) return;
+  if (s.default_model_provider) window._activeProvider = s.default_model_provider;
+  const defaultModel = String(s.default_model || '');
+  if (!defaultModel) return;
+  const hasExplicitSource = settingsDefaultModelHasExplicitSourceForTest(s);
+  window._defaultModel = defaultModel;
+  window._defaultModelHasExplicitSource = hasExplicitSource;
+  window._defaultModelEligibleForFreshBoot = hasExplicitSource;
+  const sel = $('modelSelect');
+  if (!hasExplicitSource) {
+    window._provisionalBootModelSelection = sel && sel.value ? String(sel.value) : '';
+    return;
+  }
+  window._provisionalBootModelSelection = '';
+  if (sel && typeof _applyModelToDropdown === 'function') {
+    const existingDefaultOpt = Array.from(sel.options).find(o => o.value === defaultModel);
+    if (existingDefaultOpt && window._activeProvider && !existingDefaultOpt.dataset.provider) {
+      existingDefaultOpt.dataset.provider = window._activeProvider;
+    }
+    if (!existingDefaultOpt) {
+      const opt = document.createElement('option');
+      opt.value = defaultModel;
+      opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(defaultModel) : defaultModel;
+      opt.dataset.custom = '1';
+      opt.dataset.provider = window._activeProvider || '';
+      sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+      sel.appendChild(opt);
+    }
+    _applyModelToDropdown(defaultModel, sel, window._activeProvider || null);
+  }
+}
 
 for (const name of [
   '_modelCatalogHasRealProviderModels', '_shouldApplyModelPayloadDefault',
@@ -152,17 +189,14 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
-for (const name of ['_settingsDefaultModelHasExplicitSource', '_hydrateBootDefaultModelFromSettings']) {
-  eval(extractFunc(name, boot));
-}
 
-const args = JSON.parse(process.argv[4]);
+const args = JSON.parse(process.argv[3]);
 apiModels = args.apiModels;
 modelSelect = makeSelect(args.initialOptions, args.initialValue);
 var S = {session: args.session || null};
 
 if (args.settings) {
-  _hydrateBootDefaultModelFromSettings(args.settings);
+  hydrateBootDefaultModelFromSettingsForTest(args.settings);
 }
 
 fetch = async function(url) {
@@ -181,6 +215,7 @@ populateModelDropdown(args.opts || {}).then(() => {
     defaultModel: window._defaultModel,
     defaultModelHasExplicitSource: window._defaultModelHasExplicitSource,
     defaultModelEligibleForFreshBoot: window._defaultModelEligibleForFreshBoot,
+    provisionalBootModelSelection: window._provisionalBootModelSelection,
     badgeKeys: Object.keys(window._configuredModelBadges || {}),
     activeProvider: window._activeProvider,
     calls,
@@ -216,6 +251,15 @@ def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
     assert "preferProfileDefaultOnFreshBoot:true" in BOOT_JS
     assert "const defaultWinsFreshBoot=!!window._defaultModel&&window._defaultModelEligibleForFreshBoot!==false;" in BOOT_JS
     assert "const stateToApply=sessionModelState||(!defaultWinsFreshBoot?savedState:null);" in BOOT_JS
+
+
+def test_boot_marks_nonexplicit_static_selection_provisional():
+    block = _boot_default_apply_snippet()
+
+    assert "window._provisionalBootModelSelection=sel&&sel.value?String(sel.value):'';" in block
+    assert "window._provisionalBootModelSelection='';" in block
+    assert "if(!hasExplicitSource)" in block
+    assert "if(!hasExplicitSource) return;" not in block
 
 
 @pytest.mark.parametrize(
@@ -258,8 +302,47 @@ def test_load_settings_exposes_default_model_explicit_source(
         assert "default_model_provider" not in settings
 
 
+def test_save_settings_drops_derived_default_model_metadata(monkeypatch, tmp_path):
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        json.dumps(
+            {
+                "font_size": "small",
+                "default_model": "stale-fallback",
+                "default_model_provider": "stale-provider",
+                "default_model_has_explicit_source": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_api, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(config_api, "cfg", {"model": "legacy-explicit-model"}, raising=False)
+    for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+    saved = config_api.save_settings({"font_size": "large"})
+    persisted = json.loads(settings_file.read_text(encoding="utf-8"))
+    reloaded = config_api.load_settings()
+
+    assert persisted["font_size"] == "large"
+    for key in (
+        "default_model",
+        "default_model_provider",
+        "default_model_has_explicit_source",
+    ):
+        assert key not in persisted
+    assert saved["default_model"] == "legacy-explicit-model"
+    assert saved["default_model_has_explicit_source"] is True
+    assert "default_model_provider" not in saved
+    assert reloaded["default_model"] == "legacy-explicit-model"
+    assert reloaded["default_model_has_explicit_source"] is True
+    assert "default_model_provider" not in reloaded
+
+
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
-    assert "const previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
+    assert "let previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
+    assert "const provisionalBootSelection=String(window._provisionalBootModelSelection||'');" in UI_JS
+    assert "window._provisionalBootModelSelection='';" in UI_JS
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
     snippet = _reconcile_selection_snippet()
     assert "preferProfileDefaultOnFreshBoot" in snippet
@@ -338,7 +421,7 @@ def test_settings_boot_then_model_refresh_does_not_recreate_nonexplicit_provider
     fallback_model = "fallback/model-that-is-not-in-provider-catalog"
     got = _run_populate_driver(
         populate_driver_path,
-        initial_value="",
+        initial_value=None,
         opts={"preferProfileDefaultOnFreshBoot": True},
         session=None,
         settings={
@@ -351,11 +434,14 @@ def test_settings_boot_then_model_refresh_does_not_recreate_nonexplicit_provider
         api_groups=[
             {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
         ],
-        initial_options=[],
+        initial_options=[
+            {"provider": "openai", "value": "@openai:gpt-4o", "label": "GPT-4o"},
+        ],
     )
 
     assert got["selectValue"] == "@safe:gpt-4o-mini"
     assert got["selectedProvider"] == "safe"
+    assert "@openai:gpt-4o" not in got["optionValues"]
     assert fallback_model not in got["optionValues"]
     assert f"@safe:{fallback_model}" not in got["optionValues"]
     assert all(fallback_model not in key for key in got["badgeKeys"])
@@ -479,7 +565,7 @@ def test_non_boot_refresh_does_not_reapply_default_when_previous_model_disappear
 def _run_populate_driver(
     driver_path: str,
     *,
-    initial_value: str,
+    initial_value: str | None,
     opts: dict,
     session: dict | None,
     api_default_model: str = "@safe:gpt-4o-mini",
@@ -516,7 +602,7 @@ def _run_populate_driver(
     }
     assert NODE is not None
     result = subprocess.run(
-        [NODE, driver_path, str(REPO / "static" / "ui.js"), str(REPO / "static" / "boot.js"), json.dumps(payload)],
+        [NODE, driver_path, str(REPO / "static" / "ui.js"), json.dumps(payload)],
         capture_output=True,
         text=True,
         timeout=30,
@@ -529,7 +615,7 @@ def _run_populate_driver(
 def _boot_default_apply_snippet() -> str:
     marker = "// Fresh page boot must prefer an explicit profile/server default"
     start = BOOT_JS.index(marker)
-    return BOOT_JS[start - 120 : start + 700]
+    return BOOT_JS[start - 260 : start + 700]
 
 
 def _reconcile_selection_snippet() -> str:

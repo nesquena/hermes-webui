@@ -2814,6 +2814,7 @@ let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 window._defaultModelHasExplicitSource=!!window._defaultModelHasExplicitSource;
 window._defaultModelEligibleForFreshBoot=window._defaultModelEligibleForFreshBoot!==false;
+window._provisionalBootModelSelection=window._provisionalBootModelSelection||'';
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
@@ -3480,7 +3481,14 @@ async function populateModelDropdown(opts={}){
       }
       return; // no server groups and no configured fallback
     }
-    const previousSelection=_captureModelDropdownSelection(sel);
+    let previousSelection=_captureModelDropdownSelection(sel);
+    const provisionalBootSelection=String(window._provisionalBootModelSelection||'');
+    if(opts&&opts.preferProfileDefaultOnFreshBoot&&provisionalBootSelection){
+      if(previousSelection&&String(previousSelection.model||'')===provisionalBootSelection){
+        previousSelection=null;
+      }
+      window._provisionalBootModelSelection='';
+    }
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};

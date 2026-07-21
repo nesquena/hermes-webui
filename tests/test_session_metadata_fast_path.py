@@ -125,7 +125,8 @@ def test_boot_primes_visible_default_model_without_catalog_fetch():
 
     assert "if(s.default_model_provider) window._activeProvider=s.default_model_provider;" in src
     assert "const hasExplicitSource=_settingsDefaultModelHasExplicitSource(s);" in default_block
-    assert "if(!hasExplicitSource) return;" in default_block
+    assert "window._provisionalBootModelSelection=sel&&sel.value?String(sel.value):'';" in default_block
+    assert "if(!hasExplicitSource)" in default_block
     assert "const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===defaultModel);" in default_block
     assert "existingDefaultOpt.dataset.provider=window._activeProvider;" in default_block
     assert "if(!existingDefaultOpt)" in default_block
