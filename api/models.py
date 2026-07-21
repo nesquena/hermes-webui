@@ -357,6 +357,26 @@ def _session_publication_generation(
         return generation
 
 
+def _register_published_session_generation(session) -> None:
+    """Make a successfully persisted lease authoritative in this process.
+
+    Bare constructors deliberately begin with an unshared token so they cannot
+    inherit a live sidecar. Once their own sidecar has passed the final
+    publication check and is durably replaced, future deletion/load paths must
+    recognize that exact object as the current generation.
+    """
+    sid = str(getattr(session, "session_id", "") or "")
+    generation = getattr(session, "_publication_generation", None)
+    if generation is None:
+        raise RuntimeError(f"Missing publication generation for {sid!r}")
+    key = _session_publication_store_key(sid)
+    with _SESSION_PUBLICATION_LOCKS_GUARD:
+        current = _SESSION_PUBLICATION_GENERATIONS.get(key)
+        if current is not None and current != generation:
+            raise RuntimeError(f"Refusing to replace live session generation {sid!r}")
+        _SESSION_PUBLICATION_GENERATIONS[key] = generation
+
+
 def _activate_session_publication_generation(session) -> _SessionPublicationGeneration:
     """Bind *session* to a fresh lease for an intentional SID recreation."""
     sid = str(getattr(session, "session_id", "") or "")
@@ -384,7 +404,24 @@ def _mark_session_deleted_for_publication(
     with _SESSION_PUBLICATION_LOCKS_GUARD:
         generation = _SESSION_PUBLICATION_GENERATIONS.get(key)
         if generation is None:
-            generation = _SessionPublicationGeneration()
+            # An ephemeral object that has never materialized a sidecar or
+            # claim may still need exact lifecycle cleanup. Its unshared
+            # constructor lease is safe to retire only while no durable
+            # publication authority exists for this SID. A bare constructor
+            # must never use this branch to delete an existing session.
+            sidecar = SESSION_DIR / f"{sid}.json"
+            has_durable_authority = _path_entry_exists(sidecar) or _path_entry_exists(
+                sidecar.with_suffix(".json.bak")
+            )
+            if not has_durable_authority:
+                try:
+                    has_durable_authority = _read_session_incarnation_claim(sid) is not None
+                except Exception:
+                    has_durable_authority = True
+            if expected_generation is not None and not has_durable_authority:
+                generation = expected_generation
+            else:
+                generation = _SessionPublicationGeneration()
             _SESSION_PUBLICATION_GENERATIONS[key] = generation
         if expected_generation is not None and expected_generation != generation:
             raise RuntimeError(f"Refusing to delete stale session generation {sid!r}")
@@ -2487,28 +2524,20 @@ class Session:
                  publication_incarnation=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
-        # Process-local incarnation lease stored in the class slot above. Every
-        # load of the current SID shares this token; an intentional same-SID
-        # recreation rotates it so old objects never regain publication authority.
-        if publication_incarnation is None and is_safe_session_id(self.session_id):
-            claim_token = _read_session_incarnation_claim(self.session_id)
-            sidecar_token = None
-            sidecar = SESSION_DIR / f"{self.session_id}.json"
-            if _path_entry_exists(sidecar):
-                persisted = _load_and_validate_session_payload(
-                    sidecar,
-                    self.session_id,
-                )
-                sidecar_token = persisted.get("publication_incarnation")
-            if claim_token and sidecar_token and claim_token != sidecar_token:
-                raise RuntimeError(
-                    f"Session incarnation authorities disagree for {self.session_id!r}"
-                )
-            publication_incarnation = sidecar_token or claim_token
-        self._publication_generation = _session_publication_generation(
-            self.session_id,
-            str(publication_incarnation) if publication_incarnation else None,
-        )
+        # Process-local incarnation lease stored in the class slot above. A
+        # constructor is not a load path: it must never read a live sidecar or
+        # pre-save claim and thereby adopt another object's publication
+        # authority. Validated loaders pass the persisted token explicitly;
+        # intentional same-SID creation receives a fresh token when its
+        # destination reservation binds it. A bare constructor gets an
+        # unshared token, which the save-time sidecar/claim comparison rejects.
+        if publication_incarnation is None:
+            self._publication_generation = _SessionPublicationGeneration()
+        else:
+            self._publication_generation = _session_publication_generation(
+                self.session_id,
+                str(publication_incarnation),
+            )
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
         self.model = model
@@ -2881,6 +2910,7 @@ class Session:
                 )
             _safe_replace(tmp, self.path)
             _fsync_parent_directory(self.path)
+            _register_published_session_generation(self)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)

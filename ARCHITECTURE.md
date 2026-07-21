@@ -262,11 +262,12 @@ destination claim. Shared index and tombstone RMW operations and sharded
 cleanup-residual writes have their own cross-process file locks and random
 exclusive staging names. Session, index, tombstone, cleanup residual, and
 destructive directory-entry changes are not acknowledged until their
-containing-directory durability barrier succeeds. File unlink and directory
-removal use type-aware commit guards on the held quarantined inode and verify
-through that still-open handle that the exact inode lost its final link; an
-entry replaced after the earlier traversal check is retained and reported as a
-retryable integrity failure.
+containing-directory durability barrier succeeds. POSIX exposes final file
+unlink and directory removal only by mutable pathname; it has no portable
+held-FD identity-bound removal primitive. Private-media cleanup therefore
+renames entries into durable quarantine but fails closed before the final
+unlink/rmdir, retaining that quarantine as retry authority rather than risking
+deletion of a replacement installed in the final check-to-delete gap.
 Deletion retires the active lease and tombstones publication before removing
 artifacts; an intentional same-SID recreation receives a new lease, so an old
 `Session` in this or another process remains stale even after the SID becomes
@@ -333,14 +334,17 @@ state-owned store on first read. Session deletion removes both upload and
 private-media namespaces.
 
 Private-media deletion first atomically renames the exact held SID directory to
-a random quarantine entry under the cross-process SID authority, syncs the
-media parent, and recursively quarantines child entries before deleting only
-their held identities. Truncate/retry/undo and backup restore prune blobs by
+a random quarantine entry under the cross-process SID authority and syncs the
+media parent. Because current POSIX/Python backends cannot retire a held inode
+without a pathname race, recursive retirement keeps child and SID quarantine
+entries and reports a retryable integrity residual instead of deleting an
+unrelated replacement. Truncate/retry/undo and backup restore prune blobs by
 reachability across both the live sidecar and any recovery backup. A successful
-clear always removes its stale backup and then removes or reachability-prunes
-the private-media namespace, including when the live transcript was already
-empty. Clear, prune, and focused recovery keep the per-SID process lock through
-retirement. Reachability cleanup runs after the transcript and recovery
+clear removes its stale backup and then removes or reachability-prunes the
+private-media namespace, including when the live transcript was already empty;
+on the current backend media retirement instead reports the retained quarantine
+as an incomplete clear. Clear, prune, and focused recovery keep the per-SID
+process lock through retirement. Reachability cleanup runs after the transcript and recovery
 authority are durably committed; a failure persists an operation-typed cleanup
 residual that `/api/sessions/cleanup` can retry. A committed transcript response
 may remain successful only after that retry authority is durable.

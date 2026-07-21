@@ -193,17 +193,18 @@ def _unlink_quarantined_regular_entry(
     name: str,
     entry_fd: int,
 ) -> None:
-    """Commit unlink only for the regular inode held in private quarantine."""
+    """Retire only the regular inode held in private quarantine.
+
+    POSIX exposes ``unlinkat`` only by mutable directory entry.  Even after an
+    inode comparison, another writer can replace that entry before the unlink,
+    so no portable Python/POSIX primitive can prove that unlink removes this
+    held inode rather than the replacement.  Keep the quarantined entry as the
+    durable retry authority instead of risking deletion of unrelated data.
+    """
     _assert_regular_entry_still_names_fd(parent_fd, name, entry_fd)
-    links_before = os.fstat(entry_fd).st_nlink
-    if links_before < 1:
-        raise SessionMediaIntegrityError("Private media file has no removable link")
-    os.unlink(name, dir_fd=parent_fd)
-    _fsync_dir(parent_fd)
-    if os.fstat(entry_fd).st_nlink != links_before - 1:
-        raise SessionMediaIntegrityError(
-            "Private media file replacement prevented exact removal"
-        )
+    raise SessionMediaIntegrityError(
+        "Exact private media file retirement is unavailable; retaining quarantine"
+    )
 
 
 def _rmdir_quarantined_directory_entry(
@@ -211,14 +212,16 @@ def _rmdir_quarantined_directory_entry(
     name: str,
     entry_fd: int,
 ) -> None:
-    """Commit rmdir only for the empty directory inode held in quarantine."""
+    """Retire only the empty directory inode held in private quarantine.
+
+    See :func:`_unlink_quarantined_regular_entry`: ``rmdir`` has the same
+    pathname-only final operation, so retaining the already-hidden quarantine
+    is the only fail-closed behavior on this backend.
+    """
     _assert_entry_still_names_fd(parent_fd, name, entry_fd)
-    os.rmdir(name, dir_fd=parent_fd)
-    _fsync_dir(parent_fd)
-    if os.fstat(entry_fd).st_nlink != 0:
-        raise SessionMediaIntegrityError(
-            "Private media directory replacement prevented exact removal"
-        )
+    raise SessionMediaIntegrityError(
+        "Exact private media directory retirement is unavailable; retaining quarantine"
+    )
 
 
 def _assert_private_handles(state_fd: int, media_fd: int, session_fd: int, sid: str) -> None:
