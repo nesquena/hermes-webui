@@ -8227,19 +8227,14 @@ def _run_agent_streaming(
                     time.sleep(_delay)
                     _last_silent_failure = True
                     continue
-
-                # Either succeeded, not a silent failure, or retries exhausted
-                if _last_silent_failure and _retry_state["attempt"] >= _retry_state["max_retries"]:
-                    logger.warning(
-                        f"[PROVIDER-RETRY] Session {s.session_id} exhausted all retries "
-                        f"for silent provider failure"
-                    )
-                break
-
-            # #4729: the run is done — flush any reasoning tail still in the coalescing
-            # buffer (the agent never calls reasoning_callback(None), and a turn can end on
-            # reasoning with no trailing token/tool boundary to trigger a flush) so the last
-            # sub-100ms window reaches the live Thinking view before the terminal done event.
+                else:
+                    # Either succeeded, not a silent failure, or retries exhausted
+                    if _last_silent_failure and _retry_state["attempt"] >= _retry_state["max_retries"]:
+                        logger.warning(
+                            f"[PROVIDER-RETRY] Session {s.session_id} exhausted all retries "
+                            f"for silent provider failure"
+                        )
+                    break
             _flush_reasoning_buffer()
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
