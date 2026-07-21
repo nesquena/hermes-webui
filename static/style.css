@@ -7023,8 +7023,9 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
     min-width:min(280px, calc(100vw - 24px));
     max-width:calc(100vw - 24px);
   }
-  /* Modal scales to viewport width on phones with reasonable padding. */
-  .kanban-modal-overlay{padding:12px;}
+  /* Modal scales to viewport width on phones with reasonable padding.
+     Ensure it's on screen and scrollable */
+  .kanban-modal-overlay{align-items:safe center;overflow-y:auto;padding:12px;}
   .kanban-modal{padding:16px 16px 14px;border-radius:14px;}
   .kanban-modal-row-inline{flex-direction:column;gap:0;}
   .kanban-column-body{overscroll-behavior:auto;}
