@@ -254,7 +254,10 @@ def test_startup_restores_v2_compression_source_and_retains_media_retry(
     assert source.path.read_bytes() == source_before
     assert models.SESSION_INDEX_FILE.read_bytes() == index_before
     assert not (tmp_path / f"{new_sid}.json").exists()
-    assert not media_dir.exists()
+    # Synthetic pre-rollback private data is never removed through a mutable
+    # pathname now that new externalization is disabled.  It remains a
+    # destination owner plus durable cleanup/recovery authority.
+    assert media_dir.exists()
     assert not models._session_incarnation_claim_file(new_sid).exists()
     transaction_dir = tmp_path / "_compression_transactions"
     assert (transaction_dir / f"{new_sid}.json").exists()

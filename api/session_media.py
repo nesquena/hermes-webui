@@ -26,6 +26,13 @@ from api.config import STATE_DIR
 
 
 _MIN_EXTERNALIZED_BYTES = 64 * 1024
+# POSIX only exposes unlink/rmdir by a mutable directory entry.  It cannot
+# retire the inode held by an open descriptor, so a replacement can always win
+# between a final identity check and the destructive syscall.  Do not create a
+# private reference until the storage backend has an identity-bound retirement
+# primitive.  Existing references remain read-compatible and are migrated back
+# to portable data URLs by Session.save().
+_PRIVATE_MEDIA_EXTERNALIZATION_ENABLED = False
 _MEDIA_SCHEME = "webui-media://"
 _PRIVATE_ROOT_NAME = "session-media"
 _REF_RE = re.compile(r"^webui-media://([a-f0-9]{64}\.(?:png|jpe?g|gif|webp|bmp))$")
@@ -111,6 +118,43 @@ def _attachment_root() -> Path:
 def _session_media_dir(session_id: str) -> Path:
     """Return the state-owned private media path (diagnostics/tests only)."""
     return _state_root() / _PRIVATE_ROOT_NAME / _validated_session_id(session_id)
+
+
+def session_media_destination_owners(session_id: str) -> list[str]:
+    """Return durable private-media owners for *session_id* without mutating.
+
+    A crash may leave a renamed ``.delete-<sid-hash>-...`` quarantine before a
+    cleanup residual is persisted.  It is still private data for that SID and
+    must block reuse just like the canonical directory does.
+    """
+    sid = _validated_session_id(session_id)
+    root = _state_root() / _PRIVATE_ROOT_NAME
+    try:
+        root_stat = os.lstat(root)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return ["session_media_unknown"]
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return ["session_media_unknown"]
+    owners = []
+    try:
+        if _path_entry_exists(_session_media_dir(sid)):
+            owners.append("session_media")
+        prefix = _deletion_quarantine_prefix(sid)
+        if any(path.name.startswith(prefix) for path in root.iterdir()):
+            owners.append("session_media_quarantine")
+    except OSError:
+        return ["session_media_unknown"]
+    return owners
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def _legacy_session_media_dirs(session_id: str) -> list[Path]:
@@ -494,9 +538,10 @@ def _read_verified_media_reference(session_id: str, filename: str) -> tuple[str,
             try:
                 with _open_legacy_session(legacy_path) as legacy_fd:
                     mime, raw = _read_and_verify_at(legacy_fd, filename)
-                # Migration is part of the successful compatibility read.  Do
-                # not keep serving from an attachment root that may move later.
-                _write_media(session_id, mime, raw)
+                # Compatibility is deliberately read-only.  Publishing a new
+                # private copy would recreate the retirement problem this
+                # module now fails closed on; Session.save() instead inlines
+                # the verified bytes into the next durable sidecar write.
                 return mime, raw
             except FileNotFoundError:
                 continue
@@ -624,6 +669,11 @@ def clone_session_media_references(value, source_session_id: str, destination_se
     if not filenames:
         return 0
 
+    if not _PRIVATE_MEDIA_EXTERNALIZATION_ENABLED:
+        raise SessionMediaIntegrityError(
+            "Private session media creation is disabled; hydrate legacy references first"
+        )
+
     if not _DIR_FD_OK:
         raise _unsupported_backend_error()
 
@@ -723,6 +773,11 @@ def externalize_large_session_media(
     min_bytes: int = _MIN_EXTERNALIZED_BYTES,
 ) -> int:
     """Replace large structured raster data URLs in *value* in place."""
+    # Portable session JSON is the only enabled write format.  Keep this
+    # no-op as the centralized save hook so callers cannot accidentally revive
+    # compact reference creation while exact retirement is unavailable.
+    if not _PRIVATE_MEDIA_EXTERNALIZATION_ENABLED:
+        return 0
     # Unsupported platforms keep portable data URLs inline. No compact private
     # reference is ever persisted unless every operation needed to read, clone,
     # commit, roll back, and remove it has an anchored handle implementation.
@@ -883,6 +938,14 @@ def _deletion_quarantine_prefix(session_id: str) -> str:
 def remove_session_media(session_id: str) -> None:
     """Delete the state-owned private media namespace for one session."""
     sid = _validated_session_id(session_id)
+    if not _PRIVATE_MEDIA_EXTERNALIZATION_ENABLED:
+        owners = session_media_destination_owners(sid)
+        if owners:
+            raise SessionMediaIntegrityError(
+                "Private session media predates disabled externalization; "
+                "automatic retirement is unavailable"
+            )
+        return
     if not _DIR_FD_OK:
         # A platform that never had the capability cannot create this tree via
         # this implementation. Absence is therefore a safe no-op; presence is
@@ -971,6 +1034,14 @@ def _retained_media_filenames(values) -> set[str]:
 def prune_session_media(session_id: str, retained_values) -> int:
     """Durably remove blobs unreachable from current and recovery payloads."""
     sid = _validated_session_id(session_id)
+    if not _PRIVATE_MEDIA_EXTERNALIZATION_ENABLED:
+        owners = session_media_destination_owners(sid)
+        if owners:
+            raise SessionMediaIntegrityError(
+                "Private session media predates disabled externalization; "
+                "automatic retirement is unavailable"
+            )
+        return 0
     retained = _retained_media_filenames(retained_values)
     if not _DIR_FD_OK:
         try:

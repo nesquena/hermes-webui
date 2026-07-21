@@ -237,120 +237,37 @@ Called after run_conversation() completes to set the session title retroactively
 
 #### 4.2.1 Private Session Media
 
-Large native raster data URLs are externalized from `messages` and
-`context_messages` into the state-owned `STATE_DIR/session-media/<session_id>`
-store. Session JSON retains content-addressed `webui-media://<sha256>.<ext>`
-references. This namespace is separate from ordinary uploads and archive
-extraction under `attachments/`; changing `HERMES_WEBUI_ATTACHMENT_DIR` does not
-move or change private-media authority. A deployment that moves WebUI state must
-move the complete `STATE_DIR` together.
+Large native raster data URLs remain inline in session JSON. New private-media
+externalization is disabled because POSIX/Python exposes final `unlink` and
+`rmdir` only by mutable pathname; it has no portable operation that retires the
+inode held by an opened descriptor. A final stat check cannot close the
+replacement window, so enabling creation would make ordinary delete, clear,
+prune, rollback, and recovery unsafe.
 
-Private-media support is enabled only when every required handle-relative
-operation is available (`open`, `mkdir`, `stat`, `unlink`, `rmdir`, `link`,
-`replace`, and directory listing). Reads, writes, clone publication/rollback,
-and removal stay anchored to opened directory handles and reject symlink
-components. A platform without that complete contract (including native
-Windows today) keeps large data URLs inline and refuses to hydrate, clone, or
-remove a pre-existing compact reference; it never falls back to a pathname
-check followed by a separately resolved write or destructive removal.
+`webui-media://<sha256>.<ext>` remains a read-only compatibility format for
+sidecars written by an earlier experimental build. The reader anchors the
+directory handles, rejects symlink components, and verifies extension/MIME,
+raster magic, and SHA-256 before it expands a reference to a data URL. A normal
+`Session.save()` writes that verified value back inline; duplicate, branch,
+`/btw`, and compression continuation do the same before the destination can
+commit. Missing or corrupt media fails closed and leaves the current sidecar
+untouched. Portable imports continue to reject private references.
 
-The anchored backend verifies extension/MIME, raster magic, and SHA-256 before
-a reference can be retained. `Session.save()` and destructive session cleanup
-share a permanent per-SID cross-process file lock, an in-process publication
-lock, and an incarnation token persisted in both the sidecar and any pre-save
-destination claim. Shared index and tombstone RMW operations and sharded
-cleanup-residual writes have their own cross-process file locks and random
-exclusive staging names. Session, index, tombstone, cleanup residual, and
-destructive directory-entry changes are not acknowledged until their
-containing-directory durability barrier succeeds. POSIX exposes final file
-unlink and directory removal only by mutable pathname; it has no portable
-held-FD identity-bound removal primitive. Private-media cleanup therefore
-renames entries into durable quarantine but fails closed before the final
-unlink/rmdir, retaining that quarantine as retry authority rather than risking
-deletion of a replacement installed in the final check-to-delete gap.
-Deletion retires the active lease and tombstones publication before removing
-artifacts; an intentional same-SID recreation receives a new lease, so an old
-`Session` in this or another process remains stale even after the SID becomes
-valid again. An unreadable aggregate deletion tombstone remains fail-closed
-for an absent SID without a matching claim. It is left byte-for-byte in place,
-but a fresh exclusive destination reservation may publish through it because
-its durable, SID-scoped incarnation claim proves an intentional recreation;
-corruption in the aggregate therefore cannot disable unrelated new sessions.
-Save validates the complete final payload and verifies every
-private reference immediately before JSON replacement. Compact references are
-permitted only in canonical image parts below `messages` and
-`context_messages`; every other serialized field is private-reference-free. A
-stale worker therefore cannot recreate a deleted session, redirect ownership,
-or publish a dangling ref.
-
-New-session lineage operations exclusively reserve the destination SID and
-prove its sidecar, media, attachment, journal, index, cache, and runtime
-namespaces unowned before publishing. Duplicate, branch, `/btw`, portable JSON
-import, focused recovery, compression continuation creation, and external-session
-share metadata sidecars use this same publish-or-rollback transaction. Share
-create/revoke holds the reservation through sidecar save, so a failed save
-cannot retain an incarnation claim that blocks future share operations.
-Rollback removes only artifacts created while that reservation is held. Before
-compression mutates either identity, it holds
-both SID authorities plus the global index writer, records durable intent, and
-stores digest-bound exact-byte backups of the source sidecar and index. It then
-archives the source, publishes the continuation JSON/index, and migrates cache,
-agent lock/cache, stream owner, active-run, and agent identity state while the
-reservation remains held. Commit occurs only after every migration succeeds.
-Any earlier failure restores the source bytes and runtime identity and removes
-the reserved destination. Startup recovery finalizes only a matching
-`migrations_complete` incarnation; every earlier durable phase restores the
-source and rolls back the destination deterministically.
-
-Every destructive session path uses the same idempotent artifact cleanup. It
-verifies absence of JSON, backup and crashed-save temporaries, attachments,
-private media, turn/run journals, sidebar index state, and (where WebUI owns it)
-`state.db` state before returning success. Failures return machine-readable
-residual artifact names and persist
-`sessions/_session_cleanup_residuals/<session_id>.json` so a later delete or
-cleanup request can retry them. Residual authority is sharded by SID: a corrupt
-or future-version record fails closed for its owning SID without preventing
-unrelated sessions from being created or other valid cleanup records from being
-retried. The corrupt record remains in place and is returned as a cleanup
-residual for operator repair. Each marker retains the original tombstone and
-`state.db` ownership policy, so retrying cleanup cannot turn a messaging-sidecar
-delete into deletion of the externally owned messaging transcript. The generic
+No automatic write, clone, migration, prune, or deletion operation creates a
+new private-media entry. Existing canonical directories and durable
+`.delete-<sid-hash>-...` quarantines remain SID owners, including the crash
+window before a cleanup residual is written, so a same-ID reservation cannot
+adopt or collide with detached private data. Automatic retirement of such old
+experimental data is intentionally refused rather than deleting a mutable
+path; it requires an identity-bound backend/operator migration. The generic
 `/api/media` file server hard-denies the complete `session-media` subtree.
 
-Ephemeral `/btw` sessions register an exact
-`{parent_session_id, ephemeral_session_id, stream_id}` owner before the stream
-is exposed. Success, cancellation (including cancel-before-worker), and startup
-failure compare-and-delete only that owner and retire JSON/backup, cache,
-stream/active-owner maps, run/turn journals, agent locks/cache, state DB state,
-and private media. A failed retirement leaves both the durable residual marker
-and the matching in-process owner marked cleanup-pending; an older completion
-cannot erase a newer `/btw` owner for the same parent.
-
-Model requests and portable exports must hydrate every reference through the
-strict reader and must reject any private URI that remains; plain JSON imports
-containing private URIs are rejected. Legacy files under
-`attachments/<session_id>/session-media` are verified and migrated into the
-state-owned store on first read. Session deletion removes both upload and
-private-media namespaces.
-
-Private-media deletion first atomically renames the exact held SID directory to
-a random quarantine entry under the cross-process SID authority and syncs the
-media parent. Because current POSIX/Python backends cannot retire a held inode
-without a pathname race, recursive retirement keeps child and SID quarantine
-entries and reports an integrity residual instead of deleting an unrelated
-replacement. A retry detects the existing SID-specific quarantine and leaves
-it in place rather than recursively creating further quarantine entries;
-operators can retain that durable authority until an identity-bound retirement
-backend is available. Truncate/retry/undo and backup restore prune blobs by
-reachability across both the live sidecar and any recovery backup. A successful
-clear removes its stale backup and then removes or reachability-prunes the
-private-media namespace, including when the live transcript was already empty;
-on the current backend media retirement instead reports the retained quarantine
-as an incomplete clear. Clear, prune, and focused recovery keep the per-SID
-process lock through retirement. Reachability cleanup runs after the transcript and recovery
-authority are durably committed; a failure persists an operation-typed cleanup
-residual that `/api/sessions/cleanup` can retry. A committed transcript response
-may remain successful only after that retry authority is durable.
+Session publication and deletion share permanent per-SID cross-process and
+in-process locks plus an incarnation token. Tokenless legacy loads hold that
+authority from signature validation through lease registration, and a save
+rechecks the bound sidecar signature immediately before publishing. Backups,
+focused recovery, and compression-source restore verify every private reference
+before they can retain or publish their payload.
 
 ### 4.3 SSE Streaming Engine
 

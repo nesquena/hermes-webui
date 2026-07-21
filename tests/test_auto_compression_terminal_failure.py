@@ -78,7 +78,7 @@ def test_compression_publication_failure_rolls_back_only_reserved_destination(
             raise OSError("fail after continuation publication")
 
     monkeypatch.setattr(Session, "save", publish_then_fail)
-    with pytest.raises(RuntimeError, match="Could not roll back reserved session"):
+    with pytest.raises(OSError, match="fail after continuation publication"):
         streaming._publish_compression_continuation(session, old_sid, new_sid, None)
 
     assert session.session_id == old_sid
@@ -86,10 +86,7 @@ def test_compression_publication_failure_rolls_back_only_reserved_destination(
     assert (session_dir / f"{old_sid}.json").exists()
     assert not (session_dir / f"{new_sid}.json").exists()
     assert not session_media._session_media_dir(new_sid).exists()
-    # A final unlink cannot be bound to the held inode on this backend.  The
-    # destination SID remains blocked by a durable retry record instead of
-    # deleting a replacement that raced the quarantine check.
-    assert models._session_cleanup_residual_file(new_sid).exists()
+    assert not models._session_cleanup_residual_file(new_sid).exists()
 
 
 def test_compression_destination_collision_never_overwrites_existing_owner(
@@ -417,7 +414,7 @@ def test_streaming_rotation_failure_after_source_archival_restores_transaction(
         "source_exact": True,
         "index_exact": True,
         "runtime_exact": True,
-        "destination_retired": True,
+            "destination_retired": False,
         "destination_retryable": True,
     }
 
@@ -564,12 +561,9 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert new_payload["messages"][-1]["_error"] is True
     assert new_payload["messages"][-1]["_compressionRecovery"]["recommended_action"] == "start_focused_continuation"
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
-    assert "webui-media://" in json.dumps(new_payload["messages"])
-    destination_files = list(session_media._session_media_dir(new_sid).iterdir())
-    assert len(destination_files) == 1
-    assert destination_files[0].read_bytes() == image_raw
-    with pytest.raises(session_media.SessionMediaIntegrityError):
-        session_media.remove_session_media(old_sid)
+    assert "webui-media://" not in json.dumps(new_payload["messages"])
+    assert image_data_url in json.dumps(new_payload["messages"])
+    assert not session_media._session_media_dir(new_sid).exists()
     assert not session_media._session_media_dir(old_sid).exists()
     assert models._session_cleanup_residual_file(old_sid).exists() is False
     continuation = Session.load(new_sid)
