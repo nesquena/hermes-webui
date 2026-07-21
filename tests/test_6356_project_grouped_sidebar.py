@@ -376,6 +376,7 @@ process.stdout.write(JSON.stringify({
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_stale_appearance_autosave_response_cannot_revert_grouping_choice():
+    queue_helper = _extract_js_function(PANELS_JS, "_queueAppearanceSettingsWrite")
     autosave = _extract_js_function(PANELS_JS, "_autosaveAppearanceSettings")
     script = f"""
 const pending = [];
@@ -393,6 +394,7 @@ function api(_url, options) {{
 function _rememberAppearanceSaved() {{}}
 function _setAppearanceAutosaveStatus() {{}}
 function renderSessionListFromCache() {{ renders += 1; }}
+{queue_helper}
 {autosave}
 (async () => {{
   const oldRequest = _autosaveAppearanceSettings({{sidebar_group_by_project: false}}, 1);

@@ -109,6 +109,23 @@ def test_full_save_settings_still_includes_font_size():
     assert "body.font_size=fontSize;" in compact
 
 
+def test_full_save_serializes_with_appearance_autosaves():
+    queue_block = _function_block(PANELS_JS, "_queueAppearanceSettingsWrite")
+    assert "_appearanceAutosaveWriteQueue.then" in queue_block
+    assert "api('/api/settings'" in queue_block
+
+    barrier_block = _function_block(PANELS_JS, "_writeSettingsWithAppearanceBarrier")
+    compact_barrier = barrier_block.replace(" ", "")
+    assert "clearTimeout(_settingsAppearanceAutosaveTimer);" in compact_barrier
+    assert "_settingsAppearanceAutosaveTimer=null;" in compact_barrier
+    assert "_appearanceAutosaveGeneration++" in compact_barrier
+    assert "_queueAppearanceSettingsWrite(payload)" in barrier_block
+
+    save_block = _function_block(PANELS_JS, "saveSettings")
+    assert "_writeSettingsWithAppearanceBarrier(payload)" in save_block
+    assert "_writeSettingsWithAppearanceBarrier(body)" in save_block
+
+
 def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_fields():
     original, status = _get("/api/settings")
     assert status == 200
