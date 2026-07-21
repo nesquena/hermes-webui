@@ -270,7 +270,12 @@ retryable integrity failure.
 Deletion retires the active lease and tombstones publication before removing
 artifacts; an intentional same-SID recreation receives a new lease, so an old
 `Session` in this or another process remains stale even after the SID becomes
-valid again. Save validates the complete final payload and verifies every
+valid again. An unreadable aggregate deletion tombstone remains fail-closed
+for an absent SID without a matching claim. It is left byte-for-byte in place,
+but a fresh exclusive destination reservation may publish through it because
+its durable, SID-scoped incarnation claim proves an intentional recreation;
+corruption in the aggregate therefore cannot disable unrelated new sessions.
+Save validates the complete final payload and verifies every
 private reference immediately before JSON replacement. Compact references are
 permitted only in canonical image parts below `messages` and
 `context_messages`; every other serialized field is private-reference-free. A
