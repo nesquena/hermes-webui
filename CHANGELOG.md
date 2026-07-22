@@ -17,6 +17,10 @@
 
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
+### Added
+
+- **Each settled assistant turn's footer now shows the model that actually served it.** In transparent-stream mode the turn footer gains a compact model chip (e.g. `8s · claude-opus-4-8 · TTFT 640ms · …`), read *after* the turn completes so a mid-turn fallback shows the real model that answered rather than the one originally requested. The label renders exactly once per turn — a gateway/failover turn keeps its existing routing chip and the additive chip is suppressed — and the footer wraps gracefully at narrow widths and on mobile instead of stretching. The used-model is persisted with the session so it survives a reload. Thanks @franksong2702. (#6113, #6068)
+
 ### Fixed
 
 - **The transcript no longer jumps when a streaming reply settles while you're reading earlier messages.** If you scrolled up to read history and a streaming assistant reply finished (collapsing its expanded worklog to the settled compact view), the viewport could lurch away from what you were reading. The scroll anchor is now captured from the live DOM *before* the collapse render and reused, so your position is preserved through settlement. Readers pinned to the bottom still auto-follow to the newest reply as before. Thanks @franksong2702. (#6390, #6385)
