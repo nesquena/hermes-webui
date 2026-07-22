@@ -174,15 +174,17 @@ process.stdout.write(JSON.stringify(rows));
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_settlement_two_projections_two_mirrors():
-    """Two projected prose rows + two settled mirrors with matching identities.
-    Mirrors consumed → both distinct-identity projections survive."""
+    """Two projected prose rows + two settled mirrors with DIFFERENT IDs.
+    Mirrors consumed by provenance (text-key matching) → both distinct-identity
+    projections survive even though their IDs differ from the settled rows."""
     script = (
         _SETTLEMENT_JS_BOOT
         + """
 function _anchorSceneRowsByMessageIndex(){ return new Map([
   [1, [
-    {role:'prose', text:'Processing...', local_id:'prose:s:1', row_id:'settled-m1', source_event_type:'token', kind:'process_prose', status:'completed'},
-    {role:'prose', text:'Processing...', local_id:'prose:s:2', row_id:'settled-m2', source_event_type:'token', kind:'process_prose', status:'completed'},
+    // Settled mirrors have DIFFERENT local_ids than projected rows (realistic production)
+    {role:'prose', text:'Processing...', local_id:'settled-prose:1', row_id:'settled-m1', source_event_type:'token', kind:'process_prose', status:'completed'},
+    {role:'prose', text:'Processing...', local_id:'settled-prose:2', row_id:'settled-m2', source_event_type:'token', kind:'process_prose', status:'completed'},
   ]]
 ]); }
 const messages = [
@@ -205,7 +207,7 @@ process.stdout.write(JSON.stringify(rows));
 """
     )
     result = _run_node_script(script)
-    # Both distinct-identity prose rows survive (mirrors consumed)
+    # Both distinct-identity prose rows survive (mirrors consumed by text-key matching)
     assert len(result) == 2, f"Expected 2 rows (2 projections + 2 mirrors consumed), got {len(result)}: {result}"
     local_ids = {r["local_id"] for r in result}
     assert local_ids == {"prose:s:1", "prose:s:2"}
@@ -280,6 +282,76 @@ process.stdout.write(JSON.stringify(rows));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_same_id_latest_value_enrichment():
+    """Same-ID projected row with different text keeps the LATEST value
+    (enrichment, not stale-first)."""
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
+const projectedScene = {
+  mode:'compact_worklog',
+  final_answer:'Final answer',
+  identity:{source_message_refs:['asst-1']},
+  lifecycle:{},
+  activity_rows:[
+    {role:'prose', text:'Initial processing...', local_id:'live-prose:updating', row_id:'ru', source_event_type:'token', kind:'process_prose', status:'completed'},
+    {role:'prose', text:'Updated processing...', local_id:'live-prose:updating', row_id:'ru', source_event_type:'token', kind:'process_prose', status:'completed'},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id}));
+process.stdout.write(JSON.stringify(rows));
+"""
+    )
+    result = _run_node_script(script)
+    assert len(result) == 1, f"Expected 1 row (enriched), got {len(result)}: {result}"
+    assert result[0]["text"] == "Updated processing...", f"Expected latest text, got: {result[0]['text']}"
+    assert result[0]["local_id"] == "live-prose:updating"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_near_overlap_mirror_matching():
+    """Settled mirror with >=80 char text that's a near-overlap of a projected
+    row's text is consumed as a mirror (one-for-one)."""
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+function _anchorSceneRowsByMessageIndex(){ return new Map([
+  [1, [
+    // Settled mirror with >80 char text that contains the projected text
+    {role:'prose', text:'The quick brown fox jumps over the lazy dog near the river bank while the sun sets in the west creating a beautiful orange glow in the sky.', local_id:'settled-near:1', row_id:'sm1', source_event_type:'token', kind:'process_prose', status:'completed'},
+  ]]
+]); }
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
+const projectedScene = {
+  mode:'compact_worklog',
+  final_answer:'Final answer',
+  identity:{source_message_refs:['asst-1']},
+  lifecycle:{},
+  activity_rows:[
+    // Projected row with shorter but contained text (>80 chars on both sides)
+    {role:'prose', text:'The quick brown fox jumps over the lazy dog near the river bank while the sun sets in the west creating a beautiful', local_id:'prose:near:1', row_id:'p1', source_event_type:'token', kind:'process_prose', status:'completed'},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id}));
+process.stdout.write(JSON.stringify(rows));
+"""
+    )
+    result = _run_node_script(script)
+    # The mirror is consumed → only 1 projected row survives
+    assert len(result) == 1, f"Expected 1 row (projection, mirror consumed via near-overlap), got {len(result)}: {[r['text'][:50] for r in result]}"
+    assert result[0]["local_id"] == "prose:near:1"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_settlement_final_answer_exact_and_prefix_removed():
     """Existing final-answer guards still work: exact match and near-prefix
     final-answer echoes are removed from settlement."""
@@ -296,17 +368,17 @@ const projectedScene = {
   identity:{source_message_refs:['asst-1']},
   lifecycle:{},
   activity_rows:[
-    // Exact final-answer echo (must be removed)
-    {role:'prose', text:'The final answer is 42.', local_id:'echo-exact', row_id:'ee', source_event_type:'token', kind:'process_prose', status:'completed'},
-    // near-prefix final-answer echo (shorter prefix in final segment, must be removed)
-    {role:'prose', text:'The final answer is ', local_id:'live-prose:echo-prefix', row_id:'ep', source_event_type:'token', kind:'process_prose', status:'completed'},
-    // Near-overlap final-answer echo (long text >=80 chars, ≥90% ratio, must be removed)
+    // Near-overlap final-answer echo (long text >=80 chars, ≥90% ratio, pre-tool → survives)
     {role:'prose', text:'Once upon a time in a far away land there lived a wise old programmer who wrote clean code.', local_id:'echo-near', row_id:'en', source_event_type:'token', kind:'process_prose', status:'completed'},
     // Legitimate intermediate prose (short prefix, <80% overlap, must survive)
     {role:'prose', text:'The final', local_id:'legitimate-short-prefix', row_id:'lp', source_event_type:'token', kind:'process_prose', status:'completed'},
-    // Tool row (unaffected by final-answer guards)
+    // Exact final-answer echo (removed by exact final-answer match regardless of segment)
+    {role:'prose', text:'The final answer is 42.', local_id:'echo-exact', row_id:'ee', source_event_type:'token', kind:'process_prose', status:'completed'},
+    // Tool row — separates pre-tool narration from final segment
     {role:'tool', text:'Fetched data', local_id:'live-tool:1', row_id:'tr', tool_call_id:'tc-1', status:'completed'},
-    // Prose with different content (must survive)
+    // Near-prefix final-answer echo (now in FINAL segment → must be removed)
+    {role:'prose', text:'The final answer is ', local_id:'live-prose:echo-prefix', row_id:'ep', source_event_type:'token', kind:'process_prose', status:'completed'},
+    // Prose with different content (post-tool, distinct, must survive)
     {role:'prose', text:'Intermediate step description', local_id:'intermediate', row_id:'ir', source_event_type:'token', kind:'process_prose', status:'completed'},
   ]
 };

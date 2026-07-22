@@ -3575,18 +3575,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
-    const orderedRows=[];
+    // ── provenance-aware projection mirror tracking ────────────
+    // Each distinct projected prose/thinking identity allocates one
+    // mirror slot, so settled/backfill rows with matching text are
+    // consumed one-for-one without collapsing distinct identities.
+    // Same-ID updates (identity re-appears with new text) update the
+    // slot to the latest text key rather than allocating a second slot.
+    const projectedMirrorSlots={};
+    const _idToLatestText={};
     for(const row of projectedRows){
-      if(row&&row.role==='terminal') continue;
-      orderedRows.push(row);
+      if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
+      const key=_anchorSceneExistingRowKey(row)||'__no_key__';
+      const tk=_anchorSceneTextKey(row.text);
+      if(!tk) continue;
+      if(_idToLatestText[key]!==undefined){
+        const oldTk=_idToLatestText[key];
+        if(oldTk!==tk){
+          projectedMirrorSlots[oldTk]=(projectedMirrorSlots[oldTk]||1)-1;
+          if(projectedMirrorSlots[oldTk]<=0) delete projectedMirrorSlots[oldTk];
+        }
+        _idToLatestText[key]=tk;
+        projectedMirrorSlots[tk]=(projectedMirrorSlots[tk]||0)+1;
+      }else{
+        _idToLatestText[key]=tk;
+        projectedMirrorSlots[tk]=(projectedMirrorSlots[tk]||0)+1;
+      }
     }
-    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
-      const bucket=messageRows.get(idx)||[];
-      for(const row of bucket) orderedRows.push(row);
-    }
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') orderedRows.push(row);
-    }
+    const _projectedTextKeys=Object.keys(projectedMirrorSlots);
+    // ── end provenance tracking ────────────────────────────────
     // #5758 gap: final-segment eligibility must be judged against the LIVE
     // projection's own chronology. The settled per-message tool rows appended
     // into orderedRows above re-list tools that ran EARLIER in the turn, so an
@@ -3602,7 +3618,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
-    const pushRow=(row)=>{
+    const _consumeMirror=(textKey)=>{
+      if(!textKey||!projectedMirrorSlots[textKey]) return false;
+      if(projectedMirrorSlots[textKey]<=0) return false;
+      projectedMirrorSlots[textKey]-=1;
+      return true;
+    };
+    const _tryNearOverlapMirror=(textKey)=>{
+      if(!textKey||textKey.length<80) return false;
+      for(const pk of _projectedTextKeys){
+        if(pk===textKey||!pk||pk.length<80) continue;
+        if(pk.includes(textKey)||textKey.includes(pk)){
+          if(projectedMirrorSlots[pk]>0){
+            projectedMirrorSlots[pk]-=1;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
@@ -3612,13 +3647,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
       const key=_anchorSceneExistingRowKey(row);
-      // Identity-based dedup: same durable identity → mirror/echo consumed
-      if(key&&seen.has(key)) return;
+      // ── same-identity enrichment: keep latest/richest value ──
+      if(key&&seen.has(key)){
+        const existingIdx=rows.findIndex(r=>_anchorSceneExistingRowKey(r)===key);
+        if(existingIdx>=0){
+          rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
+        }
+        return;
+      }
       if(key) seen.add(key);
-      // Legacy text-only near-overlap protection for rows without durable ID
-      if(isTextual&&textKey&&!row.local_id&&!row.row_id&&!row.event_id&&!(row.identity&&(row.identity.local_id||row.identity.row_id||row.identity.event_id))){
-        if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
-        seenTextKeys.push(textKey);
+      // ── provenance-aware mirror consumption (settled rows) ───
+      if(origin==='settled'&&isTextual&&textKey){
+        if(_consumeMirror(textKey)) return;
+        // Fallback: near-overlap mirror matching for >=80 char texts
+        if(_tryNearOverlapMirror(textKey)) return;
+      }
+      // ── legacy text-only dedup ────────────────────────────────────
+      // Exact-text dedup applies only to rows without a durable ID
+      // (rows with IDs are already deduped by _anchorSceneExistingRowKey).
+      // Long-text ≥80 near-overlap protection applies unconditionally.
+      if(isTextual&&textKey){
+        const hasDurableId=!!(row.local_id||row.row_id||row.event_id||(row.identity&&(row.identity.local_id||row.identity.row_id||row.identity.event_id)));
+        if(!hasDurableId){
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+          seenTextKeys.push(textKey);
+        }else if(textKey.length>=80){
+          // For ID'd rows, only the ≥80 char near-overlap leg applies
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+        }
       }
       rows.push({
         ...row,
@@ -3627,7 +3683,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:rows.length,
       });
     };
-    orderedRows.forEach((row)=>pushRow(row));
+    // Phase 1: projected non-terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') continue;
+      pushRow(row,'projected');
+    }
+    // Phase 2: settled/backfill rows (from per-message buckets)
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
+      const bucket=messageRows.get(idx)||[];
+      for(const row of bucket) pushRow(row,'settled');
+    }
+    // Phase 3: projected terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') pushRow(row,'projected');
+    }
     const scene={
       ...base,
       version:'activity_scene_v1',
