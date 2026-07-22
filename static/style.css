@@ -5885,6 +5885,11 @@ main.main > #mainPlugin{display:none;}
      the existing "some rows must stay fully rendered" opt-out pattern for
      #liveAssistantTurn below. */
   .msg-row[data-role="user"] { content-visibility: auto; contain-intrinsic-size: auto 96px; contain: layout style; }
+  /* A fresh session switch must establish the incoming transcript's real row
+     geometry before content-visibility starts skipping off-screen user rows.
+     Otherwise the landing frame can shrink repeatedly as remembered intrinsic
+     sizes settle, producing a visible jump even though scrollTop follows dH. */
+  .messages.session-switch-layout-stabilizing .msg-row[data-role="user"] { content-visibility: visible; }
   .msg-row { contain: layout style; }
   /* Keep the LIVE streaming turn fully rendered while a response streams. The
      live turn is always id="liveAssistantTurn" (assigned on every render path:

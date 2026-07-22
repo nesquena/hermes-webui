@@ -128,7 +128,7 @@ class TestLoadPdfInlineFunction:
     def test_fallback_on_error(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 4000]  # was 3000 — loadPdfInline grew with the per-page render loop + truncation notice
+        body = ui[idx:idx + 4200]  # grows with loadPdfInline: per-page render loop, truncation notice, and the session-switch stabilization pending marker
         assert 'pdf_error' in body, 'Must show error fallback on failure'
         assert 'pdf_download' in body or 'download=' in body, 'Error fallback must include download link'
 
@@ -204,7 +204,7 @@ class TestLoadHtmlInlineFunction:
     def test_pdf_fetch_url_includes_session_id_for_session_media_artifacts(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 1200]
+        body = ui[idx:idx + 1400]  # window grows with the session-switch stabilization pending marker at the top of loadPdfInline
         assert 'const mediaSessionId=' in body
         assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
         assert 'fetch(mediaUrl)' in body

@@ -5671,6 +5671,134 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
+let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutLoadGeneration=null;
+let _sessionSwitchLayoutStabilizationToken=0;
+let _sessionSwitchLayoutStabilizationTimer=0;
+let _sessionSwitchLayoutStabilizationObserver=null;
+// Absolute-cap watchdog: force-retires stabilization even if a post-process
+// waiter (a never-settling fetch/preview) never releases its pending marker, so
+// the `session-switch-layout-stabilizing` class can't stay armed forever and
+// silently disable mobile user-row virtualization.
+let _sessionSwitchLayoutWatchdogTimer=0;
+let _sessionSwitchLayoutPostProcessPending=0;
+let _sessionSwitchLayoutSettleRequested=false;
+let _liveAnchorScrollRebuildGeneration=0;
+// Cleanup ownership for the live-anchor min-height guard, tracked separately
+// from the render/session generation so a no-guard rebuild can't strand
+// min-height set (see _prepareLiveAnchorScrollRebuildGuard).
+let _liveAnchorMinHeightGuardOwner=0;
+function _endSessionSwitchLayoutStabilization(loadGeneration,token,force){
+  // `force` lets the authoritative current load retire stabilization owned by
+  // an older load it superseded (e.g. a forced reload of the incoming session
+  // that skipped _begin because currentSid===sid). Stale continuations pass
+  // force=false and stay gated on generation so they can't clear newer state.
+  if(!force&&loadGeneration!==undefined&&loadGeneration!==null&&loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
+  if(token!==undefined&&token!==_sessionSwitchLayoutStabilizationToken) return;
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  _sessionSwitchLayoutStabilizationTimer=0;
+  clearTimeout(_sessionSwitchLayoutWatchdogTimer);
+  _sessionSwitchLayoutWatchdogTimer=0;
+  if(_sessionSwitchLayoutStabilizationObserver){
+    _sessionSwitchLayoutStabilizationObserver.disconnect();
+    _sessionSwitchLayoutStabilizationObserver=null;
+  }
+  _sessionSwitchLayoutPostProcessPending=0;
+  _sessionSwitchLayoutSettleRequested=false;
+  _sessionSwitchLayoutStabilizationSid='';
+  _sessionSwitchLayoutLoadGeneration=null;
+  const el=$('messages');
+  if(el&&el.classList) el.classList.remove('session-switch-layout-stabilizing');
+}
+function _beginSessionSwitchLayoutStabilization(sid,loadGeneration){
+  _endSessionSwitchLayoutStabilization();
+  ++_sessionSwitchLayoutStabilizationToken;
+  _bottomSettleToken++;
+  if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+  clearTimeout(_settleTimer);
+  clearTimeout(_settleFinalTimer);
+  cancelAnimationFrame(_settleRAF);
+  _programmaticScroll=false;
+  _sessionSwitchLayoutStabilizationSid=String(sid||'');
+  _sessionSwitchLayoutLoadGeneration=(loadGeneration===undefined?null:loadGeneration);
+  _sessionSwitchLayoutPostProcessPending=0;
+  _sessionSwitchLayoutSettleRequested=false;
+  const el=$('messages');
+  if(el&&el.classList) el.classList.add('session-switch-layout-stabilizing');
+}
+function _finishSessionSwitchLayoutStabilization(token,sid,loadGeneration){
+  if(token!==_sessionSwitchLayoutStabilizationToken||String(sid||'')!==_sessionSwitchLayoutStabilizationSid||loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
+  _endSessionSwitchLayoutStabilization(loadGeneration,token);
+  requestAnimationFrame(()=>{
+    if(token!==_sessionSwitchLayoutStabilizationToken) return;
+    if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollToBottom==='function') scrollToBottom();
+  });
+}
+function _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration){
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  _sessionSwitchLayoutStabilizationTimer=setTimeout(()=>{
+    if(token!==_sessionSwitchLayoutStabilizationToken||!_sessionSwitchLayoutSettleRequested) return;
+    if(_sessionSwitchLayoutPostProcessPending>0) return;
+    _finishSessionSwitchLayoutStabilization(token,sid,loadGeneration);
+  },300);
+}
+function _beginSessionSwitchLayoutPostProcess(){
+  if(!_sessionSwitchLayoutSettleRequested||!_sessionSwitchLayoutStabilizationSid) return null;
+  const marker={token:_sessionSwitchLayoutStabilizationToken,sid:_sessionSwitchLayoutStabilizationSid,loadGeneration:_sessionSwitchLayoutLoadGeneration};
+  _sessionSwitchLayoutPostProcessPending++;
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  return marker;
+}
+function _endSessionSwitchLayoutPostProcess(marker){
+  if(!marker||marker.token!==_sessionSwitchLayoutStabilizationToken||marker.sid!==_sessionSwitchLayoutStabilizationSid||marker.loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
+  _sessionSwitchLayoutPostProcessPending=Math.max(0,_sessionSwitchLayoutPostProcessPending-1);
+  if(_sessionSwitchLayoutPostProcessPending===0) _scheduleSessionSwitchLayoutQuietCheck(marker.token,marker.sid,marker.loadGeneration);
+}
+function _settleSessionSwitchLayoutStabilization(sid,loadGeneration,streaming){
+  if(!_sessionSwitchLayoutStabilizationSid||String(sid||'')!==_sessionSwitchLayoutStabilizationSid||loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
+  const el=$('messages');
+  if(!el){ _endSessionSwitchLayoutStabilization(); return; }
+  const token=_sessionSwitchLayoutStabilizationToken;
+  _sessionSwitchLayoutSettleRequested=true;
+  // Skip the ResizeObserver arm when switching INTO an actively-streaming
+  // session. The live turn grows continuously there, so the observer would keep
+  // firing and the quiet-check would never reach zero-pending until the stream
+  // pauses — leaving content-visibility forced on every user row for the whole
+  // stream duration and temporarily disabling #5637's off-screen-skip win. The
+  // stream's own scroll handling already owns geometry during streaming, so a
+  // single quiet-check that still waits on any pending async post-processing is
+  // enough; stabilization settles promptly instead of trailing the stream.
+  if(!streaming&&typeof ResizeObserver==='function'){
+    if(_sessionSwitchLayoutStabilizationObserver) _sessionSwitchLayoutStabilizationObserver.disconnect();
+    const observed=document.getElementById('msgInner')||el;
+    _sessionSwitchLayoutStabilizationObserver=new ResizeObserver(()=>{
+      if(token!==_sessionSwitchLayoutStabilizationToken) return;
+      _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration);
+    });
+    _sessionSwitchLayoutStabilizationObserver.observe(observed);
+  }
+  _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration);
+  // Independent absolute-cap watchdog. The quiet-check is event-driven and waits
+  // on _sessionSwitchLayoutPostProcessPending, so a single async processor that
+  // never resolves (a hung fetch / preview that neither renders nor errors)
+  // would keep pending>0 and leave stabilization armed for the whole tab. Arm a
+  // bounded fallback that force-retires this exact token after the cap even if a
+  // waiter never releases. Re-armed on each settle; cleared by _end.
+  clearTimeout(_sessionSwitchLayoutWatchdogTimer);
+  _sessionSwitchLayoutWatchdogTimer=setTimeout(()=>{
+    if(token!==_sessionSwitchLayoutStabilizationToken) return;
+    // Force-retire regardless of pending count; a still-pending waiter here is a
+    // stuck processor, not live geometry. token match guarantees we only clear
+    // the stabilization this settle owns.
+    _endSessionSwitchLayoutStabilization(loadGeneration,token,true);
+  },15000);
+}
+if(typeof window!=='undefined'){
+  window._beginSessionSwitchLayoutStabilization=_beginSessionSwitchLayoutStabilization;
+  window._settleSessionSwitchLayoutStabilization=_settleSessionSwitchLayoutStabilization;
+  window._endSessionSwitchLayoutStabilization=_endSessionSwitchLayoutStabilization;
+}
+
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
 // scrolls up, streaming stops auto-following until they return to the bottom or
 // click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
@@ -12672,6 +12800,12 @@ function _projectLiveAnchorActivitySceneForStream(streamId, mode){
     return null;
   }
 }
+function _nextLiveAnchorScrollRebuildGuard(){
+  return {generation:++_liveAnchorScrollRebuildGeneration,sessionId:String(S.session&&S.session.session_id||'')};
+}
+function _liveAnchorScrollRebuildGuardCurrent(guard){
+  return !!(guard&&guard.generation===_liveAnchorScrollRebuildGeneration&&String(S.session&&S.session.session_id||'')===guard.sessionId);
+}
 function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   const messagesEl=$('messages');
   if(!messagesEl||!scrollSnapshot) return {readerAwayFromBottom:false,release:null};
@@ -12700,9 +12834,26 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   }
   const guardHeight=Math.max(messagesEl.scrollHeight,Number(scrollSnapshot.scrollHeight)||0);
   if(guardHeight>0) msgInner.style.minHeight=`${guardHeight}px`;
+  // Min-height cleanup ownership is tracked SEPARATELY from the render/session
+  // generation. Every rebuild advances the render generation (used to guard the
+  // stale-snapshot restore), but only a rebuild that actually installs a
+  // min-height guard takes cleanup ownership. This lets the release closure
+  // decide correctly in both overlap cases:
+  //   - A newer rebuild that installs its OWN guard bumps the owner, so the
+  //     older release no-ops (the newer one will restore the true original) —
+  //     no torn-down active guard.
+  //   - A newer rebuild that installs NO guard (reader re-pinned / session
+  //     switch) leaves the owner untouched, so THIS release still runs and
+  //     min-height can never be stranded set (the no-successor leak).
+  const guardOwnerToken=++_liveAnchorMinHeightGuardOwner;
+  let released=false;
   return {
     readerAwayFromBottom:true,
     release:()=>{
+      // Only the current cleanup owner may restore. If a newer guard superseded
+      // us, it owns min-height now and will release its own value.
+      if(released||guardOwnerToken!==_liveAnchorMinHeightGuardOwner) return;
+      released=true;
       msgInner.style.minHeight=previousMinHeight;
       if(msgInner.dataset&&msgInner.dataset[guardPreviousKey]===previousMinHeight){
         delete msgInner.dataset[guardPreviousKey];
@@ -12834,6 +12985,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  const scrollRebuildIdentity=(typeof _nextLiveAnchorScrollRebuildGuard==='function')?_nextLiveAnchorScrollRebuildGuard():null;
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
@@ -12861,11 +13013,20 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
+      // release() is self-owning: it restores min-height only if THIS guard is
+      // still the cleanup owner (a newer guard-installing rebuild bumps the
+      // owner and releases its own value; a newer no-guard rebuild leaves us the
+      // owner so we still release). So call it unconditionally here — gating it
+      // on the render generation would strand min-height set when a no-guard
+      // successor advanced the generation without taking cleanup ownership.
       scrollRebuildGuard.release();
-      // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
-      // rAF time. If they re-pinned between guard-engage and this frame, the
-      // stale re-restore would yank them back off the bottom (Opus gate finding).
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      // Releasing the temporary min-height changes layout. Restoring in this
+      // SAME callback reads the pre-release geometry and lands one frame early.
+      // Restore on the following frame after released geometry is measurable.
+      requestAnimationFrame(()=>{
+        if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
+        if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      });
     });
   }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
@@ -12893,6 +13054,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  const scrollRebuildIdentity=(typeof _nextLiveAnchorScrollRebuildGuard==='function')?_nextLiveAnchorScrollRebuildGuard():null;
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
@@ -12975,8 +13137,16 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
+      // release() is self-owning (see renderLiveAnchorActivityScene): it restores
+      // min-height only when THIS guard is still the cleanup owner, so call it
+      // unconditionally. Gating on the render generation would strand min-height
+      // set when a no-guard successor advanced the generation without taking
+      // cleanup ownership.
       scrollRebuildGuard.release();
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      requestAnimationFrame(()=>{
+        if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
+        if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      });
     });
   }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
@@ -18373,12 +18543,14 @@ async function regenerateResponse(btn) {
 // it) in the same suppression so the browser layer cannot re-anchor during the
 // async settle window. Desktop rests at `none`, so this is a no-op there.
 function _postProcessWithAnchorSuppression(container){
+  const sessionSwitchPostProcess=_beginSessionSwitchLayoutPostProcess();
   const scroller=$('messages');
   const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
     ? _suppressBrowserOverflowAnchor(scroller) : null;
   try{
     postProcessRenderedMessages(container);
   }finally{
+    _endSessionSwitchLayoutPostProcess(sessionSwitchPostProcess);
     // Hold suppression across ONE more frame so late media/layout reflow
     // (image decode, katex/mermaid measure) cannot re-anchor either, then let
     // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.
@@ -18420,18 +18592,23 @@ function highlightCode(container) {
   }
 }
 
-// Lazy load js-yaml for YAML tree view support
+// Lazy load js-yaml for YAML tree view support.
+// onSettle (optional) fires exactly once when this call reaches a terminal
+// state — after cb on success, OR on CDN/script failure — so callers holding a
+// resource (e.g. a session-switch stabilization marker) can always release it,
+// even when the loader never invokes cb because the script failed to load.
 let _jsyamlLoading=false;
-function _loadJsyamlThen(cb){
-  if(typeof jsyaml!=='undefined'){ cb(); return; }
-  if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb),100); return; }
+function _loadJsyamlThen(cb,onSettle){
+  const settle=(typeof onSettle==='function')?onSettle:null;
+  if(typeof jsyaml!=='undefined'){ try{ cb(); } finally{ if(settle) settle(); } return; }
+  if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb,onSettle),100); return; }
   _jsyamlLoading=true;
   const s=document.createElement('script');
   s.src='static/vendor/js-yaml/4.1.0/js-yaml.min.js';
   s.integrity='sha384-+pxiN6T7yvpryuJmE1gM9PX7yQit15auDb+ZwwvJOd/4be2Cie5/IuVXgQb/S9du';
   s.crossOrigin='anonymous';
-  s.onload=()=>{ _jsyamlLoading=false; cb(); };
-  s.onerror=()=>{ _jsyamlLoading=false; }; // CDN blocked, fall back to raw
+  s.onload=()=>{ _jsyamlLoading=false; try{ cb(); } finally{ if(settle) settle(); } };
+  s.onerror=()=>{ _jsyamlLoading=false; if(settle) settle(); }; // CDN blocked, fall back to raw
   document.head.appendChild(s);
 }
 
@@ -18478,10 +18655,16 @@ function initTreeViews(container){
         try{ parsed=jsyaml.load(rawText); }catch(e){ parseFailed=true; }
       }else{
         // Defer: remove init marker so we retry after load.
-        // Note: if CDN load fails, s.onerror does NOT call back —
-        // the wrap stays un-initialised (raw view only), which is safe.
         wrap.removeAttribute('data-tree-init');
-        _loadJsyamlThen(initTreeViews);
+        // Hold session-switch stabilization across the async js-yaml fetch +
+        // the deferred re-run that builds the tree view. Release the marker on
+        // settle (success OR CDN failure) so a blocked load can't leave the
+        // pending count above zero and wedge the quiet check permanently.
+        const yamlMarker=_beginSessionSwitchLayoutPostProcess();
+        _loadJsyamlThen(
+          ()=>initTreeViews(container),
+          ()=>{ if(yamlMarker) _endSessionSwitchLayoutPostProcess(yamlMarker); }
+        );
         return;
       }
     }
@@ -18628,7 +18811,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -18647,6 +18831,7 @@ function loadDiffInline(container){
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -18700,7 +18885,8 @@ function loadCsvInline(container){
     const path=el.dataset.path;
     const mediaUrl=_csvMediaUrl(path);
     const downloadUrl=_csvMediaUrl(path,{download:true});
-    fetch(mediaUrl)
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
@@ -18709,6 +18895,7 @@ function loadCsvInline(container){
       .catch(()=>{
         el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error');
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -18718,7 +18905,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -18750,6 +18938,7 @@ function loadExcalidrawInline(container){
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -18849,6 +19038,10 @@ function loadPdfInline(container){
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    // Hold session-switch stabilization until the async PDF fetch + full page
+    // render settle (or time out / error); released once at every exit below.
+    const _pdfMk=_beginSessionSwitchLayoutPostProcess(); let _pdfMkDone=false;
+    const releaseMarker=()=>{ if(_pdfMk&&!_pdfMkDone){ _pdfMkDone=true; _endSessionSwitchLayoutPostProcess(_pdfMk); } };
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
@@ -18856,12 +19049,13 @@ function loadPdfInline(container){
           if(buf.byteLength>PDF_MAX_SIZE){
             const dlUrl=publicMediaUrl+'&download=1';
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            releaseMarker();
             return;
           }
           return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
-          if(!pdf) return;
+          if(!pdf) { releaseMarker(); return; }
           const dlUrl=publicMediaUrl+'&download=1';
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
@@ -18884,7 +19078,7 @@ function loadPdfInline(container){
           // page can't silently halt the preview or surface an unhandled
           // promise rejection (renderPage runs outside the outer .catch chain).
           const renderPage=(i)=>{
-            if(i>n) return;
+            if(i>n) { releaseMarker(); return; }
             pdf.getPage(i).then(page=>{
               const canvas=document.createElement('canvas');
               const scale=1.5;
@@ -18903,32 +19097,43 @@ function loadPdfInline(container){
         .catch(()=>{
           const dlUrl=publicMediaUrl+'&download=1';
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          releaseMarker();
         });
     };
     if(_pdfjsReady){
       loadPdf(window._pdfjsLib);
-    } else if(!_pdfjsLoading){
-      _pdfjsLoading=true;
-      const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
-      const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-      const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
-      const s=document.createElement('script');
-      s.type='module';
-      const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
-      s.src=_pdfBlobUrl;
-      s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
-      document.head.appendChild(s);
-      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
-      setTimeout(()=>{
-        if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1';
-          if(el.parentNode){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
-          }
-        }
-      },15000);
     } else {
-      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
+      // pdfjs is loaded once and shared across every PDF in the render. Kick off
+      // the loader on the first PDF that needs it, but give EVERY waiting PDF —
+      // not just the loader owner — its own pdfjs-ready listener AND its own
+      // bounded timeout that releases THIS el's stabilization marker. Otherwise
+      // a shared loader failure (CDN blocked) fires the owner's timeout only,
+      // stranding every other waiter's marker so stabilization never settles.
+      if(!_pdfjsLoading){
+        _pdfjsLoading=true;
+        const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+        const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+        const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
+        const s=document.createElement('script');
+        s.type='module';
+        const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
+        s.src=_pdfBlobUrl;
+        s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
+        s.onerror=()=>{ _pdfjsLoading=false; };
+        document.head.appendChild(s);
+      }
+      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
+      // Per-el bounded cleanup: if pdfjs is still not ready after the cap, render
+      // this el's fallback (once) and release this el's marker so a stalled or
+      // failed shared loader can't leave stabilization pending indefinitely.
+      setTimeout(()=>{
+        if(_pdfjsReady||_pdfMkDone) return;
+        const dlUrl=publicMediaUrl+'&download=1';
+        if(el.parentNode){
+          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+        }
+        releaseMarker();
+      },15000);
     }
   });
 }
@@ -18944,7 +19149,8 @@ function loadHtmlInline(container){
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
-    fetch(mediaUrl)
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
@@ -18960,6 +19166,7 @@ function loadHtmlInline(container){
         const dlUrl=publicMediaUrl+'&download=1';
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -18989,7 +19196,8 @@ function renderMermaidBlocks(container){
     }
     return;
   }
-  blocks.forEach(async(block)=>{
+  const marker=_beginSessionSwitchLayoutPostProcess();
+  const tasks=Array.from(blocks).map(async(block)=>{
     block.dataset.rendered='true';
     const code=block.textContent;
     const id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
@@ -19011,6 +19219,7 @@ function renderMermaidBlocks(container){
       block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
     }
   });
+  if(marker) Promise.allSettled(tasks).finally(()=>_endSessionSwitchLayoutPostProcess(marker));
 }
 
 let _katexLoading=false;

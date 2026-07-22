@@ -122,6 +122,7 @@ const messages = {{
   clientHeight: 600,
 }};
 const inner = {{ style: {{ minHeight: '' }}, dataset: {{}} }};
+let _liveAnchorMinHeightGuardOwner = 0;
 function $(id) {{
   if (id === 'messages') return messages;
   if (id === 'msgInner') return inner;
@@ -157,8 +158,13 @@ const nestedGuard = _prepareLiveAnchorScrollRebuildGuard(nestedSnapshot);
 assert.strictEqual(nestedGuard.readerAwayFromBottom, true);
 assert.strictEqual(inner.style.minHeight, '5200px');
 assert.strictEqual(inner.dataset.liveAnchorScrollGuardPreviousMinHeight, '');
+// Ownership model: the nested (newer) guard took cleanup ownership, so the
+// older guard's release must NO-OP — it can no longer tear down the newer
+// guard's min-height (the frozen-layout leak class). Height stays pinned at the
+// newer guard's value until the OWNER releases.
 guard.release();
-assert.strictEqual(inner.style.minHeight, '');
+assert.strictEqual(inner.style.minHeight, '5200px');
+// The current owner's release restores the original and clears the dataset.
 nestedGuard.release();
 assert.strictEqual(inner.style.minHeight, '');
 assert.strictEqual(Object.prototype.hasOwnProperty.call(inner.dataset, 'liveAnchorScrollGuardPreviousMinHeight'), false);

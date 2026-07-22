@@ -96,6 +96,8 @@ def test_stale_load_guard_present_before_self_heal():
     # And before the 404 inline clear too.
     assert block.index(guard) < block.index("localStorage.removeItem('hermes-webui-session')"), \
         "stale-load guard must precede the 404 inline self-heal"
-    # It re-arms the active stream rather than leaving it torn down.
-    guard_tail = block[block.index(guard): block.index(guard) + 120]
+    # It re-arms the active stream rather than leaving it torn down. (The guard
+    # body may also release session-switch layout stabilization before re-arming,
+    # so allow a wider tail than the bare re-arm call.)
+    guard_tail = block[block.index(guard): block.index(guard) + 320]
     assert "_rearmActiveSessionStream()" in guard_tail

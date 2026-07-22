@@ -1701,6 +1701,14 @@ async function loadSession(sid){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
     // background completion left on the open, unfocused pane) before returning.
+    // It is ALSO an authoritative same-SID load: if a just-abandoned switch left
+    // stabilization armed (rapid A→B→A where the B load never became current and
+    // its stale return was gated out by a newer generation), force-retire it now
+    // so `session-switch-layout-stabilizing` can't stay permanently armed and
+    // silently disable mobile user-row virtualization for the rest of the tab.
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function'){
+      try { window._endSessionSwitchLayoutStabilization(undefined, undefined, true); } catch (_) {}
+    }
     if(_sessionVisitHasUnreadState(sid)){
       _acknowledgeSessionVisit(
         sid,
@@ -1714,6 +1722,16 @@ async function loadSession(sid){
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  // Retire the session-switch stabilization THIS load armed, generation-gated
+  // and non-forced: it only clears if the live stabilization is still ours, so a
+  // stale continuation can't tear down a newer owner. Called on every post-begin
+  // stale return so an abandoned generation that exits before a successor opens
+  // its own stabilization can't leave `session-switch-layout-stabilizing` armed.
+  const _retireOwnStabilization = () => {
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function'){
+      try { window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, false); } catch (_) {}
+    }
+  };
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -1824,6 +1842,7 @@ async function loadSession(sid){
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
+        if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
         _rearmActiveSessionStream();
         return;
       }
@@ -1836,6 +1855,7 @@ async function loadSession(sid){
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
+          if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
           _rearmActiveSessionStream();
           return;
         }
@@ -1854,6 +1874,7 @@ async function loadSession(sid){
     // load, re-arm the active session's stream and bail before any DOM mutation
     // or self-heal.
     if (!_isCurrentLoad()) {
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
       _rearmActiveSessionStream();
       return;
     }
@@ -1892,6 +1913,7 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
     // Capture whether this failure self-healed away the current session (a
     // 404 on the *current* session whose sidecar was deleted server-side).
     // In that case there is no live session left to stream for, so we must
@@ -1927,6 +1949,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
     if (_isCurrentLoad()) _loadingSessionId = null;
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
@@ -1986,6 +2009,18 @@ async function loadSession(sid){
   // as pinned and snap them back to the bottom on the next render.
   if (currentSid !== sid) {
     _clearDeferredActiveSessionExternalRefresh();
+  }
+  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._beginSessionSwitchLayoutStabilization === 'function') {
+    try { window._beginSessionSwitchLayoutStabilization(sid, _loadGeneration); } catch (_) {}
+  } else if (sameSessionForceReload && typeof window !== 'undefined' && typeof window._endSessionSwitchLayoutStabilization === 'function') {
+    // A same-session force reload does NOT open a new stabilization (the
+    // currentSid===sid gate above skips _begin), but it IS the authoritative
+    // current load. If an older cross-session load left stabilization active
+    // (e.g. its async settle is still pending when the user force-reloads the
+    // same session), nothing else would retire it and the transcript could stay
+    // forced-visible / min-height-pinned. Force-retire + invalidate it now so
+    // the reload starts from a clean layout state.
+    try { window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, true); } catch (_) {}
   }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
@@ -2113,12 +2148,14 @@ async function loadSession(sid){
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch(e) {
       if (!_isCurrentLoad()) {
+        _retireOwnStabilization();
         _rearmActiveSessionStream();
         return;
       }
       S.messages=inflightMessages;
     }
     if (!_isCurrentLoad()) {
+      _retireOwnStabilization();
       _rearmActiveSessionStream();
       return;
     }
@@ -2154,7 +2191,7 @@ async function loadSession(sid){
     let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
-      if (!_isCurrentLoad()) return;
+      if (!_isCurrentLoad()) { _retireOwnStabilization(); return; }
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
@@ -2208,6 +2245,17 @@ async function loadSession(sid){
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    // Settle session-switch stabilization for the INFLIGHT streaming-restore
+    // path. This branch renders + reattaches the live stream and then returns
+    // without falling through to the idle/attach settle below, so without this
+    // the stabilization opened at _begin (currentSid!==sid) would never be
+    // released (begin=1 / settle=0 / end=0) — leaving the transcript
+    // forced-visible / min-height-pinned for the rest of the session. Pass the
+    // streaming flag: the live turn keeps growing, so we must not arm the
+    // ResizeObserver (it would chase the stream and never settle).
+    if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
+      window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);
+    }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -2219,6 +2267,7 @@ async function loadSession(sid){
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch (e) {
       if (!_isCurrentLoad()) {
+        _retireOwnStabilization();
         _rearmActiveSessionStream();
         return;
       }
@@ -2231,11 +2280,12 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) { _retireOwnStabilization(); return; }
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -2290,6 +2340,9 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
+        window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);
+      }
       const restoredAnchorScene=activeStreamId&&typeof window!=='undefined'
         ? ((typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid))||
           _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid))
@@ -2315,6 +2368,9 @@ async function loadSession(sid){
       setComposerStatus('');
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
+        window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);
+      }
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
