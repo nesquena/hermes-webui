@@ -1306,6 +1306,15 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  // Voice Mode and other programmatic producers can call send() even while the
+  // composer controls are disabled. Wait until the New Session owner resolves;
+  // success sends to the fresh session, failure safely remains on the source.
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+    // If another send already owns this transition, a Voice Mode callback is a
+    // duplicate producer for the same still-visible composer. Do not queue it.
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
+    try{await _newSessionInFlight;}catch(_){ }
+  }
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode

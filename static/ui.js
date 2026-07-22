@@ -20352,6 +20352,16 @@ function _showUploadTooLarge(file){
   else if(typeof showToast==='function')showToast(message,5000,'error');
 }
 function addFiles(files){
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+    // OS drag/drop can still reach this helper while the native controls are
+    // disabled. Replay those File objects after the transition settles so they
+    // belong to whichever session actually remains visible (new on success,
+    // source on failure) instead of being cleared at the ownership boundary.
+    const deferredFiles=Array.from(files||[]);
+    const replay=()=>setTimeout(()=>addFiles(deferredFiles),0);
+    Promise.resolve(_newSessionInFlight).then(replay,replay);
+    return;
+  }
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
