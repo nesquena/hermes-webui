@@ -790,10 +790,11 @@ function _selectedTextReplySelection(){
   return {text, rect};
 }
 
-function _formatSelectedTextReplyQuote(text){
+function _formatSelectedTextReplyQuote(text, includeMarker=true){
   const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   if(!normalized)return '';
-  return `<!-- hermes-selected-context -->\n${normalized.split('\n').map(line=>`> ${line}`).join('\n')}`;
+  const quote=normalized.split('\n').map(line=>`> ${line}`).join('\n');
+  return includeMarker?`<!-- hermes-selected-context -->\n${quote}`:quote;
 }
 
 function insertSavedPromptIntoComposer(text){
@@ -809,7 +810,7 @@ function insertSavedPromptIntoComposer(text){
 
 function _seedSelectedTextRefineDraft(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
-  const quote=_formatSelectedTextReplyQuote(text);
+  const quote=_formatSelectedTextReplyQuote(text, false);
   const instruction=_selectedTextReplyT('selected_text_refine_instruction','Refine instruction:');
   if(!composer||!quote||!instruction)return;
   const current=String(composer.value||'');

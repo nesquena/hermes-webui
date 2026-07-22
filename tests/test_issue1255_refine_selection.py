@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_selected_context_user_render_runtime import _run_user_renderer
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = ROOT / "static" / "messages.js"
@@ -436,11 +438,11 @@ def test_refine_seeds_editable_draft_without_send():
     assert out["refineText"] == "Refine"
     assert out["composerValue"] == (
         "Existing draft\n\n"
-        "<!-- hermes-selected-context -->\n"
         "> Quoted context\n"
         "> Second line\n\n"
         "Refine instruction:"
     )
+    assert "hermes-selected-context" not in out["composerValue"]
     assert out["selectionRange"] == [len(out["composerValue"]), len(out["composerValue"])]
     assert out["inputEvents"] == 1
     assert out["focused"] is True
@@ -459,6 +461,18 @@ def test_invalid_selection_keeps_refine_inert():
     assert out["selectionClears"] == 0
     assert out["autoResizeCalls"] == 0
     assert out["sendCalls"] == 0
+
+
+def test_refine_output_stays_marker_free_in_sent_user_rendering():
+    out = _run_js("refine")
+    rendered = _run_user_renderer(out["composerValue"])
+
+    assert "hermes-selected-context" not in out["composerValue"]
+    assert "hermes-selected-context" not in rendered
+    assert 'class="sent-selection-context"' not in rendered
+    assert "&lt;!-- hermes-selected-context --&gt;" not in rendered
+    assert "&gt; Quoted context" in rendered
+    assert "Refine instruction:" in rendered
 
 
 def test_refine_keys_exist_in_all_locale_blocks():
@@ -533,7 +547,6 @@ def test_selected_text_mousedown_preserves_selection_until_click_revalidation_in
     assert selection_after_mousedown == "Alpha Beta"
     assert result == {
         "draft": (
-            "<!-- hermes-selected-context -->\n"
             "> Alpha Beta\n\n"
             "Refine instruction:"
         ),
