@@ -192,6 +192,63 @@ def test_named_custom_provider_config_reasoning_efforts(monkeypatch):
             monkeypatch.setitem(cfg.cfg, "custom_providers", original)
 
 
+def test_named_custom_provider_model_reasoning_efforts_take_precedence(monkeypatch):
+    original = cfg.cfg.get("custom_providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "custom_providers",
+        [
+            {
+                "name": "llm-proxy",
+                "reasoning_efforts": ["high"],
+                "models": {
+                    "Inkling": {
+                        "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
+                    }
+                },
+            }
+        ],
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "inkling",
+            provider_id="custom:llm-proxy",
+        ) == ["none", "low", "medium", "high", "xhigh"]
+        assert cfg.resolve_model_reasoning_efforts(
+            "another-model",
+            provider_id="custom:llm-proxy",
+        ) == ["high"]
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "custom_providers", original)
+
+
+def test_model_reasoning_efforts_fall_back_to_provider_when_invalid(monkeypatch):
+    original = cfg.cfg.get("providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "providers",
+        {
+            "wandb": {
+                "reasoning_efforts": ["none", "high"],
+                "models": {"inkling": {"reasoning_efforts": ["bogus", "typo"]}},
+            }
+        },
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "inkling",
+            provider_id="wandb",
+        ) == ["none", "high"]
+    finally:
+        if original is None:
+            cfg.cfg.pop("providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "providers", original)
+
+
 def test_acp_guards_win_over_configured_reasoning_efforts(monkeypatch):
     original = cfg.cfg.get("providers")
     monkeypatch.setitem(
@@ -216,7 +273,16 @@ def test_nested_route_deny_wins_over_configured_reasoning_efforts(monkeypatch):
     monkeypatch.setitem(
         cfg.cfg,
         "custom_providers",
-        [{"name": "agg", "reasoning_efforts": ["low", "high"]}],
+        [
+            {
+                "name": "agg",
+                "reasoning_efforts": ["low", "high"],
+                "models": {
+                    "vertex/gemini-image-1.0": {"reasoning_efforts": ["high"]},
+                    "vertex/gemini-embedding-001": {"reasoning_efforts": ["high"]},
+                },
+            }
+        ],
     )
     try:
         for model in ("vertex/gemini-image-1.0", "vertex/gemini-embedding-001"):

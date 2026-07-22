@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- **Per-model reasoning-effort metadata is now honored by the WebUI reasoning picker.** When resolving which reasoning modes a model exposes, a `models.<model>.reasoning_efforts` list (as Hermes Agent stores under `custom_providers[].models`) now takes precedence over the provider-wide `reasoning_efforts` list, falling back to the provider list and then heuristics. This lets a model with its own declared modes (e.g. an unrecognized custom model) expose them without a provider-wide override. Configs that only set a provider-level list are completely unaffected — output is byte-identical to before. Thanks @CharlesMcquade. (#6107)
+
 - **Stream teardown no longer leaks per-stream runtime state on long-running servers.** When a stream ended, its `STREAM_SESSION_OWNERS` owner mapping and (for gateway turns) the `AGENT_INSTANCES` entry were retained, so a high-volume, long-lived server slowly accumulated dead per-stream bookkeeping. Teardown now unregisters the stream owner and drops the gateway agent instance. The offline-frame buffer is deliberately **not** cleared on teardown so a late reconnect can still replay buffered `token`/`done`/`stream_end` frames; buffers remain bounded (8,192 frames) and channels are reclaimed once outstanding reconnect references exit. Thanks @webtecnica. (#6389, #6351)
 
 - **Japanese UI is fully translated again.** The Japanese (`ja`) locale had drifted to English fallback across recent features (workspace panel, session sharing, extensions gallery, cron sentence-builder, composer, settings, and update flows); it is now refreshed to parity with the current English keys — 180 strings — so Japanese users no longer see a mixed-language UI. Thanks @koshikai. (#6403)
