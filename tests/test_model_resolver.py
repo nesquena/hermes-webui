@@ -140,6 +140,41 @@ def test_cross_provider_routes_through_openrouter_with_alias_prefix():
     assert base_url is None  # openrouter uses its own endpoint
 
 
+def test_cross_provider_openrouter_qwen_selection_not_stale_routed():
+    """An OpenRouter Qwen selection under a different config provider must
+    still route through openrouter — NOT inherit the stale config provider.
+
+    Regression guard for #6131's fix: ``qwen`` canonicalises to ``qwen``
+    (a _PROVIDER_MODELS key), but its hermes_cli *alias* target is
+    ``alibaba`` (NOT a _PROVIDER_MODELS key). An earlier fix that resolved
+    through _PROVIDER_ALIASES instead of the idempotent
+    _canonicalise_provider_id would have mapped ``qwen`` → ``alibaba``,
+    missed the membership check, and wrongly returned the stale provider.
+    """
+    model, provider, base_url = _resolve_with_config(
+        'qwen/qwen3-max', provider='anthropic',
+    )
+    assert model == 'qwen/qwen3-max'
+    assert provider == 'openrouter'
+    assert base_url is None
+
+
+def test_alias_prefix_matching_active_provider_not_cross_routed():
+    """A namespaced model whose prefix is an *alias of its own active
+    provider* must NOT be cross-routed to openrouter.
+
+    ``z-ai/glm-5.2`` under provider ``zai`` — the prefix ``z-ai`` and the
+    config provider ``zai`` canonicalise to the SAME id (``zai``), so this
+    is a same-provider selection, not a cross-provider one. The fix compares
+    canonical prefix against canonical config provider (not the raw prefix)
+    so the inequality guard correctly suppresses the openrouter cross-route.
+    """
+    model, provider, base_url = _resolve_with_config(
+        'z-ai/glm-5.2', provider='zai',
+    )
+    assert provider != 'openrouter'
+
+
 # ── Bare model names ─────────────────────────────────────────────────────
 
 def test_bare_model_uses_config_provider():
