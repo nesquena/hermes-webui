@@ -243,6 +243,8 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
             os.fsync(f.fileno())
         _verify_symlink_target()
         os.replace(tmp, write_path)
+        if mode is not None:
+            os.chmod(write_path, mode)
         _fsync_directory(write_path.parent)
     except BaseException:
         if owns_fd:
