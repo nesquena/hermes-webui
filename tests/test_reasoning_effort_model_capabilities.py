@@ -518,6 +518,7 @@ def test_datestamped_claude3_not_reasoning_capable_heuristic():
 def test_bare_grok45_is_reasoning_capable_and_capped_at_high():
     # Bare Grok-4.5 ids used to hide the composer chip entirely because the
     # family heuristic only matched names containing "reasoning"/"thinking".
+    # Native ladder for Grok-4.5 is low/medium/high (no minimal/xhigh/max).
     for model in (
         "grok-4.5",
         "x-ai/grok-4.5",
@@ -526,11 +527,15 @@ def test_bare_grok45_is_reasoning_capable_and_capped_at_high():
     ):
         assert cfg._candidate_supports_reasoning(model) is True, model
         efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:cpa")
-        assert "high" in efforts, model
+        assert efforts == ["low", "medium", "high"], model
+        assert "minimal" not in efforts, model
         assert "xhigh" not in efforts, model
         assert "max" not in efforts, model
         assert cfg.coerce_reasoning_effort_for_model(
             "xhigh", model, provider_id="custom:cpa"
+        ) == "high", model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model, provider_id="custom:cpa"
         ) == "high", model
 
 
