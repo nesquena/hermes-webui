@@ -1237,6 +1237,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
+  const ownerProfile=String((filesSnapshot&&filesSnapshot._ownerProfile)||'').trim()||null;
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!restore&&!files.length) return false;
@@ -1246,6 +1247,12 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // send failure would pollute another session's composer. (Codex #5484 catch.)
   const visibleSid=(S.session&&S.session.session_id)||null;
   const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
+  // A failed background send has no visible tray to own its live File objects.
+  // Keep them under the profile+session captured when send() started so switching
+  // back can restore the exact browser objects without touching this session.
+  if(!belongsToVisible&&files.length&&typeof _rememberComposerPendingFiles==='function'){
+    _rememberComposerPendingFiles(sid,files,ownerProfile);
+  }
   let restoredVisible=false;
   if(belongsToVisible){
     const inp=$('msg');
@@ -1283,7 +1290,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          // The explicit owner profile prevents a later profile switch from filing
+          // the live browser objects under whichever profile is visible now.
+          _saveComposerDraftNow(sid, restore, files, ownerProfile);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1344,6 +1353,9 @@ async function send(){
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
   const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  _failedSendFilesSnapshot._ownerProfile=String(
+    (S.session&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){

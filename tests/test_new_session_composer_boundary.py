@@ -74,6 +74,18 @@ def _run_pending_file_ownership_harness() -> dict:
           _restoreComposerDraft(S.session.composer_draft, 'old-session');
           const otherProfile = S.pendingFiles.map(file => file.name);
 
+          S.activeProfile = 'visible-profile';
+          S.session = {{session_id:'visible-session', profile:'visible-profile'}};
+          _rememberComposerPendingFiles('background-session', [oldFile], 'source-profile');
+          S.activeProfile = 'source-profile';
+          S.session = {{
+            session_id:'background-session', profile:'source-profile',
+            composer_draft:{{text:'background draft', files:[]}}
+          }};
+          S.pendingFiles = [];
+          _restoreComposerDraft(S.session.composer_draft, 'background-session');
+          const backgroundRestored = S.pendingFiles.map(file => file.name);
+
           S.activeProfile = 'default';
           S.session = {{session_id:'old-session', profile:'default', composer_draft:{{text:'', files:[]}}}};
           _forgetComposerPendingFiles('old-session');
@@ -82,7 +94,7 @@ def _run_pending_file_ownership_harness() -> dict:
           const afterForget = S.pendingFiles.map(file => file.name);
 
           process.stdout.write(JSON.stringify({{
-            fresh, restored, otherProfile, afterForget, trayRenders
+            fresh, restored, otherProfile, backgroundRestored, afterForget, trayRenders
           }}));
         }})().catch(err => {{console.error(err); process.exit(1);}});
         """
@@ -206,6 +218,7 @@ def test_pending_files_follow_their_session_owner_across_new_session_boundary():
         "files": ["private.pdf"],
     }
     assert result["otherProfile"] == []
+    assert result["backgroundRestored"] == ["private.pdf"]
     assert result["afterForget"] == []
     assert result["trayRenders"] >= 3
 
