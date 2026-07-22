@@ -2976,7 +2976,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # branch (#3872).
         _cp_lower_cross = (config_provider or "").strip().lower()
         _is_custom_cross = _cp_lower_cross == "custom" or _cp_lower_cross.startswith("custom:")
-        if prefix in _PROVIDER_MODELS and prefix != config_provider and not _is_custom_cross:
+        _canon_prefix = _canonicalise_provider_id(prefix)
+        _canon_config_provider = _canonicalise_provider_id(config_provider)
+        if (
+            _canon_prefix in _PROVIDER_MODELS
+            and _canon_prefix != _canon_config_provider
+            and not _is_custom_cross
+        ):
             return model_id, "openrouter", None
 
     return model_id, config_provider, config_base_url
