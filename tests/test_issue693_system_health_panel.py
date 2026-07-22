@@ -43,11 +43,6 @@ class _FakeHandler:
         return json.loads(bytes(self.body).decode("utf-8"))
 
 
-def _snapshot_when_locked(lock, snapshot):
-    assert lock.locked()
-    return snapshot
-
-
 def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
     from api import system_health
 
@@ -67,7 +62,11 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
         "_webui_runtime_payload",
         lambda: {
             "sessions": {"resident_count": 2, "effective_cap": 100},
-            "session_list_cache": {"entries": 1, "entry_cap": 64, "inflight_rebuilds": 0},
+            "session_list_cache": {
+                "entries": 1,
+                "entry_cap": 64,
+                "inflight_rebuilds": 0,
+            },
             "streams": {
                 "active_streams": 0,
                 "total_subscribers": 0,
@@ -75,7 +74,12 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
                 "total_offline_dropped_events": 0,
                 "per_stream_offline_buffer_cap": 8192,
             },
-            "models_cache": {"loaded": False, "provider_groups": 0, "total_models": 0, "age_seconds": None},
+            "models_cache": {
+                "loaded": False,
+                "provider_groups": 0,
+                "total_models": 0,
+                "age_seconds": None,
+            },
         },
     )
 
@@ -84,12 +88,32 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["available"] is True
     assert payload["cpu"] == {"percent": 17.3}
-    assert payload["memory"] == {"used_bytes": 4000, "total_bytes": 10000, "percent": 40.0}
-    assert payload["disk"] == {"used_bytes": 55500, "total_bytes": 100000, "percent": 55.5}
-    assert payload["webui_runtime"]["sessions"] == {"resident_count": 2, "effective_cap": 100}
+    assert payload["memory"] == {
+        "used_bytes": 4000,
+        "total_bytes": 10000,
+        "percent": 40.0,
+    }
+    assert payload["disk"] == {
+        "used_bytes": 55500,
+        "total_bytes": 100000,
+        "percent": 55.5,
+    }
+    assert payload["webui_runtime"]["sessions"] == {
+        "resident_count": 2,
+        "effective_cap": 100,
+    }
     assert payload["checked_at"]
     rendered = repr(payload)
-    for private_fragment in ("/home/", "/Users/", "mount", "path", "argv", "command", "env", "token"):
+    for private_fragment in (
+        "/home/",
+        "/Users/",
+        "mount",
+        "path",
+        "argv",
+        "command",
+        "env",
+        "token",
+    ):
         assert private_fragment not in rendered
 
 
@@ -106,7 +130,11 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
         "_disk_usage",
         lambda: {"used_bytes": 1, "total_bytes": 4, "percent": 25.0},
     )
-    monkeypatch.setattr(system_health, "_webui_runtime_payload", system_health._zero_webui_runtime_payload)
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_payload",
+        system_health._zero_webui_runtime_payload,
+    )
 
     partial = system_health.build_system_health_payload()
     assert partial["status"] == "partial"
@@ -129,7 +157,6 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
 
 def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
     from api import system_health
-    models_cache_lock = threading.Lock()
 
     class _FakeChannel:
         def __init__(self, subscribers, buffered, dropped):
@@ -160,7 +187,7 @@ def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
         lambda: {
             "sessions": {"a": object(), "b": object(), "c": object()},
             "sessions_lock": threading.Lock(),
-            "get_sessions_cache_max": lambda: 123,
+            "sessions_effective_cap": 123,
             "streams": {
                 "one": _FakeChannel(2, 5, 1),
                 "two": _FakeChannel(1, 7, 3),
@@ -171,24 +198,28 @@ def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
             "session_list_cache_inflight": {("default",): object()},
             "session_list_cache_lock": threading.Lock(),
             "session_list_cache_cap": 64,
-            "models_cache_lock": models_cache_lock,
-            "models_cache_snapshot": lambda: _snapshot_when_locked(models_cache_lock, ({
-                "active_provider": "openai",
-                "default_model": "gpt-5.5",
-                "configured_model_badges": {},
-                "groups": [
-                    {
-                        "provider_id": "openai",
-                        "models": [{"id": "gpt-5.5"}, {"id": "gpt-5.5-mini"}],
-                        "extra_models": [{"id": "gpt-5.4"}],
-                    },
-                    {
-                        "provider_id": "anthropic",
-                        "models": [{"id": "claude"}],
-                    },
-                ],
-            }, 90.0)),
-            "is_valid_models_cache": lambda snapshot: isinstance(snapshot, dict) and isinstance(snapshot.get("groups"), list),
+            "models_cache_snapshot": lambda: (
+                {
+                    "active_provider": "openai",
+                    "default_model": "gpt-5.5",
+                    "configured_model_badges": {},
+                    "groups": [
+                        {
+                            "provider_id": "openai",
+                            "models": [{"id": "gpt-5.5"}, {"id": "gpt-5.5-mini"}],
+                            "extra_models": [{"id": "gpt-5.4"}],
+                        },
+                        {
+                            "provider_id": "anthropic",
+                            "models": [{"id": "claude"}],
+                        },
+                    ],
+                },
+                90.0,
+            ),
+            "is_valid_models_cache": lambda snapshot: (
+                isinstance(snapshot, dict) and isinstance(snapshot.get("groups"), list)
+            ),
         },
         raising=False,
     )
@@ -216,7 +247,6 @@ def test_system_health_payload_includes_webui_runtime_counts(monkeypatch):
 
 def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
     from api import system_health
-    models_cache_lock = threading.Lock()
 
     monkeypatch.setattr(
         system_health,
@@ -224,7 +254,7 @@ def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
         lambda: {
             "sessions": {},
             "sessions_lock": threading.Lock(),
-            "get_sessions_cache_max": lambda: 100,
+            "sessions_effective_cap": 100,
             "streams": {},
             "streams_lock": threading.Lock(),
             "stream_buffer_cap": 8192,
@@ -232,8 +262,7 @@ def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
             "session_list_cache_inflight": {},
             "session_list_cache_lock": threading.Lock(),
             "session_list_cache_cap": 64,
-            "models_cache_lock": models_cache_lock,
-            "models_cache_snapshot": lambda: _snapshot_when_locked(models_cache_lock, (None, 0.0)),
+            "models_cache_snapshot": lambda: (None, 0.0),
             "is_valid_models_cache": lambda snapshot: False,
         },
         raising=False,
@@ -260,47 +289,82 @@ def test_system_health_payload_reports_cold_webui_runtime_state(monkeypatch):
     }
 
 
-def test_system_health_runtime_models_cache_invalid_and_untimestamped_states(monkeypatch):
+def test_system_health_runtime_models_cache_invalid_and_untimestamped_states(
+    monkeypatch,
+):
     from api import system_health
-    models_cache_lock = threading.Lock()
 
     base_sources = {
-        "sessions": {}, "sessions_lock": threading.Lock(), "get_sessions_cache_max": lambda: 1,
-        "streams": {}, "streams_lock": threading.Lock(), "stream_buffer_cap": 8,
-        "session_list_cache": {}, "session_list_cache_inflight": {},
-        "session_list_cache_lock": threading.Lock(), "session_list_cache_cap": 2,
-        "models_cache_lock": models_cache_lock,
-        "is_valid_models_cache": lambda value: isinstance(value, dict) and value.get("valid") is True,
+        "sessions": {},
+        "sessions_lock": threading.Lock(),
+        "sessions_effective_cap": 1,
+        "streams": {},
+        "streams_lock": threading.Lock(),
+        "stream_buffer_cap": 8,
+        "session_list_cache": {},
+        "session_list_cache_inflight": {},
+        "session_list_cache_lock": threading.Lock(),
+        "session_list_cache_cap": 2,
+        "is_valid_models_cache": lambda value: (
+            isinstance(value, dict) and value.get("valid") is True
+        ),
     }
 
-    monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: {
-        **base_sources,
-        "models_cache_snapshot": lambda: _snapshot_when_locked(
-            models_cache_lock, ({"groups": [{"models": [{"id": "secret"}]}]}, 10.0)
-        ),
-    })
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        lambda: {
+            **base_sources,
+            "models_cache_snapshot": lambda: (
+                {"groups": [{"models": [{"id": "secret"}]}]},
+                10.0,
+            ),
+        },
+    )
     invalid = system_health._webui_runtime_payload()["models_cache"]
-    assert invalid == {"loaded": False, "provider_groups": 0, "total_models": 0, "age_seconds": None}
+    assert invalid == {
+        "loaded": False,
+        "provider_groups": 0,
+        "total_models": 0,
+        "age_seconds": None,
+    }
 
-    monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: {
-        **base_sources,
-        "models_cache_snapshot": lambda: _snapshot_when_locked(
-            models_cache_lock, ({"valid": True, "groups": []}, 0.0)
-        ),
-    })
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        lambda: {
+            **base_sources,
+            "models_cache_snapshot": lambda: ({"valid": True, "groups": []}, 0.0),
+        },
+    )
     untimestamped = system_health._webui_runtime_payload()["models_cache"]
-    assert untimestamped == {"loaded": True, "provider_groups": 0, "total_models": 0, "age_seconds": None}
+    assert untimestamped == {
+        "loaded": True,
+        "provider_groups": 0,
+        "total_models": 0,
+        "age_seconds": None,
+    }
 
 
 def test_system_health_runtime_source_failure_is_reported(monkeypatch):
     from api import system_health
 
     monkeypatch.setattr(system_health, "_cpu_percent", lambda: 10.0)
-    monkeypatch.setattr(system_health, "_memory_usage", lambda: {"used_bytes": 1, "total_bytes": 2, "percent": 50.0})
-    monkeypatch.setattr(system_health, "_disk_usage", lambda: {"used_bytes": 1, "total_bytes": 2, "percent": 50.0})
-    monkeypatch.setattr(system_health, "_webui_runtime_sources", lambda: (_ for _ in ()).throw(
-        RuntimeError("private /home/user/secret-token")
-    ))
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 1, "total_bytes": 2, "percent": 50.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 1, "total_bytes": 2, "percent": 50.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        lambda: (_ for _ in ()).throw(RuntimeError("private /home/user/secret-token")),
+    )
 
     payload = system_health.build_system_health_payload()
 
@@ -361,7 +425,9 @@ def test_system_health_missing_optional_psutil_is_safe_unavailable(monkeypatch):
         except RuntimeError as exc:
             assert str(exc) == "psutil_unavailable"
         else:  # pragma: no cover - defensive regression clarity
-            raise AssertionError("missing optional psutil should surface a safe unavailable error")
+            raise AssertionError(
+                "missing optional psutil should surface a safe unavailable error"
+            )
 
 
 def test_system_health_procfs_parse_errors_remain_visible(monkeypatch):
@@ -391,10 +457,14 @@ def test_system_health_procfs_parse_errors_remain_visible(monkeypatch):
     except RuntimeError as exc:
         assert str(exc) == "meminfo_unavailable"
     else:  # pragma: no cover - defensive regression clarity
-        raise AssertionError("meminfo invariant RuntimeError should not fall back to psutil")
+        raise AssertionError(
+            "meminfo invariant RuntimeError should not fall back to psutil"
+        )
 
 
-def test_system_health_cpu_second_procfs_read_fallback_does_not_sleep_twice(monkeypatch):
+def test_system_health_cpu_second_procfs_read_fallback_does_not_sleep_twice(
+    monkeypatch,
+):
     from api import system_health
 
     calls = []
@@ -414,10 +484,17 @@ def test_system_health_cpu_second_procfs_read_fallback_does_not_sleep_twice(monk
 
     monkeypatch.setattr(system_health, "_read_proc_stat_cpu", fake_read_proc_stat_cpu)
     monkeypatch.setattr(system_health.time, "sleep", fake_sleep)
-    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(cpu_percent=fake_cpu_percent))
+    monkeypatch.setitem(
+        sys.modules, "psutil", SimpleNamespace(cpu_percent=fake_cpu_percent)
+    )
 
     assert system_health._cpu_percent() == 12.3
-    assert calls == ["proc", ("sleep", system_health._CPU_SAMPLE_SECONDS), "proc", ("psutil", 0.0)]
+    assert calls == [
+        "proc",
+        ("sleep", system_health._CPU_SAMPLE_SECONDS),
+        "proc",
+        ("psutil", 0.0),
+    ]
 
 
 def test_system_health_route_registered_and_auth_gated(monkeypatch):
@@ -438,7 +515,10 @@ def test_system_health_route_registered_and_auth_gated(monkeypatch):
 
     handler = _FakeHandler()
     try:
-        assert check_auth(handler, SimpleNamespace(path="/api/system/health", query="")) is False
+        assert (
+            check_auth(handler, SimpleNamespace(path="/api/system/health", query=""))
+            is False
+        )
         assert handler.status in (302, 401)
     finally:
         monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
@@ -460,7 +540,11 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
             "disk": {"used_bytes": 3, "total_bytes": 4, "percent": 75.0},
             "webui_runtime": {
                 "sessions": {"resident_count": 1, "effective_cap": 100},
-                "session_list_cache": {"entries": 0, "entry_cap": 64, "inflight_rebuilds": 0},
+                "session_list_cache": {
+                    "entries": 0,
+                    "entry_cap": 64,
+                    "inflight_rebuilds": 0,
+                },
                 "streams": {
                     "active_streams": 0,
                     "total_subscribers": 0,
@@ -479,29 +563,46 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
         },
     )
     handler = _FakeHandler()
-    assert routes.handle_get(handler, urlparse("http://example.test/api/system/health")) is True
+    assert (
+        routes.handle_get(handler, urlparse("http://example.test/api/system/health"))
+        is True
+    )
     payload = handler.json_body()
     assert payload["cpu"]["percent"] == 12.0
-    assert set(payload) == {"status", "available", "checked_at", "cpu", "memory", "disk", "webui_runtime", "errors"}
+    assert set(payload) == {
+        "status",
+        "available",
+        "checked_at",
+        "cpu",
+        "memory",
+        "disk",
+        "webui_runtime",
+        "errors",
+    }
 
 
 def test_system_health_panel_markup_and_styles_live_under_insights_not_top_chrome():
     top_shell = INDEX_HTML[: INDEX_HTML.index('<div class="layout">')]
     assert 'id="systemHealthPanel"' not in top_shell
     assert 'aria-label="Host resource health"' not in top_shell
-    assert 'function _renderSystemHealthPanel()' in PANELS_JS
+    assert "function _renderSystemHealthPanel()" in PANELS_JS
     assert 'id="systemHealthPanel"' in PANELS_JS
     assert 'aria-label="Host resource health"' in PANELS_JS
-    assert 'System health' in PANELS_JS
-    assert 'Current VPS resource usage' in PANELS_JS
-    assert PANELS_JS.index('_renderSystemHealthPanel()') < PANELS_JS.index('_renderLlmWikiStatus(wikiStatus)')
+    assert "System health" in PANELS_JS
+    assert "Current VPS resource usage" in PANELS_JS
+    assert PANELS_JS.index("_renderSystemHealthPanel()") < PANELS_JS.index(
+        "_renderLlmWikiStatus(wikiStatus)"
+    )
     assert 'data-system-health-metric="cpu"' in PANELS_JS
     assert 'data-system-health-metric="memory"' in PANELS_JS
     assert 'data-system-health-metric="disk"' in PANELS_JS
     assert ".system-health-panel.insights-card" in STYLE_CSS
     assert ".system-health-bar-fill" in STYLE_CSS
     assert ".system-health-panel.unavailable" in STYLE_CSS
-    assert "@media(max-width:640px)" in STYLE_CSS and ".system-health-panel.insights-card" in STYLE_CSS
+    assert (
+        "@media(max-width:640px)" in STYLE_CSS
+        and ".system-health-panel.insights-card" in STYLE_CSS
+    )
 
 
 def test_system_health_frontend_polls_visible_and_renders_progress_labels():
@@ -509,7 +610,10 @@ def test_system_health_frontend_polls_visible_and_renders_progress_labels():
     assert "api('/api/system/health',{timeoutToast:false})" in UI_JS
     assert "document.visibilityState !== 'visible'" in UI_JS
     assert "document.querySelector('main.main.showing-insights')" in UI_JS
-    assert "document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)" in UI_JS
+    assert (
+        "document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)"
+        in UI_JS
+    )
     assert "typeof _syncSystemHealthMonitorVisibility === 'function'" in PANELS_JS
     assert "function renderSystemHealth(payload)" in UI_JS
     assert "setSystemHealthUnavailable" in UI_JS
@@ -527,3 +631,158 @@ def test_system_health_backend_uses_no_shell_or_private_process_sources():
     assert "/proc/self/environ" not in src
     for private_field in ("argv", "cmdline", "username", "mountpoint"):
         assert private_field not in src
+
+
+def test_system_health_uses_request_profile_config_without_mutating_global_config(
+    monkeypatch, tmp_path
+):
+    from api import config
+    from api import profiles
+    from api import system_health
+
+    default_path = tmp_path / "default-config.yaml"
+    work_path = tmp_path / "work-config.yaml"
+    default_config = {
+        "webui": {"session_save_mode": "eager", "sessions_cache_max": 101}
+    }
+    work_config = {
+        "webui": {"session_save_mode": "deferred", "sessions_cache_max": 202}
+    }
+    default_path.write_text("default", encoding="utf-8")
+    work_path.write_text("work", encoding="utf-8")
+    global_cache = dict(default_config)
+
+    monkeypatch.setattr(config, "_cfg_cache", global_cache)
+    monkeypatch.setattr(config, "cfg", global_cache)
+    monkeypatch.setattr(config, "_cfg_path", default_path)
+    monkeypatch.setattr(
+        config,
+        "_get_config_path",
+        lambda: work_path,
+    )
+    monkeypatch.setattr(
+        config,
+        "_load_yaml_config_file",
+        lambda path: dict(work_config if path == work_path else default_config),
+    )
+    monkeypatch.setattr(
+        config,
+        "_load_yaml_config_file_raw",
+        lambda path, **kwargs: dict(
+            work_config if path == work_path else default_config
+        ),
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        system_health._webui_runtime_sources,
+    )
+
+    profiles.set_request_profile("work")
+    try:
+        runtime = system_health._webui_runtime_payload()
+    finally:
+        profiles.clear_request_profile()
+
+    assert runtime["sessions"]["effective_cap"] == 202
+    assert config._cfg_path == default_path
+    assert config._cfg_cache == global_cache == default_config
+    assert config.cfg == default_config
+
+    from api import routes
+    from api.models import new_session
+
+    monkeypatch.setattr(config, "_get_config_path", lambda: default_path)
+    session = new_session(workspace=str(tmp_path))
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="default eager checkpoint",
+        attachments=[],
+        workspace=str(tmp_path),
+        model=session.model,
+        model_provider=session.model_provider,
+        stream_id="stream_default_eager",
+        started_at=123.0,
+    )
+    saved = json.loads(session.path.read_text(encoding="utf-8"))
+    assert [message["role"] for message in saved["messages"]] == ["user"]
+
+
+def test_system_health_route_does_not_wait_for_busy_models_cache_lock(monkeypatch):
+    from api import config
+    from api import routes
+
+    lock = config._available_models_cache_lock
+    handler = _FakeHandler()
+    result = {}
+    finished = threading.Event()
+
+    def serve():
+        result["handled"] = routes.handle_get(
+            handler, urlparse("http://example.test/api/system/health")
+        )
+        finished.set()
+
+    assert lock.acquire(blocking=False)
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        assert finished.wait(0.5), (
+            "health route waited for the models-cache rebuild lock"
+        )
+    finally:
+        lock.release()
+    thread.join(timeout=2)
+
+    assert result["handled"] is True
+    payload = handler.json_body()
+    assert payload["status"] == "ok"
+    assert payload["available"] is True
+    assert payload["errors"] == []
+    assert payload["webui_runtime"]["models_cache"] == {
+        "loaded": False,
+        "provider_groups": 0,
+        "total_models": 0,
+        "age_seconds": None,
+    }
+
+
+def test_system_health_models_cache_snapshot_releases_successful_lock(monkeypatch):
+    from api import config
+    from api import system_health
+
+    class _SpyLock:
+        def __init__(self):
+            self.acquire_calls = []
+            self.release_calls = 0
+            self.held = False
+
+        def acquire(self, *, blocking=True):
+            self.acquire_calls.append(blocking)
+            self.held = True
+            return True
+
+        def release(self):
+            self.release_calls += 1
+            self.held = False
+
+    lock = _SpyLock()
+    cached_models = {"groups": [{"models": [{"id": "gpt-5.5"}]}]}
+    config_path = system_health.Path("health-test-config.yaml")
+    monkeypatch.setattr(config, "_available_models_cache_lock", lock)
+    monkeypatch.setattr(config, "_available_models_cache", cached_models)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 42.0)
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        config,
+        "_load_yaml_config_file",
+        lambda path: {"webui": {"sessions_cache_max": 202}},
+    )
+
+    sources = system_health._webui_runtime_sources()
+    snapshot = sources["models_cache_snapshot"]()
+
+    assert snapshot == (cached_models, 42.0)
+    assert lock.acquire_calls == [False]
+    assert lock.release_calls == 1
+    assert lock.held is False
