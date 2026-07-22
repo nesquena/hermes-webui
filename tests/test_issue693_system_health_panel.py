@@ -645,40 +645,46 @@ def test_system_health_uses_request_profile_config_without_mutating_global_confi
     from api.models import new_session
 
     default_path = tmp_path / "default-config.yaml"
-    work_path = tmp_path / "work-config.yaml"
+    work_home = tmp_path / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    work_path = work_home / "config.yaml"
     default_config = {
         "webui": {"session_save_mode": "eager", "sessions_cache_max": 101}
     }
-    work_config = {
-        "webui": {"session_save_mode": "deferred", "sessions_cache_max": 202}
-    }
+    work_path.write_text(
+        "webui:\n  session_save_mode: deferred\n  sessions_cache_max: ${PROFILE_CAP}\n",
+        encoding="utf-8",
+    )
+    (work_home / ".env").write_text("PROFILE_CAP=202\n", encoding="utf-8")
     default_path.write_text("default", encoding="utf-8")
-    work_path.write_text("work", encoding="utf-8")
     expected_default_config = copy.deepcopy(default_config)
     global_cache = copy.deepcopy(default_config)
 
     monkeypatch.setattr(config, "_cfg_cache", global_cache)
     monkeypatch.setattr(config, "cfg", global_cache)
     monkeypatch.setattr(config, "_cfg_path", default_path)
+    monkeypatch.setattr(config, "_yaml_file_cache", {})
+    monkeypatch.setenv("PROFILE_CAP", "731")
     monkeypatch.setattr(
         config,
         "_get_config_path",
         lambda: work_path,
     )
-    monkeypatch.setattr(
-        config,
-        "_load_yaml_config_file",
-        lambda path: copy.deepcopy(
-            work_config if path == work_path else default_config
-        ),
+    config._yaml_file_cache[str(work_path)] = (
+        ("cached", 1, 1),
+        {
+            "webui": {
+                "session_save_mode": "deferred",
+                "sessions_cache_max": "${PROFILE_CAP}",
+            }
+        },
     )
     monkeypatch.setattr(
-        config,
-        "_load_yaml_config_file_raw",
-        lambda path, **kwargs: copy.deepcopy(
-            work_config if path == work_path else default_config
-        ),
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: work_home if name == "work" else tmp_path,
     )
+    profiles.get_profile_runtime_env(work_home)
     monkeypatch.setattr(
         system_health,
         "_webui_runtime_sources",
@@ -725,14 +731,201 @@ def test_system_health_uses_request_profile_config_without_mutating_global_confi
                 models.SESSIONS.pop(session.session_id, None)
 
 
+def test_system_health_missing_profile_env_falls_back_to_documented_cap(
+    monkeypatch, tmp_path
+):
+    from api import config
+    from api import profiles
+    from api import system_health
+
+    work_home = tmp_path / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    work_path = work_home / "config.yaml"
+    work_path.write_text(
+        "webui:\n  sessions_cache_max: ${PROFILE_CAP}\n",
+        encoding="utf-8",
+    )
+    (work_home / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PROFILE_CAP", "731")
+    monkeypatch.setattr(config, "_yaml_file_cache", {})
+    config._yaml_file_cache[str(work_path)] = (
+        ("cached", 1, 1),
+        {"webui": {"sessions_cache_max": "${PROFILE_CAP}"}},
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: work_path)
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: work_home if name == "work" else tmp_path,
+    )
+    profiles.get_profile_runtime_env(work_home)
+    monkeypatch.setattr(
+        system_health,
+        "_webui_runtime_sources",
+        system_health._webui_runtime_sources,
+    )
+
+    profiles.set_request_profile("work")
+    try:
+        runtime = system_health._webui_runtime_payload()
+    finally:
+        profiles.clear_request_profile()
+
+    assert runtime["sessions"]["effective_cap"] == config.DEFAULT_SESSIONS_CACHE_MAX
+
+
+def test_system_health_route_does_not_wait_for_busy_config_cache(monkeypatch):
+    from api import config
+    from api import profiles
+    from api import routes
+    from api import system_health
+
+    work_home = pathlib.Path(config._get_config_path()).parent
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: work_home if name == "work" else work_home.parent,
+    )
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 10.0)
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 100, "total_bytes": 200, "percent": 50.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 30, "total_bytes": 60, "percent": 50.0},
+    )
+    lock = config._yaml_file_cache_lock
+    handler = _FakeHandler()
+    result = {}
+    finished = threading.Event()
+
+    def serve():
+        profiles.set_request_profile("work")
+        try:
+            result["handled"] = routes.handle_get(
+                handler, urlparse("http://example.test/api/system/health")
+            )
+            finished.set()
+        finally:
+            profiles.clear_request_profile()
+
+    try:
+        assert lock.acquire(blocking=False)
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            assert finished.wait(0.5), "health route waited for the config cache lock"
+        finally:
+            lock.release()
+        thread.join(timeout=2)
+    finally:
+        profiles.clear_request_profile()
+
+    assert result["handled"] is True
+    payload = handler.json_body()
+    assert payload["status"] == "ok"
+    assert payload["available"] is True
+    assert payload["errors"] == []
+    assert payload["webui_runtime"]["sessions"] == system_health._zero_webui_runtime_payload()[
+        "sessions"
+    ]
+
+
+def test_system_health_route_does_not_wait_for_production_session_lock_holder(
+    monkeypatch,
+):
+    from api import models
+    from api import routes
+    from api import system_health
+
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 10.0)
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 100, "total_bytes": 200, "percent": 50.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 30, "total_bytes": 60, "percent": 50.0},
+    )
+
+    class _BlockingIndexPath:
+        def __init__(self):
+            self.read_started = threading.Event()
+            self.release_read = threading.Event()
+
+        def exists(self):
+            return True
+
+        def with_suffix(self, _suffix):
+            return self
+
+        def read_bytes(self):
+            self.read_started.set()
+            assert self.release_read.wait(1.0)
+            return b"[]"
+
+    fake_index = _BlockingIndexPath()
+    handler = _FakeHandler()
+    result = {}
+    finished = threading.Event()
+
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", fake_index)
+
+    worker = threading.Thread(target=models.prune_session_from_index, args=("missing",))
+    worker.start()
+    assert fake_index.read_started.wait(0.5), "session-index read never started"
+
+    def serve():
+        result["handled"] = routes.handle_get(
+            handler, urlparse("http://example.test/api/system/health")
+        )
+        finished.set()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        assert finished.wait(0.5), "health route waited for the session index prune"
+    finally:
+        fake_index.release_read.set()
+    thread.join(timeout=2)
+    worker.join(timeout=2)
+
+    assert result["handled"] is True
+    payload = handler.json_body()
+    assert payload["status"] == "ok"
+    assert payload["available"] is True
+    assert payload["errors"] == []
+    assert payload["webui_runtime"]["sessions"] == system_health._zero_webui_runtime_payload()[
+        "sessions"
+    ]
+
+
 def test_system_health_route_does_not_wait_for_busy_models_cache_lock(monkeypatch):
     from api import config
     from api import routes
+    from api import system_health
 
     lock = config._available_models_cache_lock
     handler = _FakeHandler()
     result = {}
     finished = threading.Event()
+
+    monkeypatch.setattr(system_health, "_cpu_percent", lambda: 10.0)
+    monkeypatch.setattr(
+        system_health,
+        "_memory_usage",
+        lambda: {"used_bytes": 100, "total_bytes": 200, "percent": 50.0},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "_disk_usage",
+        lambda: {"used_bytes": 30, "total_bytes": 60, "percent": 50.0},
+    )
 
     def serve():
         result["handled"] = routes.handle_get(
@@ -761,6 +954,48 @@ def test_system_health_route_does_not_wait_for_busy_models_cache_lock(monkeypatc
         "provider_groups": 0,
         "total_models": 0,
         "age_seconds": None,
+    }
+
+
+def test_system_health_payload_returns_default_stream_slice_when_channel_lock_is_busy(
+    monkeypatch,
+):
+    from api import config
+    from api import system_health
+
+    channel = config.StreamChannel()
+    assert channel._lock.acquire(blocking=False)
+    try:
+        monkeypatch.setattr(
+            system_health,
+            "_webui_runtime_sources",
+            lambda: {
+                "sessions": {},
+                "sessions_lock": threading.Lock(),
+                "sessions_effective_cap": (100, True),
+                "streams": {"one": channel},
+                "streams_lock": threading.Lock(),
+                "stream_buffer_cap": 8192,
+                "session_list_cache": {},
+                "session_list_cache_inflight": {},
+                "session_list_cache_lock": threading.Lock(),
+                "session_list_cache_cap": 64,
+                "models_cache_snapshot": lambda: (None, 0.0),
+                "is_valid_models_cache": lambda snapshot: False,
+            },
+            raising=False,
+        )
+
+        payload = system_health._webui_runtime_payload()
+    finally:
+        channel._lock.release()
+
+    assert payload["streams"] == {
+        "active_streams": 0,
+        "total_subscribers": 0,
+        "total_offline_buffered_events": 0,
+        "total_offline_dropped_events": 0,
+        "per_stream_offline_buffer_cap": 8192,
     }
 
 

@@ -21,6 +21,7 @@ _PROC_STAT = Path("/proc/stat")
 _PROC_MEMINFO = Path("/proc/meminfo")
 _CPU_SAMPLE_SECONDS = 0.05
 _MODELS_CACHE_BUSY = object()
+_STREAM_CHANNEL_BUSY = object()
 
 
 def _load_optional_psutil():
@@ -161,8 +162,19 @@ def _safe_error(metric: str, exc: Exception) -> dict[str, str]:
 
 
 def _zero_webui_runtime_payload() -> dict[str, Any]:
+    default_sessions_cap = 0
+    try:
+        from api import config as _config
+
+        value = int(getattr(_config, "DEFAULT_SESSIONS_CACHE_MAX", 0))
+        default_sessions_cap = max(0, value)
+    except Exception:
+        default_sessions_cap = 0
     return {
-        "sessions": {"resident_count": 0, "effective_cap": 0},
+        "sessions": {
+            "resident_count": 0,
+            "effective_cap": default_sessions_cap,
+        },
         "session_list_cache": {"entries": 0, "entry_cap": 0, "inflight_rebuilds": 0},
         "streams": {
             "active_streams": 0,
@@ -180,12 +192,130 @@ def _zero_webui_runtime_payload() -> dict[str, Any]:
     }
 
 
+def _default_sessions_cache_cap(_config) -> int:
+    try:
+        return max(0, int(getattr(_config, "DEFAULT_SESSIONS_CACHE_MAX", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _try_acquire(lock: Any) -> bool:
+    if lock is None or not hasattr(lock, "acquire"):
+        return False
+    try:
+        return bool(lock.acquire(blocking=False))
+    except TypeError:
+        return bool(lock.acquire(False))
+
+
+def _release_lock(lock: Any) -> None:
+    if lock is None or not hasattr(lock, "release"):
+        return
+    lock.release()
+
+
+def _cached_profile_sessions_cache_cap(_config) -> tuple[int, bool]:
+    default_cap = _default_sessions_cache_cap(_config)
+
+    def _resolve_from_cache() -> tuple[int, bool]:
+        cache_lock = getattr(_config, "_yaml_file_cache_lock", None)
+        if not _try_acquire(cache_lock):
+            return default_cap, False
+        try:
+            config_path = _config._get_config_path()
+            cache = getattr(_config, "_yaml_file_cache", {})
+            cached = cache.get(str(config_path)) if isinstance(cache, dict) else None
+        finally:
+            _release_lock(cache_lock)
+
+        if not cached or len(cached) < 2:
+            return default_cap, False
+
+        raw_config = cached[1]
+        if not isinstance(raw_config, dict):
+            return default_cap, True
+
+        webui_cfg = raw_config.get("webui", {}) if isinstance(raw_config, dict) else {}
+        raw_cap = webui_cfg.get("sessions_cache_max") if isinstance(webui_cfg, dict) else None
+        if raw_cap is None:
+            return default_cap, True
+
+        try:
+            cap = int(raw_cap)
+        except (TypeError, ValueError):
+            cap = None
+        if cap is not None and cap >= 1:
+            return cap, True
+
+        expanded = _expand_sessions_cap_with_request_env(_config, raw_cap, default_cap)
+        webui_cfg = expanded.get("webui", {}) if isinstance(expanded, dict) else {}
+        raw_cap = (
+            webui_cfg.get("sessions_cache_max") if isinstance(webui_cfg, dict) else None
+        )
+        try:
+            cap = int(raw_cap)
+        except (TypeError, ValueError):
+            cap = None
+        if cap is not None and cap >= 1:
+            return cap, True
+        return default_cap, True
+
+    return _resolve_from_cache()
+
+
+def _expand_sessions_cap_with_request_env(
+    _config,
+    raw_cap: Any,
+    default_cap: int,
+) -> dict[str, Any]:
+    if not isinstance(raw_cap, str):
+        return {"webui": {"sessions_cache_max": default_cap}}
+
+    try:
+        from api import profiles as _profiles
+
+        profile_name = (_profiles.get_active_profile_name() or "").strip()
+        is_named_profile = bool(profile_name and profile_name != "default")
+        profile_home = (
+            Path(_profiles.get_hermes_home_for_profile(profile_name))
+            if is_named_profile
+            else None
+        )
+        cached_profile_env = (
+            _profiles.filter_runtime_env_for_gateway_parity(
+                _profiles.get_cached_profile_runtime_env(profile_home)
+            )
+            if is_named_profile and profile_home is not None
+            else {}
+        )
+    except Exception:
+        return {"webui": {"sessions_cache_max": default_cap}}
+
+    previous_thread_env = getattr(_config._thread_ctx, "env", {}).copy()
+    previous_block = bool(
+        getattr(_config._thread_ctx, "block_process_env_fallback", False)
+    )
+    try:
+        if is_named_profile:
+            thread_env = dict(cached_profile_env)
+            if profile_home is not None:
+                thread_env["HERMES_HOME"] = str(profile_home)
+            _config._set_thread_env(**thread_env)
+            _config._thread_ctx.block_process_env_fallback = True
+        expanded = _config._expand_env_vars({"webui": {"sessions_cache_max": raw_cap}})
+    finally:
+        _config._thread_ctx.block_process_env_fallback = previous_block
+        if previous_thread_env:
+            _config._set_thread_env(**previous_thread_env)
+        else:
+            _config._clear_thread_env()
+
+    return expanded if isinstance(expanded, dict) else {"webui": {}}
+
+
 def _webui_runtime_sources() -> dict[str, Any]:
     from api import config as _config
     from api import route_session_list_cache as _route_session_list_cache
-
-    config_path = _config._get_config_path()
-    profile_config = _config._load_yaml_config_file(config_path)
 
     def models_cache_snapshot():
         if not _config._available_models_cache_lock.acquire(blocking=False):
@@ -198,7 +328,7 @@ def _webui_runtime_sources() -> dict[str, Any]:
     return {
         "sessions": _config.SESSIONS,
         "sessions_lock": _config.LOCK,
-        "sessions_effective_cap": _config.get_sessions_cache_max(profile_config),
+        "sessions_effective_cap": _cached_profile_sessions_cache_cap(_config),
         "streams": _config.STREAMS,
         "streams_lock": _config.STREAMS_LOCK,
         "stream_buffer_cap": _config.StreamChannel._OFFLINE_BUFFER_MAXLEN,
@@ -251,55 +381,105 @@ def _models_cache_stats(snapshot: Any, cache_ts: Any, validator) -> dict[str, An
     return stats
 
 
+def _stream_channel_snapshot(channel: Any) -> dict[str, Any] | object:
+    if channel is None:
+        return _STREAM_CHANNEL_BUSY
+
+    channel_lock = getattr(channel, "_lock", None)
+    if channel_lock is not None:
+        if not _try_acquire(channel_lock):
+            return _STREAM_CHANNEL_BUSY
+        try:
+            return {
+                "subscriber_count": len(getattr(channel, "_subscribers", [])),
+                "offline_buffered_events": len(getattr(channel, "_offline_buffer", [])),
+                "offline_dropped_events": _safe_int(
+                    getattr(channel, "_offline_dropped_total", 0)
+                ),
+            }
+        finally:
+            _release_lock(channel_lock)
+
+    snapshot_fn = getattr(channel, "diagnostic_snapshot", None)
+    if not callable(snapshot_fn):
+        return _STREAM_CHANNEL_BUSY
+    return snapshot_fn()
+
+
 def _webui_runtime_payload() -> dict[str, Any]:
     payload = _zero_webui_runtime_payload()
     sources = _webui_runtime_sources()
 
     sessions = sources.get("sessions")
     sessions_lock = sources.get("sessions_lock")
-    with sessions_lock:
-        payload["sessions"]["resident_count"] = len(sessions)
-    payload["sessions"]["effective_cap"] = _safe_int(
-        sources.get("sessions_effective_cap")
-    )
+    sessions_cap = sources.get("sessions_effective_cap")
+    sessions_cap_value = sessions_cap
+    sessions_cap_observed = True
+    if isinstance(sessions_cap, tuple) and len(sessions_cap) >= 2:
+        sessions_cap_value, sessions_cap_observed = sessions_cap[:2]
+    if sessions_cap_observed and _try_acquire(sessions_lock):
+        try:
+            payload["sessions"]["resident_count"] = len(sessions)
+            payload["sessions"]["effective_cap"] = _safe_int(
+                sessions_cap_value,
+                default=payload["sessions"]["effective_cap"],
+            )
+        finally:
+            _release_lock(sessions_lock)
 
     session_list_cache = sources.get("session_list_cache")
     session_list_cache_lock = sources.get("session_list_cache_lock")
     session_list_cache_inflight = sources.get("session_list_cache_inflight")
-    with session_list_cache_lock:
-        payload["session_list_cache"]["entries"] = len(session_list_cache)
-        payload["session_list_cache"]["inflight_rebuilds"] = len(
-            session_list_cache_inflight
-        )
-        payload["session_list_cache"]["entry_cap"] = _safe_int(
-            sources.get("session_list_cache_cap")
-        )
+    payload["session_list_cache"]["entry_cap"] = _safe_int(
+        sources.get("session_list_cache_cap")
+    )
+    if _try_acquire(session_list_cache_lock):
+        try:
+            payload["session_list_cache"]["entries"] = len(session_list_cache)
+            payload["session_list_cache"]["inflight_rebuilds"] = len(
+                session_list_cache_inflight
+            )
+        finally:
+            _release_lock(session_list_cache_lock)
 
     streams = sources.get("streams")
     streams_lock = sources.get("streams_lock")
     stream_buffer_cap = _safe_int(sources.get("stream_buffer_cap"))
     payload["streams"]["per_stream_offline_buffer_cap"] = stream_buffer_cap
-    total_subscribers = 0
-    total_offline_buffered_events = 0
-    total_offline_dropped_events = 0
     stream_items: list[Any] = []
-    with streams_lock:
-        stream_items = list(streams.values())
-    payload["streams"]["active_streams"] = len(stream_items)
-    for channel in stream_items:
-        snapshot = channel.diagnostic_snapshot()
-        if not isinstance(snapshot, dict):
-            continue
-        total_subscribers += _safe_int(snapshot.get("subscriber_count"))
-        total_offline_buffered_events += _safe_int(
-            snapshot.get("offline_buffered_events")
-        )
-        total_offline_dropped_events += _safe_int(
-            snapshot.get("offline_dropped_events")
-        )
-    payload["streams"]["total_subscribers"] = total_subscribers
-    payload["streams"]["total_offline_buffered_events"] = total_offline_buffered_events
-    payload["streams"]["total_offline_dropped_events"] = total_offline_dropped_events
+    if _try_acquire(streams_lock):
+        try:
+            stream_items = list(streams.values())
+        finally:
+            _release_lock(streams_lock)
+    if stream_items:
+        total_subscribers = 0
+        total_offline_buffered_events = 0
+        total_offline_dropped_events = 0
+        stream_snapshots: list[dict[str, Any]] = []
+        for channel in stream_items:
+            snapshot = _stream_channel_snapshot(channel)
+            if snapshot is _STREAM_CHANNEL_BUSY or not isinstance(snapshot, dict):
+                stream_snapshots = []
+                break
+            stream_snapshots.append(snapshot)
+        if stream_snapshots:
+            payload["streams"]["active_streams"] = len(stream_items)
+            for snapshot in stream_snapshots:
+                total_subscribers += _safe_int(snapshot.get("subscriber_count"))
+                total_offline_buffered_events += _safe_int(
+                    snapshot.get("offline_buffered_events")
+                )
+                total_offline_dropped_events += _safe_int(
+                    snapshot.get("offline_dropped_events")
+                )
+            payload["streams"]["total_subscribers"] = total_subscribers
+            payload["streams"]["total_offline_buffered_events"] = (
+                total_offline_buffered_events
+            )
+            payload["streams"]["total_offline_dropped_events"] = (
+                total_offline_dropped_events
+            )
 
     snapshot_result = sources["models_cache_snapshot"]()
     if snapshot_result is not _MODELS_CACHE_BUSY:

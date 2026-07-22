@@ -49,6 +49,8 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+_profile_runtime_env_cache_lock = threading.Lock()
+_profile_runtime_env_cache: dict[str, dict[str, str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -863,6 +865,20 @@ def _stringify_env_value(value) -> str:
     return str(value)
 
 
+def _profile_runtime_env_cache_key(home: Path) -> str:
+    try:
+        return str(Path(home).expanduser().resolve())
+    except Exception:
+        return str(Path(home).expanduser())
+
+
+def get_cached_profile_runtime_env(home: Path) -> dict[str, str]:
+    key = _profile_runtime_env_cache_key(home)
+    with _profile_runtime_env_cache_lock:
+        cached = _profile_runtime_env_cache.get(key)
+    return dict(cached) if isinstance(cached, dict) else {}
+
+
 def get_profile_runtime_env(home: Path) -> dict[str, str]:
     """Return env vars needed to run an agent turn for a profile home.
 
@@ -912,6 +928,8 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
 
+    with _profile_runtime_env_cache_lock:
+        _profile_runtime_env_cache[_profile_runtime_env_cache_key(home)] = dict(env)
     return env
 
 
