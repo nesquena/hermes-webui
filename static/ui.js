@@ -12309,6 +12309,7 @@ function _anchorSceneToolCallFromRow(row, opts){
     )||'',
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
+    is_diff:!!(tool.is_diff||payload.is_diff||payload.isDiff),
     duration:tool.duration||payload.duration||payload.duration_seconds,
     started_at:firstValidTimestampSeconds(tool.started_at, payload.started_at, rowTs),
     created_at:firstValidTimestampSeconds(tool.created_at, payload.created_at, rowTs),
@@ -14706,6 +14707,226 @@ function _toolArgsSnapshot(args, limit){
   return out;
 }
 
+function _idLinkedHistoricalMessageText(message){
+  if(!message||typeof message!=='object') return '';
+  const content=message.content;
+  if(typeof content==='string') return content;
+  if(!Array.isArray(content)) return '';
+  return content.filter(part=>part&&typeof part==='object'&&part.type==='text').map(part=>{
+    if(!part||typeof part!=='object') return '';
+    return String(part.text||part.content||'');
+  }).join('\n');
+}
+
+function _idLinkedHistoricalMessageHasVisibleText(message){
+  return _idLinkedHistoricalMessageText(message).trim()!=='';
+}
+
+function _idLinkedHistoricalMessageRef(message, rawIdx){
+  if(message&&typeof message==='object'){
+    for(const key of ['message_id','id','local_id']){
+      const value=message[key];
+      if(typeof value==='string'&&value.trim()) return value.trim();
+      if(typeof value==='number'&&Number.isFinite(value)) return String(value);
+    }
+  }
+  return `raw_idx:${rawIdx}`;
+}
+
+function _idLinkedHistoricalToolArguments(toolCall){
+  if(!toolCall||typeof toolCall!=='object') return null;
+  const fn=toolCall.function;
+  if(!fn||typeof fn!=='object'||Array.isArray(fn)) return null;
+  const raw=fn.arguments;
+  if(raw===undefined||raw===null||raw==='') return null;
+  if(raw&&typeof raw==='object'&&!Array.isArray(raw)) return raw;
+  if(typeof raw!=='string') return null;
+  try{
+    const parsed=JSON.parse(raw);
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:null;
+  }catch(e){
+    return null;
+  }
+}
+
+function _idLinkedHistoricalToolResultRaw(message){
+  if(!message||typeof message!=='object') return null;
+  const content=message.content;
+  return typeof content==='string'?content:null;
+}
+
+function _idLinkedHistoricalRedactSnippet(value){
+  let text=String(value||'');
+  if(!text) return '';
+  if(typeof _redactToolTargetLabel==='function'){
+    try{text=_redactToolTargetLabel(text);}
+    catch(e){}
+  }
+  return text;
+}
+
+function _idLinkedHistoricalHasVisibleSidecar(message){
+  if(!message||typeof message!=='object') return false;
+  const visibleKeys=['attachments','_attachments','_statusCard','status_card','statusCard','card','cards','artifact','artifacts','files','images','media'];
+  for(const key of visibleKeys){
+    if(!Object.prototype.hasOwnProperty.call(message,key)) continue;
+    const value=message[key];
+    if(value===undefined||value===null||value===false) continue;
+    if(Array.isArray(value)&&value.length===0) continue;
+    if(typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===0) continue;
+    return true;
+  }
+  return false;
+}
+
+// Claim legacy settled ownership only when the transcript itself proves a
+// complete, user-bounded declaration/result/final-answer chain.
+function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
+  const list=Array.isArray(messages)?messages:[];
+  const start=Math.max(0,Number(turnStart)||0);
+  const end=Math.min(list.length,Math.max(start,Number(turnEnd)||0));
+  const opts=options&&typeof options==='object'?options:{};
+  const sessionId=String(opts.sessionId||opts.session_id||'').trim();
+  const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
+  if(!sessionId||!api||typeof api.projectAssistantTurnAnchorHistoricalTranscriptScene!=='function') return null;
+
+  const declarations=[];
+  const declarationIds=new Set();
+  const declarationRefs=[];
+  const visibleAssistantIndexes=[];
+  const assistantIndexes=[];
+  const resultsById=new Map();
+  for(let rawIdx=start;rawIdx<end;rawIdx++){
+    const message=list[rawIdx];
+    if(!message||typeof message!=='object') continue;
+    const role=message.role;
+    if(role==='user'&&rawIdx===start) continue;
+    if(message._anchor_activity_scene) return null;
+    if(role==='assistant'){
+      assistantIndexes.push(rawIdx);
+      const hasVisibleText=_idLinkedHistoricalMessageHasVisibleText(message);
+      const reasoningText=_assistantReasoningPayloadText(message);
+      if(hasVisibleText) visibleAssistantIndexes.push(rawIdx);
+      if(reasoningText) return null;
+      if(_idLinkedHistoricalHasVisibleSidecar(message)) return null;
+      if(Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length) return null;
+      if(Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use')) return null;
+      const toolCalls=Array.isArray(message.tool_calls)?message.tool_calls:[];
+      if(toolCalls.length&&hasVisibleText) return null;
+      if(!toolCalls.length){
+        if(hasVisibleText) continue;
+        return null;
+      }
+      if(message.content!==undefined&&message.content!==null&&message.content!=='') return null;
+      const messageRef=_idLinkedHistoricalMessageRef(message,rawIdx);
+      if(!declarationRefs.includes(messageRef)) declarationRefs.push(messageRef);
+      for(const toolCall of toolCalls){
+        const callId=String(toolCall&&toolCall.id||'').trim();
+        const fn=toolCall&&toolCall.function;
+        const name=String(fn&&fn.name||'').trim();
+        const args=_idLinkedHistoricalToolArguments(toolCall);
+        if(!callId||!name||args===null||declarationIds.has(callId)) return null;
+        declarationIds.add(callId);
+        declarations.push({callId,name,args,rawIdx,messageRef});
+      }
+      continue;
+    }
+    if(role!=='tool') return null;
+    const callId=String(message.tool_call_id||'').trim();
+    if(!callId||!declarationIds.has(callId)) return null;
+    const matches=resultsById.get(callId)||[];
+    matches.push({message,rawIdx});
+    resultsById.set(callId,matches);
+  }
+
+  if(!declarations.length||visibleAssistantIndexes.length!==1) return null;
+  const ownerIndex=visibleAssistantIndexes[0];
+  if(ownerIndex!==assistantIndexes[assistantIndexes.length-1]) return null;
+  const owner=list[ownerIndex];
+  if(Array.isArray(owner.tool_calls)&&owner.tool_calls.length) return null;
+  const ownerRef=_idLinkedHistoricalMessageRef(owner,ownerIndex);
+  for(const declaration of declarations){
+    const matches=resultsById.get(declaration.callId)||[];
+    if(matches.length!==1||matches[0].rawIdx<=declaration.rawIdx||matches[0].rawIdx>=ownerIndex) return null;
+  }
+  if(resultsById.size!==declarations.length) return null;
+
+  const sourceRefs=declarationRefs.concat(ownerRef).filter((value,index,array)=>array.indexOf(value)===index);
+  const turnId=['historical',sessionId,declarationRefs[0],ownerRef].join(':');
+  const activityEvents=[];
+  for(let index=0;index<declarations.length;index++){
+    const declaration=declarations[index];
+    const resultEntry=resultsById.get(declaration.callId)[0];
+    const args=_toolArgsSnapshot(declaration.args);
+    const resultRaw=_idLinkedHistoricalToolResultRaw(resultEntry.message);
+    if(resultRaw===null) return null;
+    const resultSnippet=_idLinkedHistoricalRedactSnippet(_cliToolResultSnippet(resultRaw));
+    const patchSnippet=_cliPatchSnippetFromArgs(declaration.name,args);
+    const isDiff=_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet);
+    const snippet=_idLinkedHistoricalRedactSnippet(_cliToolCardSnippet(resultSnippet,patchSnippet));
+    const status=String(resultEntry.message.status||'').trim().toLowerCase();
+    const isError=resultEntry.message.is_error===true||status==='error'||status==='failed'||status==='failure';
+    activityEvents.push({
+      source_type:'tool_complete',
+      seq:index+1,
+      local_id:`historical:${declaration.messageRef}:tool:${declaration.callId}`,
+      payload:{
+        id:declaration.callId,
+        tid:declaration.callId,
+        tool_call_id:declaration.callId,
+        name:declaration.name,
+        args,
+        command:String(args.command||args.cmd||''),
+        snippet,
+        done:true,
+        is_error:isError,
+        is_diff:isDiff,
+        assistant_msg_idx:declaration.rawIdx,
+      },
+    });
+  }
+  let scene;
+  try{
+    scene=api.projectAssistantTurnAnchorHistoricalTranscriptScene({
+      session_id:sessionId,
+      turn_id:turnId,
+      local_id:ownerRef,
+      source_message_refs:sourceRefs,
+      activity_events:activityEvents,
+      settled_message:{role:'assistant',id:ownerRef,content:_idLinkedHistoricalMessageText(owner)},
+    },{mode:opts.mode||'compact_worklog'});
+  }catch(e){
+    return null;
+  }
+  if(!scene||scene.version!=='activity_scene_v1'||scene.activity_rows.length!==declarations.length) return null;
+  return {ownerIndex,scene};
+}
+
+function _hydrateIdLinkedHistoricalToolScenes(messages, options){
+  const list=Array.isArray(messages)?messages:[];
+  let turnStart=-1;
+  let hydrated=0;
+  const hydrateTurn=(turnEnd)=>{
+    if(turnStart<0||turnEnd<=turnStart+1) return;
+    let hydratedTurn;
+    try{hydratedTurn=_idLinkedHistoricalTurnScene(list,turnStart,turnEnd,options);}
+    catch(e){return;}
+    if(!hydratedTurn) return;
+    const owner=list[hydratedTurn.ownerIndex];
+    try{owner._anchor_activity_scene=hydratedTurn.scene;}
+    catch(e){return;}
+    if(owner._anchor_activity_scene===hydratedTurn.scene) hydrated+=1;
+  };
+  for(let rawIdx=0;rawIdx<list.length;rawIdx++){
+    const message=list[rawIdx];
+    if(!message||message.role!=='user') continue;
+    hydrateTurn(rawIdx);
+    turnStart=rawIdx;
+  }
+  hydrateTurn(list.length);
+  return hydrated;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -15349,6 +15570,10 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
+    const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
+    _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
+  }
   const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
