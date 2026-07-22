@@ -1845,6 +1845,7 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
+  if(typeof _invalidatePendingLiveAttachClaims==='function') _invalidatePendingLiveAttachClaims();
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
@@ -2176,6 +2177,23 @@ async function loadSession(sid){
   // _mergePendingSessionMessage is the global identity-aware helper shared by
   // loadSession and refreshSession; see its definition below.
 
+  const attachOwnedSessionStream=(requireReattach=false)=>{
+    const inflight=INFLIGHT[sid];
+    if(!activeStreamId||typeof attachLiveStream!=='function') return false;
+    if(requireReattach&&(!inflight||!inflight.reattach)) return false;
+    if(!_isActiveSessionSceneRestoreOwner(sid, activeStreamId, _loadGeneration)) return false;
+    return attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {
+      reconnecting:true,
+      ownerToken:`load-session:${sid}:${_loadGeneration}`,
+      loadGeneration:_loadGeneration,
+      isCurrentOwner:()=>_isActiveSessionSceneRestoreOwner(sid, activeStreamId, _loadGeneration),
+      onAttached:()=>{
+        const latest=INFLIGHT[sid];
+        if(latest&&String(latest.streamId||'')===String(activeStreamId)) latest.reattach=false;
+      },
+    });
+  };
+
   // Phase 2a: If session is streaming, restore the persisted transcript first,
   // then merge the local INFLIGHT live tail. INFLIGHT is a recovery tail, not a
   // complete transcript; treating it as the full source makes long sessions look
@@ -2346,32 +2364,41 @@ async function loadSession(sid){
       const currentInflight=INFLIGHT[sid];
       if(!currentInflight||!currentInflight.reattach||!activeStreamId||typeof attachLiveStream!=='function') return false;
       if(!_isActiveSessionSceneRestoreOwner(sid, activeStreamId, _loadGeneration)) return false;
-      currentInflight.reattach=false;
-      _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
-      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-      return true;
+      if(String(currentInflight.streamId||'')===String(activeStreamId)){
+        _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
+      }
+      return attachOwnedSessionStream(true);
     };
 
-    syncTopbar();
-    renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-    _deferWorkspaceRefreshForSession(sid);
-    setBusy(true);
-    setComposerStatus('');
-    startApprovalPolling(sid);
-    if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-    _deferActiveSessionSceneRestore(sid, activeStreamId, _loadGeneration, ()=>{
-      const restoreResult=restoreLiveSurfaceForActiveInflight();
-      const didReconnect=attachLiveSceneForActiveSession();
-      if(didReconnect&&restoreResult&&restoreResult.restoredLiveTurn&&!restoreResult.restoredAnchorScene){
-        replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
-      }
-    }).catch(()=>{});
-  }else{
+    try{
+      syncTopbar();
+      renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      _deferWorkspaceRefreshForSession(sid);
+      setBusy(true);
+      setComposerStatus('');
+      startApprovalPolling(sid);
+      if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    }finally{
+      _deferActiveSessionSceneRestoreAndAttach(
+        sid,
+        activeStreamId,
+        _loadGeneration,
+        restoreLiveSurfaceForActiveInflight,
+        attachLiveSceneForActiveSession,
+      ).then((result)=>{
+        const restoreResult = result && typeof result === 'object' ? result.restoreResult : undefined;
+        const didReconnect = result && typeof result === 'object' ? result.attached : false;
+        if(didReconnect&&restoreResult&&restoreResult.restoredLiveTurn&&!restoreResult.restoredAnchorScene){
+          replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+        }
+      }).catch(()=>{});
+    }
+  } else {
     // Phase 2b: Idle session — load full messages lazily for rendering.
-    // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
-    // #5177: when the caller asked us to keep stale messages until the new ones
-    // arrive (visibility/focus recovery), force the fetch so the
+    // _ensureMessagesLoaded is idempotent; it skips if S.messages already
+    // populated. #5177: when the caller asked us to keep stale messages until
+    // the new ones arrive (visibility/focus recovery), force the fetch so the
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
@@ -2465,11 +2492,12 @@ async function loadSession(sid){
 
       const attachLiveSceneForIdleSession=()=>{
         if(!_isActiveSessionSceneRestoreOwner(sid, activeStreamId, _loadGeneration)) return false;
-        // #7640: normalize the current recovery object immediately before reattach.
-        if(INFLIGHT[sid]) _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
+        const currentInflight=INFLIGHT[sid];
+        if(currentInflight&&String(currentInflight.streamId||'')===String(activeStreamId)){
+          _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
+        }
         if(typeof attachLiveStream==='function'){
-          attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-          return true;
+          return attachOwnedSessionStream();
         }
         if(typeof watchInflightSession==='function'){
           watchInflightSession(sid, activeStreamId);
@@ -2477,19 +2505,26 @@ async function loadSession(sid){
         }
         return false;
       };
-      updateSendBtn();
-      setStatus('');
-      setComposerStatus('');
-      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-      _deferWorkspaceRefreshForSession(sid);
-      updateQueueBadge(sid);
-      startApprovalPolling(sid);
-      if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-      _deferActiveSessionSceneRestore(sid, activeStreamId, _loadGeneration, ()=>{
-        restoreLiveSurfaceForIdleInflight();
-        attachLiveSceneForIdleSession();
-      }).catch(()=>{});
+
+      try{
+        updateSendBtn();
+        setStatus('');
+        setComposerStatus('');
+        syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+        _deferWorkspaceRefreshForSession(sid);
+        updateQueueBadge(sid);
+        startApprovalPolling(sid);
+        if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+        if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+      }finally{
+        _deferActiveSessionSceneRestoreAndAttach(
+          sid,
+          activeStreamId,
+          _loadGeneration,
+          restoreLiveSurfaceForIdleInflight,
+          attachLiveSceneForIdleSession,
+        ).catch(()=>{});
+      }
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -3242,6 +3277,24 @@ function _deferActiveSessionSceneRestore(sid, activeStreamId, loadGeneration, re
       return;
     }
     scheduleFallback();
+  });
+}
+
+function _deferActiveSessionSceneRestoreAndAttach(sid, activeStreamId, loadGeneration, restoreFn, attachFn){
+  if(!sid||!activeStreamId||typeof restoreFn!=='function'||typeof attachFn!=='function'){
+    return Promise.resolve({restoreResult:undefined,attached:false});
+  }
+  return _deferActiveSessionSceneRestore(sid,activeStreamId,loadGeneration,()=>{
+    let restoreResult;
+    let attached=false;
+    try{
+      restoreResult=restoreFn();
+    }catch(_){
+      restoreResult=undefined;
+    }finally{
+      try{attached=!!attachFn();}catch(_){attached=false;}
+    }
+    return {restoreResult,attached};
   });
 }
 

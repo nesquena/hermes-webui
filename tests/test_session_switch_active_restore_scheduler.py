@@ -316,7 +316,7 @@ def test_active_load_session_branches_defer_after_transcript_render_while_preser
     idx = body.rfind("if(INFLIGHT[sid]){")
     assert idx != -1, "INFLIGHT branch not found"
     inflight_block = body[idx : idx + 9000]
-    defer_pos = inflight_block.find("_deferActiveSessionSceneRestore(")
+    defer_pos = inflight_block.find("_deferActiveSessionSceneRestoreAndAttach(")
     assert defer_pos != -1, "active in-memory INFLIGHT branch must defer restore/attach"
     sync_topbar_pos = inflight_block.find("syncTopbar();")
     render_messages_pos = inflight_block.find("renderMessages(")
@@ -344,8 +344,8 @@ def test_active_load_session_branches_defer_after_transcript_render_while_preser
 
     idle_idx = body.find("if(activeStreamId){")
     assert idle_idx != -1, "discovered active-stream branch not found"
-    idle_block = body[idle_idx : idle_idx + 2400]
-    idle_defer = idle_block.find("_deferActiveSessionSceneRestore(")
+    idle_block = body[idle_idx : idle_idx + 4200]
+    idle_defer = idle_block.find("_deferActiveSessionSceneRestoreAndAttach(")
     assert idle_defer != -1, "active discovered branch must defer restore/attach"
     idle_sync_topbar_pos = idle_block.find("syncTopbar();")
     idle_render_messages_pos = idle_block.find("renderMessages(")
@@ -375,14 +375,7 @@ def test_active_load_session_branches_defer_after_transcript_render_while_preser
     assert idle_defer_workspace_pos != -1, "active discovered branch should defer workspace refresh before deferring restore"
     assert idle_defer_workspace_pos < idle_defer
 
-    active_inflight_re = re.search(
-        r"_deferActiveSessionSceneRestore\([^\n]*=>\s*\{[\s\S]*?restoreLiveSurfaceForActiveInflight\(\)[\s\S]*?attachLiveSceneForActiveSession\(\)",
-        inflight_block,
-    )
-    assert active_inflight_re is not None, "inflight deferred callback must restore scene before attach"
-
-    active_discovered_re = re.search(
-        r"_deferActiveSessionSceneRestore\([^\n]*=>\s*\{[\s\S]*?restoreLiveSurfaceForIdleInflight\(\)[\s\S]*?attachLiveSceneForIdleSession\(\)",
-        idle_block,
-    )
-    assert active_discovered_re is not None, "discovered active-branch callback must restore scene before attach"
+    assert inflight_block.find("restoreLiveSurfaceForActiveInflight,", defer_pos) > defer_pos
+    assert inflight_block.find("attachLiveSceneForActiveSession,", defer_pos) > defer_pos
+    assert idle_block.find("restoreLiveSurfaceForIdleInflight,", idle_defer) > idle_defer
+    assert idle_block.find("attachLiveSceneForIdleSession,", idle_defer) > idle_defer
