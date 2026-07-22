@@ -15606,6 +15606,128 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
+function _hydrateHistoricalToolTranscriptAnchorScenes(){
+  // #6220: hydrate ID-linked historical tool transcripts into Anchors.
+  // Scan S.messages for eligible assistant turns where every tool_calls[]
+  // entry carries an explicit id linked to a matching role:tool result
+  // message within the same turn boundary, then build one deterministic
+  // activity_scene_v1 and attach it as _anchor_activity_scene. The
+  // existing _renderSettledAnchorSceneForMessage path renders the scene;
+  // the legacy fallback in renderMessages skips anchor-owned turns.
+  const messages=S.messages;
+  if(!Array.isArray(messages)||!messages.length) return;
+
+  // Index role:tool results by tool_call_id.
+  const resultsByTid={};
+  const resultMsgIdxByTid={};
+  for(let i=0;i<messages.length;i++){
+    const m=messages[i];
+    if(!m||m.role!=='tool') continue;
+    const tid=m.tool_call_id||m.tool_use_id||'';
+    if(!tid) continue;
+    // Only record the FIRST result per tid to guard against duplicates.
+    if(!Object.prototype.hasOwnProperty.call(resultMsgIdxByTid,tid)){
+      resultMsgIdxByTid[tid]=i;
+      resultsByTid[tid]=typeof _cliToolResultSnippet==='function'?_cliToolResultSnippet(m.content):String(m.content||'').slice(0,4000);
+    }
+  }
+
+  for(let i=0;i<messages.length;i++){
+    const m=messages[i];
+    if(!m||m.role!=='assistant'||m._anchor_activity_scene) continue;
+    const toolCalls=Array.isArray(m.tool_calls)?m.tool_calls:[];
+    if(!toolCalls.length) continue;
+
+    // Find the turn boundary: the position of the NEXT user message after i.
+    let turnEnd=messages.length;
+    for(let j=i+1;j<messages.length;j++){
+      if(messages[j]&&messages[j].role==='user'){turnEnd=j;break;}
+    }
+
+    // Validate every tool_call has an id and matching result within the turn.
+    let allLinked=true;
+    const seenIds=new Set();
+    for(const tc of toolCalls){
+      if(!tc||typeof tc!=='object'){allLinked=false;break;}
+      const tid=tc.id||tc.call_id||'';
+      if(!tid){allLinked=false;break;}
+      // Detect duplicate ids within the same message.
+      if(seenIds.has(tid)){allLinked=false;break;}
+      seenIds.add(tid);
+      // Must have a result message with matching id.
+      if(!Object.prototype.hasOwnProperty.call(resultMsgIdxByTid,tid)){allLinked=false;break;}
+      // Result must not cross a user-message turn boundary.
+      const resultIdx=resultMsgIdxByTid[tid];
+      if(resultIdx<=i||resultIdx>=turnEnd){allLinked=false;break;}
+    }
+    if(!allLinked) continue;
+
+    // Find the turn-final (last) assistant message with visible content
+    // to use as scene owner — the Anchor pattern attaches to the answer.
+    let ownerIdx=i;
+    let finalAnswer='';
+    for(let j=i;j<turnEnd;j++){
+      const am=messages[j];
+      if(!am||am.role!=='assistant') continue;
+      ownerIdx=j;
+      const visContent=typeof msgContent==='function'?msgContent(am):String(am.content||'');
+      if(visContent&&visContent.trim()) finalAnswer=visContent;
+    }
+
+    // Build activity rows.
+    const activityRows=[];
+    toolCalls.forEach((tc,idx)=>{
+      const fn=tc.function||{};
+      const name=fn.name||tc.name||'tool';
+      let args={};
+      try{args=JSON.parse(fn.arguments||'{}');}catch(e){}
+      const tid=tc.id||tc.call_id||'';
+      const resultSnippet=resultsByTid[tid]||'';
+      const patchSnippet=typeof _cliPatchSnippetFromArgs==='function'?_cliPatchSnippetFromArgs(name,args):'';
+      const toolSnippet=typeof _cliToolCardSnippet==='function'
+        ?_cliToolCardSnippet(resultSnippet,patchSnippet)
+        :(resultSnippet||patchSnippet||'');
+      const argsSnap=typeof _toolArgsSnapshot==='function'?_toolArgsSnapshot(args):{};
+      activityRows.push({
+        row_id:'tool:'+tid+':'+idx,
+        order_index:idx,
+        kind:'tool_started',
+        role:'tool',
+        display_hint:'tool_row',
+        display_hints:{compact_worklog:'tool_row',transparent_stream:'chronological_activity'},
+        source_event_type:'tool',
+        status:'completed',
+        tool_call_id:tid,
+        tool:{
+          id:tid,
+          name:name,
+          args:argsSnap,
+          done:true,
+          is_error:false,
+          snippet:toolSnippet,
+        },
+        payload:{
+          name:name,
+          args:args,
+          snippet:resultSnippet||patchSnippet,
+        },
+      });
+    });
+
+    if(!activityRows.length||ownerIdx<0||!messages[ownerIdx]) continue;
+    messages[ownerIdx]._anchor_activity_scene=Object.freeze({
+      version:'activity_scene_v1',
+      mode:'compact_worklog',
+      identity:Object.freeze({source_message_refs:Object.freeze([])}),
+      lifecycle:Object.freeze({}),
+      final_answer:finalAnswer,
+      final_message_ref:null,
+      terminal_state:null,
+      activity_rows:Object.freeze(activityRows),
+    });
+  }
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -15626,6 +15748,9 @@ function renderMessages(options){
   // renderMessages() in this window. Keep the existing loading placeholder.
   if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
+  // #6220: hydrate ID-linked historical tool transcripts into Anchors before
+  // the anchorOwnedAssistantRawIdxs gate and the legacy fallback run.
+  if(typeof _hydrateHistoricalToolTranscriptAnchorScenes==='function') _hydrateHistoricalToolTranscriptAnchorScenes();
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
