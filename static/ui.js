@@ -10816,6 +10816,7 @@ function _assistantTurnFinalVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
+    if(m&&m.role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) flush();
     if(m&&m.role==='assistant'){
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
@@ -10838,6 +10839,7 @@ function _assistantTurnVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
+    if(m&&m.role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) flush();
     if(m&&m.role==='assistant'){
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
@@ -15945,6 +15947,7 @@ function renderMessages(options){
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
+    if(role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) lastQuestionRawIdx=-1;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
@@ -15969,6 +15972,7 @@ function renderMessages(options){
     };
     for(const entry of renderVisWithIdx){
       const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) _flush();
       if(role==='assistant'){
         _run.push(entry.rawIdx);
         // Visible prose = content with any leading <think>…</think> /channel-thought
