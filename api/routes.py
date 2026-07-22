@@ -26101,13 +26101,11 @@ def _external_notes_sources_enabled(config_data: dict | None = None) -> bool:
 def _memory_feature_flags(config_data: dict | None = None) -> tuple[bool, bool]:
     config_data = config_data if isinstance(config_data, dict) else get_config_snapshot()
     memory_config = config_data.get("memory") if isinstance(config_data, dict) else None
-    has_memory_block = isinstance(memory_config, dict)
-    if not has_memory_block:
+    if not isinstance(memory_config, dict):
         memory_config = {}
-    missing_default = False if has_memory_block else True
     flags = []
     for key in ("memory_enabled", "user_profile_enabled"):
-        value = memory_config.get(key, missing_default)
+        value = memory_config.get(key, True)
         flags.append(value if isinstance(value, bool) else _webui_truthy(value))
     return tuple(flags)
 
