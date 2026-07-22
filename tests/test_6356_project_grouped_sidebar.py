@@ -663,12 +663,22 @@ if (keepSwipe(true, true, true)) throw new Error('read-only row should not keep 
     assert "_buildSessionSidebarGroups(orderedSessions,!!window._sidebarGroupByProject" in SESSIONS_JS
 
 
+def test_grouped_drag_uses_title_row_and_blocks_embedded_controls():
+    assert "titleRow.classList.add('session-title-row-draggable');" in SESSIONS_JS
+    assert "titleRow.draggable=true;" in SESSIONS_JS
+    assert "dragHandle.draggable=true;" not in SESSIONS_JS
+    assert "titleRow.addEventListener('dragstart',(e)=>{" in SESSIONS_JS
+    assert "closest('button,input,label,.session-tag,[contenteditable=\"\"],[contenteditable=\"true\"]')" in SESSIONS_JS
+    assert "_setSessionProjectDragData(e.dataTransfer,s.session_id);" in SESSIONS_JS
+
+
 def test_grouped_drag_affordance_is_hover_revealed_and_unassigned_header_is_styled_target():
     assert re.search(
         r"\.session-item:hover \.session-project-drag-handle,\s*"
         r"\.session-item:focus-within \.session-project-drag-handle\{visibility:visible;opacity:1;pointer-events:auto;\}",
         (ROOT / "static" / "style.css").read_text(encoding="utf-8"),
     )
+    assert ".session-title-row-draggable{cursor:grab;}" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert ".session-project-drag-handle{display:inline-block;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "visibility:hidden;opacity:0;pointer-events:none;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "Object.prototype.hasOwnProperty.call(g,'dropProjectId')?' project-session-header':''" in SESSIONS_JS
