@@ -1826,11 +1826,11 @@
   .session-date-header.pinned{color:var(--accent);}
   .project-session-header{color:var(--text);background:var(--surface-subtle);border-radius:6px;margin:2px 4px 0;padding:7px 8px 5px;}
   .project-session-header.drag-over{background:var(--accent-bg);outline:1px dashed var(--accent);opacity:1;}
-  .session-project-drag-handle{display:none;flex:0 0 auto;color:var(--muted);font-size:12px;line-height:1;letter-spacing:-3px;cursor:grab;user-select:none;}
+  .session-project-drag-handle{display:inline-block;flex:0 0 auto;color:var(--muted);font-size:12px;line-height:1;letter-spacing:-3px;cursor:grab;user-select:none;visibility:hidden;opacity:0;pointer-events:none;transition:opacity .15s;}
   .session-project-drag-handle:active{cursor:grabbing;}
   @media (hover:hover) and (pointer:fine){
     .session-item:hover .session-project-drag-handle,
-    .session-item:focus-within .session-project-drag-handle{display:inline-block;}
+    .session-item:focus-within .session-project-drag-handle{visibility:visible;opacity:1;pointer-events:auto;}
     .session-item.dragging{opacity:.55;}
   }
 
