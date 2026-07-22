@@ -4182,6 +4182,40 @@ def _sanitize_anchor_activity_scene(scene):
     return json.loads(encoded.decode("utf-8"))
 
 
+def _fit_anchor_activity_scene_for_storage(scene: dict) -> dict:
+    scene_copy = copy.deepcopy(scene)
+    if _anchor_activity_scene_encoded_size(scene_copy) <= _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+        return _sanitize_anchor_activity_scene(scene_copy)
+    base_scene = copy.deepcopy(scene_copy)
+    outcome_candidates: list[tuple[str, dict, int]] = []
+    for event_name, key in (
+        ("artifact_reference", "artifacts"),
+        ("state_saved", "side_effects"),
+    ):
+        for outcome in scene_copy.get(key) or []:
+            if not isinstance(outcome, dict):
+                continue
+            outcome_candidates.append(
+                (
+                    event_name,
+                    copy.deepcopy(outcome),
+                    _run_journal_outcome_encoded_size(outcome),
+                )
+            )
+    truncation_marker = scene_copy.get("outcomes_truncated")
+    if not isinstance(truncation_marker, dict):
+        truncation_marker = None
+    base_scene["artifacts"] = []
+    base_scene["side_effects"] = []
+    base_scene.pop("outcomes_truncated", None)
+    fitted = _run_journal_fit_outcomes_to_anchor_scene(
+        base_scene,
+        outcome_candidates,
+        truncation_marker,
+    )
+    return _sanitize_anchor_activity_scene(fitted)
+
+
 def _anchor_scene_int_or_none(value):
     try:
         return int(value)
@@ -5251,7 +5285,18 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if isinstance(message, dict) and message.get("role") == "assistant"
     ]
     repaired["identity"] = identity
-    return repaired
+    try:
+        return _fit_anchor_activity_scene_for_storage(repaired)
+    except ValueError:
+        repaired["activity_rows"] = []
+        repaired["artifacts"] = []
+        repaired["side_effects"] = []
+        repaired["outcomes_truncated"] = _run_journal_outcome_truncation_marker(
+            "scene_bytes",
+            accepted_count=0,
+            accepted_bytes=0,
+        )
+        return _sanitize_anchor_activity_scene(repaired)
 
 
 def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool_calls=None):
@@ -5359,6 +5404,10 @@ def _handle_session_anchor_scene(handler, body):
             duration = _anchor_scene_message_turn_duration(message)
             if duration is not None:
                 scene["turn_duration"] = duration
+        try:
+            scene = _sanitize_anchor_activity_scene(scene)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
         ref = _assistant_anchor_scene_message_ref(message)
         records = dict(_anchor_scene_records(s))
         records[ref or f"index:{idx}"] = {

@@ -572,9 +572,12 @@ const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
 for(const name of [
   '_liveAnchorActivitySceneIdentity',
+  '_liveAnchorStrictActivitySceneIdentity',
   '_liveAnchorRegistryIdentity',
   '_liveAnchorRegistryForActivityScene',
 ]) eval(extractFunc(messagesSrc,name));
+function _anchorOutcomeTruncationMarker(){ return null; }
+function _messageAnchorBoundedActivityScene(scene){ return scene; }
 eval(messagesSrc.slice(attachStart,attachEnd));
 attachLiveStream('sid-1','stream-1');
 const source=FakeEventSource.instances[0];

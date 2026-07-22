@@ -152,6 +152,9 @@
     'constructor',
     'prototype',
   ]);
+  const ACTIVITY_SCENE_MAX_BYTES=256000;
+  const ACTIVITY_SCENE_OUTCOME_MAX_EVENTS=512;
+  const ACTIVITY_SCENE_OUTCOME_MAX_BYTES=128000;
 
   function _isUnsafeObjectKey(key){
     return UNSAFE_OBJECT_KEYS.indexOf(key)!==-1;
@@ -1050,6 +1053,82 @@
     });
   }
 
+  function _activitySceneUtf8ByteLength(text){
+    const raw=String(text||'');
+    try{
+      if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(raw).length;
+    }catch(_){}
+    try{
+      if(typeof Buffer!=='undefined'&&Buffer&&typeof Buffer.byteLength==='function') return Buffer.byteLength(raw,'utf8');
+    }catch(_){}
+    try{
+      return encodeURIComponent(raw).replace(/%[0-9A-F]{2}/gi,'x').length;
+    }catch(_){
+      return raw.length;
+    }
+  }
+
+  function _activitySceneCompactBytes(scene){
+    try{
+      return _activitySceneUtf8ByteLength(JSON.stringify(scene));
+    }catch(_){
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  function _activitySceneOutcomeBytes(events){
+    let total=0;
+    for(const event of (Array.isArray(events)?events:[])){
+      try{ total+=_activitySceneUtf8ByteLength(JSON.stringify(event)); }catch(_){}
+    }
+    return total;
+  }
+
+  function _activitySceneOutcomeMarker(reason, events, priorMarker){
+    const marker=(priorMarker&&typeof priorMarker==='object'&&!Array.isArray(priorMarker))?priorMarker:{};
+    const accepted=Array.isArray(events)?events:[];
+    return Object.freeze({
+      reason:_cleanString(reason)||_cleanString(_own(marker,'reason'))||'scene_bytes',
+      accepted_count:accepted.length,
+      max_count:Number(_own(marker,'max_count')||ACTIVITY_SCENE_OUTCOME_MAX_EVENTS)||ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
+      accepted_bytes:_activitySceneOutcomeBytes(accepted),
+      max_bytes:Number(_own(marker,'max_bytes')||ACTIVITY_SCENE_OUTCOME_MAX_BYTES)||ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
+      max_scene_bytes:Number(_own(marker,'max_scene_bytes')||ACTIVITY_SCENE_MAX_BYTES)||ACTIVITY_SCENE_MAX_BYTES,
+    });
+  }
+
+  function _activitySceneBoundedScene(scene){
+    if(!scene||scene.version!=='activity_scene_v1') return scene;
+    if(_activitySceneCompactBytes(scene)<=ACTIVITY_SCENE_MAX_BYTES) return scene;
+    const marker=_activitySceneOutcomesTruncated(scene.outcomes_truncated);
+    const items=[
+      ...(Array.isArray(scene.artifacts)?scene.artifacts.map(event=>['artifact_reference',event]):[]),
+      ...(Array.isArray(scene.side_effects)?scene.side_effects.map(event=>['state_saved',event]):[]),
+    ];
+    const build=(events, nextMarker)=>({
+      ...scene,
+      artifacts:Object.freeze(events.filter(item=>item[0]==='artifact_reference').map(item=>item[1])),
+      side_effects:Object.freeze(events.filter(item=>item[0]==='state_saved').map(item=>item[1])),
+      outcomes_truncated:nextMarker,
+    });
+    let nextMarker=_activitySceneOutcomeMarker('scene_bytes',items.map(item=>item[1]),marker);
+    let next=build(items,nextMarker);
+    while(items.length&&_activitySceneCompactBytes(next)>ACTIVITY_SCENE_MAX_BYTES){
+      items.pop();
+      nextMarker=_activitySceneOutcomeMarker('scene_bytes',items.map(item=>item[1]),marker);
+      next=build(items,nextMarker);
+    }
+    if(_activitySceneCompactBytes(next)<=ACTIVITY_SCENE_MAX_BYTES) return next;
+    nextMarker=_activitySceneOutcomeMarker('scene_bytes',[],marker);
+    return {
+      ...scene,
+      activity_rows:Object.freeze([]),
+      artifacts:Object.freeze([]),
+      side_effects:Object.freeze([]),
+      outcomes_truncated:nextMarker,
+    };
+  }
+
   function projectAssistantTurnAnchorActivityScene(input, options){
     const anchor=_anchorFromProjectionInput(input);
     const opts=(options&&typeof options==='object')?options:{};
@@ -1087,7 +1166,7 @@
     };
     const outcomesTruncated=_activitySceneOutcomesTruncated(anchor.outcomes_truncated);
     if(outcomesTruncated) scene.outcomes_truncated=outcomesTruncated;
-    return Object.freeze(scene);
+    return Object.freeze(_activitySceneBoundedScene(scene));
   }
 
   function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){

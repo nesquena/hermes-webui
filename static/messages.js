@@ -2067,15 +2067,112 @@ function _anchorOutcomeTruncationMarker(scene){
   };
 }
 
+const _MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
+const _MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS=512;
+const _MESSAGE_ANCHOR_OUTCOME_MAX_BYTES=128000;
+
+function _liveAnchorStrictActivitySceneIdentity(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return null;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||scene.run_id||scene.runId||'').trim();
+  if(!sessionId||!streamId||!runId) return null;
+  return {sessionId,streamId,runId};
+}
+
+function _messageAnchorUtf8ByteLength(text){
+  const raw=String(text||'');
+  try{
+    if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(raw).length;
+  }catch(_){}
+  try{
+    if(typeof Buffer!=='undefined'&&Buffer&&typeof Buffer.byteLength==='function') return Buffer.byteLength(raw,'utf8');
+  }catch(_){}
+  try{
+    return encodeURIComponent(raw).replace(/%[0-9A-F]{2}/gi,'x').length;
+  }catch(_){
+    return raw.length;
+  }
+}
+
+function _messageAnchorCompactSceneBytes(scene){
+  try{
+    return _messageAnchorUtf8ByteLength(JSON.stringify(scene));
+  }catch(_){
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function _messageAnchorOutcomeBytes(events){
+  let total=0;
+  for(const event of (Array.isArray(events)?events:[])){
+    try{ total+=_messageAnchorUtf8ByteLength(JSON.stringify(event)); }catch(_){}
+  }
+  return total;
+}
+
+function _messageAnchorOutcomeTruncationMarker(reason, events, priorMarker){
+  const marker=(priorMarker&&typeof priorMarker==='object'&&!Array.isArray(priorMarker))?priorMarker:{};
+  const accepted=Array.isArray(events)?events:[];
+  return {
+    reason:String(reason||marker.reason||'scene_bytes').trim()||'scene_bytes',
+    accepted_count:accepted.length,
+    max_count:Number(marker.max_count||_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS)||_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:_messageAnchorOutcomeBytes(accepted),
+    max_bytes:Number(marker.max_bytes||_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES)||_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:Number(marker.max_scene_bytes||_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES)||_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
+
+function _messageAnchorSceneOutcomeItems(scene){
+  const items=[];
+  for(const event of (Array.isArray(scene&&scene.artifacts)?scene.artifacts:[])) items.push(['artifact_reference',event]);
+  for(const event of (Array.isArray(scene&&scene.side_effects)?scene.side_effects:[])) items.push(['state_saved',event]);
+  return items;
+}
+
+function _messageAnchorSceneWithOutcomeItems(scene, items, marker){
+  const next={...(scene||{})};
+  next.artifacts=items.filter(item=>item[0]==='artifact_reference').map(item=>item[1]);
+  next.side_effects=items.filter(item=>item[0]==='state_saved').map(item=>item[1]);
+  if(marker) next.outcomes_truncated=marker;
+  else delete next.outcomes_truncated;
+  return next;
+}
+
+function _messageAnchorBoundedActivityScene(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return scene;
+  const existingMarker=_anchorOutcomeTruncationMarker(scene);
+  if(_messageAnchorCompactSceneBytes(scene)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return scene;
+  const items=_messageAnchorSceneOutcomeItems(scene);
+  let marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',items.map(item=>item[1]),existingMarker);
+  let next=_messageAnchorSceneWithOutcomeItems(scene,items,marker);
+  while(items.length&&_messageAnchorCompactSceneBytes(next)>_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    items.pop();
+    marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',items.map(item=>item[1]),existingMarker);
+    next=_messageAnchorSceneWithOutcomeItems(scene,items,marker);
+  }
+  if(_messageAnchorCompactSceneBytes(next)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return next;
+  marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',[],existingMarker);
+  return {
+    ...(scene||{}),
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+}
+
 function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry, scene, context){
   if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function'||!anchorRegistry) return false;
   if(!scene||scene.version!=='activity_scene_v1') return false;
-  const sceneIdentity=_liveAnchorActivitySceneIdentity(scene, context&&context.stream_id);
+  const sceneIdentity=_liveAnchorStrictActivitySceneIdentity(scene);
   const contextSession=String(context&&context.session_id||'').trim();
   const contextStream=String(context&&context.stream_id||'').trim();
   const contextRun=String(context&&context.run_id||'').trim();
   if(
-    !sceneIdentity.sessionId||!sceneIdentity.streamId||!sceneIdentity.runId
+    !sceneIdentity
     ||(contextSession&&sceneIdentity.sessionId!==contextSession)
     ||(contextStream&&sceneIdentity.streamId!==contextStream)
     ||(contextRun&&sceneIdentity.runId!==contextRun)
@@ -2135,8 +2232,8 @@ function _liveAnchorRegistryIdentity(registry){
 }
 
 function _liveAnchorRegistryForActivityScene(anchorApi, registryMap, streamId, activeSid, scene, existingRegistry){
-  const sceneIdentity=_liveAnchorActivitySceneIdentity(scene, streamId);
-  const stableRunId=sceneIdentity.streamId===String(streamId||'').trim()
+  const sceneIdentity=_liveAnchorStrictActivitySceneIdentity(scene);
+  const stableRunId=sceneIdentity&&sceneIdentity.streamId===String(streamId||'').trim()
     &&sceneIdentity.runId
     &&sceneIdentity.runId!==sceneIdentity.streamId
     ? sceneIdentity.runId
@@ -3862,7 +3959,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !!(
       scene&&scene.version==='activity_scene_v1'
       &&((Array.isArray(scene.artifacts)&&scene.artifacts.length)
-      ||(Array.isArray(scene.side_effects)&&scene.side_effects.length))
+      ||(Array.isArray(scene.side_effects)&&scene.side_effects.length)
+      ||_anchorOutcomeTruncationMarker(scene))
     );
   }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
@@ -3879,7 +3977,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const scene=_messageAnchorBoundedActivityScene(_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene));
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
@@ -4235,8 +4333,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
   const _inflightAnchorActivityScene=INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene;
   if(_inflightAnchorActivityScene&&_inflightAnchorActivityScene.version==='activity_scene_v1'){
-    const _outcomeSceneIdentity=_liveAnchorActivitySceneIdentity(_inflightAnchorActivityScene, streamId);
-    if(_outcomeSceneIdentity.streamId===streamId&&_outcomeSceneIdentity.runId){
+    const _outcomeSceneIdentity=_liveAnchorStrictActivitySceneIdentity(_inflightAnchorActivityScene);
+    if(_outcomeSceneIdentity&&_outcomeSceneIdentity.streamId===streamId){
       _applyAnchorRegistryOutcomesFromActivityScene(
         _anchorApi,
         _anchorRegistry,

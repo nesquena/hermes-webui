@@ -911,7 +911,7 @@ def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     reasoning_text = _function_body(MESSAGES_JS, "_anchorSceneMessageReasoningText")
 
-    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);" in attach
+    assert "_messageAnchorBoundedActivityScene(_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene))" in attach
     assert "for(let idx=lastAsstIndex-1;idx>=0;idx-=1)" in complete
     assert "messages.slice(turnStart+1,lastAsstIndex+1)" in complete
     assert "message.reasoning||message._reasoning||message.reasoning_content||message.thinking" in reasoning_text

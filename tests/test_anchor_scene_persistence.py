@@ -198,6 +198,157 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_activity_scene"]["outcomes_truncated"] == scene["outcomes_truncated"]
 
 
+def test_anchor_scene_marker_only_round_trip_outside_provider_messages(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="anchormarker1",
+        title="Marker-only Anchor persistence",
+        messages=[
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "final answer", "timestamp": 10.0},
+        ],
+    )
+    session.save(skip_index=True)
+
+    marker = {
+        "reason": "scene_bytes",
+        "accepted_count": 0,
+        "max_count": 512,
+        "accepted_bytes": 0,
+        "max_bytes": 128000,
+        "max_scene_bytes": 256000,
+    }
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {
+            "session_id": "anchormarker1",
+            "stream_id": "stream-marker",
+            "run_id": "run-marker",
+        },
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+        "outcomes_truncated": marker,
+        "final_answer": "final answer",
+    }
+    request_body = {
+        "session_id": "anchormarker1",
+        "stream_id": "stream-marker",
+        "message_index": 1,
+        "scene": scene,
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: request_body)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        )
+        or True,
+    )
+
+    assert routes.handle_post(SimpleNamespace(command="POST"), SimpleNamespace(path="/api/session/anchor-scene")) is True
+    assert captured["status"] == 200
+
+    raw = json.loads((session_dir / "anchormarker1.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    assert record["scene"]["activity_rows"] == []
+    assert record["scene"]["artifacts"] == []
+    assert record["scene"]["side_effects"] == []
+    assert record["scene"]["outcomes_truncated"] == marker
+
+    loaded = Session.load("anchormarker1")
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        loaded.messages,
+        loaded.anchor_activity_scenes,
+        message_offset=0,
+    )
+    assert hydrated[1]["_anchor_activity_scene"]["activity_rows"] == []
+    assert hydrated[1]["_anchor_activity_scene"]["artifacts"] == []
+    assert hydrated[1]["_anchor_activity_scene"]["side_effects"] == []
+    assert hydrated[1]["_anchor_activity_scene"]["outcomes_truncated"] == marker
+
+
+def test_anchor_scene_persistence_rechecks_size_after_turn_duration(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    Session(
+        session_id="anchordurationlimit1",
+        title="Anchor size boundary",
+        messages=[
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "content": "final answer",
+                "_turnDuration": 12345678901234567890,
+            },
+        ],
+    ).save(skip_index=True)
+
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+        "final_answer": "final answer",
+    }
+    scene_size = routes._anchor_activity_scene_encoded_size(scene)
+    monkeypatch.setattr(routes, "_ANCHOR_ACTIVITY_SCENE_MAX_BYTES", scene_size + 2)
+    request_body = {
+        "session_id": "anchordurationlimit1",
+        "stream_id": "stream-duration",
+        "message_index": 1,
+        "scene": scene,
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: request_body)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: captured.update(error=msg, status=status) or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        )
+        or True,
+    )
+
+    assert routes.handle_post(SimpleNamespace(command="POST"), SimpleNamespace(path="/api/session/anchor-scene")) is True
+    assert captured["status"] == 400
+    assert captured["error"] == "scene payload is too large"
+    raw = json.loads((session_dir / "anchordurationlimit1.json").read_text(encoding="utf-8"))
+    assert not raw.get("anchor_activity_scenes")
+
+
 def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypatch):
     """#4411 security: /api/session/anchor-scene must not persist a scene onto a
     session that isn't visible to the active request profile. _get_or_materialize_session

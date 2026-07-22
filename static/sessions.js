@@ -1038,11 +1038,101 @@ function _sessionAnchorOutcomeTruncationMarker(scene){
   };
 }
 
+const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
+const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;
+const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;
+
+function _anchorActivitySceneStrictIdentity(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return null;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||scene.run_id||scene.runId||'').trim();
+  if(!sessionId||!streamId||!runId) return null;
+  return {sessionId,streamId,runId};
+}
+
+function _sessionAnchorUtf8ByteLength(text){
+  const raw=String(text||'');
+  try{
+    if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(raw).length;
+  }catch(_){}
+  try{
+    if(typeof Buffer!=='undefined'&&Buffer&&typeof Buffer.byteLength==='function') return Buffer.byteLength(raw,'utf8');
+  }catch(_){}
+  try{
+    return encodeURIComponent(raw).replace(/%[0-9A-F]{2}/gi,'x').length;
+  }catch(_){
+    return raw.length;
+  }
+}
+
+function _sessionAnchorCompactSceneBytes(scene){
+  try{
+    return _sessionAnchorUtf8ByteLength(JSON.stringify(scene));
+  }catch(_){
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function _sessionAnchorOutcomeBytes(events){
+  let total=0;
+  for(const event of (Array.isArray(events)?events:[])){
+    try{ total+=_sessionAnchorUtf8ByteLength(JSON.stringify(event)); }catch(_){}
+  }
+  return total;
+}
+
+function _sessionAnchorMarkerLimit(markers, key, fallback){
+  const values=(Array.isArray(markers)?markers:[])
+    .map(marker=>Number(marker&&marker[key]))
+    .filter(value=>Number.isFinite(value)&&value>0);
+  return values.length?Math.min(...values):fallback;
+}
+
+function _sessionAnchorReasonRank(reason){
+  if(reason==='scene_bytes') return 3;
+  if(reason==='bytes') return 2;
+  if(reason==='count') return 1;
+  return 0;
+}
+
+function _sessionAnchorMergedReason(markers, fallback){
+  let selected=String(fallback||'').trim();
+  for(const marker of (Array.isArray(markers)?markers:[])){
+    const reason=String(marker&&marker.reason||'').trim();
+    if(_sessionAnchorReasonRank(reason)>_sessionAnchorReasonRank(selected)) selected=reason;
+  }
+  return selected;
+}
+
+function _sessionAnchorOutcomeMarker(reason, events, markers){
+  const accepted=Array.isArray(events)?events:[];
+  const markerList=Array.isArray(markers)?markers:[];
+  return {
+    reason:String(reason||_sessionAnchorMergedReason(markerList,'')||'scene_bytes').trim()||'scene_bytes',
+    accepted_count:accepted.length,
+    max_count:_sessionAnchorMarkerLimit(markerList,'max_count',_SESSION_ANCHOR_OUTCOME_MAX_EVENTS),
+    accepted_bytes:_sessionAnchorOutcomeBytes(accepted),
+    max_bytes:_sessionAnchorMarkerLimit(markerList,'max_bytes',_SESSION_ANCHOR_OUTCOME_MAX_BYTES),
+    max_scene_bytes:_sessionAnchorMarkerLimit(markerList,'max_scene_bytes',_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES),
+  };
+}
+
+function _sessionAnchorSceneWithOutcomeItems(scene, items, marker){
+  const next={...(scene||{})};
+  next.artifacts=items.filter(item=>item.type==='artifact_reference').map(item=>item.event);
+  next.side_effects=items.filter(item=>item.type==='state_saved').map(item=>item.event);
+  if(marker) next.outcomes_truncated=marker;
+  else delete next.outcomes_truncated;
+  return next;
+}
+
 function _anchorActivitySceneHasRecoveryState(scene){
   if (!scene || scene.version !== 'activity_scene_v1') return false;
-  const sceneIdentity=_anchorActivitySceneMergeIdentity(scene);
+  const sceneIdentity=_anchorActivitySceneStrictIdentity(scene);
   const hasVisibleRows=Array.isArray(scene.activity_rows) && scene.activity_rows.length;
-  if(!sceneIdentity||!sceneIdentity.sessionId||!sceneIdentity.streamId||!sceneIdentity.runId){
+  if(!sceneIdentity){
     return !!hasVisibleRows;
   }
   const expectedRunId=sceneIdentity.runId;
@@ -1159,50 +1249,70 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
     : null;
   if(!cachedScene) return false;
   const activeStream=String(activeStreamId||serverSnapshot.streamId||inflight.streamId||'').trim();
-  const cachedIdentity=_anchorActivitySceneMergeIdentity(cachedScene);
-  const journalIdentity=_anchorActivitySceneMergeIdentity(journalScene);
+  const cachedIdentity=_anchorActivitySceneStrictIdentity(cachedScene);
+  const journalIdentity=_anchorActivitySceneStrictIdentity(journalScene);
   if(
     !activeStream
     ||!cachedIdentity||!journalIdentity
-    ||!cachedIdentity.sessionId||!journalIdentity.sessionId
     ||cachedIdentity.sessionId!==journalIdentity.sessionId
-    ||!cachedIdentity.streamId||!journalIdentity.streamId
     ||cachedIdentity.streamId!==activeStream
     ||journalIdentity.streamId!==activeStream
-    ||!cachedIdentity.runId||!journalIdentity.runId
     ||cachedIdentity.runId!==journalIdentity.runId
   ) return false;
   const cachedRun=cachedIdentity.runId;
   const journalRun=journalIdentity.runId;
-  const mergeCollection=(journalEvents,cachedEvents,expectedType)=>{
-    const merged=[];
-    const seen=new Set();
-    for(const [events,expectedRun,identity] of [[journalEvents,journalRun,journalIdentity],[cachedEvents,cachedRun,cachedIdentity]]){
-      for(const event of (Array.isArray(events)?events:[])){
-        const identityKey=_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
-        if(!identityKey||seen.has(identityKey)) continue;
-        seen.add(identityKey);
-        merged.push(event);
-      }
+  const items=[];
+  const seen=new Set();
+  const appendCollection=(events,expectedType,expectedRun,identity)=>{
+    for(const event of (Array.isArray(events)?events:[])){
+      const identityKey=_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
+      const seenKey=`${expectedType}:${identityKey}`;
+      if(!identityKey||seen.has(seenKey)) continue;
+      seen.add(seenKey);
+      items.push({type:expectedType,event});
     }
-    return merged;
   };
-  const artifacts=mergeCollection(journalScene.artifacts,cachedScene&&cachedScene.artifacts,'artifact_reference');
-  const sideEffects=mergeCollection(journalScene.side_effects,cachedScene&&cachedScene.side_effects,'state_saved');
-  const truncationMarker=_sessionAnchorOutcomeTruncationMarker(journalScene)
-    ||_sessionAnchorOutcomeTruncationMarker(cachedScene);
-  if(!artifacts.length&&!sideEffects.length&&!truncationMarker) return false;
-  inflight.anchorActivityScene={
+  appendCollection(journalScene.artifacts,'artifact_reference',journalRun,journalIdentity);
+  appendCollection(journalScene.side_effects,'state_saved',journalRun,journalIdentity);
+  appendCollection(cachedScene&&cachedScene.artifacts,'artifact_reference',cachedRun,cachedIdentity);
+  appendCollection(cachedScene&&cachedScene.side_effects,'state_saved',cachedRun,cachedIdentity);
+  const markerList=[
+    _sessionAnchorOutcomeTruncationMarker(journalScene),
+    _sessionAnchorOutcomeTruncationMarker(cachedScene),
+  ].filter(Boolean);
+  if(!items.length&&!markerList.length) return false;
+  const baseScene={
     ...(cachedScene||journalScene),
     identity:{
       ...((cachedScene&&cachedScene.identity)||{}),
       ...((journalScene&&journalScene.identity)||{}),
     },
-    artifacts,
-    side_effects:sideEffects,
   };
-  if(truncationMarker) inflight.anchorActivityScene.outcomes_truncated=truncationMarker;
-  else delete inflight.anchorActivityScene.outcomes_truncated;
+  let reason=_sessionAnchorMergedReason(markerList,'');
+  let marker=reason?_sessionAnchorOutcomeMarker(reason,items.map(item=>item.event),markerList):null;
+  let mergedScene=_sessionAnchorSceneWithOutcomeItems(baseScene,items,marker);
+  if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    reason='scene_bytes';
+    marker=_sessionAnchorOutcomeMarker(reason,items.map(item=>item.event),markerList);
+    mergedScene=_sessionAnchorSceneWithOutcomeItems(baseScene,items,marker);
+  }
+  while(items.length&&_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    items.pop();
+    marker=_sessionAnchorOutcomeMarker('scene_bytes',items.map(item=>item.event),markerList);
+    mergedScene=_sessionAnchorSceneWithOutcomeItems(baseScene,items,marker);
+  }
+  if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    marker=_sessionAnchorOutcomeMarker('scene_bytes',[],markerList);
+    mergedScene={
+      ...baseScene,
+      activity_rows:[],
+      artifacts:[],
+      side_effects:[],
+      outcomes_truncated:marker,
+    };
+  }
+  if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return false;
+  inflight.anchorActivityScene=mergedScene;
   const journalSeq=Number(serverSnapshot.lastRunJournalSeq||0);
   const cachedSeq=Number(inflight.lastRunJournalSeq||0);
   inflight.lastRunJournalSeq=Math.max(

@@ -855,6 +855,8 @@ const activeSid='sid-owned-outcome';
 const streamId='stream-owned-outcome';
 const _anchorRegistry={{}};
 let persisted=0;
+function _anchorOutcomeTruncationMarker(){{ return null; }}
+function _messageAnchorBoundedActivityScene(scene){{ return scene; }}
 function _anchorSceneHasOwnedOutcomes(scene){{{has_owned_outcomes}}}
 function _anchorSceneHasWorklogWorthyRows(){{ return false; }}
 function _projectLiveAnchorActivityScene(){{

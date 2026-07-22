@@ -43,6 +43,75 @@ def _js_function_source(source: str, name: str) -> str:
     raise AssertionError(f"unterminated JavaScript function: {name}")
 
 
+SESSION_ANCHOR_SIZE_CONSTANTS = """
+const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
+const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;
+const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;
+"""
+
+
+MESSAGE_ANCHOR_SIZE_CONSTANTS = """
+const _MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
+const _MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS=512;
+const _MESSAGE_ANCHOR_OUTCOME_MAX_BYTES=128000;
+"""
+
+
+def _session_anchor_recovery_helper_sources() -> list[str]:
+    return [
+        _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
+        _js_function_source(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
+        _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
+        _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
+    ]
+
+
+def _session_anchor_merge_helper_sources() -> list[str]:
+    return [
+        SESSION_ANCHOR_SIZE_CONSTANTS,
+        *_session_anchor_recovery_helper_sources(),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorUtf8ByteLength"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorCompactSceneBytes"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeBytes"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorMarkerLimit"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorReasonRank"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorMergedReason"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeMarker"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorSceneWithOutcomeItems"),
+        _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+        _js_function_source(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+        _js_function_source(SESSIONS_JS, "_mergeServerLiveSnapshotOutcomesIntoInflight"),
+    ]
+
+
+def _message_anchor_outcome_helper_sources() -> list[str]:
+    return [
+        _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
+        _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+        _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
+        _js_function_source(MESSAGES_JS, "_liveAnchorStrictActivitySceneIdentity"),
+        _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
+    ]
+
+
+def _message_anchor_settlement_helper_sources() -> list[str]:
+    return [
+        MESSAGE_ANCHOR_SIZE_CONSTANTS,
+        *_message_anchor_outcome_helper_sources(),
+        _js_function_source(MESSAGES_JS, "_messageAnchorUtf8ByteLength"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorCompactSceneBytes"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorOutcomeBytes"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorOutcomeTruncationMarker"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorSceneOutcomeItems"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorSceneWithOutcomeItems"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorBoundedActivityScene"),
+        _js_function_source(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows"),
+        _js_function_source(MESSAGES_JS, "_anchorSceneHasOwnedOutcomes"),
+        _js_function_source(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant"),
+    ]
+
+
 def test_snapshot_reconstructs_bounded_outcome_envelopes_without_activity_rows(monkeypatch):
     from api import routes
 
@@ -669,12 +738,7 @@ def test_snapshot_caps_high_volume_outcomes_under_production_scene_limit(monkeyp
 def test_backend_stable_scene_identity_passes_frontend_recovery_validation(monkeypatch):
     scene = _stable_outcome_scene(monkeypatch)
     functions = "\n".join(
-        [
-            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
-            _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
-            _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
-        ]
+        _session_anchor_recovery_helper_sources()
     )
     script = f"""
 const vm=require('vm');
@@ -768,18 +832,9 @@ def test_snapshot_rejects_legacy_outcome_prefix_that_conflicts_with_authoritativ
 def test_outcome_only_scene_enters_inflight_and_replay_dedupes_in_real_registry():
     functions = "\n".join(
         [
-            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
-            _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
-            _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
             _js_function_source(SESSIONS_JS, "_inflightHasVisibleLiveState"),
-            _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),
-            _js_function_source(SESSIONS_JS, "_serverLiveSnapshotInflight"),
-            _js_function_source(SESSIONS_JS, "_mergeServerLiveSnapshotOutcomesIntoInflight"),
-            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
-            _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
+            *_session_anchor_merge_helper_sources(),
+            *_message_anchor_outcome_helper_sources(),
         ]
     )
     script = f"""
@@ -888,12 +943,7 @@ console.log(JSON.stringify({{
 @pytest.mark.skipif(not NODE, reason="node is required for Anchor hydration coverage")
 def test_outcome_replay_rejects_per_envelope_identity_mismatches():
     functions = "\n".join(
-        [
-            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
-            _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
-        ]
+        _message_anchor_outcome_helper_sources()
     )
     script = f"""
 const fs=require('fs');
@@ -948,6 +998,44 @@ assert.strictEqual(
   false
 );
 assert.strictEqual(missingSceneSessionRegistry.anchor.artifacts.length,0);
+const missingSceneStreamRegistry=api.createAssistantTurnAnchorRegistry({{session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-current'}});
+const missingSceneStream={{
+  ...scene,
+  identity:{{session_id:'sid-1',run_id:'stable-run-1'}},
+  artifacts:[
+    {{source_event_type:'artifact_reference',event_id:'stable-run-1:22',session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-current',seq:22,payload:{{kind:'workspace_file',path:'missing-scene-stream.md'}}}},
+  ],
+  side_effects:[],
+}};
+assert.strictEqual(
+  sandbox._applyAnchorRegistryOutcomesFromActivityScene(
+    api,
+    missingSceneStreamRegistry,
+    missingSceneStream,
+    {{session_id:'sid-1',stream_id:'stream-current',run_id:'stable-run-1'}}
+  ),
+  false
+);
+assert.strictEqual(missingSceneStreamRegistry.anchor.artifacts.length,0);
+const missingSceneRunRegistry=api.createAssistantTurnAnchorRegistry({{session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-current'}});
+const missingSceneRun={{
+  ...scene,
+  identity:{{session_id:'sid-1',stream_id:'stream-current'}},
+  artifacts:[
+    {{source_event_type:'artifact_reference',event_id:'stable-run-1:23',session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-current',seq:23,payload:{{kind:'workspace_file',path:'missing-scene-run.md'}}}},
+  ],
+  side_effects:[],
+}};
+assert.strictEqual(
+  sandbox._applyAnchorRegistryOutcomesFromActivityScene(
+    api,
+    missingSceneRunRegistry,
+    missingSceneRun,
+    {{session_id:'sid-1',stream_id:'stream-current',run_id:'stable-run-1'}}
+  ),
+  false
+);
+assert.strictEqual(missingSceneRunRegistry.anchor.artifacts.length,0);
 const foreignSceneSessionRegistry=api.createAssistantTurnAnchorRegistry({{session_id:'sid-1',run_id:'stable-run-1',stream_id:'stream-current'}});
 const foreignSceneSession={{
   ...scene,
@@ -980,15 +1068,7 @@ assert.strictEqual(foreignSceneSessionRegistry.anchor.artifacts.length,0);
 @pytest.mark.skipif(not NODE, reason="node is required for settled Anchor scene coverage")
 def test_projected_outcomes_survive_settlement_and_reload():
     functions = "\n".join(
-        [
-            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
-            _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
-            _js_function_source(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows"),
-            _js_function_source(MESSAGES_JS, "_anchorSceneHasOwnedOutcomes"),
-            _js_function_source(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant"),
-        ]
+        _message_anchor_settlement_helper_sources()
     )
     script = f"""
 const fs=require('fs');
@@ -1092,18 +1172,82 @@ console.log(JSON.stringify(sandbox.result));
     ] == ["settled-state"]
 
 
+@pytest.mark.skipif(not NODE, reason="node is required for settled Anchor scene coverage")
+def test_marker_only_outcome_scene_survives_frontend_settlement():
+    functions = "\n".join(
+        _message_anchor_settlement_helper_sources()
+    )
+    script = f"""
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{window:{{isFinalAnswerOnlyMode:()=>false}},console}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'marker_only_settlement_helpers.js'}});
+vm.runInContext(`
+const marker={{reason:'scene_bytes',accepted_count:0,max_count:512,accepted_bytes:0,max_bytes:128000,max_scene_bytes:256000}};
+var projectedScene={{
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  identity:{{session_id:'sid-marker',stream_id:'stream-marker',run_id:'run-marker'}},
+  activity_rows:[],
+  artifacts:[],
+  side_effects:[],
+  outcomes_truncated:marker,
+}};
+var _anchorRegistry={{}};
+var streamId='stream-marker';
+var persisted=null;
+function _projectLiveAnchorActivityScene(){{ return projectedScene; }}
+function _completeSettledAnchorSceneForTurn(messages,lastAsstIndex,scene){{
+  return {{
+    ...scene,
+    final_answer:'done',
+    final_message_ref:'message-marker',
+    activity_rows:Array.isArray(scene.activity_rows)?scene.activity_rows:[],
+  }};
+}}
+function _persistSettledAnchorScene(message,scene,messageIndex){{ persisted={{message,scene,messageIndex}}; }}
+const messages=[
+  {{role:'user',content:'question'}},
+  {{role:'assistant',content:'done'}},
+];
+const renderedWorklog=_attachProjectedAnchorSceneToLastAssistant(messages);
+globalThis.result={{
+  renderedWorklog,
+  persisted,
+  attached:messages[1]._anchor_activity_scene,
+}};
+`, sandbox, {{filename:'marker_only_settlement_probe.js'}});
+console.log(JSON.stringify(sandbox.result));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["renderedWorklog"] is False
+    assert data["persisted"]["messageIndex"] == 1
+    assert data["attached"]["activity_rows"] == []
+    assert data["attached"]["artifacts"] == []
+    assert data["attached"]["side_effects"] == []
+    assert data["attached"]["outcomes_truncated"] == {
+        "reason": "scene_bytes",
+        "accepted_count": 0,
+        "max_count": 512,
+        "accepted_bytes": 0,
+        "max_bytes": 128000,
+        "max_scene_bytes": 256000,
+    }
+
+
 @pytest.mark.skipif(not NODE, reason="node is required for recovery identity coverage")
 def test_outcome_merge_fails_closed_on_missing_or_wrong_scene_identity():
     functions = "\n".join(
-        [
-            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
-            _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
-            _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
-            _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),
-            _js_function_source(SESSIONS_JS, "_serverLiveSnapshotInflight"),
-            _js_function_source(SESSIONS_JS, "_mergeServerLiveSnapshotOutcomesIntoInflight"),
-        ]
+        _session_anchor_merge_helper_sources()
     )
     script = f"""
 const assert=require('assert');
@@ -1133,6 +1277,16 @@ const missingSceneSessionOutcomeOnly={{
   identity:{{stream_id:'stream-1',run_id:'stable-run-1'}},
 }};
 assert.strictEqual(sandbox._anchorActivitySceneHasRecoveryState(missingSceneSessionOutcomeOnly),false);
+const missingSceneStreamOutcomeOnly={{
+  ...ownedOutcomeOnly,
+  identity:{{session_id:'sid-1',run_id:'stable-run-1'}},
+}};
+assert.strictEqual(sandbox._anchorActivitySceneHasRecoveryState(missingSceneStreamOutcomeOnly),false);
+const missingSceneRunOutcomeOnly={{
+  ...ownedOutcomeOnly,
+  identity:{{session_id:'sid-1',stream_id:'stream-1'}},
+}};
+assert.strictEqual(sandbox._anchorActivitySceneHasRecoveryState(missingSceneRunOutcomeOnly),false);
 const journalScene={{
   version:'activity_scene_v1',
   identity:{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}},
@@ -1165,6 +1319,53 @@ const missingCached={{
 assert.strictEqual(sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(missingCached,server,'stream-1'),false);
 assert.strictEqual(missingCached.lastRunJournalSeq,5);
 assert.deepStrictEqual(missingCached.anchorActivityScene.artifacts,[]);
+const missingCachedStream={{
+  ...missingCached,
+  anchorActivityScene:{{
+    ...missingCached.anchorActivityScene,
+    identity:{{session_id:'sid-1',run_id:'stable-run-1'}},
+  }},
+}};
+assert.strictEqual(sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(missingCachedStream,server,'stream-1'),false);
+assert.strictEqual(missingCachedStream.lastRunJournalSeq,5);
+assert.deepStrictEqual(missingCachedStream.anchorActivityScene.artifacts,[]);
+const missingCachedRun={{
+  ...missingCached,
+  anchorActivityScene:{{
+    ...missingCached.anchorActivityScene,
+    identity:{{session_id:'sid-1',stream_id:'stream-1'}},
+  }},
+}};
+assert.strictEqual(sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(missingCachedRun,server,'stream-1'),false);
+assert.strictEqual(missingCachedRun.lastRunJournalSeq,5);
+assert.deepStrictEqual(missingCachedRun.anchorActivityScene.artifacts,[]);
+const missingJournalStream=sandbox._serverLiveSnapshotInflight({{
+  stream_id:'stream-1',
+  last_seq:99,
+  anchor_activity_scene:{{...journalScene,identity:{{session_id:'sid-1',run_id:'stable-run-1'}}}},
+}},[]);
+const missingJournalRun=sandbox._serverLiveSnapshotInflight({{
+  stream_id:'stream-1',
+  last_seq:99,
+  anchor_activity_scene:{{...journalScene,identity:{{session_id:'sid-1',stream_id:'stream-1'}}}},
+}},[]);
+const completeCachedForMissingJournal={{
+  ...missingCached,
+  anchorActivityScene:{{
+    ...missingCached.anchorActivityScene,
+    identity:{{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}},
+  }},
+}};
+assert.strictEqual(
+  sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(completeCachedForMissingJournal,missingJournalStream,'stream-1'),
+  false
+);
+assert.strictEqual(completeCachedForMissingJournal.lastRunJournalSeq,5);
+assert.strictEqual(
+  sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(completeCachedForMissingJournal,missingJournalRun,'stream-1'),
+  false
+);
+assert.strictEqual(completeCachedForMissingJournal.lastRunJournalSeq,5);
 const compatible={{
   ...missingCached,
   lastRunJournalSeq:6,
@@ -1212,16 +1413,108 @@ assert.strictEqual(JSON.stringify(owned.anchorActivityScene.artifacts.map(event=
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(not NODE, reason="node is required for recovery budget coverage")
+def test_outcome_merge_rebudgets_cached_and_journal_outcomes_under_scene_limit():
+    functions = "\n".join(
+        _session_anchor_merge_helper_sources()
+    )
+    script = f"""
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{Buffer}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'merge_budget_helpers.js'}});
+const identity={{session_id:'sid-1',stream_id:'stream-1',run_id:'stable-run-1'}};
+function artifact(seq,path,size){{
+  return {{
+    source_event_type:'artifact_reference',
+    event_id:`stable-run-1:${{seq}}`,
+    session_id:'sid-1',
+    stream_id:'stream-1',
+    run_id:'stable-run-1',
+    seq,
+    payload:{{kind:'workspace_file',path,blob:'a'.repeat(size)}},
+  }};
+}}
+function sideEffect(seq,name,size){{
+  return {{
+    source_event_type:'state_saved',
+    event_id:`stable-run-1:${{seq}}`,
+    session_id:'sid-1',
+    stream_id:'stream-1',
+    run_id:'stable-run-1',
+    seq,
+    payload:{{kind:'memory',action:'saved',name,blob:'s'.repeat(size)}},
+  }};
+}}
+const cached={{
+  streamId:'stream-1',
+  lastRunJournalSeq:8,
+  lastAssistantText:'local visible row owner',
+  messages:[{{role:'assistant',content:'local visible row owner'}}],
+  anchorActivityScene:{{
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    identity,
+    activity_rows:[{{row_id:'cached-prose',role:'prose',text:'r'.repeat(90000)}}],
+    artifacts:[artifact(101,'cached-artifact.md',80000)],
+    side_effects:[sideEffect(102,'cached-state',80000)],
+    outcomes_truncated:{{reason:'count',accepted_count:2,max_count:512,accepted_bytes:160000,max_bytes:128000,max_scene_bytes:256000}},
+  }},
+}};
+const journalScene={{
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  identity,
+  activity_rows:[],
+  artifacts:[artifact(201,'journal-artifact.md',80000)],
+  side_effects:[sideEffect(202,'journal-state',80000)],
+  outcomes_truncated:{{reason:'bytes',accepted_count:2,max_count:512,accepted_bytes:160000,max_bytes:128000,max_scene_bytes:256000}},
+}};
+const merged=sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(
+  cached,
+  {{streamId:'stream-1',lastRunJournalSeq:12,anchorActivityScene:journalScene}},
+  'stream-1'
+);
+assert.strictEqual(merged,true);
+const scene=cached.anchorActivityScene;
+const retained=[...scene.artifacts,...scene.side_effects];
+const marker=scene.outcomes_truncated;
+assert.strictEqual(sandbox._sessionAnchorCompactSceneBytes(scene)<=256000,true);
+assert.strictEqual(marker.reason,'scene_bytes');
+assert.strictEqual(marker.accepted_count,retained.length);
+assert.strictEqual(marker.accepted_bytes,sandbox._sessionAnchorOutcomeBytes(retained));
+assert.strictEqual(marker.max_count,512);
+assert.strictEqual(marker.max_bytes,128000);
+assert.strictEqual(marker.max_scene_bytes,256000);
+assert.strictEqual(retained.length<4,true);
+assert.strictEqual(retained.length>=1,true);
+assert.strictEqual(cached.lastRunJournalSeq,12);
+console.log(JSON.stringify({{
+  retained:retained.length,
+  marker,
+  bytes:sandbox._sessionAnchorCompactSceneBytes(scene),
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["retained"] == data["marker"]["accepted_count"]
+    assert data["bytes"] <= 256000
+
+
 @pytest.mark.skipif(not NODE, reason="node is required for Anchor registry coverage")
 def test_stable_recovered_scene_replaces_transport_registry_before_outcomes():
     functions = "\n".join(
         [
-            _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
             _js_function_source(MESSAGES_JS, "_liveAnchorRegistryIdentity"),
             _js_function_source(MESSAGES_JS, "_liveAnchorRegistryForActivityScene"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
-            _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
-            _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
+            *_message_anchor_outcome_helper_sources(),
         ]
     )
     script = f"""
