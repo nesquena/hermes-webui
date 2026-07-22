@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- **Stream teardown no longer leaks per-stream runtime state on long-running servers.** When a stream ended, its `STREAM_SESSION_OWNERS` owner mapping and (for gateway turns) the `AGENT_INSTANCES` entry were retained, so a high-volume, long-lived server slowly accumulated dead per-stream bookkeeping. Teardown now unregisters the stream owner and drops the gateway agent instance. The offline-frame buffer is deliberately **not** cleared on teardown so a late reconnect can still replay buffered `token`/`done`/`stream_end` frames; buffers remain bounded (8,192 frames) and channels are reclaimed once outstanding reconnect references exit. Thanks @webtecnica. (#6389, #6351)
+
 - **Japanese UI is fully translated again.** The Japanese (`ja`) locale had drifted to English fallback across recent features (workspace panel, session sharing, extensions gallery, cron sentence-builder, composer, settings, and update flows); it is now refreshed to parity with the current English keys — 180 strings — so Japanese users no longer see a mixed-language UI. Thanks @koshikai. (#6403)
 
 - **Reloaded tool-call turns render with the same unified Worklog as live turns.** Historical transcripts using ID-linked tool calls (OpenAI-shape `assistant.tool_calls[].id` ↔ `role:tool.tool_call_id`) previously rendered through the legacy renderer after a reload or session switch, so a reloaded turn could look different from how it appeared live. Unambiguous, complete ID-linked turns now hydrate into the unified Assistant Turn Anchor before render, matching the live presentation exactly while failing closed to the existing renderer for any richer or ambiguous case. Thanks @franksong2702. (#6222, #6220)
