@@ -3338,6 +3338,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // settings.json), so it can be written synchronously here — no deferred
     // write needed.
     window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
+    window._showBackgroundWakeups=s.show_background_wakeups!==false;
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
