@@ -527,9 +527,9 @@ class FakeEventSource {
 }
 global.EventSource=FakeEventSource;
 
-const attachStart=messagesSrc.indexOf('function attachLiveStream(');
+const attachStart=messagesSrc.indexOf('const _PENDING_LIVE_ATTACHES=');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
-if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
+if(attachStart<0||attachEnd<0) throw new Error('live-attach source boundary not found');
 eval(messagesSrc.slice(attachStart,attachEnd));
 attachLiveStream('sid-1','stream-1');
 const source=FakeEventSource.instances[0];

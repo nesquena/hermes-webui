@@ -291,16 +291,12 @@ process.stdout.write(JSON.stringify({{
 
 
 def test_reattach_path_uses_replay_when_status_reports_journal():
-    reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
-    # Window widened to 2200: the SSE-recovery follow-restore fix (the
-    # _wasFollowingAtReconnectDead guard + its sticky-unpin check) inserted lines
-    # into the reconnect-dead cleanup block between this anchor and the
-    # replay-params assertion below, pushing the target string past the old slice.
-    block = MESSAGES_SRC[reattach_pos : reattach_pos + 2200]
+    reattach_pos = MESSAGES_SRC.index("statusDecision:(status)=>{")
+    block = MESSAGES_SRC[reattach_pos : reattach_pos + 1800]
 
-    assert "st.replay_available" in block
-    assert "replayOnly=true" in block
-    assert "(reconnecting||replayOnly)?_runJournalReplayParams():''" in block
+    assert "status&&status.replay_available" in block
+    assert "replayOnly:true" in block
+    assert "replayParamsForAttach:(shouldReplay)=>shouldReplay?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
 
 
