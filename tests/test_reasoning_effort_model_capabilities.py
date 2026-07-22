@@ -520,22 +520,21 @@ def test_bare_grok45_is_reasoning_capable_and_capped_at_high():
     # family heuristic only matched names containing "reasoning"/"thinking".
     # Native ladder for Grok-4.5 is low/medium/high (no minimal/xhigh/max).
     for model in (
-        "grok-4.5",
-        "x-ai/grok-4.5",
-        "grok-4-5",
-        "@custom:cpa:grok-4.5",
+        "grok-4.5",                 # bare id
+        "x-ai/grok-4.5",            # vendor-prefixed
+        "@custom:proxy:grok-4.5",   # generic custom-provider form (not a local slug)
     ):
         assert cfg._candidate_supports_reasoning(model) is True, model
-        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:cpa")
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:proxy")
         assert efforts == ["low", "medium", "high"], model
         assert "minimal" not in efforts, model
         assert "xhigh" not in efforts, model
         assert "max" not in efforts, model
         assert cfg.coerce_reasoning_effort_for_model(
-            "xhigh", model, provider_id="custom:cpa"
+            "xhigh", model, provider_id="custom:proxy"
         ) == "high", model
         assert cfg.coerce_reasoning_effort_for_model(
-            "max", model, provider_id="custom:cpa"
+            "max", model, provider_id="custom:proxy"
         ) == "high", model
 
 
