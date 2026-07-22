@@ -15635,10 +15635,17 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
-            from api.profiles import delete_profile_api, _validate_profile_name
+            from api.auth import ensure_trusted_auth_session
+            from api.profiles import delete_profile_api, _profiles_match, _validate_profile_name
             from api.helpers import build_profile_cookie
 
             _validate_profile_name(name)
+            session_info = ensure_trusted_auth_session(handler)
+            if getattr(handler, '_trusted_auth_session_rejected', False):
+                return bad(handler, 'Authentication required', 401)
+            bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
+            if bound_profile and _profiles_match(bound_profile, name):
+                return bad(handler, "Profile is bound to the current session", 403)
             result = delete_profile_api(name)
             extra_headers = None
             active_profile = result.get("active") if isinstance(result, dict) else None

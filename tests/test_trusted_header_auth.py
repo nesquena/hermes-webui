@@ -354,6 +354,70 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
     assert any(value.startswith("hermes_profile=") for value in handler.header_values("Set-Cookie"))
 
 
+def test_profile_delete_rejects_trusted_session_bound_to_target(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile="devops",
+    )
+    handler = _Handler(headers={
+        "Cookie": f"hermes_session={cookie}",
+        "Remote-User": "alice",
+        "Remote-Groups": "hermes_devops",
+    })
+    handler.command = "POST"
+    delete_calls = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "devops"})
+    monkeypatch.setattr(
+        "api.profiles.delete_profile_api",
+        lambda name: delete_calls.append(name) or {"ok": True, "name": name},
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Profile is bound to the current session"
+    assert delete_calls == []
+    assert auth.session_bound_profile(cookie) == "devops"
+
+
+def test_profile_delete_allows_unbound_trusted_session_default_handoff(monkeypatch):
+    _trusted_env(monkeypatch)
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile=None,
+    )
+    handler = _Handler(headers={
+        "Cookie": f"hermes_session={cookie}",
+        "Remote-User": "alice",
+    })
+    handler.command = "POST"
+    delete_calls = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "work"})
+    monkeypatch.setattr(
+        "api.profiles.delete_profile_api",
+        lambda name: delete_calls.append(name) or {"ok": True, "name": name, "active": "default"},
+    )
+
+    profiles.set_request_profile("work")
+    try:
+        assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+        routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+    finally:
+        profiles.clear_request_profile()
+
+    assert handler.status == 200
+    assert handler.json_body() == {"ok": True, "name": "work", "active": "default"}
+    assert delete_calls == ["work"]
+    assert auth.session_bound_profile(cookie) is None
+    assert any(value.startswith("hermes_profile=default.") for value in handler.header_values("Set-Cookie"))
+
+
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
     _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(

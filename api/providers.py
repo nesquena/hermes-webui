@@ -25,7 +25,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 try:  # POSIX-only; Windows-style environments fall back to process-local locking.
     import fcntl
@@ -1150,7 +1150,7 @@ def _write_env_file(
     env_path: Path,
     updates: dict[str, str | None],
     *,
-    update_process_env: bool = True,
+    update_process_env: bool | Callable[[], bool] = True,
 ) -> None:
     """Write key=value pairs to the .env file.
 
@@ -1163,13 +1163,27 @@ def _write_env_file(
     write cycle to prevent TOCTOU races between concurrent POST /api/providers
     calls (each reading the same file baseline and overwriting the other's key).
     Also serialises os.environ mutations with streaming sessions. Callers that
-    persist a non-process-active profile's .env pass update_process_env=False
-    so another profile's live provider key is not replaced by a scoped write.
+    need profile ownership checks may pass a callable; it is evaluated inside
+    ``_ENV_LOCK`` so a concurrent process-wide profile switch cannot happen
+    between the ownership decision and the live ``os.environ`` mutation.
     """
     from api.streaming import _ENV_LOCK
     import stat as _stat
 
     with _ENV_LOCK:
+        try:
+            should_update_process_env = (
+                update_process_env()
+                if callable(update_process_env)
+                else bool(update_process_env)
+            )
+        except Exception:
+            logger.debug(
+                "Could not determine process-env ownership for env write",
+                exc_info=True,
+            )
+            should_update_process_env = False
+
         # ── Read existing lines (preserving comments and blank lines) ──
         existing_lines: list[str] = []
         if env_path.exists():
@@ -1192,7 +1206,7 @@ def _write_env_file(
         for key, value in updates.items():
             if value is None:
                 # Mark the line for removal (None sentinel) and clear env.
-                if update_process_env:
+                if should_update_process_env:
                     os.environ.pop(key, None)
                 if key in existing_key_indices:
                     output_lines[existing_key_indices[key]] = None  # type: ignore[assignment]
@@ -1203,7 +1217,7 @@ def _write_env_file(
             # Reject embedded newlines/carriage returns to prevent .env injection
             if "\n" in clean or "\r" in clean:
                 raise ValueError("API key must not contain newline characters.")
-            if update_process_env:
+            if should_update_process_env:
                 os.environ[key] = clean
 
             if key in existing_key_indices:
@@ -1258,17 +1272,15 @@ def _provider_key_write_updates_process_env() -> bool:
     try:
         from api import profiles as _profiles
 
-        request_profile = str(_profiles.get_active_profile_name() or "").strip()
-        if not request_profile or _profiles._is_root_profile(request_profile):
-            return True
-        process_profile = str(getattr(_profiles, "_active_profile", "") or "").strip()
-        return bool(process_profile) and _profiles._profiles_match(
-            process_profile,
-            request_profile,
-        )
+        with _profiles._profile_lock:
+            request_profile = str(_profiles.get_active_profile_name() or "").strip()
+            process_profile = str(getattr(_profiles, "_active_profile", "") or "").strip()
+            if not request_profile or not process_profile:
+                return False
+            return _profiles._profiles_match(process_profile, request_profile)
     except Exception:
         logger.debug("Could not determine process-env ownership for provider key write", exc_info=True)
-        return True
+        return False
 
 
 def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool:
@@ -2947,7 +2959,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
         _write_env_file(
             env_path,
             {env_var: api_key},
-            update_process_env=_provider_key_write_updates_process_env(),
+            update_process_env=_provider_key_write_updates_process_env,
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}

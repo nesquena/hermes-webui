@@ -1652,13 +1652,28 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
-    with _profile_lock:
+    def _apply_switch_state() -> None:
+        global _active_profile
         _SKILLS_STATS_CACHE.clear()
         if process_wide:
-            global _active_profile
             _active_profile = name
             _set_hermes_home(home)
             _reload_dotenv(home)
+
+    if process_wide:
+        from api.streaming import _ENV_LOCK
+
+        # Provider-key writes decide whether to mutate live os.environ while
+        # holding _ENV_LOCK. Process-wide switches mutate the same authority, so
+        # they share this critical section with _profile_lock nested inside it:
+        # _ENV_LOCK -> _profile_lock is the single lock order for profile-owned
+        # live-env changes.
+        with _ENV_LOCK:
+            with _profile_lock:
+                _apply_switch_state()
+    else:
+        with _profile_lock:
+            _apply_switch_state()
 
     if process_wide:
         # Write sticky default for CLI consistency
