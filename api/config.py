@@ -780,7 +780,8 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
+    _paths._atomic_write_text(
+        config_path,
         _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -1052,6 +1053,10 @@ MIME_MAP = {
     ".m4v": "video/mp4",
     ".webm": "video/webm",
     ".ogv": "video/ogg",
+    # TypeScript source files — served as text/plain to avoid XSS from
+    # same-origin inline execution in _handle_file_raw.
+    ".ts": "text/plain",
+    ".tsx": "text/plain",
 }
 
 # ── Toolsets (from config.yaml or hardcoded default) ─────────────────────────
