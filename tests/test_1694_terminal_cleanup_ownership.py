@@ -49,7 +49,7 @@ def _function_body(name: str) -> str:
 def test_terminal_handlers_use_session_owned_cleanup_helpers():
     """Patch #1694 should centralize terminal cleanup behind owner-aware helpers."""
     attach_body = _function_body("attachLiveStream")
-    assert "function _clearOwnerInflightState()" in attach_body
+    assert "function _clearOwnerInflightState(options)" in attach_body
     owner_helper = _function_body("_clearOwnerInflightState")
     assert "delete INFLIGHT[activeSid]" in owner_helper
     assert "clearInflightState(activeSid)" in owner_helper
@@ -63,7 +63,9 @@ def test_terminal_handlers_use_session_owned_cleanup_helpers():
 def test_done_event_does_not_clear_active_pane_for_background_session():
     """A background done event may clear its owner marker, not the active pane."""
     body = _event_body("done")
-    assert "_clearOwnerInflightState();" in body
+    attach_body = _function_body("attachLiveStream")
+    assert "_clearOwnerInflightState({deferSessionStreamResume:true});" in body
+    assert "_resumeSessionStreamAfterLiveChat(completedSid);" in attach_body
     assert "clearInflight();clearInflightState(activeSid)" not in body
     assert "delete INFLIGHT[activeSid];\n      clearInflight();" not in body
     assert "renderSessionList();setBusy(false)" not in body
