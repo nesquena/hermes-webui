@@ -420,27 +420,29 @@ def test_deduplicate_context_messages_adjacent_dup_collapsed_same_id():
     assert result[1]["id"] == 102
 
 
-def test_deduplicate_context_messages_adjacent_dup_preserved_diff_id():
-    """Adjacent same-content rows with distinct stable ids are preserved.
+def test_deduplicate_context_messages_adjacent_dup_collapsed_lifecycle_equivalent_diff_id():
+    """Adjacent same-content rows with equivalent lifecycle are collapsed even with different ids.
 
-    In hide_all_activity mode a _partial marker (no id) sits adjacent to the
-    settled final message (has id). The same pattern arises when two distinct
-    turns accidentally share the same text. Backstop 1 must not collapse them.
+    With lifecycle-aware dedup (#6322), two adjacent rows that share both
+    content identity AND lifecycle ownership (both settled, non-partial,
+    non-error) are genuine duplicates regardless of whether minting gave
+    them different stable IDs. Differing lifecycle metadata (partial vs
+    settled, different anchor ownership) prevents collapse so the
+    authoritative final/anchor-owning row survives.
     """
     from api.streaming import _deduplicate_context_messages
 
     messages = [
         {"role": "assistant", "content": "ok", "id": 100},
-        {"role": "assistant", "content": "ok", "id": 101},  # diff id → distinct turn
+        {"role": "assistant", "content": "ok", "id": 101},  # same lifecycle → collapsed
         {"role": "user", "content": "next", "id": 102},
     ]
 
     result = _deduplicate_context_messages(messages)
-    # Distinct ids → both rows kept
-    assert len(result) == 3
+    # Lifecycle-equivalent → collapsed to 2 rows
+    assert len(result) == 2
     assert result[0]["id"] == 100
-    assert result[1]["id"] == 101
-    assert result[2]["id"] == 102
+    assert result[1]["id"] == 102
 
 
 def test_deduplicate_context_messages_adjacent_dup_collapsed_no_id():
@@ -463,13 +465,14 @@ def test_deduplicate_context_messages_adjacent_dup_collapsed_no_id():
     assert result[1]["id"] == 102
 
 
-def test_deduplicate_context_messages_partial_then_settled_preserved():
+def test_deduplicate_context_messages_partial_then_settled_replaced():
     """Adjacent _partial (no id) followed by settled (has id) with same content.
 
     This is the exact hide_all_activity scenario: a live-stream _partial
     marker sits adjacent to the final settled message. They have the same
-    content identity but different stable-id status — Backstop 1 must preserve
-    the settled message to avoid no-assistant-turn on switch-away/back.
+    content identity but different lifecycle ownership — Backstop 1 must
+    replace the unsettled partial with the settled final/anchor-owning row
+    to avoid no-assistant-turn on switch-away/back (#6322).
     """
     from api.streaming import _deduplicate_context_messages
 
@@ -480,10 +483,93 @@ def test_deduplicate_context_messages_partial_then_settled_preserved():
     ]
 
     result = _deduplicate_context_messages(messages)
-    # Both rows kept (no id vs has id → distinct)
+    # Settled replaces partial → only 2 rows, the settled row is authoritative
+    assert len(result) == 2
+    assert result[0]["id"] == 50
+    assert "_partial" not in result[0] or not result[0].get("_partial")
+    assert result[1]["id"] == 102
+
+
+def test_deduplicate_context_messages_settled_then_partial_settled_survives():
+    """Adjacent settled (has id) followed by _partial (no id) with same content.
+
+    Reverse order: the settled row comes first and the partial is adjacent.
+    Backstop 1 must skip the partial (settled is already authoritative).
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "Hello", "id": 50},
+        {"role": "assistant", "content": "Hello", "_partial": True},
+        {"role": "user", "content": "next", "id": 102},
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    # Settled survives, partial skipped → 2 rows
+    assert len(result) == 2
+    assert result[0]["id"] == 50
+    assert result[1]["id"] == 102
+
+
+def test_deduplicate_context_messages_partial_then_error_preserved():
+    """Two different unsettled rows (_partial then _error) with same content.
+
+    Both are unsettled but with different lifecycle flags — both preserved
+    since neither can be authoritatively "settled" over the other.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "Hello", "_partial": True},
+        {"role": "assistant", "content": "Hello", "_error": True},
+        {"role": "user", "content": "next", "id": 102},
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    # Both unsettled with different flags → both preserved
     assert len(result) == 3
     assert result[0].get("_partial") is True
-    assert result[1]["id"] == 50
+    assert result[1].get("_error") is True
+    assert result[2]["id"] == 102
+
+
+def test_deduplicate_context_messages_partial_to_settled_repairs_seen():
+    """When Backstop 1 replaces a partial with settled, the 'seen' set tracks
+    the settled key, not the stale partial key, so id-less non-adjacent
+    duplicates of the partial do not affect dedup of the settled row.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "Hello", "_partial": True},     # replaced
+        {"role": "assistant", "content": "Hello", "id": 50},            # settles
+        {"role": "assistant", "content": "Hello", "_partial": True},     # non-adjacent partial dup → dropped
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    assert len(result) == 1
+    assert result[0]["id"] == 50
+
+
+def test_deduplicate_context_messages_lifecycle_anchor_ownership_preserved():
+    """Rows with same content but different _anchor_stream_id are not collapsed.
+
+    Anchor ownership distinguishes turned that happened to produce the same
+    text but are owned by different stream/anchor contexts.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    messages = [
+        {"role": "assistant", "content": "Hello", "id": 50, "_anchor_stream_id": "stream-a"},
+        {"role": "assistant", "content": "Hello", "id": 51, "_anchor_stream_id": "stream-b"},
+        {"role": "user", "content": "next", "id": 102},
+    ]
+
+    result = _deduplicate_context_messages(messages)
+    # Different anchor stream → distinct lifecycle → both preserved
+    assert len(result) == 3
+    assert result[0]["id"] == 50
+    assert result[1]["id"] == 51
     assert result[2]["id"] == 102
 
 
