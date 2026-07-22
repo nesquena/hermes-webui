@@ -148,7 +148,10 @@ def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions
     assert active_pos != -1
     assert reattach_pos != -1
     assert active_pos < reattach_pos
-    assert "{reconnecting:true}" in body[reattach_pos : reattach_pos + 200]
+    attach_opts = body[reattach_pos : reattach_pos + 700]
+    assert "reconnecting:true" in attach_opts
+    assert "isCurrentOwner:()=>_isActiveSessionSceneRestoreOwner" in attach_opts
+    assert "onAttached:" in attach_opts
 
 
 def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
@@ -285,16 +288,13 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
         "loadSession()'s INFLIGHT branch must route reattach through the owned "
         "active session restore callback"
     )
-    assert "currentInflight.reattach" in inflight_block, (
+    assert "attachOwnedSessionStream(true)" in inflight_block, (
         "loadSession()'s INFLIGHT branch should still require reattach=true from "
         "the current inflight entry"
     )
-    reattach_gate = re.search(
-        r"const\s+currentInflight=INFLIGHT\[sid\];[\s\S]*?if\s*\(!currentInflight\|\|!currentInflight\.reattach\|\|!activeStreamId",
-        inflight_block,
-        re.DOTALL,
-    )
-    assert reattach_gate, (
+    helper_pos = body.find("const attachOwnedSessionStream=")
+    helper_tail = body[helper_pos : helper_pos + 1000]
+    assert helper_pos != -1 and "requireReattach&&(!inflight||!inflight.reattach)" in helper_tail, (
         "loadSession() must gate active-session attach on currentInflight.reattach and "
         "activeStreamId before calling attachLiveStream()"
     )
@@ -312,7 +312,7 @@ def test_load_session_replays_live_scene_after_transcript_with_deferred_attach()
     inflight_idx = body.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx != -1, "INFLIGHT branch not found"
     inflight_branch = body[inflight_idx : inflight_idx + 9000]
-    inflight_defer = inflight_branch.find("_deferActiveSessionSceneRestore(")
+    inflight_defer = inflight_branch.find("_deferActiveSessionSceneRestoreAndAttach(")
     assert inflight_defer != -1, "active INFLIGHT branch should defer live restore path"
     inflight_sync_topbar_pos = inflight_branch.find("syncTopbar();")
     inflight_render_messages_pos = inflight_branch.find("renderMessages(")
@@ -336,16 +336,15 @@ def test_load_session_replays_live_scene_after_transcript_with_deferred_attach()
     assert inflight_defer_workspace_pos != -1, "inflight branch should defer workspace refresh before deferring restore"
     assert inflight_defer_workspace_pos < inflight_defer
 
-    active_inflight_order_re = re.search(
-        r"_deferActiveSessionSceneRestore\([\s\S]*?restoreLiveSurfaceForActiveInflight\(\)[\s\S]*?attachLiveSceneForActiveSession\(\)",
-        inflight_branch,
-    )
-    assert active_inflight_order_re is not None, "INFLIGHT path should restore live scene ownership before attach/watch"
+    inflight_restore_ref = inflight_branch.find("restoreLiveSurfaceForActiveInflight,", inflight_defer)
+    inflight_attach_ref = inflight_branch.find("attachLiveSceneForActiveSession,", inflight_defer)
+    assert inflight_defer < inflight_restore_ref < inflight_attach_ref
+    assert inflight_branch.find(".then((result)=>{", inflight_attach_ref) > inflight_attach_ref
 
     idle_anchor = body.find("if(activeStreamId){")
     assert idle_anchor != -1, "discovered active stream branch not found"
-    active_idle = body[idle_anchor : idle_anchor + 2400]
-    idle_defer = active_idle.find("_deferActiveSessionSceneRestore(")
+    active_idle = body[idle_anchor : idle_anchor + 4200]
+    idle_defer = active_idle.find("_deferActiveSessionSceneRestoreAndAttach(")
     assert idle_defer != -1, "discovered active stream branch should defer live restore path"
     active_idle_sync_topbar_pos = active_idle.find("syncTopbar();")
     active_idle_render_messages_pos = active_idle.find("renderMessages(")
@@ -375,11 +374,9 @@ def test_load_session_replays_live_scene_after_transcript_with_deferred_attach()
     assert active_idle_defer_workspace_pos != -1, "active discovered branch should defer workspace refresh before deferring restore"
     assert active_idle_defer_workspace_pos < idle_defer
 
-    active_idle_order_re = re.search(
-        r"_deferActiveSessionSceneRestore\([\s\S]*?restoreLiveSurfaceForIdleInflight\(\)[\s\S]*?attachLiveSceneForIdleSession\(\)",
-        active_idle,
-    )
-    assert active_idle_order_re is not None, "idle active-stream reattach path should establish live ownership before attach/watch"
+    idle_restore_ref = active_idle.find("restoreLiveSurfaceForIdleInflight,", idle_defer)
+    idle_attach_ref = active_idle.find("attachLiveSceneForIdleSession,", idle_defer)
+    assert idle_defer < idle_restore_ref < idle_attach_ref
 
 
 def test_load_session_active_scene_restore_is_deferred_after_transcript_render():
@@ -1433,15 +1430,22 @@ def test_attach_and_reattach_use_the_validated_replay_floor():
     assert "INFLIGHT[activeSid].lastRunJournalEventId" not in init_block
 
     load_body = re.sub(r"\s+", "", _function_body(SESSIONS_JS, "loadSession"))
-    assert load_body.count("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])") == 2, (
-        "both reattach paths must re-validate the recovery object"
-    )
-    first = load_body.index("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
-    first_attach = load_body.index("attachLiveStream(sid,activeStreamId", first)
-    assert first < first_attach, "validation must run before the stream is attached"
-    last = load_body.rindex("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
-    last_attach = load_body.rindex("attachLiveStream(sid,activeStreamId", 0, last)
-    assert last_attach < last
+    assert load_body.count("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])") == 2
+    active_start = load_body.index("constattachLiveSceneForActiveSession=")
+    active_end = load_body.index("};", active_start)
+    active_attach = load_body[active_start:active_end]
+    active_normalize = active_attach.index("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
+    assert "String(currentInflight.streamId||'')===String(activeStreamId)" in active_attach
+    assert active_attach.index("_isActiveSessionSceneRestoreOwner(") < active_normalize
+    assert active_attach.index("attachOwnedSessionStream(true)") > active_normalize
+
+    idle_start = load_body.index("constattachLiveSceneForIdleSession=")
+    idle_end = load_body.index("};", idle_start)
+    idle_attach = load_body[idle_start:idle_end]
+    idle_normalize = idle_attach.index("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
+    assert "String(currentInflight.streamId||'')===String(activeStreamId)" in idle_attach
+    assert idle_attach.index("_isActiveSessionSceneRestoreOwner(") < idle_normalize
+    assert idle_attach.index("returnattachOwnedSessionStream()") > idle_normalize
 
 
 def test_live_recovery_prefers_newer_durable_run_journal_snapshot():
