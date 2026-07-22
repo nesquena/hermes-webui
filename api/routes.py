@@ -15636,7 +15636,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.auth import ensure_trusted_auth_session
-            from api.profiles import delete_profile_api, _profiles_match, _validate_profile_name
+            from api.profiles import delete_profile_api, _validate_profile_name
             from api.helpers import build_profile_cookie
 
             _validate_profile_name(name)
