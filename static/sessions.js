@@ -986,7 +986,7 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   _rememberObservedStreamingSession(s);
 }
 
-function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, sceneIdentity){
+function _sessionAnchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, sceneIdentity){
   if(!event||typeof event!=='object') return '';
   const sourceType=String(
     event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
@@ -1031,7 +1031,7 @@ function _anchorActivitySceneHasRecoveryState(scene) {
   const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
   const expectedRunId=String(identity.run_id||identity.stream_id||'').trim();
   const hasOutcome=(events,expectedType)=>Array.isArray(events)
-    &&events.some((event)=>!!_anchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRunId));
+    &&events.some((event)=>!!_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRunId));
   return Boolean(
     (Array.isArray(scene.activity_rows) && scene.activity_rows.length)
     || hasOutcome(scene.artifacts,'artifact_reference')
@@ -1162,7 +1162,7 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
     const seen=new Set();
     for(const [events,expectedRun,identity] of [[journalEvents,journalRun,journalIdentity],[cachedEvents,cachedRun,cachedIdentity]]){
       for(const event of (Array.isArray(events)?events:[])){
-        const identityKey=_anchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
+        const identityKey=_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
         if(!identityKey||seen.has(identityKey)) continue;
         seen.add(identityKey);
         merged.push(event);

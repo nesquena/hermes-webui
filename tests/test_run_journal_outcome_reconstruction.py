@@ -455,7 +455,7 @@ def test_backend_stable_scene_identity_passes_frontend_recovery_validation(monke
     scene = _stable_outcome_scene(monkeypatch)
     functions = "\n".join(
         [
-            _js_function_source(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
         ]
     )
@@ -551,7 +551,7 @@ def test_snapshot_rejects_legacy_outcome_prefix_that_conflicts_with_authoritativ
 def test_outcome_only_scene_enters_inflight_and_replay_dedupes_in_real_registry():
     functions = "\n".join(
         [
-            _js_function_source(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
             _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
             _js_function_source(SESSIONS_JS, "_inflightHasVisibleLiveState"),
@@ -829,7 +829,7 @@ console.log(JSON.stringify(sandbox.result));
 def test_outcome_merge_fails_closed_on_missing_or_wrong_scene_identity():
     functions = "\n".join(
         [
-            _js_function_source(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
             _js_function_source(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
             _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),

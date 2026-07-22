@@ -1152,7 +1152,7 @@ def test_run_journal_recovery_persists_stream_scoped_event_cursor():
         [
             "const assert=require('assert');",
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
-            _function_decl(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _function_decl(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
             """
@@ -1297,7 +1297,7 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
         [
             "const assert=require('assert');",
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
-            _function_decl(SESSIONS_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _function_decl(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
             _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
