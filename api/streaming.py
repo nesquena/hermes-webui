@@ -3228,11 +3228,19 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
 def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
     """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
 
-    Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
-    suppress thinking on reasoning-capable models (#2083). But OpenAI Chat
-    Completions (and Azure OpenAI) reject unknown top-level params with a 400, so
-    that inject silently fails the title call and falls back to a low-quality
-    heuristic title (#4161). Skip the inject for those routes.
+    Fast-path optimization to avoid an extra RTT for known-bad routes.
+    Title generation injects ``extra_body={"reasoning": {"enabled": False}}``
+    to suppress thinking on reasoning-capable models (#2083). Many strict
+    OpenAI-compatible endpoints (OpenAI Chat Completions, Azure, Meta's Llama
+    API, custom proxies, etc.) reject unknown params with 400, so that inject
+    would fail the title call and fall back to a low-quality heuristic
+    title (#4161). We skip the inject for known-bad routes.
+
+    Correctness does NOT depend on this list being exhaustive — the generic
+    compatibility retry in ``agent/auxiliary_client.py`` (call_llm) strips
+    ``reasoning`` on 400 ``unsupported_parameter`` / ``unknown parameter`` and
+    retries once. This function just avoids the wasted round-trip for routes
+    we already know will 400.
 
     OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
     are reasoning-capable but reject a reasoning *disable* — title gen only needs
