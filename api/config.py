@@ -484,6 +484,25 @@ def get_config() -> dict:
     return _cfg_cache
 
 
+def get_config_snapshot() -> dict:
+    """Return a request-owned config snapshot captured under the cache lock."""
+    with _cfg_lock:
+        config_path = _get_config_path()
+        try:
+            current_mtime = config_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        path_changed = _cfg_path != config_path
+        mtime_stale = current_mtime != _cfg_mtime
+        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+            _refresh_config_cache(config_path)
+        try:
+            active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+        except NameError:
+            active_cfg = _cfg_cache
+        return copy.deepcopy(active_cfg)
+
+
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     """Return the validated first-turn session persistence mode.
 
@@ -3867,6 +3886,33 @@ def resolve_model_reasoning_efforts(
     return filtered
 
 
+def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
+    """Return model-level then provider-level effort lists from config."""
+    if not isinstance(provider_entry, dict):
+        return []
+
+    configured_lists = []
+    models = provider_entry.get("models")
+    if isinstance(models, dict):
+        model_key = str(model_id or "").strip().lower()
+        model_entry = models.get(model_id)
+        if not isinstance(model_entry, dict) and model_key:
+            model_entry = next(
+                (
+                    metadata
+                    for configured_id, metadata in models.items()
+                    if str(configured_id).strip().lower() == model_key
+                    and isinstance(metadata, dict)
+                ),
+                None,
+            )
+        if isinstance(model_entry, dict):
+            configured_lists.append(model_entry.get("reasoning_efforts"))
+
+    configured_lists.append(provider_entry.get("reasoning_efforts"))
+    return configured_lists
+
+
 def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -3900,29 +3946,32 @@ def _resolve_model_reasoning_efforts_impl(
     if _nested_route_reasoning_denied(hinted_model):
         return []
 
-    # 0. Provider config: providers.<name>.reasoning_efforts or named
-    # custom_providers[].reasoning_efforts. When the user has explicitly listed
-    # valid efforts for a provider, return that list directly — no heuristics,
-    # no models.dev lookup.
-    # Only short-circuits when the filtered list is non-empty; an all-invalid
-    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
-    _re_list = None
+    # 0. Model/provider config: a models.<model>.reasoning_efforts list takes
+    # precedence over its provider-level reasoning_efforts list. Explicit valid
+    # config is authoritative — no heuristics or models.dev lookup. Invalid or
+    # empty model metadata falls through to the provider list, then heuristics.
+    _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
-                    _re_list = _entry.get("reasoning_efforts")
+                    _re_lists = _configured_reasoning_effort_lists(
+                        _entry, hinted_model
+                    )
                     break
         elif provider:
             _prov_entry = (cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
-                _re_list = _prov_entry.get("reasoning_efforts")
-        if isinstance(_re_list, list) and _re_list:
-            _filtered = [str(x).strip().lower() for x in _re_list
-                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
-            _filtered = list(dict.fromkeys(_filtered))
-            if _filtered:
-                return _filtered
+                _re_lists = _configured_reasoning_effort_lists(
+                    _prov_entry, hinted_model
+                )
+        for _re_list in _re_lists:
+            if isinstance(_re_list, list) and _re_list:
+                _filtered = [str(x).strip().lower() for x in _re_list
+                             if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+                _filtered = list(dict.fromkeys(_filtered))
+                if _filtered:
+                    return _filtered
     except Exception:
         pass
 
@@ -8484,16 +8533,18 @@ _INDEX_HTML_PATH = get_index_html_path()
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()
-# Max compact Session objects held in the in-memory LRU (issue #3506, #4765).
+# Max compact Session objects held in the in-memory LRU (issue #3506, #4765, #6351).
 # Lighter than the agent cache (no live agent runtime), but still bounded so a
 # long-running self-hosted install cannot accumulate every session it ever
 # touched in RAM and eventually segfault (the #4765/#2233/#4633 crash cluster).
+# The shipped default is tuned for the common single-user install; larger
+# deployments can keep raising it through config.yaml or the legacy env fallback.
 #
 # Precedence for the effective cap is resolved by get_sessions_cache_max():
 #   1. config.yaml  webui.sessions_cache_max   (preferred, no new env var)
 #   2. HERMES_WEBUI_SESSIONS_MAX env var        (legacy operator override)
 #   3. DEFAULT_SESSIONS_CACHE_MAX               (sane bounded default)
-DEFAULT_SESSIONS_CACHE_MAX = 300
+DEFAULT_SESSIONS_CACHE_MAX = 100
 SESSIONS_MAX = _env_int("HERMES_WEBUI_SESSIONS_MAX", DEFAULT_SESSIONS_CACHE_MAX)
 
 
@@ -9119,6 +9170,7 @@ _SETTINGS_DEFAULTS = {
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
     "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
+    "hide_empty_state_panel": False,  # hide the complete new-chat welcome panel
     "new_chat_on_workspace_switch": False,  # #5473 opt-in: switching to a DIFFERENT workspace starts a new chat (leaving the current conversation on its original workspace) instead of mutating the current session's workspace in place. Default OFF preserves the shipped in-place-switch behavior.
     "virtualize_transcript": False,  # #4343: virtualize long (>80 msg) transcripts. EXPERIMENTAL, opt-IN (default OFF). Was opt-out/default-on in #4325 but caused scroll-up flicker on long sessions with tall tool-call rows (variable-height anchor oscillation) — flipped off for everyone in #4343; re-enabling requires an explicit opt-in (see virtualize_transcript_optin migration in load_settings).
     "virtualize_transcript_optin": False,  # #4343 migration marker: True only once the user explicitly enables virtualize_transcript AFTER the default-off flip. A stored virtualize_transcript=True WITHOUT this marker is a stale pre-flip value and is reset to False on load (force-off-for-everyone migration).
@@ -9155,6 +9207,7 @@ _SETTINGS_DEFAULTS = {
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
+    "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "hide_composer_attach": False,  # hide attach button in composer footer
@@ -9440,6 +9493,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_conversation_outline",
     "show_busy_placeholder_hint",
     "hide_empty_state_suggestions",
+    "hide_empty_state_panel",
     "new_chat_on_workspace_switch",
     "virtualize_transcript",
     "virtualize_transcript_optin",
@@ -9471,6 +9525,7 @@ _SETTINGS_BOOL_KEYS = {
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",
     "session_endless_scroll",
+    "transparent_stream_event_timestamps",
     "auto_scroll_follow",
     "worklog_details_expanded_default",
     "auth_disabled_acknowledged",

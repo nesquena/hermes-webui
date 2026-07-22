@@ -928,6 +928,7 @@
     );
     const done=_activityRowToolDone(kind,status,payload);
     const isError=_activityRowToolIsError(status,payload);
+    const isDiff=_own(payload,'is_diff')===true||_own(payload,'isDiff')===true;
     const signatureParts=[
       toolName,
       toolCallId||'',
@@ -943,6 +944,7 @@
       output:_sanitizePayload(_own(payload,'output'))??null,
       done,
       is_error:isError,
+      ...(isDiff?{is_diff:true}:{}),
       duration:_activityPayloadFirst(payload,['duration','duration_seconds','elapsed'])??null,
       started_at:_activityPayloadFirst(payload,['started_at','startedAt'])??null,
       signature:signatureParts.join('|'),
@@ -1030,6 +1032,8 @@
         final_message_ref:null,
         terminal_state:null,
         activity_rows:Object.freeze([]),
+        artifacts:Object.freeze([]),
+        side_effects:Object.freeze([]),
       });
     }
     const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
@@ -1045,7 +1049,60 @@
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
       terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
       activity_rows:Object.freeze(rows),
+      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(event=>Object.freeze({
+        ..._copyObject(event),
+        payload:Object.freeze(_copyObject(_own(event,'payload'))),
+      }))),
+      side_effects:Object.freeze((Array.isArray(anchor.side_effects)?anchor.side_effects:[]).map(event=>Object.freeze({
+        ..._copyObject(event),
+        payload:Object.freeze(_copyObject(_own(event,'payload'))),
+      }))),
     });
+  }
+
+  function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const sessionId=_cleanString(_own(item,'session_id'));
+    const turnId=_cleanString(_own(item,'turn_id'));
+    const localId=_cleanString(_own(item,'local_id'));
+    const activityEvents=Array.isArray(_own(item,'activity_events'))?_own(item,'activity_events'):[];
+    const settledMessage=_own(item,'settled_message');
+    if(!sessionId||!turnId||!localId||!activityEvents.length
+      ||!settledMessage||typeof settledMessage!=='object') return null;
+    const runId=_cleanString(_own(item,'run_id'))||null;
+    const streamId=_cleanString(_own(item,'stream_id'))||null;
+    const sourceMessageRefs=Array.isArray(_own(item,'source_message_refs'))
+      ?_own(item,'source_message_refs').map(_cleanString).filter(Boolean)
+      :[];
+    const registry=createAssistantTurnAnchorRegistry({
+      session_id:sessionId,
+      turn_id:turnId,
+      run_id:runId,
+      stream_id:streamId,
+      local_id:localId,
+      source_message_refs:sourceMessageRefs,
+    });
+    const context={
+      session_id:sessionId,
+      turn_id:turnId,
+      run_id:runId,
+      stream_id:streamId,
+    };
+    for(const event of activityEvents){
+      const result=applyAssistantTurnAnchorSourceEvent(registry,event,context);
+      if(!result.applied||result.normalized.classification!=='activity') return null;
+    }
+    const settledPayload={...settledMessage,role:_cleanString(_own(settledMessage,'role'))||'assistant'};
+    const settled=applyAssistantTurnAnchorSourceEvent(registry,{
+      source_type:'settled_message',
+      seq:activityEvents.length+1,
+      local_id:localId,
+      payload:settledPayload,
+    },context);
+    if(!settled.applied) return null;
+    const opts=(options&&typeof options==='object')?options:{};
+    const requestedMode=_cleanString(_own(opts,'mode'))||_cleanString(_own(item,'mode'));
+    return projectAssistantTurnAnchorActivityScene(registry,{mode:requestedMode});
   }
 
   const ACTIVITY_RECONCILIATION_DEFAULT_FIELDS=Object.freeze([
@@ -1648,6 +1705,7 @@
     createAssistantTurnAnchorShadowSnapshot,
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
     projectAssistantTurnAnchorActivityScene,
+    projectAssistantTurnAnchorHistoricalTranscriptScene,
     reconcileAssistantTurnAnchorActivityScene,
     createAssistantTurnAnchorRendererSnapshot,
     reconcileAssistantTurnAnchorRendererSnapshot,

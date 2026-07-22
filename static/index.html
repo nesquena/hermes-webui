@@ -1065,6 +1065,11 @@
                 <option value="hide_all_activity" data-i18n="settings_option_final_answer_only">Final answer only</option>
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row. Final answer only hides activity rows while keeping the final answer visible.</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
+                <input type="checkbox" id="settingsTransparentEventTimestamps" checked onchange="_pickTransparentEventTimestamps(this.checked)" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_transparent_stream_event_timestamps">Show Transparent Stream event timestamps</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_transparent_stream_event_timestamps">Keeps the response footer time visible while hiding the per-event timestamp chips.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1170,6 +1175,13 @@
                 <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsHideEmptyStatePanel" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_hide_empty_state_panel">Hide new-chat welcome panel</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_empty_state_panel">Hide the logo, heading, subtitle, and suggestion buttons on an empty new conversation.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

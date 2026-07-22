@@ -2553,8 +2553,53 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
 // streamed prose loses its image when the answer settles (#MEDIA-in-stream).
 // `sessionId` is forwarded into /api/media so the same allow-list check applies
 // to streamed references too; falls back to whatever the current session is.
-function _inlineMediaHtmlForRef(ref, sessionId){
+// data:image/* URIs the renderer may embed directly as <img src>. Only raster
+// formats plus base64 SVG (scripts do not execute inside <img>), only safe payload
+// chars, and bounded size — everything else (data:text/html etc.) must
+// keep rendering as inert text so a model-emitted data: URI can never become an
+// executable document.
+const _DATA_IMAGE_RE=/^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i;
+const _DATA_IMAGE_SVG_RE=/^data:image\/svg\+xml;base64,[a-z0-9+/=]+$/i;
+const _DATA_IMAGE_MAX_LEN=2*1024*1024;
+
+// The streaming renderer calls this ui-owned predicate too. Keep the dangerous
+// SVG form base64-only: URL-encoded XML is a document-shaped payload, not a
+// normal inline image transport.
+function _isSafeDataImageUri(ref){
+  const value=String(ref||'');
+  return value.length<=_DATA_IMAGE_MAX_LEN
+    && (_DATA_IMAGE_RE.test(value)||_DATA_IMAGE_SVG_RE.test(value));
+}
+
+function _dataImageHtml(ref, altText){
+  if(!_isSafeDataImageUri(ref)) return null;
+  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
+}
+
+// Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
+// <img>; file:// and bare data:image/ URIs route through the same helpers the
+// MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
+// of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
+// dumping raw base64 text into the chat.
+function _mdImageHtml(alt, url){
+  if(/^data:/i.test(url)){
+    const img=_dataImageHtml(url, alt);
+    if(img) return img;
+    return esc(`![${alt}](${String(url).slice(0,64)}…)`);
+  }
+  if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
+  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+}
+
+function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(ref==null) return '';
+  // data:image/* → inline <img>; any other data: scheme renders as inert
+  // truncated text (never routed to api/media, never embedded).
+  if(/^data:/i.test(ref)){
+    const img=_dataImageHtml(ref,altText===undefined?'image':altText);
+    if(img) return img;
+    return `<code>${esc(String(ref).slice(0,64))}…</code>`;
+  }
   // Keep this logic self-contained: some tests extract renderMd() alone and
   // execute it in node, without the top-level helper functions from ui.js.
   // Tests look for `new URL(ref)` / `u.pathname` / `api/media?path=` patterns,
@@ -2599,13 +2644,13 @@ function _inlineMediaHtmlForRef(ref, sessionId){
   const localKind=_mediaKindForName(ref);
   // localArtifactCard(...)
   if(localKind==='image'){
-    const safeName=esc(ref.split('/').pop()||'image');
+    const safeName=esc(altText===undefined?(ref.split('/').pop()||'image'):altText);
     const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
     const dlLabel=esc(tt('media_download'));
     const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
     return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
   }
-  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(altText===undefined?(typeof t==='function'?t('media_svg_label'):'svg'):altText)}" loading="lazy">`;
   if(localKind==='audio'||localKind==='video'){
     return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
   }
@@ -2852,7 +2897,18 @@ function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
   const explicitProvider=_providerFromModelValue(value);
-  if(explicitProvider) return {model:value,model_provider:explicitProvider};
+  if(explicitProvider){
+    const selected=sel&&sel.options
+      ?Array.from(sel.options).find(o=>String(o.value||'')===value)
+      :null;
+    const routedModel=selected&&selected.dataset&&selected.dataset.model;
+    // Read the provider from the matched option's authoritative data-provider
+    // rather than re-parsing the value at its LAST colon: a colon-bearing model
+    // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
+    // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
+    const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
+    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+  }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
   // /tab switch or a model-list rebuild the dropdown transiently still has the
@@ -3141,9 +3197,19 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
-  // 2. Normalized match
+  // 2. Normalized match — but ONLY when unambiguous. If the bare id
+  // matches across multiple provider groups AND no provider hint is
+  // available, return null instead of snapping to the first group's
+  // option. This prevents a deliberate non-default pick from reverting
+  // to the default provider on re-render (#6195).
   const exact=opts.find(o=>norm(o)===target);
-  if(exact) return exact;
+  if(exact){
+    const normMatches=options.filter(o=>norm(o.value)===target);
+    if(normMatches.length>1 && !preferred && !explicitProvider && !rawModel.includes('/')){
+      return null;  // ambiguous bare id — caller must inject the correct option
+    }
+    return exact;
+  }
   // If the request is provider-qualified (either explicit @provider:model or
   // a slash-qualified vendor/model id), do NOT fuzzy-match a sibling model
   // once exact/provider-aware lookup failed. Returning null lets the caller
@@ -3242,19 +3308,33 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
-  if(applied) return applied;
-  const value=modelId;
+  const requestedProvider=String(preferredProviderId||_providerFromModelValue(modelId)||'').trim();
+  const applied=_applyModelToDropdown(modelId,sel,requestedProvider||null);
+  if(applied){
+    const appliedState=typeof _modelStateForSelect==='function'
+      ?_modelStateForSelect(sel,applied)
+      :{model:applied,model_provider:null};
+    if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
+  const rawModel=String(modelId||'');
+  const bareModel=explicitPrefix&&rawModel.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    ?rawModel.slice(explicitPrefix.length)
+    :rawModel;
+  const value=requestedProvider?`${explicitPrefix}${bareModel}`:rawModel;
   const opt=document.createElement('option');
-  opt.value=modelId;
+  opt.value=value;
   opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
   opt.dataset.custom='1';
   const badge=(window._configuredModelBadges||{})[value];
+  const rawBadge=(window._configuredModelBadges||{})[rawModel];
   if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
+  if(rawBadge&&rawBadge.provider) opt.dataset.provider=rawBadge.provider;
+  if(requestedProvider) opt.dataset.model=bareModel;
+  const provider=requestedProvider||(badge&&badge.provider)||(rawBadge&&rawBadge.provider)||_providerFromModelValue(value)||'';
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
-  sel.value=modelId;
+  sel.value=value;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
     _refreshOpenModelDropdown();
@@ -3263,7 +3343,7 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
     if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
-  return modelId;
+  return value;
 }
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
@@ -3644,6 +3724,30 @@ function _normalizeConfiguredModelKey(modelId){
     if(s.includes('/')) s=s.replace(/^[^/]+\//, '')||s;
   }
   return s.replace(/-/g,'.');
+}
+
+function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
+  const normalized=_normalizeConfiguredModelKey(modelId);
+  const provider=String(badge&&badge.provider||'').toLowerCase();
+  const matchingEntries=(entries||[]).filter(existing=>
+    _normalizeConfiguredModelKey(existing.value)===normalized
+  );
+  if(matchingEntries.some(existing=>{
+    const entryProvider=String(existing.providerId||'').toLowerCase();
+    return !provider||!entryProvider||entryProvider===provider;
+  })) return true;
+  // @provider:model is an equivalent routing spelling only when an existing
+  // picker row belongs to that same provider. This supports named custom
+  // providers (@custom:name:model) without collapsing matching model IDs from
+  // different providers.
+  const rawId=String(modelId||'');
+  const prefix=provider?`@${provider}:`:'';
+  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
+  const routedId=rawId.slice(prefix.length);
+  return (entries||[]).some(entry=>
+    String(entry.providerId||'').toLowerCase()===provider
+    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+  );
 }
 
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
@@ -4090,9 +4194,8 @@ function renderModelDropdown(){
       _groupMeta.get(groupKey).modelCount++;
     }
   }
-  const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
   for(const [modelId,badge] of Object.entries(_badgeMap)){
-    if(_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))) continue;
+    if(_isEquivalentConfiguredModelEntry(modelId,badge,_modelData)) continue;
     _modelData.push({
       value:modelId,
       name:esc(getModelLabel(modelId)),
@@ -4100,7 +4203,6 @@ function renderModelDropdown(){
       group:'',
       badge,
     });
-    _existingConfiguredKeys.add(_normalizeConfiguredModelKey(modelId));
   }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
@@ -6205,6 +6307,7 @@ function _transparentEventTimestampSeconds(row, opts){
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
   opts=opts||{};
+  const showEventTimestamp=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
   const live=opts.live===true||row.getAttribute&&(
     row.getAttribute('data-live-tid')==='1'||
     row.getAttribute('data-live-thinking')==='1'||
@@ -6238,6 +6341,12 @@ function _syncTransparentEventTimestamp(row, header, opts){
     return null;
   }
   const source=explicitTs||toolTs||attrTs?'event':'live';
+  row.setAttribute('data-event-at',String(ts));
+  row.setAttribute('data-event-at-source',source);
+  if(!showEventTimestamp){
+    if(timeEl) timeEl.remove();
+    return null;
+  }
   if(!timeEl){
     timeEl=document.createElement('span');
     timeEl.className='transparent-event-time';
@@ -6250,8 +6359,6 @@ function _syncTransparentEventTimestamp(row, header, opts){
   if(fullLabel) timeEl.setAttribute('title',fullLabel); else timeEl.removeAttribute('title');
   timeEl.setAttribute('data-event-at',String(ts));
   timeEl.setAttribute('data-event-at-source',source);
-  row.setAttribute('data-event-at',String(ts));
-  row.setAttribute('data-event-at-source',source);
   const anchor=header.querySelector('.transparent-event-status,.thinking-card-btn-row,.tool-card-toggle,.thinking-card-toggle');
   if(timeEl.parentNode!==header){
     if(anchor&&anchor.parentNode===header) header.insertBefore(timeEl,anchor);
@@ -7221,7 +7328,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -7363,7 +7470,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -7453,7 +7560,11 @@ function renderMd(raw){
     const raw=_safeAttrValue(v);
     const compact=raw.replace(/[\u0000-\u001f\u007f\s]+/g,'').toLowerCase();
     if(!compact) return false;
-    if(/^(javascript|data|vbscript):/i.test(compact)) return false;
+    // data:image/* is permitted for <img> only, validated by the shared strict
+    // predicate. Every other
+    // data: scheme stays blocked for both anchors and images.
+    if(/^data:/i.test(compact)) return !!(img && typeof _isSafeDataImageUri==='function' && _isSafeDataImageUri(raw));
+    if(/^(javascript|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
@@ -12198,6 +12309,7 @@ function _anchorSceneToolCallFromRow(row, opts){
     )||'',
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
+    is_diff:!!(tool.is_diff||payload.is_diff||payload.isDiff),
     duration:tool.duration||payload.duration||payload.duration_seconds,
     started_at:firstValidTimestampSeconds(tool.started_at, payload.started_at, rowTs),
     created_at:firstValidTimestampSeconds(tool.created_at, payload.created_at, rowTs),
@@ -14595,6 +14707,226 @@ function _toolArgsSnapshot(args, limit){
   return out;
 }
 
+function _idLinkedHistoricalMessageText(message){
+  if(!message||typeof message!=='object') return '';
+  const content=message.content;
+  if(typeof content==='string') return content;
+  if(!Array.isArray(content)) return '';
+  return content.filter(part=>part&&typeof part==='object'&&part.type==='text').map(part=>{
+    if(!part||typeof part!=='object') return '';
+    return String(part.text||part.content||'');
+  }).join('\n');
+}
+
+function _idLinkedHistoricalMessageHasVisibleText(message){
+  return _idLinkedHistoricalMessageText(message).trim()!=='';
+}
+
+function _idLinkedHistoricalMessageRef(message, rawIdx){
+  if(message&&typeof message==='object'){
+    for(const key of ['message_id','id','local_id']){
+      const value=message[key];
+      if(typeof value==='string'&&value.trim()) return value.trim();
+      if(typeof value==='number'&&Number.isFinite(value)) return String(value);
+    }
+  }
+  return `raw_idx:${rawIdx}`;
+}
+
+function _idLinkedHistoricalToolArguments(toolCall){
+  if(!toolCall||typeof toolCall!=='object') return null;
+  const fn=toolCall.function;
+  if(!fn||typeof fn!=='object'||Array.isArray(fn)) return null;
+  const raw=fn.arguments;
+  if(raw===undefined||raw===null||raw==='') return null;
+  if(raw&&typeof raw==='object'&&!Array.isArray(raw)) return raw;
+  if(typeof raw!=='string') return null;
+  try{
+    const parsed=JSON.parse(raw);
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:null;
+  }catch(e){
+    return null;
+  }
+}
+
+function _idLinkedHistoricalToolResultRaw(message){
+  if(!message||typeof message!=='object') return null;
+  const content=message.content;
+  return typeof content==='string'?content:null;
+}
+
+function _idLinkedHistoricalRedactSnippet(value){
+  let text=String(value||'');
+  if(!text) return '';
+  if(typeof _redactToolTargetLabel==='function'){
+    try{text=_redactToolTargetLabel(text);}
+    catch(e){}
+  }
+  return text;
+}
+
+function _idLinkedHistoricalHasVisibleSidecar(message){
+  if(!message||typeof message!=='object') return false;
+  const visibleKeys=['attachments','_attachments','_statusCard','status_card','statusCard','card','cards','artifact','artifacts','files','images','media'];
+  for(const key of visibleKeys){
+    if(!Object.prototype.hasOwnProperty.call(message,key)) continue;
+    const value=message[key];
+    if(value===undefined||value===null||value===false) continue;
+    if(Array.isArray(value)&&value.length===0) continue;
+    if(typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===0) continue;
+    return true;
+  }
+  return false;
+}
+
+// Claim legacy settled ownership only when the transcript itself proves a
+// complete, user-bounded declaration/result/final-answer chain.
+function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
+  const list=Array.isArray(messages)?messages:[];
+  const start=Math.max(0,Number(turnStart)||0);
+  const end=Math.min(list.length,Math.max(start,Number(turnEnd)||0));
+  const opts=options&&typeof options==='object'?options:{};
+  const sessionId=String(opts.sessionId||opts.session_id||'').trim();
+  const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
+  if(!sessionId||!api||typeof api.projectAssistantTurnAnchorHistoricalTranscriptScene!=='function') return null;
+
+  const declarations=[];
+  const declarationIds=new Set();
+  const declarationRefs=[];
+  const visibleAssistantIndexes=[];
+  const assistantIndexes=[];
+  const resultsById=new Map();
+  for(let rawIdx=start;rawIdx<end;rawIdx++){
+    const message=list[rawIdx];
+    if(!message||typeof message!=='object') continue;
+    const role=message.role;
+    if(role==='user'&&rawIdx===start) continue;
+    if(message._anchor_activity_scene) return null;
+    if(role==='assistant'){
+      assistantIndexes.push(rawIdx);
+      const hasVisibleText=_idLinkedHistoricalMessageHasVisibleText(message);
+      const reasoningText=_assistantReasoningPayloadText(message);
+      if(hasVisibleText) visibleAssistantIndexes.push(rawIdx);
+      if(reasoningText) return null;
+      if(_idLinkedHistoricalHasVisibleSidecar(message)) return null;
+      if(Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length) return null;
+      if(Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use')) return null;
+      const toolCalls=Array.isArray(message.tool_calls)?message.tool_calls:[];
+      if(toolCalls.length&&hasVisibleText) return null;
+      if(!toolCalls.length){
+        if(hasVisibleText) continue;
+        return null;
+      }
+      if(message.content!==undefined&&message.content!==null&&message.content!=='') return null;
+      const messageRef=_idLinkedHistoricalMessageRef(message,rawIdx);
+      if(!declarationRefs.includes(messageRef)) declarationRefs.push(messageRef);
+      for(const toolCall of toolCalls){
+        const callId=String(toolCall&&toolCall.id||'').trim();
+        const fn=toolCall&&toolCall.function;
+        const name=String(fn&&fn.name||'').trim();
+        const args=_idLinkedHistoricalToolArguments(toolCall);
+        if(!callId||!name||args===null||declarationIds.has(callId)) return null;
+        declarationIds.add(callId);
+        declarations.push({callId,name,args,rawIdx,messageRef});
+      }
+      continue;
+    }
+    if(role!=='tool') return null;
+    const callId=String(message.tool_call_id||'').trim();
+    if(!callId||!declarationIds.has(callId)) return null;
+    const matches=resultsById.get(callId)||[];
+    matches.push({message,rawIdx});
+    resultsById.set(callId,matches);
+  }
+
+  if(!declarations.length||visibleAssistantIndexes.length!==1) return null;
+  const ownerIndex=visibleAssistantIndexes[0];
+  if(ownerIndex!==assistantIndexes[assistantIndexes.length-1]) return null;
+  const owner=list[ownerIndex];
+  if(Array.isArray(owner.tool_calls)&&owner.tool_calls.length) return null;
+  const ownerRef=_idLinkedHistoricalMessageRef(owner,ownerIndex);
+  for(const declaration of declarations){
+    const matches=resultsById.get(declaration.callId)||[];
+    if(matches.length!==1||matches[0].rawIdx<=declaration.rawIdx||matches[0].rawIdx>=ownerIndex) return null;
+  }
+  if(resultsById.size!==declarations.length) return null;
+
+  const sourceRefs=declarationRefs.concat(ownerRef).filter((value,index,array)=>array.indexOf(value)===index);
+  const turnId=['historical',sessionId,declarationRefs[0],ownerRef].join(':');
+  const activityEvents=[];
+  for(let index=0;index<declarations.length;index++){
+    const declaration=declarations[index];
+    const resultEntry=resultsById.get(declaration.callId)[0];
+    const args=_toolArgsSnapshot(declaration.args);
+    const resultRaw=_idLinkedHistoricalToolResultRaw(resultEntry.message);
+    if(resultRaw===null) return null;
+    const resultSnippet=_idLinkedHistoricalRedactSnippet(_cliToolResultSnippet(resultRaw));
+    const patchSnippet=_cliPatchSnippetFromArgs(declaration.name,args);
+    const isDiff=_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet);
+    const snippet=_idLinkedHistoricalRedactSnippet(_cliToolCardSnippet(resultSnippet,patchSnippet));
+    const status=String(resultEntry.message.status||'').trim().toLowerCase();
+    const isError=resultEntry.message.is_error===true||status==='error'||status==='failed'||status==='failure';
+    activityEvents.push({
+      source_type:'tool_complete',
+      seq:index+1,
+      local_id:`historical:${declaration.messageRef}:tool:${declaration.callId}`,
+      payload:{
+        id:declaration.callId,
+        tid:declaration.callId,
+        tool_call_id:declaration.callId,
+        name:declaration.name,
+        args,
+        command:String(args.command||args.cmd||''),
+        snippet,
+        done:true,
+        is_error:isError,
+        is_diff:isDiff,
+        assistant_msg_idx:declaration.rawIdx,
+      },
+    });
+  }
+  let scene;
+  try{
+    scene=api.projectAssistantTurnAnchorHistoricalTranscriptScene({
+      session_id:sessionId,
+      turn_id:turnId,
+      local_id:ownerRef,
+      source_message_refs:sourceRefs,
+      activity_events:activityEvents,
+      settled_message:{role:'assistant',id:ownerRef,content:_idLinkedHistoricalMessageText(owner)},
+    },{mode:opts.mode||'compact_worklog'});
+  }catch(e){
+    return null;
+  }
+  if(!scene||scene.version!=='activity_scene_v1'||scene.activity_rows.length!==declarations.length) return null;
+  return {ownerIndex,scene};
+}
+
+function _hydrateIdLinkedHistoricalToolScenes(messages, options){
+  const list=Array.isArray(messages)?messages:[];
+  let turnStart=-1;
+  let hydrated=0;
+  const hydrateTurn=(turnEnd)=>{
+    if(turnStart<0||turnEnd<=turnStart+1) return;
+    let hydratedTurn;
+    try{hydratedTurn=_idLinkedHistoricalTurnScene(list,turnStart,turnEnd,options);}
+    catch(e){return;}
+    if(!hydratedTurn) return;
+    const owner=list[hydratedTurn.ownerIndex];
+    try{owner._anchor_activity_scene=hydratedTurn.scene;}
+    catch(e){return;}
+    if(owner._anchor_activity_scene===hydratedTurn.scene) hydrated+=1;
+  };
+  for(let rawIdx=0;rawIdx<list.length;rawIdx++){
+    const message=list[rawIdx];
+    if(!message||message.role!=='user') continue;
+    hydrateTurn(rawIdx);
+    turnStart=rawIdx;
+  }
+  hydrateTurn(list.length);
+  return hydrated;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -15238,6 +15570,10 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
+    const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
+    _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
+  }
   const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call

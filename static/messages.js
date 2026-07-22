@@ -2649,7 +2649,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   _scheduleAnchorRegistryCleanup(600000);
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
-  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome){
+  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
     if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
     const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
@@ -2674,7 +2674,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         sourceEvent,
         {session_id:activeSid,stream_id:streamId}
       );
-      const rendered=_renderAnchorLiveScene();
+      const rendered=options&&options.render===false?false:_renderAnchorLiveScene();
       if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
       return result;
     }catch(err){
@@ -3467,7 +3467,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!row||typeof row!=='object') return false;
     const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
     const values=[row.row_id,row.local_id,row.event_id,identity.local_id,identity.event_id];
-    return values.some(value=>String(value||'').startsWith('live-'));
+    if(values.some(value=>String(value||'').startsWith('live-'))) return true;
+    // Provider tool-call IDs do not use the live prefix. A stream owner without
+    // a settled assistant index still identifies a projected live row.
+    const group=row.group&&typeof row.group==='object'?row.group:{};
+    const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);
+    const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;
+    return hasStreamOwner&&!hasAssistantMessageIndex;
   }
   function _anchorSceneMessageRowsHaveThinking(messageRows){
     if(!(messageRows instanceof Map)) return false;
@@ -3482,7 +3488,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(String(row.status||'').toLowerCase()!=='running') return row;
     if(!_anchorSceneRowHasLiveIdentity(row)) return row;
     if(row.role==='thinking'&&hasSettledThinking) return null;
-    return {...row,status:'completed'};
+    const sealed={...row,status:'completed'};
+    if(row.payload&&typeof row.payload==='object'){
+      sealed.payload={...row.payload,status:'completed'};
+      if(row.role==='tool') sealed.payload.done=true;
+    }
+    if(row.role==='tool'&&row.tool&&typeof row.tool==='object'){
+      sealed.tool={...row.tool,done:true};
+    }
+    return sealed;
   }
   function _anchorSceneRowLooksLikeFinalAnswer(rowTextKey, finalKey){
     if(!rowTextKey||!finalKey) return false;
@@ -3694,6 +3708,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
+  function _anchorSceneHasOwnedOutcomes(scene){
+    return !!(
+      (Array.isArray(scene&&scene.artifacts)&&scene.artifacts.length)
+      || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
+    );
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
@@ -3709,9 +3729,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+    const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
+    if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
-      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';
+      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
       if(!shouldPersistScene) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
@@ -3992,8 +4013,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
     if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
+    const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+    const sceneStreamId=sceneIdentity.stream_id||streamId;
+    const sceneRunId=sceneIdentity.run_id||sceneStreamId;
     const sceneKey=[
-      scene.identity&&scene.identity.stream_id||streamId||'',
+      sceneRunId||'',
+      sceneStreamId||'',
       scene.activity_rows.length,
       scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
     ].join(':');
@@ -4022,22 +4047,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.activitySegmentSeq=payload.activitySegmentSeq||row.group.activity_segment_seq;
         payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
       }
+      const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
       const sourceEvent={
         ...payload,
         source_event_type:sourceType,
-        local_id:row.local_id||row.row_id||`snapshot:${streamId}:${i}`,
+        local_id:row.local_id||row.row_id||`snapshot:${sceneStreamId}:${i}`,
         event_id:row.event_id||null,
         seq:row.seq??undefined,
         status:row.status||undefined,
-        stream_id:row.stream_id||streamId,
-        run_id:row.run_id||streamId,
+        stream_id:row.stream_id||rowIdentity.stream_id||sceneStreamId,
+        run_id:row.run_id||rowIdentity.run_id||sceneRunId,
         // Carry the row's persisted creation timestamp through hydration so the
         // worklog event timestamp (#5700/#5739) survives a settled-snapshot rebuild
         // (payload may not carry created_at even when the row does). (#5739 gate.)
         created_at:payload.created_at??row.created_at??undefined,
       };
       try{
-        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:streamId,run_id:streamId});
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
       }catch(err){
         if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
           _anchorShadowWarned=true;
@@ -4219,7 +4245,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
   const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\/|#|\?|\.|api|session\/)/i;
+  // ui.js owns the image-only data URI policy. It loads before this script;
+  // fail closed if that contract is unavailable rather than inventing a second
+  // allowlist that can drift from settled rendering.
   const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  function _smdImgSrcAllowed(v){
+    const s=String(v||'');
+    if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
+    return _SMD_SAFE_IMG_URL_RE.test(s);
+  }
   function _smdLinkHref(raw){
     const href=String(raw||'');
     if(/^session:\/\//i.test(href)){
@@ -4262,7 +4296,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const _im=root.querySelectorAll('img[src]');
     for(let i=0;i<_im.length;i++){
       const n=_im[i],v=n.getAttribute('src')||'';
-      if(!_SMD_SAFE_IMG_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
+      if(!_smdImgSrcAllowed(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
 
@@ -4390,7 +4424,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
-      const safeUrl=isSrc?_SMD_SAFE_IMG_URL_RE:_SMD_SAFE_URL_RE;
+      const allowed=isSrc?_smdImgSrcAllowed(value):_SMD_SAFE_URL_RE.test(String(value||''));
       if(isHref&&/^(file|workspace|session):\/\//i.test(String(value||''))){
         baseSetAttr(data,attr,_smdLinkHref(value));
         if(/^session:\/\//i.test(String(value||''))){
@@ -4399,7 +4433,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         return;
       }
-      if((isHref||isSrc)&&!safeUrl.test(String(value||''))){
+      if((isHref||isSrc)&&!allowed){
         const node=data&&data.nodes&&data.nodes[data.index];
         if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
         return;
@@ -4642,7 +4676,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
-      const safeUrl=isSrc?_SMD_SAFE_IMG_URL_RE:_SMD_SAFE_URL_RE;
+      const allowed=isSrc?_smdImgSrcAllowed(value):_SMD_SAFE_URL_RE.test(String(value||''));
       if(isHref&&/^(file|workspace|session):\/\//i.test(String(value||''))){
         baseSetAttr(data,attr,_smdLinkHref(value));
         if(/^session:\/\//i.test(String(value||''))){
@@ -4651,7 +4685,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         return;
       }
-      if((isHref||isSrc)&&!safeUrl.test(String(value||''))){
+      if((isHref||isSrc)&&!allowed){
         const node=data&&data.nodes&&data.nodes[data.index];
         if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
         return;
@@ -5573,6 +5607,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       if(!S.session||S.session.session_id!==activeSid) return;
+      _applyToAnchor('state_saved',d,e,null,{render:false});
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
@@ -6469,6 +6504,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
   const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  function _isHistoricalAnchorActivityScene(scene){
+    if(!scene||typeof scene!=='object') return false;
+    const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+    const turnId=identity&&typeof identity.turn_id==='string'?identity.turn_id:'';
+    return turnId.indexOf('historical:')===0;
+  }
   function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
@@ -6483,6 +6524,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const k=_messageIdentityKey(nm); if(!k) continue;
       const pm=prevIdx.get(k); if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
+        if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
         if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
       }
     }

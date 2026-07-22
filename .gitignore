@@ -37,6 +37,7 @@ final-check.png
 
 # Version file written by Docker/CI build — generated, never committed
 api/_version.py
+api/_scm_version.py
 
 # OS files
 .DS_Store

@@ -2538,6 +2538,11 @@ function applyEmptyStateSuggestionPref(){
   $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
 }
 
+function applyEmptyStatePanelPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStatePanel===true);
+}
+
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
@@ -3224,9 +3229,13 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
+    applyEmptyStatePanelPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
-    // It caused scroll-up flicker on long sessions, so it's off for everyone
-    // unless explicitly opted in; long transcripts render in full by default.
+    // #4346 Phase B (footer-jitter suppression during virtual-scroll
+    // measurement re-renders) resolved the scroll-up flicker root cause,
+    // but virtualization remains opt-in until battle-tested further.
+    // Users can explicitly enable it via Settings → virtualize_transcript.
     window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
@@ -3241,6 +3250,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       ? s.chat_activity_display_mode
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
+    window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -3378,6 +3388,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=false;
+    applyEmptyStatePanelPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
@@ -3389,6 +3401,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
+    window._transparentEventTimestamps=true;
     window._terminalAutoExpandOnOutput=false;
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
