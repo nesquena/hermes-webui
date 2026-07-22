@@ -12,6 +12,7 @@ import urllib.request
 from typing import Any
 
 from api.config import (
+    AGENT_INSTANCES,
     CANCEL_FLAGS,
     PENDING_GOAL_CONTINUATION,
     STREAM_GOAL_RELATED,
@@ -1187,6 +1188,7 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
+            AGENT_INSTANCES.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
@@ -1195,4 +1197,5 @@ def _run_gateway_chat_streaming(
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
         _STREAM_RUN_IDS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
