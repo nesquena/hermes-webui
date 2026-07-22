@@ -567,7 +567,7 @@ class TestDoneEventSmd:
         fn = self.get_fn()
         assert fn, "'done' handler not found"
         fetch_idx = fn.index("await _fetchSettledSessionMessageWindow")
-        ownership_idx = fn.index("if(isActiveSession&&!_isSessionCurrentPane(activeSid)) isActiveSession=false;")
+        ownership_idx = fn.index("const _settlementStillOwnsPane=", fetch_idx)
         decision_idx = fn.index("const shouldFollowOnDone", ownership_idx)
         render_idx = fn.index("renderMessages({preserveScroll:true})", decision_idx)
         helper_idx = fn.index("_followSettledDoneIfStillPinned();", render_idx)
