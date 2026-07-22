@@ -3335,7 +3335,10 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
     # stays hidden even when the agent is already sending effort for Grok.
     # Names that already contain "reasoning"/"thinking" match the generic
     # branch above and never reach here.
-    if "grok" in token_set or normalized.startswith("grok"):
+    # Token-only match (no startswith): after [^a-z0-9]+ normalization,
+    # "grok-4.5" → tokens include "grok", while "grokfast-150x" → "grokfast"
+    # and must NOT be treated as Grok reasoning-capable.
+    if "grok" in token_set:
         return True
     if "glm" in token_set or normalized.startswith("glm"):
         return True

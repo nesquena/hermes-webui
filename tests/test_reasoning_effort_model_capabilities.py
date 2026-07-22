@@ -539,3 +539,10 @@ def test_grok_reasoning_named_ids_still_reasoning_capable():
     # keep that path green after adding the bare-family rule.
     assert cfg._candidate_supports_reasoning("grok-4.20-reasoning") is True
 
+
+def test_grok_prefix_without_family_token_is_not_reasoning_capable():
+    # Guard against a broad startswith("grok") match (Greptile P2 on #6438):
+    # "grokfast-150x" normalizes to token "grokfast", not "grok".
+    for model in ("grokfast-150x", "my-provider/grokfast-150x", "notgrok-4.5"):
+        assert cfg._candidate_supports_reasoning(model) is False, model
+
