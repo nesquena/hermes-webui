@@ -171,18 +171,32 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
     # UNCONDITIONALLY right after disarm (covers both pin states), THEN scrollToBottom()
     # only for followers to re-settle at the tail. This makes keep-open genuinely
     # one-frame for everyone.
+    #
+    # Round 10 (#6385): capture the scroll snapshot from the LIVE DOM before arming
+    # keep-open, so the collapse render below anchors to the content the reader was
+    # actually viewing — not to a stale intermediate state where the worklog was
+    # temporarily expanded. The pre-capture variable must be defined before arm and
+    # threaded into the collapse pass as `_prescrollSnapshot`.
+    pre_capture_idx = MESSAGES_JS.index("_doneLiveScrollSnapshot")
+    arm_idx = MESSAGES_JS.index("_armKeepSettledWorklogOpen")
+    assert pre_capture_idx < arm_idx, (
+        "_doneLiveScrollSnapshot must be captured before _armKeepSettledWorklogOpen "
+        "to snapshot the live (not expanded-worklog) DOM positions."
+    )
     disarm_idx = MESSAGES_JS.index("_disarmKeepSettledWorklogOpen()")
     after = MESSAGES_JS[disarm_idx : disarm_idx + 700]
-    # The collapse pass must run after disarm for BOTH pin states.
-    assert "_renderMessagesWithScrollSnapshot()" in after, (
+    # The collapse pass must run after disarm for BOTH pin states, and it must
+    # carry the pre-captured live snapshot.
+    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after, (
         "after _disarmKeepSettledWorklogOpen() the STREAM_DONE handler must run a "
-        "scroll-preserving collapse pass (_renderMessagesWithScrollSnapshot) so the "
-        "forced-open worklog collapses back to the user/live state without the jump."
+        "scroll-preserving collapse pass (_renderMessagesWithScrollSnapshot) with the "
+        "pre-captured live snapshot so the forced-open worklog collapses back to "
+        "the user/live state without the jump."
     )
     # The follower re-settle (scrollToBottom) must come AFTER the collapse render —
     # otherwise a pinned follower keeps the forced-open DOM (scrollToBottom does not
     # re-render). This is the exact pinned-path bug the second RED gate-cert caught.
-    collapse_pos = after.index("_renderMessagesWithScrollSnapshot()")
+    collapse_pos = after.index("_renderMessagesWithScrollSnapshot")
     follow_pos = after.index("shouldFollowOnDone")
     assert collapse_pos < follow_pos, (
         "the collapse render must run BEFORE the shouldFollowOnDone scrollToBottom() "
@@ -199,4 +213,87 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
     wrapper = _function_body(UI_JS, "_renderMessagesWithScrollSnapshot")
     assert "_captureMessageScrollSnapshot()" in wrapper
     assert "_restoreMessageScrollSnapshotSameFrame" in wrapper
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_prescroll_snapshot_bypasses_capture_no_option_fallback_still_captures():
+    """Sentinel _prescrollSnapshot reaches restore without re-capture.
+
+    Behavioral harness for _renderMessagesWithScrollSnapshot:
+
+    1. Supply a sentinel snapshot via _prescrollSnapshot, stub
+       _captureMessageScrollSnapshot with a counter — proves the
+       sentinel reaches _restoreMessageScrollSnapshotSameFrame
+       without a second capture.
+
+    2. Call with no options — proves the no-option fallback still
+       calls _captureMessageScrollSnapshot() normally (the contract
+       for callers at static/ui.js:9565, 14416, 14424).
+
+    3. Call with empty options {} — same fallback proof.
+    """
+    wrapper = _extract("_renderMessagesWithScrollSnapshot")
+    harness = textwrap.dedent(f"""
+        let captureCount = 0;
+        let restoredSnapshot = null;
+        let renderedOptions = null;
+        globalThis._captureMessageScrollSnapshot = () => {{
+            captureCount++;
+            return {{_sentinel: 'fresh-capture', bottom: 0, pinned: true}};
+        }};
+        globalThis.renderMessages = (opts) => {{ renderedOptions = opts; }};
+        globalThis._restoreMessageScrollSnapshotSameFrame = (snap) => {{ restoredSnapshot = snap; }};
+        {wrapper}
+        // Test 1: supplied _prescrollSnapshot -> use it, do NOT capture
+        const sentinel = {{_sentinel: 'pre-captured', bottom: 42, pinned: true}};
+        _renderMessagesWithScrollSnapshot({{_prescrollSnapshot: sentinel}});
+        const test1_usedPrescroll = restoredSnapshot === sentinel;
+        const test1_noCapture = captureCount === 0;
+        const test1_preservedArgs = renderedOptions && renderedOptions._prescrollSnapshot === sentinel;
+        // Reset
+        captureCount = 0; restoredSnapshot = null; renderedOptions = null;
+        // Test 2: no options -> fall back to _captureMessageScrollSnapshot()
+        _renderMessagesWithScrollSnapshot();
+        const test2_captured = captureCount === 1;
+        const test2_usedCapture = restoredSnapshot && restoredSnapshot._sentinel === 'fresh-capture';
+        // Reset
+        captureCount = 0; restoredSnapshot = null; renderedOptions = null;
+        // Test 3: empty options object -> still fall back to capture
+        _renderMessagesWithScrollSnapshot({{}});
+        const test3_captured = captureCount === 1;
+        const test3_usedCapture = restoredSnapshot && restoredSnapshot._sentinel === 'fresh-capture';
+        console.log(JSON.stringify({{
+            test1_usedPrescroll,
+            test1_noCapture,
+            test1_preservedArgs,
+            test2_captured,
+            test2_usedCapture,
+            test3_captured,
+            test3_usedCapture
+        }}));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert out["test1_usedPrescroll"] is True, (
+        "supplied _prescrollSnapshot must reach _restoreMessageScrollSnapshotSameFrame"
+    )
+    assert out["test1_noCapture"] is True, (
+        "supplied _prescrollSnapshot must bypass _captureMessageScrollSnapshot()"
+    )
+    assert out["test1_preservedArgs"] is True, (
+        "options passed to _renderMessagesWithScrollSnapshot must be forwarded to renderMessages"
+    )
+    assert out["test2_captured"] is True, (
+        "no-option call must fall back to _captureMessageScrollSnapshot()"
+    )
+    assert out["test2_usedCapture"] is True, (
+        "no-option call's captured snapshot must reach _restoreMessageScrollSnapshotSameFrame"
+    )
+    assert out["test3_captured"] is True, (
+        "empty-options call must fall back to _captureMessageScrollSnapshot()"
+    )
+    assert out["test3_usedCapture"] is True, (
+        "empty-options call's captured snapshot must reach _restoreMessageScrollSnapshotSameFrame"
+    )
 
