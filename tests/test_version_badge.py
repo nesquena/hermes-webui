@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).parent.parent
 
 class TestDetectWebUIVersion:
 
-    def _fresh_detect(self, mock_run_git=None, version_file_content=None, tmp_path=None):
+    def _fresh_detect(self, mock_run_git=None, version_file_content=None, scm_version=None, tmp_path=None):
         """Call _detect_webui_version() with controlled dependencies."""
         import api.updates as upd
 
@@ -37,13 +37,18 @@ class TestDetectWebUIVersion:
             vf.parent.mkdir(parents=True, exist_ok=True)
             vf.write_text(version_file_content, encoding='utf-8')
 
+        scm_module = types.ModuleType('api._scm_version')
+        if scm_version is not None:
+            scm_module.__version__ = scm_version
+
         def _run_git_side_effect(args, cwd, timeout=10):
             if mock_run_git is not None:
                 return mock_run_git(args, cwd, timeout)
             return ('', False)
 
         with patch.object(upd, '_run_git', side_effect=_run_git_side_effect), \
-             patch.object(upd, 'REPO_ROOT', fake_root):
+             patch.object(upd, 'REPO_ROOT', fake_root), \
+             patch.dict(sys.modules, {'api._scm_version': scm_module}):
             return upd._detect_webui_version()
 
     def test_git_success_returns_tag(self, tmp_path):
@@ -75,6 +80,31 @@ class TestDetectWebUIVersion:
         """When git fails and no _version.py exists, returns 'unknown'."""
         result = self._fresh_detect(
             mock_run_git=lambda args, cwd, timeout: ('', False),
+            tmp_path=tmp_path,
+        )
+        assert result == 'unknown'
+
+    def test_scm_fallback_normalizes_pep440_version(self, tmp_path):
+        result = self._fresh_detect(
+            mock_run_git=lambda args, cwd, timeout: ('', False),
+            scm_version='0.52.2695',
+            tmp_path=tmp_path,
+        )
+        assert result == 'v0.52.2695'
+
+    def test_docker_version_file_precedes_scm_fallback(self, tmp_path):
+        result = self._fresh_detect(
+            mock_run_git=lambda args, cwd, timeout: ('', False),
+            version_file_content="__version__ = 'v0.52.100'\n",
+            scm_version='0.52.2695',
+            tmp_path=tmp_path,
+        )
+        assert result == 'v0.52.100'
+
+    def test_malformed_scm_module_returns_unknown(self, tmp_path):
+        result = self._fresh_detect(
+            mock_run_git=lambda args, cwd, timeout: ('', False),
+            scm_version=None,
             tmp_path=tmp_path,
         )
         assert result == 'unknown'

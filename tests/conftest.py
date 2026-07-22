@@ -19,6 +19,7 @@ import multiprocessing
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -180,6 +181,20 @@ os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # tests that read/write config.yaml stay inside the isolated test home.
 os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
+# Model-selection env overrides must NOT leak from the runner into tests.
+# get_effective_default_model() (api/config.py) treats HERMES_MODEL / OPENAI_MODEL
+# / LLM_MODEL as the highest-priority default-model source — above the isolated
+# test config. When the pytest process runs inside a live Hermes agent session,
+# HERMES_MODEL is exported to the agent's runtime model (e.g. "opus-4.8"), which
+# then overrides the sandbox config and pollutes the model picker/catalog. That
+# broke test_sprint12 (default-model readback), test_issue1538 (Nous @nous:
+# prefix invariant) and test_issue1567 (picker capacity/symmetry) whenever the
+# suite ran on a box with HERMES_MODEL set. Strip them at module level so the
+# isolated config is authoritative for the pytest process; the out-of-process
+# test server env is scrubbed identically in the test_server fixture below.
+for _model_env in ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
+    os.environ.pop(_model_env, None)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_hermes_config_path():
@@ -214,6 +229,28 @@ def _reset_password_hash_cache():
     yield
     if _invalidate_password_hash_cache:
         _invalidate_password_hash_cache()
+
+
+@pytest.fixture(autouse=True)
+def _invalidate_providers_cache():
+    """Clear the /api/providers TTL cache around every test (#6010).
+
+    get_providers() caches its response for 30s keyed on profile home +
+    .env/config.yaml mtimes + config fingerprint. Tests that monkeypatch auth
+    state (e.g. test_issue1202_oauth_provider_status) without changing those
+    key inputs would receive a stale cached result from a sibling test,
+    breaking test hermeticity in the full sharded suite. Clear before AND after
+    each test so no cache entry leaks across the isolation boundary.
+    """
+    try:
+        from api.providers import invalidate_providers_cache
+    except Exception:
+        invalidate_providers_cache = None
+    if invalidate_providers_cache:
+        invalidate_providers_cache()
+    yield
+    if invalidate_providers_cache:
+        invalidate_providers_cache()
 
 
 _MISSING = object()  # sentinel: api.profiles module not loaded pre-test
@@ -862,6 +899,24 @@ def _rmtree_retry(path):
     )
 
 
+def _seed_test_skills(real_skills: pathlib.Path, test_skills: pathlib.Path) -> None:
+    if not real_skills.exists() or test_skills.exists():
+        return
+    try:
+        test_skills.symlink_to(real_skills)
+    except OSError as exc:
+        if not WINDOWS or getattr(exc, "winerror", None) != 1314:
+            raise
+        shutil.copytree(real_skills, test_skills, copy_function=_copy2_readonly)
+
+
+def _copy2_readonly(source: str, destination: str) -> str:
+    copied = shutil.copy2(source, destination)
+    path = pathlib.Path(copied)
+    path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    return copied
+
+
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -892,8 +947,7 @@ def test_server():
     # but all write-heavy state stays isolated.
     real_skills  = HERMES_HOME / 'skills'
     test_skills  = TEST_STATE_DIR / 'skills'
-    if real_skills.exists() and not test_skills.exists():
-        test_skills.symlink_to(real_skills)
+    _seed_test_skills(real_skills, test_skills)
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)
@@ -947,6 +1001,13 @@ def test_server():
     for _k in list(env):
         if any(_k.startswith(p) for p in _CRED_ENV_PREFIXES):
             del env[_k]
+    # Model-selection overrides must not reach the test server either. They are
+    # already popped from the pytest process env at module level, but strip them
+    # explicitly here so the subprocess default model comes only from the isolated
+    # config / HERMES_WEBUI_DEFAULT_MODEL below — never a runner-exported
+    # HERMES_MODEL (get_effective_default_model gives these env vars top priority).
+    for _model_env in ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
+        env.pop(_model_env, None)
     # Belt-and-suspenders: keep IMDS disabled in the spawn env too (we set it
     # at module level above for the pytest process, but make it explicit here
     # so it's never accidentally cleared by an env.update later).

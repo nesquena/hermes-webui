@@ -10,11 +10,10 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-# Ignore SIGPIPE so a dropped client only aborts that write, not the whole WebUI process.
-_SIGPIPE = getattr(signal, "SIGPIPE", None)
-if _SIGPIPE is not None:
-    signal.signal(_SIGPIPE, signal.SIG_IGN)
+def _ignore_sigpipe() -> None:
+    """Keep broken client writes from terminating the server process."""
+    if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
+        signal.signal(sigpipe, signal.SIG_IGN)
 
 # Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
@@ -548,6 +547,8 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
+    _ignore_sigpipe()
+
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /
     # handler-thread exception during startup or serving produces a diagnostic
@@ -744,6 +745,5 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
-
 if __name__ == '__main__':
     main()

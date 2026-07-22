@@ -161,7 +161,10 @@ def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypa
     assert decision["continuation_prompt"].startswith("[Continuing toward your standing goal]")
 
 
-def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path):
+@pytest.mark.parametrize("gateway_owned", [False, True])
+def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(
+    monkeypatch, tmp_path, gateway_owned
+):
     """POST /api/goal uses GoalManager state and launches the first goal turn."""
     from api import goals as webui_goals
     from api import routes
@@ -201,6 +204,12 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
     monkeypatch.setattr(
         routes,
+        "webui_gateway_chat_enabled",
+        lambda _cfg: gateway_owned,
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
         "_resolve_compatible_session_model_state",
         lambda model, provider, **_: (model, provider, False),
     )
@@ -229,6 +238,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
     assert result["payload"]["stream_id"] == "goal-stream"
     assert started and started[0]["msg"] == "ship the feature"
     assert started[0]["model_provider"] == "openai-codex"
+    assert started[0]["external_runtime_owned"] is gateway_owned
 
 
 def test_goal_endpoint_preserves_response_shape_under_runtime_adapter_flag(monkeypatch, tmp_path):

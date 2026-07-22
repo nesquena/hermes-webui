@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import atexit
 import codecs
+import collections
 import os
 import queue
 import shutil
@@ -53,6 +54,12 @@ def _safe_close_fd(fd: int) -> None:
         pass
 
 
+# Bounds both the replay backlog and each subscriber's live queue: how many
+# output chunks are buffered before the oldest is dropped. One value so the
+# catch-up backlog and the per-viewer queue stay in lockstep.
+_OUTPUT_BUFFER_MAXLEN = 2000
+
+
 @dataclass
 class TerminalSession:
     session_id: str
@@ -61,7 +68,18 @@ class TerminalSession:
     master_fd: int
     rows: int = 24
     cols: int = 80
-    output: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=2000))
+    # Output is fanned out to every attached viewer. Each SSE consumer
+    # subscribe()s its own queue; put_output broadcasts to all of them plus a
+    # bounded backlog that a newly attaching consumer replays. Two tabs/windows
+    # on the same session therefore each get the FULL byte stream — previously a
+    # single shared queue was read destructively, so two consumers split the
+    # output between them and only one saw terminal_closed.
+    _subscribers: list = field(default_factory=list)
+    _backlog: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=_OUTPUT_BUFFER_MAXLEN)
+    )
+    _sub_lock: threading.Lock = field(default_factory=threading.Lock)
+    _next_output_seq: int = 1
     closed: threading.Event = field(default_factory=threading.Event)
     reader: threading.Thread | None = None
     # Serializes fd-touching ops (os.write, resize ioctl) against os.close, so a
@@ -79,20 +97,53 @@ class TerminalSession:
     def is_alive(self) -> bool:
         return not self.closed.is_set() and self.proc.poll() is None
 
+    def subscribe(self, after_seq: int | None = None) -> queue.Queue:
+        """Attach a viewer: return a queue seeded with the current backlog and
+        registered to receive all subsequent output.
+
+        A reconnecting EventSource supplies its last received sequence so only
+        newer backlog entries are replayed. A new viewer leaves ``after_seq``
+        unset and receives the full bounded backlog.
+        """
+        q: queue.Queue = queue.Queue(maxsize=_OUTPUT_BUFFER_MAXLEN)
+        with self._sub_lock:
+            for item in self._backlog:
+                if after_seq is None or item[0] > after_seq:
+                    q.put_nowait(item)
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._sub_lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
     def put_output(self, event: str, payload: dict) -> None:
         self.last_activity = time.time()
-        try:
-            self.output.put_nowait((event, payload))
-        except queue.Full:
-            # Keep the terminal responsive by dropping the oldest queued chunk.
-            try:
-                self.output.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.output.put_nowait((event, payload))
-            except queue.Full:
-                pass
+        with self._sub_lock:
+            item = (self._next_output_seq, event, payload)
+            self._next_output_seq += 1
+            self._backlog.append(item)
+            # Keep sequence assignment, backlog append, and non-blocking fanout in
+            # one publication order. Releasing this lock before fanout lets two
+            # producers enqueue seq N+1 before seq N to a live subscriber.
+            for q in self._subscribers:
+                try:
+                    q.put_nowait(item)
+                except queue.Full:
+                    # Slow viewer: drop its oldest chunk to stay responsive.
+                    # Isolated per subscriber, so one lagging tab can't starve
+                    # another; all queue operations remain non-blocking.
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(item)
+                    except queue.Full:
+                        pass
 
 
 _TERMINALS: dict[str, TerminalSession] = {}

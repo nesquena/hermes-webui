@@ -6,11 +6,13 @@ import logging
 import os
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.request
 from typing import Any
 
 from api.config import (
+    AGENT_INSTANCES,
     CANCEL_FLAGS,
     PENDING_GOAL_CONTINUATION,
     STREAM_GOAL_RELATED,
@@ -31,7 +33,7 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +316,9 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
         "preview": payload.get("label") or payload.get("preview"),
-        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "args": bound_run_journal_snapshot_args(payload.get("args"))
+        if isinstance(payload.get("args"), dict)
+        else {},
         "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
     if tid:
@@ -334,6 +338,8 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    if not approval_id:
+        approval_id = uuid.uuid4().hex
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
@@ -553,6 +559,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         _provider_error_payload,
         _session_payload_with_full_messages,
         _snapshot_and_append_partial_on_error,
+        _terminal_turn_duration,
     )
 
     with _get_session_agent_lock(session_id):
@@ -565,6 +572,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification["type"],
             error_classification.get("hint", ""),
         )
+        turn_duration = _terminal_turn_duration(session)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         session.pending_user_message = None
@@ -584,6 +592,8 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             "timestamp": int(time.time()),
             "_error": True,
         }
+        if turn_duration is not None:
+            error_message["_turnDuration"] = turn_duration
         if error_payload.get("details"):
             error_message["provider_details"] = error_payload["details"]
         if not isinstance(session.messages, list):
@@ -1178,6 +1188,7 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
+            AGENT_INSTANCES.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
@@ -1186,4 +1197,5 @@ def _run_gateway_chat_streaming(
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
         _STREAM_RUN_IDS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)

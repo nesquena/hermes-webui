@@ -1,11 +1,30 @@
 # Transparent Stream — A Chronological Activity Display Mode
 
-- **Status:** Accepted (direction confirmed by @nesquena; RFC merged via [#3862](https://github.com/nesquena/hermes-webui/pull/3862))
+- **Status:** Implemented (opt-in display mode; follow-up hardening tracked in [#3400](https://github.com/nesquena/hermes-webui/issues/3400))
 - **Author:** @franksong2702
 - **Created:** 2026-06-09
-- **Updated:** 2026-06-09
+- **Updated:** 2026-07-16
 - **Tracking issue:** [#3820](https://github.com/nesquena/hermes-webui/issues/3820)
 - **Parent contract:** [Live-to-Final Assistant Replies](./live-to-final-assistant-replies.md) ([#3400](https://github.com/nesquena/hermes-webui/issues/3400) / #3401 / #3741)
+
+## Current projection family
+
+The shipped `chat_activity_display_mode` setting now has three explicit values:
+
+- `compact_worklog` — default, results-first presentation;
+- `transparent_stream` — opt-in chronological activity rows;
+- `hide_all_activity` — opt-in **Final answer only** presentation.
+
+All three are render strategies over the same Assistant Turn Anchor and
+`activity_scene_v1`; they do not create separate activity ownership or change
+the final-answer boundary. Final answer only suppresses activity presentation
+while preserving the persisted scene so another mode, settle, or reload can
+reconstruct the same turn.
+
+The original proposal and rollout notes below are retained as design history.
+Statements describing a missing selector, missing settled branch, or unwired
+live/replay renderer describe the tree when this RFC was written, not current
+`master`.
 
 ## Problem
 
@@ -104,21 +123,22 @@ Plus two boundaries:
 - **Not full transcript virtualization.** Performance hardening for very long
   transparent transcripts (#3714) is acknowledged but scoped to a later slice.
 
-## Proposal
+## Implemented proposal
 
 ### 1. A new, dedicated preference
 
-A new preference, independent of `simplified_tool_calling`:
+The shipped preference is independent of `simplified_tool_calling`:
 
 ```python
 # api/config.py preferences
-"chat_activity_display_mode": "compact_worklog",  # | "transparent_stream"
+"chat_activity_display_mode": "compact_worklog",  # | "transparent_stream" | "hide_all_activity"
 ```
 
 - Default `compact_worklog` — existing users see no change.
 - Surfaced in Settings as an explicit **segmented choice** (not a checkbox):
   - **Compact Worklog** — default; results-first, supporting activity quiet.
   - **Transparent Stream** — advanced; every step shown chronologically.
+  - **Final answer only** — activity hidden; final answer remains visible.
 - The legacy `Compact tool activity` checkbox is marked deprecated. It is not
   the seam for this feature.
 
@@ -128,6 +148,7 @@ predicate used everywhere:
 ```js
 function chatActivityMode(){ return window._chatActivityDisplayMode || 'compact_worklog'; }
 function isTransparentStream(){ return chatActivityMode() === 'transparent_stream'; }
+function isFinalAnswerOnlyMode(){ return chatActivityMode() === 'hide_all_activity'; }
 ```
 
 ### 2. Decouple "event sequence" from "grouping strategy"

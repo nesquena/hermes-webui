@@ -89,6 +89,8 @@ def _extract_function(source: str, name: str) -> str:
 
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
+INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
+SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 
 
 def _normalise_ws(s: str) -> str:
@@ -208,6 +210,19 @@ function createEnvironment() {
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;
   globalThis._messageReloadLimitForSession = () => 2;
+  // sessions.js module-level const, referenced by _ensureMessagesLoaded's
+  // boundedReloadLimit ceiling check (#6152/#6154). Not one of the extracted
+  // functions, so define it in the harness (matching the real value) or the
+  // reload-width path resolves it as undefined -> boundedReloadLimit=null ->
+  // the fetch URL drops msg_limit/expand_renderable and mismatches the
+  // enqueued buildMessageUrl(), stalling the ordered api() harness.
+  globalThis._MSG_LIMIT_MAX = 500;
+  // #6177: _msgLimitMax is a module-scope `let` (live server-advertised ceiling,
+  // defaulting to _MSG_LIMIT_MAX). It's read by _ensureMessagesLoaded's
+  // boundedReloadLimit and _loadOlderMessages's useBeforePaging; the harness
+  // injects only the extracted functions, not module-level lets, so define it
+  // here or those reads resolve undefined -> wrong fetch URL -> ordered-api stall.
+  globalThis._msgLimitMax = 500;
   globalThis._currentMessageRenderWindowSize = () => 1;
   globalThis._messageRenderableMessageCount = () => 2;
 
@@ -331,6 +346,8 @@ let toolSyncCalls = 0;
 let toastCalls = [];
 
 // Source under test
+__INFLIGHT_HAS_VISIBLE_STATE_SRC__
+__SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -577,10 +594,15 @@ def _run_node(script: str) -> dict:
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
-    script = _NODE_SCRIPT_TEMPLATE.replace(
-        "__LOAD_SESSION_SRC__", LOAD_SESSION_SRC
-    ).replace(
-        "__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC
+    script = (
+        _NODE_SCRIPT_TEMPLATE.replace(
+            "__INFLIGHT_HAS_VISIBLE_STATE_SRC__", INFLIGHT_HAS_VISIBLE_STATE_SRC
+        )
+        .replace(
+            "__SELECT_LIVE_RECOVERY_INFLIGHT_SRC__", SELECT_LIVE_RECOVERY_INFLIGHT_SRC
+        )
+        .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
+        .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
     body = _run_node(script)
 

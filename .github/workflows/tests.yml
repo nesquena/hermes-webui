@@ -6,28 +6,120 @@ on:
   push:
     branches: [master]
 
+# Docs-only fast path: a CHANGELOG/README/docs-only PR does not need the full pytest
+# matrix or the JS/lint runtime guards — nothing executable changed. But the `test (…)`
+# shards and `lint` are REQUIRED status checks in the master ruleset, and a *skipped*
+# required check reports as pending forever (auto-merge would hang). So we keep the jobs
+# running and reporting green, but SHORT-CIRCUIT their expensive work when every changed
+# path is documentation. Detection FAILS SAFE: if anything is uncertain (no base to diff,
+# any non-doc path touched), docs_only=false and the full suite runs.
 jobs:
-  # Forward-looking Python lint gate (ruff). The Python twin of the ESLint runtime
-  # guard. Runs the curated [tool.ruff] ruleset (E9 + F + B) but only on lines this
-  # PR adds/modifies vs the merge-base — so it keeps NEW code clean without demanding
-  # a reformat of the existing tree's cosmetic backlog (#3273). Fast, fails early.
-  lint:
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only change set
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Fail-safe: this step ALWAYS exits 0 and ALWAYS emits docs_only (default
+          # 'false' = run the full suite). If the `changes` job ever failed, the
+          # required test/browser jobs (needs: changes) would be SKIPPED and their
+          # required contexts would never report — wedging the PR in perpetual
+          # pending. So the detector can never fail; worst case it over-runs CI.
+          docs_only="false"
+          emit() { echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"; }
+          trap emit EXIT
+          set -uo pipefail
+          # STRICT ALLOWLIST — a path counts as "docs" ONLY if it is unambiguously
+          # documentation. Everything else runs the full suite (fail-open to safety).
+          # A file is docs iff:
+          #   * it has a doc extension: *.md / *.markdown / *.rst, OR
+          #   * its basename is an extensionless doc file (LICENSE/README/CHANGELOG/…).
+          # NOT docs (deliberately): *.txt (requirements.txt controls deps!), anything
+          # under docs/ that isn't a doc extension (docs/Makefile, docs/build.py,
+          # docs/*.json), and any code file whose NAME merely contains README/CHANGELOG
+          # (scripts/CHANGELOG_stamp.py, static/README_renderer.js). Extension/type
+          # wins over name, and a non-doc extension is never docs.
+          is_docs() {
+            f="$1"; low="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"; base="${f##*/}"
+            case "$low" in
+              *.md|*.markdown|*.rst) return 0 ;;
+            esac
+            case "$base" in
+              LICENSE|README|CHANGELOG|NOTICE|AUTHORS|CONTRIBUTING) return 0 ;;
+            esac
+            return 1
+          }
+
+          # Resolve the changed-file list. PR event = base..head; push = before..after.
+          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
+            RANGE="$BASE_SHA...$HEAD_SHA"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          # --no-renames so a rename shows BOTH sides: `git mv src/app.py docs.md` must
+          # reveal the src/app.py deletion (a code change) instead of collapsing to the
+          # docs.md destination and being mis-classified as docs-only.
+          if ! FILES="$(git diff --name-only --no-renames "$RANGE" 2>/dev/null)"; then
+            echo "Could not diff $RANGE — running full suite (fail-safe)."; exit 0
+          fi
+          if [ -z "$FILES" ]; then
+            echo "Empty diff — running full suite (fail-safe)."; exit 0
+          fi
+
+          echo "Changed files:"; echo "$FILES"
+          result="true"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if ! is_docs "$f"; then
+              echo "Non-docs path -> full suite required: $f"
+              result="false"
+              break
+            fi
+          done <<< "$FILES"
+          docs_only="$result"
+          echo "docs_only=$docs_only"
+
+  lint:
+    needs: changes
+    # `lint` is not currently a required check, but add always() anyway so it can
+    # never wedge if it's promoted to required later — same rationale as the test/
+    # browser-smoke jobs; a failed `changes` degrades to running the full lint.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping lint/runtime guards (nothing executable changed)."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           # Need history so the gate can diff against the merge-base with master.
           fetch-depth: 0
 
       - name: Set up Python
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install ruff
+        if: needs.changes.outputs.docs_only != 'true'
         run: pip install ruff
 
       - name: Ensure origin/master ref is available for the diff gate
+        if: needs.changes.outputs.docs_only != 'true'
         run: git fetch --no-tags --depth=1 origin master || true
 
       # Whole-tree Python syntax gate. The Python analog of the JS `node --check`
@@ -39,13 +131,15 @@ jobs:
       # file:line, before the matrix suite runs. Whole-tree + unconditional so it
       # cannot be bypassed by the diff scope. (#4641)
       - name: Python syntax gate (whole tree — fails fast on any unparseable .py)
+        if: needs.changes.outputs.docs_only != 'true'
         run: python3 -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts
 
       - name: Ruff forward gate (new/changed lines only)
+        if: needs.changes.outputs.docs_only != 'true'
         run: python3 scripts/ruff_lint.py --diff origin/master
 
       - name: Ruff whole-tree report (informational — never blocks)
-        if: always()
+        if: needs.changes.outputs.docs_only != 'true' && always()
         run: python3 scripts/ruff_lint.py --all
 
       # Static-JS runtime-error guards. These catch brick-class bugs that throw only
@@ -56,20 +150,31 @@ jobs:
       #     scope, catching a function defined nested but called from a sibling
       #     scope (#3696 — ReferenceError: _sessionAttentionState is not defined).
       - name: Set up Node for ESLint runtime guards
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install ESLint
+        if: needs.changes.outputs.docs_only != 'true'
         run: npm install --no-save eslint@^10
 
       - name: ESLint runtime-error gate (no-const-assign / no-import-assign, #3162)
+        if: needs.changes.outputs.docs_only != 'true'
         run: npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 
       - name: Scope / undefined-reference gate (#3696)
+        if: needs.changes.outputs.docs_only != 'true'
         run: python3 scripts/scope_undef_gate.py
 
   test:
+    needs: changes
+    # Belt-and-suspenders: run even if `changes` errored/was skipped. A required job
+    # that gets SKIPPED reports its context as pending forever (wedge). With always(),
+    # the job runs regardless; the per-step `if: … != 'true'` guards then treat a
+    # missing/empty docs_only (which is what a failed `changes` yields) as "run full
+    # CI" — so a detector failure degrades to running everything, never to a wedge.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
       # Don't cancel the other shards/versions when one fails — we want the full
@@ -87,9 +192,15 @@ jobs:
         shard: [0, 1, 2, 3, 4]
 
     steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping pytest shard ${{ matrix.shard }} (no executable change)."
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Set up Python ${{ matrix.python-version }}
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -100,6 +211,7 @@ jobs:
             **/pyproject.toml
 
       - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           python -m pip install --upgrade pip
           # Office parsers stay optional at runtime; CI installs them explicitly for the workspace preview tests.
@@ -118,10 +230,12 @@ jobs:
           pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
 
       - name: Get Playwright version
+        if: needs.changes.outputs.docs_only != 'true'
         id: pw-version
         run: echo "version=$(pip show playwright | grep '^Version:' | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright browsers
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
@@ -130,7 +244,9 @@ jobs:
             ${{ runner.os }}-playwright-
 
       - name: Install Playwright browsers
+        if: needs.changes.outputs.docs_only != 'true'
         run: python -m playwright install --with-deps chromium
 
       - name: Run tests (shard ${{ matrix.shard }} of 5)
+        if: needs.changes.outputs.docs_only != 'true'
         run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5

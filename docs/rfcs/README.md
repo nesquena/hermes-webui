@@ -47,16 +47,17 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   replay, compression, and session metadata coherent during active and recovered
   WebUI runs.
 - [`live-to-final-assistant-replies.md`](live-to-final-assistant-replies.md)
-  — #3400 product model for long-running assistant replies, live process prose,
-  tool activity, recovery, terminal outcomes, and the final-answer boundary.
+  — #3400 accepted product model for long-running assistant replies, live
+  process prose, tool activity, recovery, terminal outcomes, display
+  projections, and the final-answer boundary.
 - [`transparent-stream-activity-mode.md`](transparent-stream-activity-mode.md)
-  — #3820 opt-in display mode for power users who need a transparent,
-  chronological Thinking / progress / tool-call stream alongside the default
-  Compact Worklog model.
+  — #3820 implemented opt-in display mode for power users who need a
+  transparent, chronological Thinking / progress / tool-call stream alongside
+  the default Compact Worklog and opt-in Final answer only projections.
 - [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md) — #3926
-  proposed frontend presentation/reconciliation model for anchoring live
-  assistant activity, settled final answers, replay, and Compact/Transparent
-  render modes to one assistant turn.
+  implemented frontend presentation/reconciliation model for anchoring live
+  assistant activity, settled final answers, replay, and all activity display
+  modes to one assistant turn; remaining hardening is tracked under #3400.
 - [`canonical-session-resolution.md`](canonical-session-resolution.md) — #2361
   focused contract for resolving URL, query parameter, localStorage, sidebar,
   and compression-lineage session IDs to one canonical visible chat target.
