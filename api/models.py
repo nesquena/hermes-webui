@@ -1307,6 +1307,7 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                pending_turn_id: str=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1376,6 +1377,7 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.pending_turn_id = pending_turn_id
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -2390,10 +2392,12 @@ def _normalize_journal_recovery_text(value) -> str:
 def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments, pending_turn_id=None):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
-    # Per-turn turn_id collision protection (#6407): require exact ID match.
-    # Fail safe — return False when no ID exists on either side.
+    # Per-turn turn_id collision protection (#6407): migration-aware check.
+    # When BOTH sides have _turn_id, require exact match.
+    # When either side lacks _turn_id (migration scenario), fall through to
+    # the text+ts+source+attachments fingerprint checks below.
     msg_turn_id = message.get('_turn_id')
-    if not pending_turn_id or not msg_turn_id or str(msg_turn_id) != str(pending_turn_id):
+    if pending_turn_id and msg_turn_id and str(msg_turn_id) != str(pending_turn_id):
         return False
     try:
         message_timestamp = int(message.get('timestamp'))
@@ -3507,10 +3511,8 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments,
             pending_turn_id=getattr(session, 'pending_turn_id', None) or stream_id_for_recheck or session.active_stream_id,
         )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
-        )
+        _tail_user_already_checkpointed = _already_checkpointed
+        _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
@@ -3601,10 +3603,7 @@ def _apply_core_sync_or_error_marker(
                 session.pending_attachments,
                 pending_turn_id=getattr(session, 'pending_turn_id', None) or stream_id_for_recheck or session.active_stream_id,
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-            )
+            _tail_user_already_checkpointed = _already_checkpointed
             if (
                 _pending_text
                 and not _tail_user_already_checkpointed
