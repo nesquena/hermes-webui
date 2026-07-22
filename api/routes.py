@@ -18607,6 +18607,129 @@ def _handle_tts(handler, parsed):
             pass
         return True
 
+    # ── VoiceBox (local) TTS ────────────────────────────────────────────
+    if engine == "voicebox":
+        # Read VoiceBox config from Hermes config.yaml
+        endpoint = "http://localhost:17494"
+        profile_id = ""
+        try:
+            from api.config import get_config
+            cfg = get_config() or {}
+            tts_cfg = cfg.get("tts") or {}
+            if isinstance(tts_cfg, dict):
+                vb_cfg = tts_cfg.get("voicebox") or {}
+                if isinstance(vb_cfg, dict):
+                    endpoint = vb_cfg.get("endpoint", endpoint)
+                    profile_id = vb_cfg.get("default_profile", profile_id)
+                # Also check under tts.providers.voicebox
+                provs = tts_cfg.get("providers") or {}
+                if isinstance(provs, dict):
+                    pvb = provs.get("voicebox") or {}
+                    if isinstance(pvb, dict):
+                        endpoint = pvb.get("endpoint", endpoint)
+                        profile_id = pvb.get("default_profile", profile_id)
+        except Exception:
+            pass  # fall back to defaults
+
+        if not profile_id:
+            logger.error("VoiceBox TTS: no default_profile configured — set tts.voicebox.default_profile in config.yaml")
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS not configured: default_profile is required", 502)
+
+        voicebox_engine = "luxtts"
+
+        # Step 1: Submit generation request
+        gen_url = f"{endpoint}/generate"
+        gen_body = json.dumps({
+            "text": text,
+            "profile_id": profile_id,
+            "engine": voicebox_engine,
+        }).encode("utf-8")
+        gen_req = Request(gen_url, data=gen_body, headers={
+            "Content-Type": "application/json",
+        })
+        try:
+            with _tts_open(gen_req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
+                gen_data = json.loads(resp.read().decode())
+        except Exception:
+            logger.exception("VoiceBox TTS generation request failed")
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS generation request failed", 502)
+
+        gen_id = gen_data.get("id")
+        if not gen_id:
+            logger.error("VoiceBox TTS: no generation id in response: %s", gen_data)
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS generation failed: no id returned", 502)
+
+        # Step 2: Poll until completed via SSE (single connection, line-by-line)
+        status_url = f"{endpoint}/generate/{gen_id}/status"
+        completed = False
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                with _tts_open(
+                    Request(status_url),
+                    timeout=min(30, remaining),
+                    opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler()),
+                ) as resp:
+                    while time.time() < deadline:
+                        raw = resp.readline()
+                        if not raw:
+                            break  # stream ended, reconnect
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            d = json.loads(line[6:])
+                            if d.get("status") == "completed":
+                                completed = True
+                                break
+                            if d.get("status") == "failed":
+                                err_msg = d.get("error", "unknown error")
+                                logger.error("VoiceBox TTS generation failed: %s", err_msg)
+                                from api.helpers import bad as _bad
+                                return _bad(handler, f"VoiceBox TTS failed: {err_msg}", 502)
+                        except json.JSONDecodeError:
+                            continue
+                if completed:
+                    break
+            except Exception:
+                logger.debug("VoiceBox TTS poll error", exc_info=True)
+            time.sleep(1)
+
+        if not completed:
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS generation timed out", 502)
+
+        # Step 3: Download audio
+        audio_url = f"{endpoint}/audio/{gen_id}"
+        try:
+            with _tts_open(Request(audio_url), timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
+                audio_data = _buffer_tts_audio_response(resp)
+        except Exception:
+            logger.exception("VoiceBox TTS audio download failed")
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS audio download failed", 502)
+
+        if not audio_data:
+            from api.helpers import bad as _bad
+            return _bad(handler, "VoiceBox TTS produced no audio", 502)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(audio_data)))
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
+
     # ── Edge TTS ────────────────────────────────────────────────────────
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",

@@ -77,3 +77,4 @@ graphify-out/
 node_modules/
 package-lock.json
 docs/ui-ux/review-shots/
+webui.log

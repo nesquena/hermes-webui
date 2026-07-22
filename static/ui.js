@@ -8693,6 +8693,10 @@ function speakMessage(btn){
     _playEdgeTtsChunked(clean, btn);
     return;
   }
+  if(engine==='voicebox'){
+    _playVoiceboxTts(clean, btn);
+    return;
+  }
   // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
   // via the extension, then play through the shared audio-buffer path.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
@@ -8755,6 +8759,33 @@ function _playElevenLabsTts(text, btn){
     return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+}
+
+function _playVoiceboxTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, engine:'voicebox'})
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'VoiceBox TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'VoiceBox TTS failed'); });
 }
 
 function _playOpenaiTts(text, btn){
@@ -8873,6 +8904,10 @@ function autoReadLastAssistant(){
   }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, null);
+    return;
+  }
+  if(engine==='voicebox'){
+    _playVoiceboxTts(clean, null);
     return;
   }
   // Extension-registered TTS engine (window.registerHermesTtsEngine): synth via
