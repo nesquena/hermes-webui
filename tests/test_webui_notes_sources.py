@@ -345,7 +345,8 @@ def test_external_notes_menu_item_is_default_off_from_memory_payload():
 
     panels = Path("static/panels.js").read_text(encoding="utf-8")
     assert "external_notes_enabled" in panels
-    assert "if (s.key === 'external_notes' && !_memoryData.external_notes_enabled) continue;" in panels
+    assert "if (meta.key === 'external_notes') return !data || data.external_notes_enabled === true;" in panels
+    assert "if (!_memorySectionEnabled(s, _memoryData)) continue;" in panels
 
 
 def test_external_notes_drawer_copy_is_localized_outside_english():

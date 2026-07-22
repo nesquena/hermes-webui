@@ -114,7 +114,7 @@ def test_project_context_content_is_redacted_in_memory_response(tmp_path, monkey
 
     monkeypatch.setattr(api.profiles, "get_active_hermes_home", lambda: home)
     monkeypatch.setattr(routes, "_memory_project_context_workspace", lambda _parsed: workspace)
-    monkeypatch.setattr(routes, "_external_notes_sources_enabled", lambda: False)
+    monkeypatch.setattr(routes, "_external_notes_sources_enabled", lambda _config_data=None: False)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
 
     payload = routes._handle_memory_read(object(), SimpleNamespace(query=""))
@@ -228,13 +228,15 @@ def _memory_button_render_blocks():
     panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     sections_start = panels.index("const MEMORY_SECTIONS = [")
     sections_end = panels.index("];", sections_start) + 2
-    helper_start = panels.index("function _memorySectionPath(key)")
-    helper_end = panels.index("function _setMemoryHeaderButtons", helper_start)
+    enabled_start = panels.index("function _memorySectionEnabled(meta, data = _memoryData)")
+    enabled_end = panels.index("function _memorySectionLabel", enabled_start)
+    path_start = panels.index("function _memorySectionPath(key)")
+    path_end = panels.index("function _setMemoryHeaderButtons", path_start)
     loop_start = panels.index("for (const s of MEMORY_SECTIONS) {")
     loop_end = panels.index("    if (_currentMemorySection && _memoryMode !== 'edit') {", loop_start)
     return (
         panels[sections_start:sections_end],
-        panels[helper_start:helper_end],
+        panels[enabled_start:enabled_end] + panels[path_start:path_end],
         panels[loop_start:loop_end].rsplit("    }", 1)[0],
     )
 
