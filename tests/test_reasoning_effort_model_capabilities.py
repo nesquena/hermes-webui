@@ -514,3 +514,28 @@ def test_datestamped_claude3_not_reasoning_capable_heuristic():
             f"{model} must remain reasoning-capable"
         )
 
+
+def test_bare_grok45_is_reasoning_capable_and_capped_at_high():
+    # Bare Grok-4.5 ids used to hide the composer chip entirely because the
+    # family heuristic only matched names containing "reasoning"/"thinking".
+    for model in (
+        "grok-4.5",
+        "x-ai/grok-4.5",
+        "grok-4-5",
+        "@custom:cpa:grok-4.5",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, model
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:cpa")
+        assert "high" in efforts, model
+        assert "xhigh" not in efforts, model
+        assert "max" not in efforts, model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "xhigh", model, provider_id="custom:cpa"
+        ) == "high", model
+
+
+def test_grok_reasoning_named_ids_still_reasoning_capable():
+    # Names with an explicit reasoning token already matched the generic branch;
+    # keep that path green after adding the bare-family rule.
+    assert cfg._candidate_supports_reasoning("grok-4.20-reasoning") is True
+

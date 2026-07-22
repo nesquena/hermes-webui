@@ -3330,6 +3330,13 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         return True
     if "mimo" in token_set or normalized.startswith("mimo"):
         return True
+    # xAI Grok family: bare ids like "grok-4.5" / "x-ai/grok-4.5" support
+    # reasoning_effort. Without this family match, the composer reasoning chip
+    # stays hidden even when the agent is already sending effort for Grok.
+    # Names that already contain "reasoning"/"thinking" match the generic
+    # branch above and never reach here.
+    if "grok" in token_set or normalized.startswith("grok"):
+        return True
     if "glm" in token_set or normalized.startswith("glm"):
         return True
     if "step" in token_set or normalized.startswith("step"):
@@ -3545,6 +3552,12 @@ def _filter_reasoning_efforts_for_provider(
         return normalized
     if zai_supports is False:
         return []
+    # Grok-4.5's native ladder tops out at high. Advertising xhigh/max lets the
+    # composer show levels the model rejects / silently mishandles, and leaves a
+    # stored CLI xhigh uncoerced. Cap the UI + coerce path at high for 4.5 only;
+    # newer Grok ids without this version tag keep the full ladder.
+    if "grok" in bare and re.search(r"(?:^|[^a-z0-9])grok-4(?:[._-])5(?:$|[^0-9])", bare):
+        return [eff for eff in normalized if eff in {"minimal", "low", "medium", "high"}]
     return normalized
 
 
