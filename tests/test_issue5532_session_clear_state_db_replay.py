@@ -217,9 +217,9 @@ def test_clear_sentinel_does_not_suppress_later_backup_recovery(tmp_path):
     assert restored["messages"][0]["content"] == "post-clear prompt"
 
 
-def test_clearing_empty_live_session_preserves_existing_recoverable_backup(monkeypatch, tmp_path):
+def test_clearing_empty_live_session_retires_existing_recovery_backup(monkeypatch, tmp_path):
     from api.models import Session
-    from api.session_recovery import inspect_session_recovery_status, recover_session
+    from api.session_recovery import inspect_session_recovery_status
 
     _install_isolated_session_env(monkeypatch, tmp_path)
     sid = "issue5532_empty_live_with_backup"
@@ -248,9 +248,6 @@ def test_clearing_empty_live_session_preserves_existing_recoverable_backup(monke
     captured = _post_clear(monkeypatch, sid)
 
     assert captured["status"] == 200
-    assert session.path.with_suffix(".json.bak").exists()
-    assert Session.load(sid).clear_generation is None
-    assert inspect_session_recovery_status(session.path)["recommend"] == "restore"
-    recovered = recover_session(session.path)
-    assert recovered["restored"] is True
-    assert Session.load(sid).messages[0]["content"] == "recoverable prompt"
+    assert not session.path.with_suffix(".json.bak").exists()
+    assert Session.load(sid).clear_generation
+    assert inspect_session_recovery_status(session.path)["recommend"] == "no_backup"

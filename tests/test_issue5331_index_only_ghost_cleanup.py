@@ -36,6 +36,7 @@ def mock_env(tmp_path, monkeypatch):
     import api.config as config_mod
     import api.routes as routes
     import api.models as models
+    import api.session_media as session_media
 
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
@@ -53,6 +54,15 @@ def mock_env(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "SESSIONS", {})
     monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(session_media, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
+    models._SESSION_PUBLICATION_DELETED.clear()
+    models._SESSION_PUBLICATION_GENERATIONS.clear()
+    models._active_destination_reservations().clear()
+    monkeypatch.setattr(
+        "api.upload._session_attachment_dir",
+        lambda sid: tmp_path / "attachments" / sid,
+    )
     return sessions_dir, index_file
 
 
@@ -64,7 +74,8 @@ def _fake_handler():
     """
     handler = type("FakeHandler", (), {})()
     handler.wfile = io.BytesIO()
-    handler.send_response = lambda status: None
+    handler.status = None
+    handler.send_response = lambda status: setattr(handler, "status", status)
     handler.send_header = lambda key, value: None
     handler.end_headers = lambda: None
     return handler
@@ -279,6 +290,36 @@ def test_cleanup_index_only_empty_ghosts_without_explicit_messages(mock_env):
     assert updated[0]["session_id"] == "sess-real"
 
 
+def test_cleanup_reports_index_publication_residual_without_counting_success(
+    mock_env,
+    monkeypatch,
+):
+    """A failed ghost-index replace is retryable and never reported cleaned."""
+    _sessions_dir, index_file = mock_env
+    _write_index(index_file, [{"session_id": "sess-ghost", "title": "Ghost"}])
+    import api.models as models
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        models,
+        "_safe_replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("index busy")),
+    )
+    handler = _fake_handler()
+    routes._handle_sessions_cleanup(handler, {})
+    result = _fake_handler_result(handler)
+
+    assert handler.status == 500
+    assert result["cleaned"] == 0
+    assert result["residuals"] == [
+        {
+            "session_id": "sess-ghost",
+            "artifacts": [{"artifact": "session_index", "error": "OSError"}],
+        }
+    ]
+    assert _read_index(index_file) == [{"session_id": "sess-ghost", "title": "Ghost"}]
+
+
 # ── Phase 3: index cache thrash fix ──────────────────────────────────────────
 
 
@@ -323,21 +364,21 @@ def test_cleanup_index_rewritten_when_phase1_removed_files(mock_env):
         {"session_id": "sess-orphan", "title": "Untitled", "message_count": 0},
     ])
 
-    routes._handle_sessions_cleanup(_fake_handler(), {}, zero_only=False)
+    handler = _fake_handler()
+    routes._handle_sessions_cleanup(handler, {}, zero_only=False)
 
     # Phase 1 unlinked the file.  Phase 2 removed the stale index entry.
     # Phase 3 skipped because Phase 2 already cleaned the index.
     # Index exists with zero entries (clean).
     assert index_file.exists()
-    assert _read_index(index_file) == []
+    assert _read_index(index_file) == [], _fake_handler_result(handler)
 
 
-def test_cleanup_phase3_deletes_when_phase2_could_not_run(mock_env):
-    """Phase 3 still deletes the index when Phase 2 couldn't run.
+def test_cleanup_phase1_repairs_corrupt_index_through_shared_deletion(mock_env):
+    """The shared deletion primitive repairs a corrupt index during Phase 1.
 
-    When the index is corrupt (or missing), Phase 2 gracefully skips.
-    Phase 1 has removed files, leaving no way to clean the stale index,
-    so Phase 3 deletes it for a fresh rebuild.
+    Generation-aware artifact cleanup owns index removal too, so its guarded
+    rebuild can leave an already-clean index before Phase 2 starts.
     """
     sessions_dir, index_file = mock_env
     import api.routes as routes
@@ -349,9 +390,8 @@ def test_cleanup_phase3_deletes_when_phase2_could_not_run(mock_env):
 
     routes._handle_sessions_cleanup(_fake_handler(), {}, zero_only=False)
 
-    # Phase 1 removed the file.  Phase 2 caught the corrupt-json exception.
-    # Phase 3: phase1_touched=True, phase2_rewrote_index=False → unlink.
-    assert not index_file.exists()
+    assert index_file.exists()
+    assert _read_index(index_file) == []
 
 
 def test_cleanup_no_double_count_when_phase1_and_phase2_overlap(mock_env):

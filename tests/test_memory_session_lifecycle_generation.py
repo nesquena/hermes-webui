@@ -353,7 +353,7 @@ def test_clear_session_evicts_outside_session_lock():
     route_end = src.index('if parsed.path == "/api/session/truncate"', route_start)
     route_block = src[route_start:route_end]
 
-    lock_start = route_block.index("with _get_session_agent_lock(sid):")
+    lock_start = route_block.index("with _get_session_agent_lock(sid)")
     lock_end = route_block.index("# Evict cached agent outside the per-session lock", lock_start)
     locked_section = route_block[lock_start:lock_end]
     outside_section = route_block[lock_end:]

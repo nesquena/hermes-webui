@@ -36,14 +36,12 @@ def post(path, body=None):
 
 
 def _make_session_with_messages():
-    created, _ = post("/api/session/new", {})
-    sid = created["session"]["session_id"]
     from api.models import Session
 
-    # Current master keeps a freshly /api/session/new session memory-only until
-    # its first message is persisted, so Session.load(sid) can return None here.
-    # Construct + persist the session directly so the share path has a real file.
-    session = Session.load(sid) or Session(session_id=sid)
+    # The test process is distinct from the test server, so it cannot own the
+    # server's memory-only, reserved /api/session/new object. Materialize an
+    # independent new SID instead of constructing over that pending claim.
+    session = Session()
     session.title = "Shared Test"
     session.messages = [
         {"role": "system", "content": "internal system instructions should stay private"},
@@ -59,7 +57,7 @@ def _make_session_with_messages():
     session.workspace = "/very/private/workspace"
     session.profile = None
     session.save()
-    return sid
+    return session.session_id
 
 
 def test_share_create_returns_public_url_and_persists_session_fields():

@@ -174,21 +174,13 @@ def test_generated_title_persist_reloads_latest_session_before_saving(tmp_path, 
     stale.save(skip_index=True)
     stale_snapshot = models.Session.load(stale.session_id)
 
-    latest = models.Session(
-        session_id=stale.session_id,
-        title="CLI Session",
-        workspace=".",
-        model="test-model",
-        messages=[
-            {"role": "user", "content": "first"},
-            {"role": "assistant", "content": "reply"},
-            {"role": "user", "content": "second"},
-        ],
-        source_tag="cli",
-        raw_source="cli",
-        session_source="external_agent",
-        source_label="CLI",
-    )
+    latest = models.Session.load(stale.session_id)
+    assert latest is not None
+    latest.messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "second"},
+    ]
     latest.save(skip_index=True)
     cache[latest.session_id] = latest
 

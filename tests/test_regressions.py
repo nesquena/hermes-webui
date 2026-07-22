@@ -5,6 +5,7 @@ These tests exist specifically to prevent those bugs from silently returning.
 Each test is tagged with the sprint/commit where the bug was found and fixed.
 """
 import json
+import inspect
 import os
 import pathlib
 import re
@@ -44,19 +45,15 @@ def make_session(created_list):
 
 def _make_session_visible(sid):
     from api.models import Session
-    from tests.conftest import TEST_WORKSPACE
 
-    session = Session(
-        session_id=sid,
-        title="regression-test-delete-R8",
-        workspace=str(TEST_WORKSPACE),
-        model="test",
-        created_at=time.time(),
-        updated_at=time.time(),
-        profile="default",
-        messages=[{"role": "user", "content": "visible row", "timestamp": time.time()}],
-        tool_calls=[],
-    )
+    # The server owns the fresh SID's publication lease. Reload that validated
+    # sidecar before changing it instead of constructing a second writer for
+    # the same persisted generation.
+    session = Session.load(sid)
+    assert session is not None
+    session.title = "regression-test-delete-R8"
+    session.messages = [{"role": "user", "content": "visible row", "timestamp": time.time()}]
+    session.tool_calls = []
     session.save(touch_updated_at=False)
 
 
@@ -333,7 +330,7 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
 
 
 def test_server_delete_prunes_session_index(cleanup_test_sessions):
-    """session/delete should prune the deleted row without discarding the index."""
+    """session/delete should route index cleanup through the shared primitive."""
     src = (REPO_ROOT / "server.py").read_text()
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
     # Find the delete handler in either file
@@ -344,24 +341,31 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
-            assert "prune_session_from_index(sid)" in delete_block, \
-                f"{label} session/delete must prune SESSION_INDEX_FILE"
+            next_route_idx = text.find('if parsed.path == "/api/session/clear":', delete_idx)
+            delete_block = text[delete_idx:next_route_idx if next_route_idx >= 0 else None]
+            assert "delete_session_artifacts(" in delete_block, \
+                f"{label} session/delete must use shared artifact cleanup"
+            from api.models import delete_session_artifacts
+            assert "prune_session_from_index(sid)" in inspect.getsource(delete_session_artifacts)
             return
     assert False, "session/delete handler not found in server.py or api/routes.py"
 
 
 def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
-    """session/delete must remove sidecar backups so deleted sessions stay deleted."""
+    """session/delete must route backup removal through shared artifact cleanup."""
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
     delete_idx = max(
         routes_src.find("if parsed.path == '/api/session/delete':"),
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    next_route_idx = routes_src.find('if parsed.path == "/api/session/clear":', delete_idx)
+    delete_block = routes_src[delete_idx:next_route_idx if next_route_idx >= 0 else None]
+    assert "delete_session_artifacts(" in delete_block
+    from api.models import delete_session_artifacts
+    helper_src = inspect.getsource(delete_session_artifacts)
+    assert 'backup = sidecar.with_suffix(".json.bak")' in helper_src
+    assert 'for artifact, path in (("session_json", sidecar), ("session_backup", backup))' in helper_src
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

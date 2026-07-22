@@ -1575,18 +1575,104 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
+def _cleanup_ephemeral_session(
+    session=None,
+    *,
+    session_id: str | None = None,
+    stream_id: str | None = None,
+    parent_session_id: str | None = None,
+) -> dict:
+    """Retire every resource owned by one transient ``/btw`` session."""
+    session_id = str(session_id or getattr(session, "session_id", "") or "")
+    stream_id = str(stream_id or getattr(session, "active_stream_id", "") or "")
+    parent_session_id = str(
+        parent_session_id or getattr(session, "parent_session_id", "") or ""
+    )
+    owner = None
+    try:
+        from api.background import find_btw_owner
+
+        owner = find_btw_owner(session_id, stream_id)
+    except Exception:
+        logger.debug("Failed to resolve ephemeral lifecycle owner", exc_info=True)
+    if owner and not parent_session_id:
+        parent_session_id = str(owner.get("parent_session_id") or "")
+    if session is None:
+        with LOCK:
+            session = SESSIONS.get(session_id)
+    if session is not None:
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+    if stream_id:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            CANCEL_FLAGS.pop(stream_id, None)
+            AGENT_INSTANCES.pop(stream_id, None)
+            STREAM_PARTIAL_TEXT.pop(stream_id, None)
+            STREAM_REASONING_TEXT.pop(stream_id, None)
+            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+            STREAM_LAST_EVENT_ID.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        unregister_active_run(stream_id)
+
+    # Keep the legacy finalizer contract for minimal Session-like objects that
+    # carry only an explicit temporary path (including older integrations and
+    # focused tests). Real /btw sessions always have a safe session_id and must
+    # go through the complete generation-aware retirement below.
+    if not session_id:
+        residuals = []
+        session_path = getattr(session, "path", None)
+        if session_path:
+            try:
+                Path(session_path).unlink(missing_ok=True)
+            except OSError as exc:
+                residuals.append({"artifact": "session_json", "error": type(exc).__name__})
+        return {
+            "ok": not residuals,
+            "session_id": session_id,
+            "residuals": residuals,
+            "generation": None,
+        }
+
+    from api.models import delete_session_artifacts
+
+    cleanup = delete_session_artifacts(
+        session_id,
+        expected_generation=getattr(session, "_publication_generation", None),
+        durable_tombstone=True,
+        delete_state_db=True,
+    )
+    if parent_session_id:
+        try:
+            from api.background import cleanup_btw, mark_btw_cleanup_pending
+
+            if cleanup["ok"]:
+                cleanup_btw(parent_session_id, session_id, stream_id)
+            else:
+                mark_btw_cleanup_pending(
+                    parent_session_id,
+                    session_id,
+                    stream_id,
+                    cleanup["residuals"],
+                )
+        except Exception:
+            logger.debug("Failed to remove ephemeral tracking", exc_info=True)
+    if not cleanup["ok"]:
+        logger.warning(
+            "Ephemeral session cleanup incomplete for %s: %s",
+            session_id,
+            cleanup["residuals"],
+        )
+    return cleanup
+
+
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
     """Remove transient /btw session state after a cancel without saving it."""
-    session.active_stream_id = None
-    session.pending_user_message = None
-    session.pending_attachments = []
-    session.pending_started_at = None
-    session.pending_user_source = None
-    try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
-    except Exception:
-        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+    _cleanup_ephemeral_session(session)
 
 
 def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
@@ -3962,36 +4048,54 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(
+    s,
+    old_sid: str,
+    *,
+    strict: bool = False,
+    session_dir: Path | None = None,
+) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
-    old_path = SESSION_DIR / f'{old_sid}.json'
+    old_path = (session_dir or SESSION_DIR) / f'{old_sid}.json'
     if not old_path.exists():
+        if strict:
+            raise RuntimeError("Compression source sidecar is missing")
         return
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
+            saved_publication_generation = getattr(
+                s, "_publication_generation", None
+            )
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
             saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
+            # ``session_id`` and its publication lease are one authoritative
+            # identity. Compression normally reaches this helper while ``s``
+            # still carries the old lease, but direct recovery/test callers can
+            # supply an object already bound to the continuation SID. Bind the
+            # temporary snapshot write to the current old-SID incarnation and
+            # restore both fields together below.
+            from api.models import _session_publication_generation
+
+            s._publication_generation = _session_publication_generation(old_sid)
             s.pre_compression_snapshot = True
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
@@ -4021,6 +4125,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 )
             finally:
                 s.session_id = saved_sid
+                s._publication_generation = saved_publication_generation
                 s.pre_compression_snapshot = saved_snapshot
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
@@ -4055,9 +4160,354 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 old_sid,
             )
     except OSError:
+        if strict:
+            raise
         logger.debug("Could not read old session file before preservation")
     except Exception:
+        if strict:
+            raise
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+
+
+def _clone_session_media_for_compression_rotation(
+    messages,
+    context_messages,
+    old_sid: str,
+    new_sid: str,
+) -> None:
+    """Clone only a staged transcript before compression changes identity."""
+    try:
+        from api.session_media import (
+            clone_session_media_references,
+        )
+
+        clone_session_media_references(
+            [messages, context_messages],
+            old_sid,
+            new_sid,
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Could not clone session media during compression from %s to %s",
+            old_sid,
+            new_sid,
+            exc_info=True,
+        )
+        raise RuntimeError("Could not copy session media for compression continuation") from exc
+
+
+def _publish_compression_continuation(
+    s,
+    old_sid: str,
+    new_sid: str,
+    resolved_profile_name: str | None,
+    *,
+    agent=None,
+    agent_lock=None,
+    stream_id: str | None = None,
+):
+    """Durably publish a reserved continuation or restore the old identity."""
+    saved_identity = {
+        "session_id": s.session_id,
+        "publication_generation": getattr(s, "_publication_generation", None),
+        "pre_compression_snapshot": bool(
+            getattr(s, "pre_compression_snapshot", False)
+        ),
+        "parent_session_id": getattr(s, "parent_session_id", None),
+        "profile": getattr(s, "profile", None),
+    }
+    # The continuation works on the live Session object, not a throwaway
+    # clone.  Disk rollback alone is insufficient: a failed clone/publish
+    # must not leave callers holding a transcript that differs from the
+    # restored old sidecar.
+    saved_transcript = (s.messages, s.context_messages)
+    # Clone the pair as one graph, not two independent deep copies: aliases
+    # across visible and model history are part of the caller-visible state.
+    staged_transcript = copy.deepcopy(saved_transcript)
+    from api.models import (
+        SESSION_DIR as live_session_dir,
+        _INDEX_WRITE_LOCK,
+        _cross_process_file_lock,
+        _path_entry_exists,
+        _session_publication_authority,
+        _session_incarnation_claim_file,
+        reserve_session_destination,
+    )
+    from api.session_recovery import (
+        _advance_compression_transaction,
+        _restore_compression_transaction_source,
+        _retire_compression_transaction,
+        _stage_compression_transaction_source,
+    )
+    import api.config as live_config
+
+    intent = None
+
+    registry_undo = []
+    transaction_committed = False
+
+    if agent is not None:
+        agent_identity_before_publication = getattr(agent, "session_id", None)
+        agent_rollback_identity = (
+            old_sid
+            if agent_identity_before_publication == new_sid
+            else agent_identity_before_publication
+        )
+
+        def undo_agent_identity():
+            agent.session_id = agent_rollback_identity
+
+        registry_undo.append(undo_agent_identity)
+
+    def mutate(mapping, key, value, lock) -> None:
+        with lock:
+            existed = key in mapping
+            previous = mapping.get(key)
+            mapping[key] = value
+
+        def undo():
+            with lock:
+                if existed:
+                    mapping[key] = previous
+                else:
+                    mapping.pop(key, None)
+
+        registry_undo.append(undo)
+
+    def remove(mapping, key, lock) -> None:
+        with lock:
+            existed = key in mapping
+            previous = mapping.pop(key, None)
+
+        def undo():
+            with lock:
+                if existed:
+                    mapping[key] = previous
+                else:
+                    mapping.pop(key, None)
+
+        registry_undo.append(undo)
+
+    transaction_authority = contextlib.ExitStack()
+    try:
+        for locked_sid in sorted({old_sid, new_sid}):
+            transaction_authority.enter_context(
+                _session_publication_authority(locked_sid)
+            )
+        transaction_authority.enter_context(_INDEX_WRITE_LOCK)
+        transaction_authority.enter_context(
+            _cross_process_file_lock("session-index")
+        )
+        intent = _stage_compression_transaction_source(
+            live_session_dir,
+            old_sid,
+            new_sid,
+        )
+        with reserve_session_destination(new_sid) as reservation:
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "reserved",
+                token=reservation.generation.token,
+            )
+            _preserve_pre_compression_snapshot(
+                s,
+                old_sid,
+                strict=True,
+                session_dir=live_session_dir,
+            )
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "source_archived",
+            )
+            _clone_session_media_for_compression_rotation(
+                staged_transcript[0],
+                staged_transcript[1],
+                old_sid,
+                new_sid,
+            )
+            s.messages, s.context_messages = staged_transcript
+            s.session_id = new_sid
+            reservation.bind(s)
+            if not s.profile and resolved_profile_name:
+                s.profile = resolved_profile_name
+                logger.info(
+                    "Stamped profile=%r on continuation session %s after compression",
+                    resolved_profile_name,
+                    new_sid,
+                )
+            s.pre_compression_snapshot = False
+            s.parent_session_id = old_sid
+            s.save()
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "sidecar_published",
+            )
+
+            with LOCK:
+                cached_old_session = SESSIONS.get(old_sid)
+            if cached_old_session is not None and cached_old_session is not s:
+                cached_old_sid = str(getattr(cached_old_session, "session_id", "") or "")
+                if cached_old_sid == old_sid:
+                    raise RuntimeError("Compression source cache owner changed")
+            mutate(SESSIONS, new_sid, s, LOCK)
+            remove(SESSIONS, old_sid, LOCK)
+            if agent_lock is not None:
+                mutate(SESSION_AGENT_LOCKS, new_sid, agent_lock, SESSION_AGENT_LOCKS_LOCK)
+                remove(SESSION_AGENT_LOCKS, old_sid, SESSION_AGENT_LOCKS_LOCK)
+
+            with live_config.SESSION_AGENT_CACHE_LOCK:
+                cached_entry = live_config.SESSION_AGENT_CACHE.get(old_sid)
+            if cached_entry is not None:
+                cached_agent = cached_entry[0]
+                if not _cached_agent_matches_session(cached_agent, new_sid):
+                    _cached_entry = cached_entry
+                    with live_config.SESSION_AGENT_CACHE_LOCK:
+                        if live_config.SESSION_AGENT_CACHE.get(old_sid) is _cached_entry:
+                            live_config.SESSION_AGENT_CACHE.pop(old_sid, None)
+                    _skipped_agent_migration_entry = _cached_entry
+                    _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
+                    raise RuntimeError("Compression cached-agent identity mismatch")
+                mutate(
+                    live_config.SESSION_AGENT_CACHE,
+                    new_sid,
+                    cached_entry,
+                    live_config.SESSION_AGENT_CACHE_LOCK,
+                )
+                remove(
+                    live_config.SESSION_AGENT_CACHE,
+                    old_sid,
+                    live_config.SESSION_AGENT_CACHE_LOCK,
+                )
+
+            with STREAMS_LOCK:
+                stream_entry = STREAMS.get(stream_id) if stream_id is not None else None
+            if isinstance(stream_entry, dict):
+                updated_stream_entry = dict(stream_entry)
+                updated_stream_entry["session_id"] = new_sid
+                mutate(STREAMS, stream_id, updated_stream_entry, STREAMS_LOCK)
+
+            with live_config.STREAM_SESSION_OWNERS_LOCK:
+                if stream_id is not None and stream_id in live_config.STREAM_SESSION_OWNERS:
+                    mutate_owner = True
+                else:
+                    mutate_owner = False
+            if mutate_owner:
+                mutate(
+                    live_config.STREAM_SESSION_OWNERS,
+                    stream_id,
+                    new_sid,
+                    live_config.STREAM_SESSION_OWNERS_LOCK,
+                )
+
+            with live_config.ACTIVE_RUNS_LOCK:
+                active_entry = (
+                    live_config.ACTIVE_RUNS.get(stream_id)
+                    if stream_id is not None
+                    else None
+                )
+            if isinstance(active_entry, dict):
+                updated_active_entry = dict(active_entry)
+                updated_active_entry["session_id"] = new_sid
+                mutate(
+                    live_config.ACTIVE_RUNS,
+                    stream_id,
+                    updated_active_entry,
+                    live_config.ACTIVE_RUNS_LOCK,
+                )
+
+            if agent is not None and getattr(agent, "session_id", None) != new_sid:
+                agent.session_id = new_sid
+
+            with LOCK:
+                SESSIONS.move_to_end(new_sid)
+                _evict_sessions_over_cap()
+            intent = _advance_compression_transaction(
+                live_session_dir,
+                intent,
+                "migrations_complete",
+            )
+            reservation.commit()
+            transaction_committed = True
+        try:
+            _retire_compression_transaction(live_session_dir, new_sid)
+        except Exception:
+            # The transaction is already committed. Keep the complete intent
+            # for startup recovery to verify/finalize; never roll back live
+            # registry ownership after the publication point.
+            logger.warning(
+                "Could not retire committed compression intent for %s",
+                new_sid,
+                exc_info=True,
+            )
+    except Exception:
+        if transaction_committed:
+            logger.warning(
+                "Compression transaction committed but authority release failed for %s",
+                new_sid,
+                exc_info=True,
+            )
+            return
+        for undo in reversed(registry_undo):
+            try:
+                undo()
+            except Exception:
+                logger.error("Compression registry rollback failed", exc_info=True)
+        s.session_id = saved_identity["session_id"]
+        s._publication_generation = saved_identity["publication_generation"]
+        s.pre_compression_snapshot = saved_identity["pre_compression_snapshot"]
+        s.parent_session_id = saved_identity["parent_session_id"]
+        s.profile = saved_identity["profile"]
+        s.messages, s.context_messages = saved_transcript
+        source_restored = False
+        if intent is None or intent.get("phase") in {"initializing", "prepared"}:
+            # Source/destination mutation is forbidden before the reserved
+            # phase, so partial staging can be retired without restoration.
+            try:
+                _retire_compression_transaction(live_session_dir, new_sid)
+                source_restored = True
+            except Exception:
+                logger.error(
+                    "Could not retire unstarted compression transaction for %s",
+                    new_sid,
+                    exc_info=True,
+                )
+        else:
+            try:
+                _restore_compression_transaction_source(live_session_dir, intent)
+                intent = _advance_compression_transaction(
+                    live_session_dir,
+                    intent,
+                    "source_restored",
+                )
+                source_restored = True
+            except Exception:
+                logger.error(
+                    "Could not restore compression source transaction %s -> %s",
+                    old_sid,
+                    new_sid,
+                    exc_info=True,
+                )
+        if (
+            source_restored
+            and intent is not None
+            and intent.get("phase") == "source_restored"
+            and not _path_entry_exists(live_session_dir / f"{new_sid}.json")
+            and not _path_entry_exists(_session_incarnation_claim_file(new_sid))
+        ):
+            try:
+                _retire_compression_transaction(live_session_dir, new_sid)
+            except Exception:
+                logger.error(
+                    "Could not retire rolled-back compression intent for %s",
+                    new_sid,
+                    exc_info=True,
+                )
+        raise
+    finally:
+        transaction_authority.close()
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -4371,6 +4821,7 @@ def _sanitize_messages_for_api(
     messages,
     *,
     cfg: dict = None,
+    session_id: str | None = None,
     effective_model: str | None = None,
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
@@ -4393,6 +4844,14 @@ def _sanitize_messages_for_api(
     remaining replay gap where an older native image in the saved transcript kept
     causing 400s on every later text-only turn (#2297).
     """
+    if session_id:
+        from api.session_media import hydrate_session_media_urls
+
+        # Private references are a local storage contract, never a provider
+        # fallback.  Missing, corrupt, or unsafe media must stop the request
+        # here with an actionable local error instead of crossing the model
+        # boundary as ``webui-media://...``.
+        messages = hydrate_session_media_urls(messages, session_id)
     strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
@@ -4520,7 +4979,17 @@ def _sanitize_messages_for_api(
             # Keep but strip the temporary marker
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
         final.append(msg)
+    from api.session_media import assert_no_session_media_references
+
+    assert_no_session_media_references(final, context="provider conversation history")
     return final
+
+
+def _assert_model_request_has_no_private_media(payload) -> None:
+    """Final recursive guard immediately before an Agent model call."""
+    from api.session_media import assert_no_session_media_references
+
+    assert_no_session_media_references(payload, context="Agent model request")
 
 
 def _api_safe_message_positions(messages):
@@ -7118,10 +7587,16 @@ def _run_agent_streaming(
     _turn_route_provider = model_provider
     q = STREAMS.get(stream_id)
     if q is None:
-        # The stream was cancelled before the worker started; the route layer
-        # already registered the stream owner, so release it here to avoid
-        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
+        # Cancel-before-worker owns the same full ephemeral lifecycle as every
+        # later exit. Consume the exact parent/session/stream record rather than
+        # releasing only the stream-owner row and leaking durable artifacts.
+        if ephemeral:
+            _cleanup_ephemeral_session(
+                session_id=session_id,
+                stream_id=stream_id,
+            )
+        else:
+            unregister_stream_owner(stream_id)
         return
     register_active_run(
         stream_id,
@@ -9045,6 +9520,7 @@ def _run_agent_streaming(
                 conversation_history=_sanitize_messages_for_api(
                     _previous_context_messages,
                     cfg=_cfg,
+                    session_id=session_id,
                     effective_model=resolved_model,
                     effective_provider=resolved_provider,
                     effective_base_url=resolved_base_url,
@@ -9085,6 +9561,7 @@ def _run_agent_streaming(
                     cfg=_cfg,
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            _assert_model_request_has_no_private_media(_run_conversation_kwargs)
             result = agent.run_conversation(**_run_conversation_kwargs)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
@@ -9130,11 +9607,6 @@ def _run_agent_streaming(
                 })
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -9284,101 +9756,20 @@ def _run_agent_streaming(
                     old_sid = session_id
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
+                    # The publication helper writes durable intent plus exact
+                    # source sidecar/index backups before archiving old_sid. It
+                    # then reserves and publishes the continuation, migrates all
+                    # runtime owners, and commits or restores the source bytes.
+                    _publish_compression_continuation(
+                        s,
+                        old_sid,
+                        new_sid,
+                        _resolved_profile_name,
+                        agent=agent,
+                        agent_lock=_agent_lock,
+                        stream_id=stream_id,
+                    )
                     _compression_continuation_session_id = new_sid
-                    s.session_id = new_sid
-                    # Carry profile identity across the compression boundary.
-                    # Without this, s.profile stays None on the continuation
-                    # session. On the next request, _run_agent_streaming calls
-                    # get_hermes_home_for_profile(getattr(s, 'profile', None))
-                    # which falls back to the default profile's HERMES_HOME.
-                    # Memory writes then land in the wrong profile's MEMORY.md.
-                    # Stamping here also ensures s.save() persists a non-null
-                    # profile field to the continuation session's JSON file,
-                    # covering the case where the session is later evicted from
-                    # SESSIONS and reconstructed from disk via Session.load().
-                    if not s.profile and _resolved_profile_name:
-                        s.profile = _resolved_profile_name
-                        logger.info(
-                            "Stamped profile=%r on continuation session %s after compression",
-                            _resolved_profile_name, new_sid,
-                        )
-                    # Preserve the original session file so the full pre-compression
-                    # history survives even when summarisation fails. The previous
-                    # implementation renamed old_sid.json → new_sid.json, which
-                    # destroyed the only persistent copy of the uncompressed history
-                    # before the new (possibly summary-only) session had been saved.
-                    # If the LLM summariser also failed, the user was left with zero
-                    # recoverable messages. (#2223)
-                    # ---
-                    # Archive the old session: write its current state to disk so
-                    # the full conversation history survives even when context
-                    # compression removes messages from the model's context. Skip
-                    # the write when the file already contains up-to-date data
-                    # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
-                    # The continuation is the live/tip session, not another archived
-                    # snapshot. If the in-memory object was itself loaded from a
-                    # pre-compression snapshot (possible on repeated compression chains
-                    # or stale-cache repair paths), _preserve_pre_compression_snapshot()
-                    # intentionally restores that old flag; clear it before saving the
-                    # new continuation so sidebar/discoverability code does not hide the
-                    # session that owns the completed turn.
-                    s.pre_compression_snapshot = False
-                    # Always link the continuation session to its immediate predecessor
-                    # (the preserved snapshot). This OVERRIDES any prior
-                    # parent_session_id because the new continuation IS the next link
-                    # in the chain: traversal walks new → old → old.parent → ... root.
-                    # Stage-353 Opus SHOULD-FIX: previous `if not s.parent_session_id`
-                    # guard skipped this stamp on fork-of-fork compressions, so a
-                    # subsequent traversal from the new continuation would jump
-                    # over the just-preserved snapshot back to the original fork
-                    # parent, losing access to the recoverable history in old_sid.json.
-                    s.parent_session_id = old_sid
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                    # Migrate the per-session lock: alias new_sid to the held
-                    # _agent_lock reference directly (not via old_sid lookup),
-                    # then remove the old_sid entry to prevent a leak.
-                    with SESSION_AGENT_LOCKS_LOCK:
-                        SESSION_AGENT_LOCKS[new_sid] = _agent_lock
-                        SESSION_AGENT_LOCKS.pop(old_sid, None)
-                    # Migrate cached agent to the new session ID so the turn
-                    # count survives context compression.
-                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                    _skipped_agent_migration_entry = None
-                    with SESSION_AGENT_CACHE_LOCK:
-                        _cached_entry = SESSION_AGENT_CACHE.pop(old_sid, None)
-                        if _cached_entry:
-                            _cached_agent = _cached_entry[0]
-                            if _cached_agent_matches_session(_cached_agent, new_sid):
-                                SESSION_AGENT_CACHE[new_sid] = _cached_entry
-                            else:
-                                _skipped_agent_migration_entry = _cached_entry
-                                logger.warning(
-                                    '[webui] Skipped cached agent migration with mismatched session identity: old_sid=%s new_sid=%s agent_session_id=%s',
-                                    old_sid,
-                                    new_sid,
-                                    _cached_agent_session_identity(_cached_agent),
-                                )
-                    if _skipped_agent_migration_entry is not None:
-                        try:
-                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
-                        except Exception:
-                            logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
 
                 # ── Detect silent agent failure (no assistant reply produced) ──
@@ -9530,6 +9921,7 @@ def _run_agent_streaming(
                                     conversation_history=_sanitize_messages_for_api(
                                         _previous_context_messages,
                                         cfg=_cfg,
+                                        session_id=session_id,
                                         effective_model=resolved_model,
                                         effective_provider=resolved_provider,
                                         effective_base_url=resolved_base_url,
@@ -9539,6 +9931,7 @@ def _run_agent_streaming(
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
+                                _assert_model_request_has_no_private_media(_heal_kwargs)
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
@@ -10753,6 +11146,7 @@ def _run_agent_streaming(
                             conversation_history=_sanitize_messages_for_api(
                                 _previous_context_messages,
                                 cfg=_cfg,
+                                session_id=session_id,
                                 effective_model=resolved_model,
                                 effective_provider=resolved_provider,
                                 effective_base_url=resolved_base_url,
@@ -10762,6 +11156,7 @@ def _run_agent_streaming(
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
+                        _assert_model_request_has_no_private_media(_heal_kwargs2)
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         # Retry succeeded — persist the result normally
                         if s is not None:
@@ -10919,10 +11314,11 @@ def _run_agent_streaming(
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
                 s.messages.append(_error_message)
-                try:
-                    s.save()
-                except Exception:
-                    pass
+                if not ephemeral:
+                    try:
+                        s.save()
+                    except Exception:
+                        pass
                 if not ephemeral:
                     try:
                         append_turn_journal_event_for_stream(
@@ -11013,6 +11409,9 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        if ephemeral and s is not None:
+            _cleanup_ephemeral_session(s, stream_id=stream_id)
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run

@@ -183,17 +183,10 @@ def test_save_writes_bak_when_messages_shrink(temp_session_dir):
     from api.models import Session
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=False)
 
-    # Build a fresh in-memory Session with a smaller messages array, then save —
-    # this models the precise failure shape of #1558 (a caller mutates messages
-    # downward and saves). We construct the Session directly rather than going
-    # through get_session() so we don't trigger _repair_stale_pending side-effects.
-    s = Session(
-        session_id=sid,
-        title="t",
-        workspace="",
-        model="m",
-        messages=[{"role": "user", "content": f"m{i}"} for i in range(500)],
-    )
+    # Mutate a validated load rather than constructing over an existing SID.
+    s = Session.load(sid)
+    assert s is not None
+    s.messages = [{"role": "user", "content": f"m{i}"} for i in range(500)]
     s.save()
 
     bak_path = temp_session_dir / f"{sid}.json.bak"
@@ -213,14 +206,10 @@ def test_save_does_not_write_bak_when_messages_grow(temp_session_dir):
     from api.models import Session
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=False)
 
-    # Build a session with MORE messages than on disk — the normal grow path.
-    s = Session(
-        session_id=sid,
-        title="t",
-        workspace="",
-        model="m",
-        messages=[{"role": "user", "content": f"m{i}"} for i in range(1001)],
-    )
+    # Mutate a validated load rather than constructing over an existing SID.
+    s = Session.load(sid)
+    assert s is not None
+    s.messages = [{"role": "user", "content": f"m{i}"} for i in range(1001)]
     s.save()
 
     bak_path = temp_session_dir / f"{sid}.json.bak"

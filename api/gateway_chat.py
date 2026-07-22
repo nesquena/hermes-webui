@@ -391,7 +391,14 @@ def _run_gateway_runs_api_streaming(
 
     instructions_parts = []
     conversation_history = []
-    for entry in getattr(session, "context_messages", None) or []:
+    stored_history = getattr(session, "context_messages", None) or []
+    from api.session_media import (
+        assert_no_session_media_references,
+        hydrate_session_media_urls,
+    )
+
+    stored_history = hydrate_session_media_urls(stored_history, session_id)
+    for entry in stored_history:
         if not isinstance(entry, dict):
             continue
         role = str(entry.get("role") or "").strip().lower()
@@ -430,6 +437,7 @@ def _run_gateway_runs_api_streaming(
         run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
     if conversation_history:
         run_body["conversation_history"] = conversation_history
+    assert_no_session_media_references(run_body, context="Gateway /v1/runs request")
     req = urllib.request.Request(
         url_runs,
         data=json.dumps(run_body).encode("utf-8"),

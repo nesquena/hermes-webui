@@ -357,7 +357,10 @@ class TestBuildNativeMultimodalMessage:
     def test_sync_chat_history_sanitizer_receives_config(self):
         """#2398: fallback POST /api/chat must use the text-mode history sanitizer too."""
         src = Path('api/routes.py').read_text()
-        assert 'conversation_history=_sanitize_messages_for_api(' in src, (
+        assert (
+            'conversation_history=_sanitize_messages_for_api(' in src
+            or '"conversation_history": _sanitize_messages_for_api(' in src
+        ), (
             'The legacy synchronous /api/chat endpoint must sanitize history through '
             '_sanitize_messages_for_api.'
         )

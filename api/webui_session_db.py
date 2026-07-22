@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -190,8 +190,8 @@ class WebUIJsonSessionDB:
     @staticmethod
     def _read_path(path: Path) -> dict[str, Any] | None:
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return models._load_and_validate_session_payload(path, path.stem)
+        except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
             return None
 
     @staticmethod
@@ -221,13 +221,14 @@ class WebUIJsonSessionDB:
     @staticmethod
     def _atomic_write(path: Path, data: dict[str, Any]) -> None:
         payload = json.dumps(data, ensure_ascii=False, indent=2)
-        tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.current_thread().ident}")
+        tmp = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
         try:
             with open(tmp, "w", encoding="utf-8") as handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
+            models._fsync_parent_directory(path)
         finally:
             try:
                 tmp.unlink(missing_ok=True)
