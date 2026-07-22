@@ -666,12 +666,66 @@ if (keepSwipe(true, true, true)) throw new Error('read-only row should not keep 
 def test_grouped_drag_affordance_is_hover_revealed_and_unassigned_header_is_styled_target():
     assert re.search(
         r"\.session-item:hover \.session-project-drag-handle,\s*"
-        r"\.session-item:focus-within \.session-project-drag-handle\{display:inline-block;\}",
+        r"\.session-item:focus-within \.session-project-drag-handle\{visibility:visible;opacity:1;pointer-events:auto;\}",
         (ROOT / "static" / "style.css").read_text(encoding="utf-8"),
     )
-    assert ".session-project-drag-handle{display:none;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".session-project-drag-handle{display:inline-block;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert "visibility:hidden;opacity:0;pointer-events:none;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "Object.prototype.hasOwnProperty.call(g,'dropProjectId')?' project-session-header':''" in SESSIONS_JS
     assert ".project-session-header.drag-over" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def test_grouped_drag_playwright_keeps_title_geometry_stable_on_hover():
+    playwright_factory = _require_playwright()
+    style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    markup = """
+<!doctype html>
+<html>
+  <body>
+    <div style="width:280px;padding:16px;">
+      <button type="button" class="session-item">
+        <div class="session-text">
+          <div class="session-title-row">
+            <span class="session-project-drag-handle">⋮⋮</span>
+            <span class="session-title">Grouped sidebar geometry proof title</span>
+          </div>
+        </div>
+      </button>
+    </div>
+  </body>
+</html>
+"""
+    with playwright_factory() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content(markup)
+        page.add_style_tag(content=style)
+        row = page.locator(".session-title-row")
+        title = page.locator(".session-title")
+        handle = page.locator(".session-project-drag-handle")
+        before = {
+            "row": row.bounding_box(),
+            "title": title.bounding_box(),
+            "handle": handle.bounding_box(),
+        }
+        page.hover(".session-item")
+        page.wait_for_timeout(50)
+        after = {
+            "row": row.bounding_box(),
+            "title": title.bounding_box(),
+            "handle": handle.bounding_box(),
+        }
+        browser.close()
+    assert before["handle"] is not None
+    assert after["handle"] is not None
+    assert abs(before["handle"]["width"] - after["handle"]["width"]) < 0.1
+    assert abs(before["row"]["x"] - after["row"]["x"]) < 0.1
+    assert abs(before["row"]["width"] - after["row"]["width"]) < 0.1
+    assert abs(before["title"]["x"] - after["title"]["x"]) < 0.1
+    assert abs(before["title"]["width"] - after["title"]["width"]) < 0.1
 
 
 def _extract_js_function(source, name):
