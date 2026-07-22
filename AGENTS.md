@@ -14,6 +14,15 @@ Before making changes, read:
 3. `docs/CONTRACTS.md`
 4. `CHANGELOG.md`
 
+## Worktree Discipline
+
+- Work only in your own git worktree from the latest default branch; never edit
+  the main checkout directly.
+- Keep the main checkout clean and on the default branch; use it only to pull
+  updates and create worktrees.
+- Put new worktrees under `<main>/.worktrees/<slug>` (or the tool's native
+  root); never `git worktree add ../…` siblings next to the main checkout.
+
 For architecture, testing, or setup work, also read the matching reference:
 
 - `ARCHITECTURE.md` for design constraints and current module layout

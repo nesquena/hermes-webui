@@ -21,6 +21,7 @@ archive/
 CLAUDE.md
 AGENTS.local.md
 .cursorrules
+.worktrees/
 .windsurfrules
 .aider*
 copilot-instructions.md
