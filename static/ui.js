@@ -7093,6 +7093,16 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
   return clean;
 }
 
+function _renderExactAsteriskEmphasis(text,multiline=false){
+  const five=multiline
+    ? /(^|[^*])\*{5}(?!\*)([^*](?:[\s\S]*?[^*])?)\*{5}(?!\*)/g
+    : /(^|[^*])\*{5}(?!\*)([^*\n](?:.*?[^*\n])?)\*{5}(?!\*)/g;
+  const triple=multiline
+    ? /(^|[^*])\*\*\*(?!\*)([^*](?:[\s\S]*?[^*])?)\*\*\*(?!\*)/g
+    : /(^|[^*])\*\*\*(?!\*)([^*\n](?:.*?[^*\n])?)\*\*\*(?!\*)/g;
+  const wrap=(_,lead,value)=>`${lead}<strong><em>${esc(value)}</em></strong>`;
+  return text.replace(five,wrap).replace(triple,wrap);
+}
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
@@ -7319,7 +7329,7 @@ function renderMd(raw){
     // Stash backtick code spans first so bold/italic never esc() their content
     const _code_stash=[];
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
-    t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
+    t=_renderExactAsteriskEmphasis(t);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     // Strikethrough: ~~text~~ → <del>text</del>
@@ -7349,7 +7359,7 @@ function renderMd(raw){
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
-  s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
+  s=_renderExactAsteriskEmphasis(s,true);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
@@ -8489,8 +8499,11 @@ function copyMsg(btn){
 function _copyThinkingText(btn){
   const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
   if(!card)return;
-  const pre=card.querySelector('.thinking-card-body pre');
-  const text=pre?pre.textContent:'';
+  const body=card.querySelector('.thinking-card-body');
+  const source=typeof card._thinkingSource==='string'
+    ? card._thinkingSource
+    : card.getAttribute&&card.getAttribute('data-thinking-source');
+  const text=source!==null&&source!==undefined?source:(body?body.textContent:'');
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;
@@ -10977,23 +10990,37 @@ function _restoreWorklogDetailDisclosureState(root, state){
     }
   });
 }
+function _thinkingBodyHtml(text=''){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean) return '';
+  // Codex emits distinct reasoning summaries as source-adjacent bold spans:
+  // **first****second**. renderMd correctly produces adjacent <strong> nodes;
+  // only Thinking-card presentation turns that exact adjacency into line breaks.
+  // Ordinary inline bold retains its surrounding text/whitespace and is untouched.
+  const rendered=renderMd(clean).replace(/<\/strong><strong>/g,'</strong><br><strong>');
+  return `<div class="thinking-card-markdown">${rendered}</div>`;
+}
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
+  const bodyHtml=_thinkingBodyHtml(clean);
+  const sourceAttr=clean?` data-thinking-source="${esc(clean)}"`:'';
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"${sourceAttr}><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body">${bodyHtml}</div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
 function _thinkingActivityNode(text, open, disclosureKey){
   const row=document.createElement('div');
+  const clean=_sanitizeThinkingDisplayText(text);
   row.className='agent-activity-thinking';
   row.setAttribute('data-worklog-thinking-card','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
-  row.innerHTML=_thinkingCardHtml(text, open);
-  _renderThinkingInto(row,text);
+  row.innerHTML=_thinkingCardHtml(clean, open);
+  row._thinkingPendingText=clean;
+  row._thinkingRenderedText=clean;
   return row;
 }
 function chatActivityMode(){
@@ -11102,8 +11129,12 @@ function _copyEventToClipboard(row){
     }
     text=parts.join('\n');
   }else if(type==='thinking'){
-    const pre=row.querySelector('.thinking-card-body pre');
-    text=pre?pre.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
+    const card=row.querySelector('.thinking-card');
+    const body=row.querySelector('.thinking-card-body');
+    const source=card&&typeof card._thinkingSource==='string'
+      ? card._thinkingSource
+      : card&&card.getAttribute&&card.getAttribute('data-thinking-source');
+    text=source!==null&&source!==undefined?source:(body?body.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,''));
     label='thinking';
   }else{
     text=row.textContent||'';
@@ -12370,7 +12401,11 @@ function _anchorSceneNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+    const thinkingKey=row.row_id||row.local_id||'anchor-thinking';
+    if(!settled&&typeof window.__anchorThinkingIncrementalNode==='function'){
+      node=window.__anchorThinkingIncrementalNode(thinkingKey,text);
+    }
+    if(!node) node=_thinkingActivityNode(text,false,thinkingKey);
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
   }else if(row.role==='lifecycle'){
@@ -12445,14 +12480,21 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+    const thinkingKey=row.row_id||row.local_id||'anchor-thinking';
+    if(!settled&&typeof window.__anchorThinkingIncrementalNode==='function'){
+      node=window.__anchorThinkingIncrementalNode(thinkingKey,text);
+    }
+    const thinkingMeta={
       type:'thinking',
       text,
       preview:text,
       ts:eventTs,
       ...meta,
       live,
-    });
+    };
+    node=node
+      ? _decorateTransparentEventRow(node,thinkingMeta)
+      : _decorateTransparentEventRow(_thinkingActivityNode(text,false,thinkingKey),thinkingMeta);
   }else if(row.role==='tool'){
     const toolCall=_anchorSceneToolCallFromRow(row,{settled});
     node=_decorateTransparentEventRow(buildToolCard(toolCall),{
@@ -12722,7 +12764,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
     const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
     if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
   }else if(row.classList&&row.classList.contains('transparent-event-row')){
-    _renderThinkingInto(row, clean);
+    _renderThinkingInto(row, clean, {force:true});
     const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
     const nextTs=typeof _firstValidTimestampSeconds==='function'
       ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
@@ -12739,7 +12781,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
       });
     }
   }else{
-    _renderThinkingInto(row, clean);
+    _renderThinkingInto(row, clean, {force:true});
   }
   if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
@@ -13022,11 +13064,22 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const existingIsThinking = existingType === 'thinking' || (existing.classList&&existing.classList.contains('transparent-thinking-event'));
   const nodeIsThinking = nodeType === 'thinking' || (node.classList&&node.classList.contains('transparent-thinking-event'));
   if(!existingIsThinking || !nodeIsThinking) return false;
-  const existingPre = existing.querySelector('.thinking-card-body pre');
-  const nodePre = node.querySelector('.thinking-card-body pre');
-  if(!existingPre || !nodePre) return false;
-  const nextText = String(nodePre.textContent || '');
-  if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
+  const existingBody = existing.querySelector('.thinking-card-body');
+  const nodeBody = node.querySelector('.thinking-card-body');
+  if(!existingBody || !nodeBody) return false;
+  const nextText = typeof node._thinkingPendingText==='string'
+    ? node._thinkingPendingText
+    : String(nodeBody.textContent || '');
+  const currentText = typeof existing._thinkingPendingText==='string'
+    ? existing._thinkingPendingText
+    : String(existingBody.textContent || '');
+  if(currentText!==nextText && existingBody.innerHTML!==nodeBody.innerHTML){
+    existingBody.innerHTML=nodeBody.innerHTML;
+  }
+  existing._thinkingPendingText=nextText;
+  existing._thinkingRenderedText=nextText;
+  const existingCard=existing.querySelector('.thinking-card');
+  if(existingCard) existingCard._thinkingSource=nextText;
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
   const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
   if(typeof _decorateTransparentEventRow === 'function'){
@@ -19016,24 +19069,57 @@ function renderKatexBlocks(container,options){
 
 function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
+  const bodyHtml=_thinkingBodyHtml(clean);
+  const sourceAttr=clean?` data-thinking-source="${esc(clean)}"`:'';
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
-  return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+  return bodyHtml
+    ? `<div class="thinking-card${openClass}"${sourceAttr}><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body">${bodyHtml}</div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+}
+function _flushThinkingMarkdown(row){
+  if(!row) return;
+  if(row._thinkingMarkdownTimer){
+    clearTimeout(row._thinkingMarkdownTimer);
+    row._thinkingMarkdownTimer=null;
+  }
+  const clean=_sanitizeThinkingDisplayText(row._thinkingPendingText||'');
+  const body=row.querySelector&&row.querySelector('.thinking-card-body');
+  if(body&&row._thinkingRenderedText===clean) return;
+  if(!clean){
+    row.innerHTML=_thinkingMarkup('');
+    row._thinkingRenderedText='';
+    return;
+  }
+  const html=_thinkingBodyHtml(clean);
+  if(body){
+    if(body.innerHTML!==html) body.innerHTML=html;
+  }else{
+    row.innerHTML=_thinkingMarkup(clean);
+  }
+  row._thinkingRenderedText=clean;
+}
+function _scheduleThinkingMarkdownRender(row){
+  if(!row) return;
+  if(row._thinkingMarkdownTimer) clearTimeout(row._thinkingMarkdownTimer);
+  row._thinkingMarkdownTimer=setTimeout(()=>{
+    row._thinkingMarkdownTimer=null;
+    _flushThinkingMarkdown(row);
+  },120);
 }
 function _renderThinkingInto(row,text=''){
   if(!row) return;
   const clean=_sanitizeThinkingDisplayText(text);
-  if(!clean){
-    row.innerHTML=_thinkingMarkup(text);
+  const options=(arguments.length>2&&arguments[2])||{};
+  row._thinkingPendingText=clean;
+  const card=row.querySelector&&row.querySelector('.thinking-card');
+  if(card) card._thinkingSource=clean;
+  const body=row.querySelector&&row.querySelector('.thinking-card-body');
+  if(!body||!clean||options.force===true){
+    _flushThinkingMarkdown(row);
     return;
   }
-  const pre=row.querySelector('.thinking-card-body pre');
-  if(pre){
-    pre.textContent=clean;
-    return;
-  }
-  row.innerHTML=_thinkingMarkup(text);
+  if(row._thinkingRenderedText===clean) return;
+  _scheduleThinkingMarkdownRender(row);
 }
 function finalizeThinkingCard(){
   // Guard: only finalize thinking card if we're looking at the session that started it.
@@ -19042,6 +19128,18 @@ function finalizeThinkingCard(){
   // stream that started it, not the session currently displayed.
   const _guardTurn = $('liveAssistantTurn');
   if(_guardTurn && S.session && _guardTurn.dataset.sessionId !== S.session.session_id) return;
+  // A trailing debounce keeps cumulative reasoning from re-running renderMd on
+  // every SSE chunk. Flush the latest source before the row loses its live
+  // identity so the settled card can never retain stale Markdown.
+  const pendingRows=[];
+  const standaloneRow=$('thinkingRow');
+  if(standaloneRow) pendingRows.push(standaloneRow);
+  if(_guardTurn&&_guardTurn.querySelectorAll){
+    _guardTurn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(row=>{
+      if(!pendingRows.includes(row)) pendingRows.push(row);
+    });
+  }
+  pendingRows.forEach(row=>_flushThinkingMarkdown(row));
   if(isTransparentStream()){
     const row=$('thinkingRow');
     if(row){

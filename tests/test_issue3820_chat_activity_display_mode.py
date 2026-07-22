@@ -664,7 +664,7 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     assert "background:transparent;" in _pre_block
     assert "border-left:2px solid var(--border-subtle);" in _pre_block
     assert "max-height:none;" in _pre_block
-    assert ".transparent-event-row .thinking-card-body pre{" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card-markdown{" in STYLE_CSS
     assert "border:0;" in STYLE_CSS
     assert "border-radius:0;" in STYLE_CSS
     assert "margin-top:0;" in STYLE_CSS

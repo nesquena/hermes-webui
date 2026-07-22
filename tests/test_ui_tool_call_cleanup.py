@@ -889,10 +889,10 @@ class TestToolCardDesignTokens:
             "",
             CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card.open .thinking-card-body{", 1)[1].split("}", 1)[0],
         )
-        pre_rule = re.sub(
+        markdown_rule = re.sub(
             r"\s+",
             "",
-            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-body pre{", 1)[1].split("}", 1)[0],
+            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-markdown{", 1)[1].split("}", 1)[0],
         )
 
         assert "background:transparent" in card_rule
@@ -906,8 +906,8 @@ class TestToolCardDesignTokens:
         assert "letter-spacing:0" in label_rule
         assert "color:var(--muted)" in icon_rule
         assert "padding:6px8px7px8px" in body_rule
-        assert "font-size:var(--message-body-font-size)" in pre_rule
-        assert "line-height:var(--message-body-line-height)" in pre_rule
+        assert "font-size:var(--message-body-font-size)" in markdown_rule
+        assert "line-height:var(--message-body-line-height)" in markdown_rule
 
     def test_worklog_tool_steps_align_with_thinking_rows(self):
         rule = re.sub(

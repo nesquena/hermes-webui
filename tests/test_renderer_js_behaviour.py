@@ -71,11 +71,17 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_renderExactAsteriskEmphasis'));
 eval(extractFunc('renderMd'));
+eval(extractFunc('_stripXmlToolCallsDisplay'));
+eval(extractFunc('_sanitizeThinkingDisplayText'));
+eval(extractFunc('_thinkingBodyHtml'));
 
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+process.stdin.on('end', () => {
+  process.stdout.write(process.argv[3] === 'thinking' ? _thinkingBodyHtml(buf) : renderMd(buf));
+});
 """
 
 
@@ -99,6 +105,84 @@ def _render(driver_path, markdown: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
+
+
+def _render_thinking(driver_path, markdown: str) -> str:
+    """Run the exact Thinking-card Markdown wrapper from static/ui.js."""
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH), "thinking"],
+        input=markdown,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node Thinking driver failed: {result.stderr}")
+    return result.stdout
+
+
+def test_codex_reasoning_adjacent_bold_summaries_render_as_markdown(driver_path):
+    raw = (
+        "**Evaluating doc sync strategies****Deciding repo docs ingestion model****"
+        "Planning dirtypages daemon for docs****Designing distributed repo syncing****"
+        "Designing metadata tagging policy**"
+    )
+
+    out = _render(driver_path, raw)
+
+    assert out.count("<strong>") == 5
+    assert "****" not in out
+    assert "**Evaluating" not in out
+    assert "&lt;strong" not in out
+
+
+def test_codex_reasoning_adjacent_bold_summaries_get_one_line_each(driver_path):
+    raw = (
+        "**Evaluating doc sync strategies****Deciding repo docs ingestion model****"
+        "Planning dirtypages daemon for docs****Designing distributed repo syncing****"
+        "Designing metadata tagging policy**"
+    )
+
+    out = _render_thinking(driver_path, raw)
+
+    assert out.count("<strong>") == 5
+    assert out.count("<br>") == 4
+    assert "</strong><br><strong>" in out
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "This is **important** text.",
+        "**First** and **second** stay inline.",
+        "`**code****stays**`",
+    ],
+)
+def test_thinking_summary_lines_do_not_blockify_ordinary_bold(driver_path, raw):
+    assert "<br>" not in _render_thinking(driver_path, raw)
+
+
+@pytest.mark.parametrize(
+    "markdown, expected",
+    [
+        ("***bold italic***", "<strong><em>bold italic</em></strong>"),
+        ("*****five star bold italic*****", "<strong><em>five star bold italic</em></strong>"),
+        ("- **one****two**", "<li><strong>one</strong><strong>two</strong></li>"),
+        ("# **one****two**", "<h1><strong>one</strong><strong>two</strong></h1>"),
+        ("> **one****two**", "<blockquote><p><strong>one</strong><strong>two</strong></p></blockquote>"),
+        ("`**one****two**`", "<code>**one****two**</code>"),
+    ],
+)
+def test_adjacent_bold_fix_preserves_other_emphasis_contexts(driver_path, markdown, expected):
+    assert expected in _render(driver_path, markdown)
+
+
+def test_literal_four_star_run_is_not_turned_into_empty_bold(driver_path):
+    out = _render(driver_path, "a****b")
+
+    assert "a****b" in out
+    assert "<strong></strong>" not in out
 
 
 

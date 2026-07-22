@@ -377,6 +377,68 @@ console.log(JSON.stringify(cases));
         assert "_label_" in cases["nestedLinkShape"]
 
 
+class TestSmdThinkingSummaryLines:
+    """Live Thinking turns only source-adjacent bold spans into separate lines."""
+
+    def test_live_thinking_separates_adjacent_bold_without_blockifying_inline_bold(self):
+        underscore = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        thinking = extract_fn(MESSAGES_JS, "_smdThinkingRenderer")
+        assert underscore and thinking
+        script = f"""
+import * as smd from './static/vendor/smd.min.js';
+globalThis.window = {{ smd }};
+{underscore}
+{thinking}
+function render(input){{
+  const out=[];
+  const stack=[];
+  const renderer=_smdThinkingRenderer({{
+    data: {{}},
+    add_token(_data, token){{
+      let tag='';
+      if(token===smd.PARAGRAPH) tag='p';
+      if(token===smd.STRONG_AST||token===smd.STRONG_UND) tag='strong';
+      if(token===smd.LINE_BREAK) tag='br';
+      stack.push(tag);
+      if(tag==='br') out.push('<br>');
+      else if(tag) out.push('<'+tag+'>');
+    }},
+    end_token() {{
+      const tag=stack.pop();
+      if(tag&&tag!=='br') out.push('</'+tag+'>');
+    }},
+    add_text(_data, text) {{ out.push(text); }},
+    set_attr() {{}},
+  }});
+  const parser=smd.parser(renderer);
+  for(const char of input) smd.parser_write(parser,char);
+  smd.parser_end(parser);
+  return out.join('');
+}}
+console.log(JSON.stringify({{
+  adjacent:render('**one****two****three**'),
+  inline:render('This is **important** text.'),
+  separated:render('**First** and **second** stay inline.'),
+  code:render('`**one****two**`'),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        cases = json.loads(completed.stdout)
+        assert cases["adjacent"].count("<strong>") == 3
+        assert cases["adjacent"].count("<br>") == 2
+        assert "</strong><br><strong>" in cases["adjacent"]
+        assert "<br>" not in cases["inline"]
+        assert "<br>" not in cases["separated"]
+        assert "<br>" not in cases["code"]
+        assert "**one****two**" in cases["code"]
+
+
 # ── 4. _scheduleRender: smd path vs fallback ──────────────────────────────────
 
 class TestScheduleRenderSmdPath:

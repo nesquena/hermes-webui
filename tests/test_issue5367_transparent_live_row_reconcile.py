@@ -1711,7 +1711,12 @@ class FakeElement {
   get textContent(){ return this.children.length ? this.children.map(child=>child.textContent).join('') : this._textContent; }
   set textContent(value){ this._textContent = String(value ?? ''); this.children = []; }
   get innerHTML(){ return this._innerHTML || this.children.map(child=>child.textContent).join(''); }
-  set innerHTML(value){ this.innerHTMLSetCount += 1; this._innerHTML = String(value ?? ''); this._textContent = this._innerHTML; this.children = []; }
+  set innerHTML(value){
+    this.innerHTMLSetCount += 1;
+    this._innerHTML = String(value ?? '');
+    this._textContent = this._innerHTML.replace(/<[^>]+>/g, '');
+    this.children = [];
+  }
   setAttribute(name, value){ this.attributes[String(name)] = String(value); if(name === 'class') this.className = value; }
   getAttribute(name){ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
   getAttributeNames(){ return Object.keys(this.attributes); }
@@ -1771,11 +1776,10 @@ function thinkingRow(text, preview){
   const body = new FakeElement('div');
   body.className = 'thinking-card-body';
   body.scrollTop = 37;
-  const pre = new FakeElement('pre');
-  pre.textContent = text;
+  body.innerHTML = `<div class="thinking-card-markdown"><strong>${text}</strong></div>`;
+  body.innerHTMLSetCount = 0;
   header.appendChild(label);
   header.appendChild(previewEl);
-  body.appendChild(pre);
   card.appendChild(header);
   card.appendChild(body);
   row.appendChild(card);
@@ -1795,29 +1799,30 @@ eval(extractFunc('_refreshTransparentLiveRow'));
 
 const existing = thinkingRow('short thought', 'short thought');
 const originalBody = existing.querySelector('.thinking-card-body');
-const originalPre = existing.querySelector('.thinking-card-body pre');
 const candidate = thinkingRow('long thought\\n'.repeat(80), 'long thought');
+const candidateBody = candidate.querySelector('.thinking-card-body');
 const refreshed = _refreshTransparentLiveRow(existing, candidate);
 const refreshedBody = refreshed.querySelector('.thinking-card-body');
-const refreshedPre = refreshed.querySelector('.thinking-card-body pre');
 const refreshedPreview = refreshed.querySelector('.transparent-event-thinking-preview');
 process.stdout.write(JSON.stringify({
   sameRow: refreshed === existing,
   sameBody: refreshedBody === originalBody,
-  samePre: refreshedPre === originalPre,
-  textUpdated: refreshedPre.textContent === 'long thought\\n'.repeat(80),
+  renderedHtmlUpdated: refreshedBody.innerHTML === candidateBody.innerHTML,
+  textUpdated: refreshedBody.textContent === 'long thought\\n'.repeat(80),
   previewUpdated: refreshedPreview.textContent === 'long thought',
   scrollTopPreserved: refreshedBody.scrollTop === 37,
   innerHTMLSetCount: refreshed.innerHTMLSetCount,
+  bodyInnerHTMLSetCount: refreshedBody.innerHTMLSetCount,
   cardOpen: !!refreshed.querySelector('.thinking-card').classList.contains('open'),
 }));
 """
     data = _run_node_script(script, str(ROOT / "static" / "ui.js"))
     assert data["sameRow"] is True
     assert data["sameBody"] is True
-    assert data["samePre"] is True
+    assert data["renderedHtmlUpdated"] is True
     assert data["textUpdated"] is True
     assert data["previewUpdated"] is True
     assert data["scrollTopPreserved"] is True
     assert data["innerHTMLSetCount"] == 0
+    assert data["bodyInnerHTMLSetCount"] == 1
     assert data["cardOpen"] is True
