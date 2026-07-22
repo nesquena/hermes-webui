@@ -15307,7 +15307,13 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   }
 }
 function _renderMessagesWithScrollSnapshot(options){
-  const scrollSnapshot=_captureMessageScrollSnapshot();
+  // Accept an optional pre-captured scroll snapshot via _prescrollSnapshot.
+  // When provided, it is used INSTEAD of capturing a fresh one from the current
+  // DOM state — essential for the STREAM_DONE collapse render: the caller has
+  // already captured the snapshot from the LIVE DOM (before keep-open was armed),
+  // and re-capturing from the intermediate expanded-worklog state would capture
+  // stale anchors that no longer exist after the worklog collapses. (#6385)
+  const scrollSnapshot=(options&&options._prescrollSnapshot)||_captureMessageScrollSnapshot();
   renderMessages({...(options||{}),preserveScroll:true});
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
 }

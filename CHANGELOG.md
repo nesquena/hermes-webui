@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- **The transcript no longer jumps when a streaming reply settles while you're reading earlier messages.** If you scrolled up to read history and a streaming assistant reply finished (collapsing its expanded worklog to the settled compact view), the viewport could lurch away from what you were reading. The scroll anchor is now captured from the live DOM *before* the collapse render and reused, so your position is preserved through settlement. Readers pinned to the bottom still auto-follow to the newest reply as before. Thanks @franksong2702. (#6390, #6385)
+
 - **TypeScript source files served from the workspace no longer risk same-origin script execution.** `.ts` and `.tsx` files fetched via the file-raw path are now served as `text/plain` instead of an executable content type, closing an XSS vector where a workspace `.ts` file could run inline in the browser. `.js`/`.jsx` remain `application/octet-stream` (non-executable) as before, and no other content-type contract changed. Thanks @webtecnica. (#6372, #6374)
 
 - **`config.yaml` is now written atomically so a crash mid-write can't corrupt it.** Config saves (settings, onboarding, and profile writes) previously used an in-place write, so a crash, full disk, or power loss between open and full write could leave `config.yaml` truncated or empty. All config writers now route through a shared same-directory temp file → `fsync` → `os.replace`, preserving the file's existing permission mode and writing through symlinks. Thanks @ai-ag2026. (#5797, #5774)
