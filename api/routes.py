@@ -20498,7 +20498,8 @@ def _read_active_project_context(workspace: Path | None) -> dict:
 
 
 def _handle_memory_read(handler, parsed=None):
-    memory_enabled, user_profile_enabled = _memory_feature_flags()
+    config_snapshot = get_config_snapshot()
+    memory_enabled, user_profile_enabled = _memory_feature_flags(config_snapshot)
     try:
         from api.profiles import get_active_hermes_home
 
@@ -20533,8 +20534,8 @@ def _handle_memory_read(handler, parsed=None):
             "user": _redact_text(user),
             "soul": _redact_text(soul),
             "project_context": _redact_text(project_context["content"]),
-            "memory_path": str(mem_file),
-            "user_path": str(user_file),
+            "memory_path": str(mem_file) if memory_enabled else None,
+            "user_path": str(user_file) if user_profile_enabled else None,
             "soul_path": str(soul_file),
             "project_context_path": project_context["path"],
             "project_context_name": project_context.get("name", ""),
@@ -20544,7 +20545,7 @@ def _handle_memory_read(handler, parsed=None):
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
-            "external_notes_enabled": _external_notes_sources_enabled(),
+            "external_notes_enabled": _external_notes_sources_enabled(config_snapshot),
             "memory_enabled": memory_enabled,
             "user_profile_enabled": user_profile_enabled,
         },
@@ -25393,7 +25394,8 @@ def _handle_memory_write(handler, body):
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
     section = body["section"]
-    memory_enabled, user_profile_enabled = _memory_feature_flags()
+    config_snapshot = get_config_snapshot()
+    memory_enabled, user_profile_enabled = _memory_feature_flags(config_snapshot)
     if section == "memory" and not memory_enabled:
         return bad(handler, "Memory is disabled", 403)
     if section == "user" and not user_profile_enabled:
@@ -26096,18 +26098,18 @@ def _external_notes_sources_enabled(config_data: dict | None = None) -> bool:
     )
 
 
-def _memory_feature_flags() -> tuple[bool, bool]:
-    config_data = get_config()
+def _memory_feature_flags(config_data: dict | None = None) -> tuple[bool, bool]:
+    config_data = config_data if isinstance(config_data, dict) else get_config_snapshot()
     memory_config = config_data.get("memory") if isinstance(config_data, dict) else None
-    if not isinstance(memory_config, dict):
+    has_memory_block = isinstance(memory_config, dict)
+    if not has_memory_block:
         memory_config = {}
-    return tuple(
-        value if isinstance(value, bool) else _webui_truthy(value)
-        for value in (
-            memory_config.get("memory_enabled", True),
-            memory_config.get("user_profile_enabled", True),
-        )
-    )
+    missing_default = False if has_memory_block else True
+    flags = []
+    for key in ("memory_enabled", "user_profile_enabled"):
+        value = memory_config.get(key, missing_default)
+        flags.append(value if isinstance(value, bool) else _webui_truthy(value))
+    return tuple(flags)
 
 
 _NOTES_SOURCE_SERVER_HINTS = {

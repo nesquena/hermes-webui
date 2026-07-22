@@ -2,6 +2,8 @@ import json
 import pathlib
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import api.profiles
@@ -23,8 +25,9 @@ def _setup_home(tmp_path, monkeypatch, config):
     (home / "SOUL.md").write_text("soul body", encoding="utf-8")
     monkeypatch.setattr(api.profiles, "get_active_hermes_home", lambda: home)
     monkeypatch.setattr(routes, "get_config", lambda: config)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: config)
     monkeypatch.setattr(routes, "_memory_project_context_workspace", lambda _parsed: tmp_path)
-    monkeypatch.setattr(routes, "_external_notes_sources_enabled", lambda: True)
+    monkeypatch.setattr(routes, "_external_notes_sources_enabled", lambda _config_data=None: True)
     captured = {}
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.setdefault("payload", payload))
     monkeypatch.setattr(
@@ -388,6 +391,7 @@ def test_reporter_repro_both_flags_disabled_blank_payload_hide_rows_and_block_wr
     payload = _read(home, captured)
     assert payload["memory"] == payload["user"] == ""
     assert payload["memory_mtime"] is payload["user_mtime"] is None
+    assert payload["memory_path"] is payload["user_path"] is None
     assert payload["memory_enabled"] is payload["user_profile_enabled"] is False
     assert _write("memory", captured) == ("Memory is disabled", 403)
     assert _write("user", captured) == ("User profile is disabled", 403)
@@ -424,6 +428,18 @@ def test_absent_flags_default_to_enabled(tmp_path, monkeypatch):
     assert _write("user", captured) is None
 
 
+def test_present_memory_block_missing_flags_disable_current_server_surfaces(tmp_path, monkeypatch):
+    home, captured = _setup_home(tmp_path, monkeypatch, {"memory": {}})
+    payload = _read(home, captured)
+    assert payload["memory"] == payload["user"] == ""
+    assert payload["memory_enabled"] is payload["user_profile_enabled"] is False
+    assert payload["memory_path"] is payload["user_path"] is None
+    assert _write("memory", captured) == ("Memory is disabled", 403)
+    assert _write("user", captured) == ("User profile is disabled", 403)
+    assert (home / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "memory body"
+    assert (home / "memories" / "USER.md").read_text(encoding="utf-8") == "user body"
+
+
 def test_string_flags_follow_existing_truthy_config_semantics(tmp_path, monkeypatch):
     home, captured = _setup_home(
         tmp_path,
@@ -448,6 +464,86 @@ def test_soul_project_context_and_external_notes_remain_available(tmp_path, monk
     assert payload["external_notes_enabled"] is True
     assert _write("soul", captured) is None
     assert (home / "SOUL.md").read_text(encoding="utf-8") == "changed"
+
+
+def test_concurrent_profiles_keep_request_owned_memory_flags(tmp_path, monkeypatch):
+    profiles = {
+        "alpha": {
+            "config": {"memory": {"memory_enabled": False, "user_profile_enabled": True}},
+            "other": "beta",
+            "memory_result": ("Memory is disabled", 403),
+            "user_result": None,
+            "memory_content": "memory body",
+            "user_content": "alpha user",
+        },
+        "beta": {
+            "config": {"memory": {"memory_enabled": True, "user_profile_enabled": False}},
+            "other": "alpha",
+            "memory_result": None,
+            "user_result": ("User profile is disabled", 403),
+            "memory_content": "beta memory",
+            "user_content": "user body",
+        },
+    }
+    tls = threading.local()
+    start = threading.Barrier(len(profiles))
+
+    for name in profiles:
+        home = tmp_path / name
+        memories = home / "memories"
+        memories.mkdir(parents=True)
+        (memories / "MEMORY.md").write_text("memory body", encoding="utf-8")
+        (memories / "USER.md").write_text("user body", encoding="utf-8")
+        profiles[name]["home"] = home
+
+    monkeypatch.setattr(api.profiles, "get_active_hermes_home", lambda: tls.home)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: tls.config)
+    monkeypatch.setattr(routes, "get_config", lambda: profiles[tls.name]["config"])
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, status=400: {"error": (message, status)})
+
+    def run(profile_name):
+        profile = profiles[profile_name]
+        tls.name = profile["other"]
+        tls.home = profile["home"]
+        tls.config = profile["config"]
+        start.wait(timeout=5)
+        memory = routes._handle_memory_write(
+            object(),
+            {"section": "memory", "content": f"{profile_name} memory"},
+        )
+        user = routes._handle_memory_write(
+            object(),
+            {"section": "user", "content": f"{profile_name} user"},
+        )
+        return {
+            "memory": memory.get("error") if isinstance(memory, dict) and "error" in memory else None,
+            "user": user.get("error") if isinstance(user, dict) and "error" in user else None,
+            "memory_content": (profile["home"] / "memories" / "MEMORY.md").read_text(encoding="utf-8"),
+            "user_content": (profile["home"] / "memories" / "USER.md").read_text(encoding="utf-8"),
+        }
+
+    with ThreadPoolExecutor(max_workers=len(profiles)) as executor:
+        results = {
+            name: future.result()
+            for name, future in {
+                name: executor.submit(run, name)
+                for name in profiles
+            }.items()
+        }
+
+    assert results["alpha"] == {
+        "memory": profiles["alpha"]["memory_result"],
+        "user": profiles["alpha"]["user_result"],
+        "memory_content": profiles["alpha"]["memory_content"],
+        "user_content": profiles["alpha"]["user_content"],
+    }
+    assert results["beta"] == {
+        "memory": profiles["beta"]["memory_result"],
+        "user": profiles["beta"]["user_result"],
+        "memory_content": profiles["beta"]["memory_content"],
+        "user_content": profiles["beta"]["user_content"],
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for panel row coverage")

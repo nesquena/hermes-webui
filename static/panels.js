@@ -7420,9 +7420,7 @@ async function loadMemory(force) {
     if (panel) {
       panel.innerHTML = '';
       for (const s of MEMORY_SECTIONS) {
-        if (s.key === 'external_notes' && !_memoryData.external_notes_enabled) continue;
-        if (s.key === 'memory' && _memoryData.memory_enabled === false) continue;
-        if (s.key === 'user' && _memoryData.user_profile_enabled === false) continue;
+        if (!_memorySectionEnabled(s, _memoryData)) continue;
         const el = document.createElement('button');
         el.type = 'button';
         el.className = 'side-menu-item';
