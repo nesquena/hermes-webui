@@ -609,7 +609,8 @@ def _update_config_payload(body):
         kanban_cfg["lane_by_profile"] = body["lane_by_profile"]
         dashboard_cfg["kanban"] = kanban_cfg
         config_data["dashboard"] = dashboard_cfg
-        config._save_yaml_config_file(config_path, config_data)
+        config._save_yaml_config_file(config_path, config_data,
+            dirty_set={("dashboard", "kanban", "lane_by_profile")})
     config.reload_config()
     payload = _config_payload()
     payload["lane_by_profile"] = body["lane_by_profile"]

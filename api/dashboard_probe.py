@@ -199,7 +199,8 @@ def save_dashboard_config(payload: dict) -> dict:
         dashboard_section["url"] = normalized_url
     else:
         dashboard_section.pop("url", None)
-    webui_config._save_yaml_config_file(config_path, config_data)
+    webui_config._save_yaml_config_file(config_path, config_data,
+        dirty_set={("webui", "dashboard", "enabled"), ("webui", "dashboard", "url")})
     webui_config.reload_config()
     return {"enabled": enabled, "url": normalized_url}
 

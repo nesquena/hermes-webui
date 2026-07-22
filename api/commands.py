@@ -5,6 +5,7 @@ If hermes-agent is unavailable the endpoint degrades to an empty list
 so the frontend can still load with WEBUI_ONLY commands.
 """
 from __future__ import annotations
+import copy
 from contextlib import nullcontext
 import logging
 import threading
@@ -240,11 +241,13 @@ def _run_codex_runtime_command(arg_string: str) -> str:
             from api import config as webui_config
 
             active_config = webui_config.get_config()
+            _snapshot = copy.deepcopy(active_config)
 
             def _persist_config(config_data: dict) -> None:
                 webui_config._save_yaml_config_file(
                     webui_config._get_config_path(),
                     config_data,
+                    snapshot=_snapshot,
                 )
                 webui_config.reload_config()
 

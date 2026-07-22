@@ -25387,7 +25387,8 @@ def _handle_skill_toggle(handler, body):
             )
 
         cfg["skills"] = skills_cfg
-        _save_yaml_config_file(config_path, cfg)
+        _save_yaml_config_file(config_path, cfg,
+            dirty_set={("skills", "disabled"), ("skills", "platform_disabled", "webui")})
 
     reload_config()  # outside with block — reload_config() acquires the lock itself
     _SKILLS_STATS_CACHE.clear()
@@ -26592,6 +26593,7 @@ def _handle_mcp_server_delete(handler, name):
     if not name:
         return bad(handler, "name is required")
     cfg = get_config()
+    _snapshot = copy.deepcopy(cfg)
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
@@ -26599,7 +26601,8 @@ def _handle_mcp_server_delete(handler, name):
         return bad(handler, f"MCP server '{name}' not found", 404)
     del servers[name]
     cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    _save_yaml_config_file(_get_config_path(), cfg,
+        snapshot=_snapshot)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -26623,7 +26626,8 @@ def _handle_mcp_server_toggle(handler, name, body):
         return bad(handler, f"MCP server '{name}' has invalid config", 400)
     servers[name]["enabled"] = enabled
     cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    _save_yaml_config_file(_get_config_path(), cfg,
+        dirty_set={("mcp_servers", name, "enabled")})
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -26657,6 +26661,7 @@ def _handle_mcp_server_update(handler, name, body):
     # Validate: must have url (http) or command (stdio)
     server_cfg = {}
     cfg = get_config()
+    _snapshot = copy.deepcopy(cfg)
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
@@ -26680,6 +26685,7 @@ def _handle_mcp_server_update(handler, name, body):
             pass
     servers[name] = server_cfg
     cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    _save_yaml_config_file(_get_config_path(), cfg,
+        snapshot=_snapshot)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

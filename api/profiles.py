@@ -2374,7 +2374,9 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     if base_url:
         model_section['base_url'] = base_url
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+    from api.config import _save_yaml_config_file
+    _save_yaml_config_file(config_path, cfg,
+        dirty_set={("model", "base_url")})
 
 
 def _clean_profile_config_value(value: Optional[str], field: str) -> Optional[str]:
@@ -2513,7 +2515,9 @@ def _write_model_defaults_to_config(
     if model_provider:
         model_section['provider'] = model_provider
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+    from api.config import _save_yaml_config_file
+    _save_yaml_config_file(config_path, cfg,
+        dirty_set={("model", "default"), ("model", "provider")})
 
 
 def create_profile_api(name: str, clone_from: str = None,

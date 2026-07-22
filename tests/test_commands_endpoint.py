@@ -338,7 +338,7 @@ def test_codex_runtime_command_uses_shared_switch_and_persists(monkeypatch, tmp_
     monkeypatch.setattr(
         webui_config,
         "_save_yaml_config_file",
-        lambda path, data: saved.append((path, data.copy())),
+        lambda path, data, **kwargs: saved.append((path, data.copy())),
     )
     monkeypatch.setattr(webui_config, "reload_config", lambda: saved.append(("reload", None)))
 
@@ -363,7 +363,7 @@ def test_codex_runtime_command_accepts_underscore_alias(monkeypatch):
     from api.commands import execute_agent_command
 
     monkeypatch.setattr(webui_config, "get_config", lambda: {"model": {"openai_runtime": "auto"}})
-    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
+    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data, **kwargs: None)
     monkeypatch.setattr(webui_config, "reload_config", lambda: None)
 
     output = execute_agent_command('/codex_runtime codex_app_server')

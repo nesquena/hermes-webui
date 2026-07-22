@@ -17,12 +17,13 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
-    invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_config_path,
+    _save_yaml_config_file,
     get_available_models,
     get_config,
+    invalidate_models_cache,
     load_settings,
     reload_config,
     save_settings,
@@ -244,16 +245,20 @@ def _load_yaml_config(config_path: Path) -> dict:
         return {}
 
 
-def _save_yaml_config(config_path: Path, config: dict) -> None:
-    try:
-        import yaml as _yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
+def _save_yaml_config(config_path: Path, config: dict) -> None:
+    """Legacy compatibility wrapper — delegates to the central sink.
+
+    All keys in *config* are treated as authored by the caller (the
+    onboarding callers that use this load raw YAML with no ``${VAR}``
+    expansion, so the guard is a no-op on their values anyway).
+
+    New callers should use ``_save_yaml_config_file`` directly with an
+    explicit ``dirty_set``.
+    """
+    _save_yaml_config_file(
+        config_path, config,
+        dirty_set={(k,) for k in config},
     )
 
 
@@ -1104,6 +1109,8 @@ def apply_self_hosted_provider_setup(body: dict) -> dict:
         cfg["model"] = model_cfg
     elif "model" in cfg:
         cfg["model"] = original_model_cfg
+
+    # Always save — providers.{provider}.base_url was always set above
     _save_yaml_config(config_path, cfg)
 
     if api_key and env_var:

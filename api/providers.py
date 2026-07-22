@@ -2975,15 +2975,15 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         return
 
     try:
-        import yaml as _yaml
-
         changed = False
 
         with _cfg_lock:
-            raw = config_path.read_text(encoding="utf-8")
-            cfg = _yaml.safe_load(raw)
+            # Read the expanded view with a snapshot so the central sink can
+            # derive exact deleted leaves and preserve raw ${VAR} siblings.
+            cfg = _config._load_yaml_config_file(config_path)
             if not isinstance(cfg, dict):
                 return
+            snapshot = copy.deepcopy(cfg)
 
             # 1. Clean providers.<id>.api_key
             providers_cfg = cfg.get("providers") or {}
@@ -3012,7 +3012,8 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                                 changed = True
 
             if changed:
-                _save_yaml_config_file(config_path, cfg)
+                _save_yaml_config_file(config_path, cfg,
+                    snapshot=snapshot)
         # Sync in-memory cache and bust model TTL cache
         # MUST be called outside _cfg_lock to avoid deadlock:
         # _cfg_lock is a threading.Lock (non-reentrant) and
