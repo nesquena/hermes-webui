@@ -20304,7 +20304,13 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
+function _syncComposerFiles(){
+  if(S.session&&S.session.session_id&&typeof _rememberComposerPendingFiles==='function'){
+    _rememberComposerPendingFiles(S.session.session_id,S.pendingFiles);
+  }
+}
 function renderTray(){ // non-media files use paperclip chip
+  _syncComposerFiles();
   const tray=$('attachTray');tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');

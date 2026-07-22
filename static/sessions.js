@@ -40,7 +40,51 @@ const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
+const _composerPendingFilesByOwner = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
+
+function _composerPendingFilesOwnerKey(sid) {
+  if (!sid) return '';
+  const sessionProfile = S.session && S.session.session_id === sid
+    ? S.session.profile
+    : null;
+  const profile = String(sessionProfile || S.activeProfile || 'default').trim() || 'default';
+  return `${profile}\u0000${sid}`;
+}
+
+function _composerPendingFileIsLive(file) {
+  if (!file || typeof file !== 'object') return false;
+  if (typeof File !== 'undefined' && file instanceof File) return true;
+  if (typeof Blob !== 'undefined' && file instanceof Blob) return true;
+  return typeof file.arrayBuffer === 'function' || typeof file.slice === 'function';
+}
+
+function _rememberComposerPendingFiles(sid, files) {
+  const key = _composerPendingFilesOwnerKey(sid);
+  if (!key) return;
+  const liveFiles = Array.isArray(files) ? files.filter(_composerPendingFileIsLive) : [];
+  if (liveFiles.length) _composerPendingFilesByOwner.set(key, [...liveFiles]);
+  else _composerPendingFilesByOwner.delete(key);
+}
+
+function _forgetComposerPendingFiles(sid) {
+  if (!sid) return;
+  const suffix = `\u0000${sid}`;
+  for (const key of _composerPendingFilesByOwner.keys()) {
+    if (key.endsWith(suffix)) _composerPendingFilesByOwner.delete(key);
+  }
+}
+
+function _restoreComposerPendingFiles(sid) {
+  const key = _composerPendingFilesOwnerKey(sid);
+  const remembered = key ? (_composerPendingFilesByOwner.get(key) || []) : [];
+  const current = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
+  const unchanged = current.length === remembered.length
+    && current.every((file, index) => file === remembered[index]);
+  if (unchanged) return;
+  S.pendingFiles = [...remembered];
+  if (typeof renderTray === 'function') renderTray();
+}
 
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
@@ -211,6 +255,7 @@ async function _restoreRememberedNewChatDraftSession() {
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  _rememberComposerPendingFiles(sid, files);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -254,6 +299,7 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
+  _rememberComposerPendingFiles(sid, files);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -302,6 +348,12 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // normally so the previous session's composer contents do not leak forward.
   if (preserveActiveInput && current && current !== text) return;
 
+  // Browser File objects cannot be reconstructed from server metadata after a
+  // reload. Within this page lifetime, keep the live objects scoped by
+  // profile+session and update the staged-file tray at the same ownership
+  // boundary as the textarea. A session with no live files clears stale chips.
+  _restoreComposerPendingFiles(restoreSid);
+
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
   if (!text && !files.length) {
@@ -318,13 +370,13 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
-  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  _forgetComposerPendingFiles(sid);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -1481,11 +1533,23 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    // newSession() replaces S.session directly instead of going through
+    // loadSession(). Flush the current composer at the create boundary so its
+    // draft remains owned by the conversation being left, not the fresh session.
+    const previousSid=S.session&&S.session.session_id;
+    if(previousSid&&typeof _saveComposerDraftNow==='function'){
+      await _saveComposerDraftNow(previousSid,($('msg')||{}).value||'',S.pendingFiles?[...S.pendingFiles]:[]);
+    }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    // The fresh session now owns the composer. Rehydrate from its own draft
+    // (normally empty) so text from the previous session cannot leak across the
+    // direct newSession() state boundary. This runs only after create succeeds,
+    // leaving the old composer untouched if the request fails.
+    if(typeof _restoreComposerDraft==='function') _restoreComposerDraft(S.session.composer_draft);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -4270,6 +4334,7 @@ function _renderBatchActionBar(){
       const retainedCount=_worktreeResponseCount(results);
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
+      ids.forEach(_forgetComposerPendingFiles);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
@@ -9008,6 +9073,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  _forgetComposerPendingFiles(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
