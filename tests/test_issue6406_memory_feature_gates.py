@@ -404,6 +404,8 @@ def test_memory_flag_only_gates_memory_surface(tmp_path, monkeypatch):
     payload = _read(home, captured)
     assert payload["memory"] == ""
     assert payload["user"] == "user body"
+    assert payload["memory_path"] is None
+    assert payload["user_path"] == str(home / "memories" / "USER.md")
     assert payload["memory_enabled"] is False
     assert payload["user_profile_enabled"] is True
     assert _write("memory", captured) == ("Memory is disabled", 403)
@@ -416,10 +418,13 @@ def test_user_flag_only_gates_user_surface(tmp_path, monkeypatch):
     payload = _read(home, captured)
     assert payload["memory"] == "memory body"
     assert payload["user"] == ""
+    assert payload["memory_path"] == str(home / "memories" / "MEMORY.md")
+    assert payload["user_path"] is None
     assert payload["memory_enabled"] is True
     assert payload["user_profile_enabled"] is False
     assert _write("memory", captured) is None
     assert _write("user", captured) == ("User profile is disabled", 403)
+    assert (home / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "changed"
 
 
 def test_absent_flags_default_to_enabled(tmp_path, monkeypatch):
@@ -450,15 +455,44 @@ def test_string_flags_follow_existing_truthy_config_semantics(tmp_path, monkeypa
     home, captured = _setup_home(
         tmp_path,
         monkeypatch,
-        {"memory": {"memory_enabled": "false", "user_profile_enabled": "yes"}},
+        {"memory": {"memory_enabled": "false", "user_profile_enabled": "no"}},
     )
     payload = _read(home, captured)
-    assert payload["memory"] == ""
+    assert payload["memory"] == "memory body"
     assert payload["user"] == "user body"
-    assert payload["memory_enabled"] is False
+    assert payload["memory_enabled"] is True
     assert payload["user_profile_enabled"] is True
-    assert _write("memory", captured) == ("Memory is disabled", 403)
+    assert _write("memory", captured) is None
     assert _write("user", captured) is None
+    assert (home / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "changed"
+    assert (home / "memories" / "USER.md").read_text(encoding="utf-8") == "changed"
+
+
+@pytest.mark.parametrize("memory_value", ["disabled", []])
+def test_non_mapping_memory_section_fails_closed(tmp_path, monkeypatch, memory_value):
+    home, captured = _setup_home(tmp_path, monkeypatch, {"memory": memory_value})
+    payload = _read(home, captured)
+    assert payload["memory"] == payload["user"] == ""
+    assert payload["memory_path"] is payload["user_path"] is None
+    assert payload["memory_mtime"] is payload["user_mtime"] is None
+    assert payload["memory_enabled"] is payload["user_profile_enabled"] is False
+    assert _write("memory", captured) == ("Memory is disabled", 403)
+    assert _write("user", captured) == ("User profile is disabled", 403)
+    assert (home / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "memory body"
+    assert (home / "memories" / "USER.md").read_text(encoding="utf-8") == "user body"
+
+
+def test_null_memory_section_keeps_defaults_enabled(tmp_path, monkeypatch):
+    home, captured = _setup_home(tmp_path, monkeypatch, {"memory": None})
+    payload = _read(home, captured)
+    assert payload["memory"] == "memory body"
+    assert payload["user"] == "user body"
+    assert payload["memory_path"] == str(home / "memories" / "MEMORY.md")
+    assert payload["user_path"] == str(home / "memories" / "USER.md")
+    assert payload["memory_enabled"] is payload["user_profile_enabled"] is True
+    assert _write("memory", captured) is None
+    assert _write("user", captured) is None
+    assert (home / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "changed"
     assert (home / "memories" / "USER.md").read_text(encoding="utf-8") == "changed"
 
 
