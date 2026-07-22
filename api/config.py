@@ -3885,6 +3885,33 @@ def resolve_model_reasoning_efforts(
     return filtered
 
 
+def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
+    """Return model-level then provider-level effort lists from config."""
+    if not isinstance(provider_entry, dict):
+        return []
+
+    configured_lists = []
+    models = provider_entry.get("models")
+    if isinstance(models, dict):
+        model_key = str(model_id or "").strip().lower()
+        model_entry = models.get(model_id)
+        if not isinstance(model_entry, dict) and model_key:
+            model_entry = next(
+                (
+                    metadata
+                    for configured_id, metadata in models.items()
+                    if str(configured_id).strip().lower() == model_key
+                    and isinstance(metadata, dict)
+                ),
+                None,
+            )
+        if isinstance(model_entry, dict):
+            configured_lists.append(model_entry.get("reasoning_efforts"))
+
+    configured_lists.append(provider_entry.get("reasoning_efforts"))
+    return configured_lists
+
+
 def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -3918,29 +3945,32 @@ def _resolve_model_reasoning_efforts_impl(
     if _nested_route_reasoning_denied(hinted_model):
         return []
 
-    # 0. Provider config: providers.<name>.reasoning_efforts or named
-    # custom_providers[].reasoning_efforts. When the user has explicitly listed
-    # valid efforts for a provider, return that list directly — no heuristics,
-    # no models.dev lookup.
-    # Only short-circuits when the filtered list is non-empty; an all-invalid
-    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
-    _re_list = None
+    # 0. Model/provider config: a models.<model>.reasoning_efforts list takes
+    # precedence over its provider-level reasoning_efforts list. Explicit valid
+    # config is authoritative — no heuristics or models.dev lookup. Invalid or
+    # empty model metadata falls through to the provider list, then heuristics.
+    _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
-                    _re_list = _entry.get("reasoning_efforts")
+                    _re_lists = _configured_reasoning_effort_lists(
+                        _entry, hinted_model
+                    )
                     break
         elif provider:
             _prov_entry = (cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
-                _re_list = _prov_entry.get("reasoning_efforts")
-        if isinstance(_re_list, list) and _re_list:
-            _filtered = [str(x).strip().lower() for x in _re_list
-                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
-            _filtered = list(dict.fromkeys(_filtered))
-            if _filtered:
-                return _filtered
+                _re_lists = _configured_reasoning_effort_lists(
+                    _prov_entry, hinted_model
+                )
+        for _re_list in _re_lists:
+            if isinstance(_re_list, list) and _re_list:
+                _filtered = [str(x).strip().lower() for x in _re_list
+                             if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+                _filtered = list(dict.fromkeys(_filtered))
+                if _filtered:
+                    return _filtered
     except Exception:
         pass
 
