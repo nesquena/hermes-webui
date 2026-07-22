@@ -74,6 +74,9 @@ const heightEnd = src.indexOf('const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS',
 if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd));
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
 if(src.indexOf('function _hasHiddenProcessWakeupBoundaryBefore') !== -1) eval(extractFunc('_hasHiddenProcessWakeupBoundaryBefore'));
+function _assistantVisibleContentForReasoningCompare(m){ return String((m && m.content) || ''); }
+eval(extractFunc('_assistantTurnFinalVisibleContentMap'));
+eval(extractFunc('_assistantTurnVisibleContentMap'));
 eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
@@ -96,6 +99,8 @@ const visible = _getVisibleMessagesWithIdx();
 const hiddenBoundaryBeforeFinal = typeof _hasHiddenProcessWakeupBoundaryBefore === 'function'
   ? _hasHiddenProcessWakeupBoundaryBefore(2)
   : false;
+const turnFinalVisible = _assistantTurnFinalVisibleContentMap(visible);
+const turnVisibleContents = _assistantTurnVisibleContentMap(visible);
 const turns = [];
 let current = [];
 for(const entry of visible){
@@ -129,6 +134,10 @@ const markerWakeupContent = [
 process.stdout.write(JSON.stringify({
   visible: visible.map(e => ({rawIdx: e.rawIdx, role: e.m.role, source: e.m._source || '', text: String(e.m.content).slice(0, 32)})),
   hiddenBoundaryBeforeFinal,
+  finalVisibleBefore: turnFinalVisible.get(0),
+  finalVisibleAfter: turnFinalVisible.get(2),
+  visibleContentsBefore: turnVisibleContents.get(0),
+  visibleContentsAfter: turnVisibleContents.get(2),
   turns,
   virtualRole,
   virtualHeight,
@@ -180,6 +189,10 @@ def test_process_wakeup_can_be_hidden_without_losing_its_turn_boundary():
         {"rawIdx": 2, "role": "assistant", "source": "", "text": "assistant response to wakeup"},
     ]
     assert result["hiddenBoundaryBeforeFinal"] is True
+    assert result["finalVisibleBefore"] == "previous assistant report"
+    assert result["finalVisibleAfter"] == "assistant response to wakeup"
+    assert result["visibleContentsBefore"] == ["previous assistant report"]
+    assert result["visibleContentsAfter"] == ["assistant response to wakeup"]
 
 
 def test_process_wakeup_has_its_own_virtual_height_role():
