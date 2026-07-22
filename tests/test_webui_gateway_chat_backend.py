@@ -349,7 +349,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["url"] == "http://gateway.local/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
-    assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
+    assert captured["headers"]["X-hermes-session-key"] == f"agent:main:api_server:dm:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert payload["reasoning_effort"] == "high"
