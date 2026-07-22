@@ -16,8 +16,8 @@ def test_undo_and_retry_use_bounded_session_reload():
     retry = _function_block(COMMANDS_JS, "async function cmdRetry()", "async function cmdUndo()")
     undo = _function_block(COMMANDS_JS, "async function cmdUndo()", "async function undoLastExchange()")
 
-    assert "await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'retry'});" in retry
-    assert "await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo'});" in undo
+    assert "await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'retry',skipExtHooks:true});" in retry
+    assert "await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo',skipExtHooks:true});" in undo
     assert "await send();" in retry
 
     for block in (retry, undo):

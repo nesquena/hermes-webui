@@ -272,7 +272,9 @@ def test_done_and_recovery_paths_do_not_expand_the_render_window():
     done_body = MESSAGES_JS[done_start:done_end]
     assert done_body.index("const _settledDoneInflightSnapshot") < done_body.index("_clearOwnerInflightState({deferSessionStreamResume:true})")
     refresh_idx = done_body.index("await _fetchSettledSessionMessageWindow")
-    ownership_idx = done_body.index("if(isActiveSession&&!_isSessionCurrentPane(activeSid)) isActiveSession=false;")
+    ownership_idx = done_body.index("const _settlementStillOwnsPane=")
+    assert "S.activeStreamId===streamId" in done_body[ownership_idx:]
+    assert "_settledLiveOwner.streamId===streamId" in done_body[ownership_idx:]
     assert refresh_idx < ownership_idx < done_body.index("S.session=_settledSession")
 
 
@@ -288,7 +290,9 @@ def test_done_defers_session_stream_resume_until_after_async_settlement():
     assert "finally" in done_body[idle_idx:resume_idx]
 
 
-def _done_continuation_stream_harness(settlement_mode: str) -> dict:
+def _done_continuation_stream_harness(
+    settlement_mode: str, *, replace_owner_while_pending: bool = False
+) -> dict:
     assert settlement_mode in {"success", "rejection"}
     return _node_driver(
         _EXTRACT
@@ -331,6 +335,9 @@ function extractFrom(source, name) {{
 const parentSid = 'parent-session';
 const continuationSid = 'continuation-session';
 const streamId = 'stream-1';
+const replacementStreamId = 'stream-new';
+const replaceOwnerWhilePending = {json.dumps(replace_owner_while_pending)};
+const completedSid = replaceOwnerWhilePending ? parentSid : continuationSid;
 const fallbackMessages = [
   {{role:'user', content:'bounded question'}},
   {{role:'assistant', content:'bounded local answer', _live:true}},
@@ -511,7 +518,7 @@ const chatSources = () => FakeEventSource.instances.filter(source=>source.url.in
     stream_id:streamId,
     status:'completed',
     session:{{
-      session_id:continuationSid,
+      session_id:completedSid,
       message_count:92,
       messages:[{{role:'assistant',content:'terminal snapshot'}}],
       tool_calls:[],
@@ -529,9 +536,18 @@ const chatSources = () => FakeEventSource.instances.filter(source=>source.url.in
     parentInflightPresent:Object.prototype.hasOwnProperty.call(INFLIGHT,parentSid),
   }};
 
+  if (replaceOwnerWhilePending) {{
+    S.messages=[{{role:'assistant',content:'new owner live transcript',_live:true}}];
+    S.toolCalls=[{{id:'new-owner-tool',name:'terminal',done:false}}];
+    S.activeStreamId=replacementStreamId;
+    S.busy=true;
+    attachLiveStream(parentSid,replacementStreamId);
+    await flush();
+  }}
+
   if ({json.dumps(settlement_mode)} === 'success') {{
     resolveSettlement({{
-      session_id:continuationSid,
+      session_id:completedSid,
       message_count:92,
       messages:settledMessages.map(message=>({{...message}})),
       tool_calls:settledToolCalls.map(tool=>({{...tool}})),
@@ -562,6 +578,7 @@ const chatSources = () => FakeEventSource.instances.filter(source=>source.url.in
       sessionStreamSessionId:_sessionStreamSessionId,
       sessionEventSourceUrl:_sessionEventSource&&_sessionEventSource.url,
       chatSourceCount:chatSources().length,
+      liveStreamId:LIVE_STREAMS[parentSid]&&LIVE_STREAMS[parentSid].streamId,
     }},
   }}));
 }})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
@@ -615,6 +632,26 @@ def test_done_restarts_continuation_session_stream_after_settlement(settlement_m
             {"id": "local-tool", "name": "read_file", "done": True}
         ]
         assert final["oldestIdx"] == 60
+
+
+@pytest.mark.parametrize("settlement_mode", ["success", "rejection"])
+def test_old_done_settlement_preserves_newer_same_session_stream_owner(settlement_mode):
+    outcome = _done_continuation_stream_harness(
+        settlement_mode, replace_owner_while_pending=True
+    )
+
+    final = outcome["final"]
+    assert final["sessionId"] == "parent-session"
+    assert final["activeStreamId"] == "stream-new"
+    assert final["liveStreamId"] == "stream-new"
+    assert final["chatSourceCount"] == 2
+    assert final["sessionSources"] == []
+    assert [(message["role"], message["content"]) for message in final["messages"]] == [
+        ("assistant", "new owner live transcript")
+    ]
+    assert final["toolCalls"] == [
+        {"id": "new-owner-tool", "name": "terminal", "done": False}
+    ]
 
 
 def test_settled_window_helpers_and_cross_module_callers_are_present():

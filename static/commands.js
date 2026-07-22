@@ -1696,7 +1696,7 @@ async function cmdRetry(){
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'retry'});
+    await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'retry',skipExtHooks:true});
     if(!S.session||S.session.session_id!==activeSid)return;
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
@@ -1715,7 +1715,7 @@ async function cmdUndo(){
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo'});
+    await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo',skipExtHooks:true});
     if(!S.session||S.session.session_id!==activeSid)return;
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}

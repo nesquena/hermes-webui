@@ -77,12 +77,14 @@ def test_manual_refresh_never_replaces_a_loaded_window_with_a_smaller_clamped_ta
         let loadedRenderable=0;
         const S={{session:null,messages:[],activeStreamId:null}};
         const calls=[];
+        const resolveCalls=[];
         function _currentLoadedRenderableMessageCount(){{return loadedRenderable;}}
         function dismissReconnect(){{}}
         function getPendingSessionMessage(){{return null;}}
         function syncTopbar(){{}}
         function _renderMessagesWithScrollSnapshot(){{}}
         function showToast(){{}}
+        function _resolveSessionModelForDisplaySoon(sid){{resolveCalls.push(sid);}}
         function setStatus(message){{throw new Error(message);}}
         const window={{_restartingForUpdate:false}};
         const location={{reload(){{throw new Error('unexpected page reload');}}}};
@@ -108,7 +110,7 @@ def test_manual_refresh_never_replaces_a_loaded_window_with_a_smaller_clamped_ta
           S.session={{session_id:'sid-'+count,message_count:count}};
           S.messages=Array.from({{length:count}},(_,i)=>({{role:'assistant',content:String(i)}}));
           await refreshSession();
-          return {{url:calls[calls.length-1],rows:S.messages.length}};
+          return {{url:calls[calls.length-1],rows:S.messages.length,resolveSid:resolveCalls[resolveCalls.length-1]}};
         }}
         (async()=>{{
           const full=await runCase(100,false);
@@ -120,8 +122,97 @@ def test_manual_refresh_never_replaces_a_loaded_window_with_a_smaller_clamped_ta
     out = _run_node(script)
     assert "msg_limit=" not in out["full"]["url"]
     assert out["full"]["rows"] == 100
+    assert out["full"]["resolveSid"] == "sid-100"
     assert "msg_limit=" not in out["aboveCeiling"]["url"]
     assert out["aboveCeiling"]["rows"] == 600
+    assert out["aboveCeiling"]["resolveSid"] == "sid-600"
+
+
+def test_manual_refresh_defers_model_hydration_and_ignores_stale_resolution():
+    refresh = _function_body(UI_JS, "refreshSession")
+    resolver = _function_body(SESSIONS_JS, "_resolveSessionModelForDisplaySoon")
+    script = textwrap.dedent(
+        f"""
+        let _messagesTruncated=false;
+        let _oldestIdx=0;
+        const _MSG_LIMIT_MAX=500;
+        let _msgLimitMax=500;
+        const S={{session:null,messages:[],activeStreamId:null,lastUsage:null}};
+        const deferred=[];
+        const apiCalls=[];
+        let resolveHydration;
+        function _deferSessionSideEffect(sid,fn){{deferred.push({{sid,fn}});return Promise.resolve();}}
+        function _messageReloadLimitForSession(){{return 30;}}
+        function _sessionMessageReloadUrl(sid){{return `/api/session?session_id=${{sid}}&messages=1&resolve_model=0`;}}
+        function dismissReconnect(){{}}
+        function getPendingSessionMessage(){{return null;}}
+        function syncTopbar(){{}}
+        function _renderMessagesWithScrollSnapshot(){{}}
+        function showToast(){{}}
+        function setStatus(message){{throw new Error(message);}}
+        function _syncCtxIndicator(){{}}
+        const window={{_restartingForUpdate:false}};
+        const location={{reload(){{throw new Error('unexpected page reload');}}}};
+        async function api(url){{
+          apiCalls.push(String(url));
+          if(String(url).includes('resolve_model=0')) return {{session:{{
+            session_id:S.session.session_id,model:'fast-alias',model_provider:'alias-provider',
+            messages:[],_messages_truncated:false,_messages_offset:0,
+          }}}};
+          if(String(url).includes('resolve_model=1')){{
+            return new Promise(resolve=>{{resolveHydration=resolve;}});
+          }}
+          throw new Error('unexpected url '+url);
+        }}
+        {resolver}
+        {refresh}
+        (async()=>{{
+          S.session={{session_id:'sid-hydrate'}};
+          await refreshSession();
+          const aliasAfterRefresh=S.session.model;
+          const deferredBeforeHydration=S.session._modelResolutionDeferred;
+          const hydration=deferred.shift().fn();
+          resolveHydration({{session:{{
+            session_id:'sid-hydrate',model:'resolved-model',model_provider:'resolved-provider',
+            context_length:128000,threshold_tokens:100000,last_prompt_tokens:100,
+          }}}});
+          await hydration;
+          const hydrated={{
+            model:S.session.model,
+            provider:S.session.model_provider,
+            deferred:S.session._modelResolutionDeferred,
+          }};
+
+          S.session={{session_id:'sid-stale'}};
+          await refreshSession();
+          const staleHydration=deferred.shift().fn();
+          S.session={{session_id:'sid-newer',model:'newer-model',model_provider:'newer-provider'}};
+          resolveHydration({{session:{{
+            session_id:'sid-stale',model:'stale-resolved',model_provider:'stale-provider',
+          }}}});
+          await staleHydration;
+          process.stdout.write(JSON.stringify({{
+            aliasAfterRefresh,deferredBeforeHydration,hydrated,
+            final:{{sid:S.session.session_id,model:S.session.model,provider:S.session.model_provider}},
+            apiCalls,
+          }}));
+        }})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+        """
+    )
+    out = _run_node(script)
+    assert out["aliasAfterRefresh"] == "fast-alias"
+    assert out["deferredBeforeHydration"] is True
+    assert out["hydrated"] == {
+        "model": "resolved-model",
+        "provider": "resolved-provider",
+        "deferred": False,
+    }
+    assert out["final"] == {
+        "sid": "sid-newer",
+        "model": "newer-model",
+        "provider": "newer-provider",
+    }
+    assert sum("resolve_model=1" in url for url in out["apiCalls"]) == 2
 
 
 def test_session_updated_recovery_does_not_hijack_an_inflight_navigation():

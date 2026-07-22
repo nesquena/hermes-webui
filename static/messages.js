@@ -5830,10 +5830,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
         }
-        // The bounded refresh awaits a second session request. Do not let a
-        // session switch during that await project the completed old stream
-        // into the newly selected pane.
-        if(isActiveSession&&!_isSessionCurrentPane(activeSid)) isActiveSession=false;
+        // The bounded refresh awaits a second session request. Pane identity
+        // alone is not enough here: a new chat stream can take ownership of the
+        // same session while the old stream is settling. Only the exact
+        // registered owner may install terminal state or clear activeStreamId.
+        if(isActiveSession){
+          const _settledLiveOwner=LIVE_STREAMS[activeSid];
+          const _settlementStillOwnsPane=
+            _isSessionCurrentPane(activeSid)&&
+            S.activeStreamId===streamId&&
+            !!(_settledLiveOwner&&_settledLiveOwner.streamId===streamId&&_settledLiveOwner.source===source);
+          if(!_settlementStillOwnsPane) isActiveSession=false;
+        }
         // The bounded window fetch above can take long enough for the reader
         // to scroll away from the tail. Re-evaluate follow intent only after
         // the await and pane-ownership check; a pre-fetch snapshot would yank

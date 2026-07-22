@@ -24,6 +24,10 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+// Tracks user-visible load intent separately from request generations. A queued
+// same-session follow-up belongs to the intent that created its active load and
+// must not start after a newer cross-session navigation has taken ownership.
+let _sessionLoadIntentGeneration = 0;
 // The generation token protects shared state from stale continuations, while
 // this promise coordinates callers that target the same session. A caller that
 // arrives during an active same-session refresh must not continue on an already
@@ -49,11 +53,12 @@ function _sessionLoadCurrentMessageCount(sid) {
   return Number.isFinite(count)?count:null;
 }
 
-function _startSessionLoad(sid, opts) {
+function _startSessionLoad(sid, opts, intentGeneration) {
   const promise=_loadSessionOnce(sid, opts||{});
   const entry={
     sid,
     promise,
+    intentGeneration,
     followUpPromise:null,
     followUpOptions:null,
     followUpRequiresMutation:false,
@@ -70,6 +75,7 @@ function _startSessionLoad(sid, opts) {
 }
 
 function _runQueuedSessionLoad(sid, entry) {
+  if(entry.intentGeneration!==_sessionLoadIntentGeneration) return;
   if(typeof S==='undefined'||!S.session||S.session.session_id!==sid) return;
   if(!entry.followUpRequiresMutation){
     const minimum=entry.minimumMessageCount;
@@ -80,7 +86,7 @@ function _runQueuedSessionLoad(sid, entry) {
   if(Number.isFinite(entry.minimumMessageCount)){
     opts.minimumMessageCount=entry.minimumMessageCount;
   }
-  return _startSessionLoad(sid,opts);
+  return _startSessionLoad(sid,opts,entry.intentGeneration);
 }
 
 function _queueSessionLoadAfterActive(sid, opts, entry) {
@@ -128,7 +134,7 @@ function loadSession(sid) {
     }
     if(!forceReload&&currentSid===sid) return activeLoad.promise;
   }
-  return _startSessionLoad(sid,opts);
+  return _startSessionLoad(sid,opts,++_sessionLoadIntentGeneration);
 }
 
 // #3306: Snapshot of S.messages captured by loadSession() right before it
