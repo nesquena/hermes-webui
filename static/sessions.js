@@ -3123,14 +3123,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
+  // When reloadLimit exceeds the server's msg_limit ceiling, cap at the ceiling
+  // instead of falling back to the bare full-transcript request (the old
+  // behaviour).  A full reload of a long session (800+ messages) on every turn
+  // causes progressive slowdown and eventual freezes (#6392).  Capping at
+  // _msgLimitMax bounds the payload to at most 500 renderable rows — a minor
+  // window shift compared to loading the entire history on every reply.
+  const boundedReloadLimit = (reloadLimit == null) ? null : Math.min(reloadLimit, _msgLimitMax);
   const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
