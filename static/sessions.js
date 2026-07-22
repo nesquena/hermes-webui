@@ -43,12 +43,12 @@ const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _composerPendingFilesByOwner = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
 
-function _composerPendingFilesOwnerKey(sid) {
+function _composerPendingFilesOwnerKey(sid, ownerProfile) {
   if (!sid) return '';
   const sessionProfile = S.session && S.session.session_id === sid
     ? S.session.profile
     : null;
-  const profile = String(sessionProfile || S.activeProfile || 'default').trim() || 'default';
+  const profile = String(ownerProfile || sessionProfile || S.activeProfile || 'default').trim() || 'default';
   return `${profile}\u0000${sid}`;
 }
 
@@ -59,8 +59,8 @@ function _composerPendingFileIsLive(file) {
   return typeof file.arrayBuffer === 'function' || typeof file.slice === 'function';
 }
 
-function _rememberComposerPendingFiles(sid, files) {
-  const key = _composerPendingFilesOwnerKey(sid);
+function _rememberComposerPendingFiles(sid, files, ownerProfile) {
+  const key = _composerPendingFilesOwnerKey(sid, ownerProfile);
   if (!key) return;
   const liveFiles = Array.isArray(files) ? files.filter(_composerPendingFileIsLive) : [];
   if (liveFiles.length) _composerPendingFilesByOwner.set(key, [...liveFiles]);
@@ -297,9 +297,10 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
+  const ownerProfile=arguments[3];
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
-  _rememberComposerPendingFiles(sid, files);
+  _rememberComposerPendingFiles(sid, files, ownerProfile);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
