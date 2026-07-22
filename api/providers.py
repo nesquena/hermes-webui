@@ -1146,7 +1146,12 @@ def _provider_has_shadowed_codex_oauth_value(
     return any(_looks_like_codex_oauth_token(str(value or "")) for value in values)
 
 
-def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
+def _write_env_file(
+    env_path: Path,
+    updates: dict[str, str | None],
+    *,
+    update_process_env: bool = True,
+) -> None:
     """Write key=value pairs to the .env file.
 
     Values of ``None`` cause the key to be removed.
@@ -1157,7 +1162,9 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
     Holds ``_ENV_LOCK`` from ``api.streaming`` for the entire load → modify →
     write cycle to prevent TOCTOU races between concurrent POST /api/providers
     calls (each reading the same file baseline and overwriting the other's key).
-    Also serialises os.environ mutations with streaming sessions.
+    Also serialises os.environ mutations with streaming sessions. Callers that
+    persist a non-process-active profile's .env pass update_process_env=False
+    so another profile's live provider key is not replaced by a scoped write.
     """
     from api.streaming import _ENV_LOCK
     import stat as _stat
@@ -1185,7 +1192,8 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
         for key, value in updates.items():
             if value is None:
                 # Mark the line for removal (None sentinel) and clear env.
-                os.environ.pop(key, None)
+                if update_process_env:
+                    os.environ.pop(key, None)
                 if key in existing_key_indices:
                     output_lines[existing_key_indices[key]] = None  # type: ignore[assignment]
                 continue
@@ -1195,7 +1203,8 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             # Reject embedded newlines/carriage returns to prevent .env injection
             if "\n" in clean or "\r" in clean:
                 raise ValueError("API key must not contain newline characters.")
-            os.environ[key] = clean
+            if update_process_env:
+                os.environ[key] = clean
 
             if key in existing_key_indices:
                 output_lines[existing_key_indices[key]] = f"{key}={clean}"
@@ -1242,6 +1251,24 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             env_path.chmod(_mode)
         except OSError:
             pass
+
+
+def _provider_key_write_updates_process_env() -> bool:
+    """Return whether a provider-key write targets the live process profile."""
+    try:
+        from api import profiles as _profiles
+
+        request_profile = str(_profiles.get_active_profile_name() or "").strip()
+        if not request_profile or _profiles._is_root_profile(request_profile):
+            return True
+        process_profile = str(getattr(_profiles, "_active_profile", "") or "").strip()
+        return bool(process_profile) and _profiles._profiles_match(
+            process_profile,
+            request_profile,
+        )
+    except Exception:
+        logger.debug("Could not determine process-env ownership for provider key write", exc_info=True)
+        return True
 
 
 def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool:
@@ -2917,7 +2944,11 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
 
     env_path = _get_hermes_home() / ".env"
     try:
-        _write_env_file(env_path, {env_var: api_key})
+        _write_env_file(
+            env_path,
+            {env_var: api_key},
+            update_process_env=_provider_key_write_updates_process_env(),
+        )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:

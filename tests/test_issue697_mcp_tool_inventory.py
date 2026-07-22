@@ -186,6 +186,41 @@ class TestMcpToolInventoryApi:
             allow_ownerless=False,
         ) is None
 
+    def test_ownerless_inventory_allowed_for_proven_single_active_profile(
+        self, monkeypatch
+    ):
+        from api import routes
+
+        monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+        monkeypatch.setattr(routes, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(
+            routes,
+            "list_profiles_api",
+            lambda: [{"name": "default", "is_default": True}],
+        )
+
+        assert routes._active_profile_allows_ownerless_mcp_inventory() is True
+
+    def test_ownerless_inventory_blocked_when_multiple_profiles_exist(
+        self, monkeypatch
+    ):
+        from api import routes
+
+        monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+        monkeypatch.setattr(routes, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(
+            routes,
+            "list_profiles_api",
+            lambda: [
+                {"name": "default", "is_default": True},
+                {"name": "work", "is_default": False},
+            ],
+        )
+
+        assert routes._active_profile_allows_ownerless_mcp_inventory() is False
+
     @patch("api.routes._mcp_runtime_status_by_name", return_value={})
     @patch("api.routes.get_active_hermes_home")
     def test_named_profile_does_not_use_ownerless_registry_for_same_server_name(
@@ -240,6 +275,14 @@ class TestMcpToolInventoryApi:
         monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
         monkeypatch.setattr(routes, "_is_root_profile", lambda name: name == "default")
         monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(
+            routes,
+            "list_profiles_api",
+            lambda: [
+                {"name": "default", "is_default": True},
+                {"name": "work", "is_default": False},
+            ],
+        )
         monkeypatch.setattr(
             routes,
             "_active_profile_mcp_config_data",

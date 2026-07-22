@@ -2637,20 +2637,19 @@ def delete_profile_api(name: str) -> dict:
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
 
-    # Browser profile switches are per-request cookie/TLS scoped. Deleting the
-    # request-active profile would leave that browser holding an unknown
-    # HttpOnly cookie and all routes would reject before it can switch away.
-    if _profiles_match(get_active_profile_name(), name):
-        raise RuntimeError(
-            f"Cannot delete active profile '{name}'. Switch to another profile first."
-        )
+    # Browser profile switches are per-request cookie/TLS scoped. If the browser
+    # deletes its current profile, hand it back to default in the same response so
+    # the next request does not carry a now-unknown HttpOnly cookie.
+    request_profile = getattr(_tls, 'profile', None)
+    request_active_matches = request_profile is not None and _profiles_match(request_profile, name)
 
-    # The request-active check above protects the browser's cookie/TLS scope.
-    # Process-wide authority is separate: if it still points at the target,
-    # switch it to root/default first and let switch_profile fail closed while
-    # streams are active, before any persisted profile state is removed.
+    # Process-wide authority is separate: if it still points at the target, switch
+    # it to root/default first and let switch_profile fail closed while streams are
+    # active, before any persisted profile state is removed.
     if _profiles_match(_active_profile, name):
         switch_profile("default", process_wide=True)
+    if request_active_matches:
+        switch_profile("default", process_wide=False)
 
     try:
         from hermes_cli.profiles import delete_profile
@@ -2668,4 +2667,8 @@ def delete_profile_api(name: str) -> dict:
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
-    return {'ok': True, 'name': name}
+    result = {'ok': True, 'name': name}
+    if request_active_matches:
+        set_request_profile("default")
+        result['active'] = 'default'
+    return result

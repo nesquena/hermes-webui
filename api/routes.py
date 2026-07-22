@@ -12429,7 +12429,9 @@ def handle_get(handler, parsed) -> bool:
             days = max(1, min(int(days_raw), 365))
         except (ValueError, TypeError):
             days = 7
-        return j(handler, get_provider_cost_history(provider_id, days))
+        from api.profiles import profile_env_for_active_request_readonly
+        with profile_env_for_active_request_readonly("/api/provider/cost-history", logger_override=logger):
+            return j(handler, get_provider_cost_history(provider_id, days))
 
     if parsed.path == "/api/settings":
         settings = load_settings()
@@ -15634,10 +15636,23 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.profiles import delete_profile_api, _validate_profile_name
+            from api.helpers import build_profile_cookie
 
             _validate_profile_name(name)
             result = delete_profile_api(name)
-            return j(handler, result)
+            extra_headers = None
+            active_profile = result.get("active") if isinstance(result, dict) else None
+            if active_profile:
+                session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
+                if session_cookie_value:
+                    profile_cookie = build_profile_cookie(
+                        str(active_profile),
+                        session_cookie_value=session_cookie_value,
+                    )
+                else:
+                    profile_cookie = build_profile_cookie(str(active_profile), handler)
+                extra_headers = {"Set-Cookie": profile_cookie}
+            return j(handler, result, extra_headers=extra_headers)
         except PermissionError as e:
             return bad(handler, _sanitize_error(e), 403)
         except (ValueError, FileNotFoundError) as e:
@@ -26390,11 +26405,27 @@ def _active_profile_mcp_config_data() -> dict:
 
 
 def _active_profile_allows_ownerless_mcp_inventory() -> bool:
-    """Ownerless Agent registry/runtime data is safe only outside TLS switching."""
+    """Return whether ownerless Agent registry/runtime data is provably scoped."""
     try:
-        return bool(_is_isolated_profile_mode())
+        if _is_isolated_profile_mode():
+            return True
     except Exception:
         return False
+    try:
+        rows = list_profiles_api()
+        active_profile = get_active_profile_name() or "default"
+    except Exception:
+        return False
+    names = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            names.append(name)
+    if len(names) != 1:
+        return False
+    return _profiles_match(names[0], active_profile)
 
 
 def _mcp_tools_from_runtime_status(

@@ -5,6 +5,7 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import os
 import sys
 import types
 import urllib.error
@@ -157,7 +158,7 @@ class TestGetProviders:
             lambda _pid, _config_data=None: key_present["value"],
         )
 
-        def _fake_write_env_file(_path, values):
+        def _fake_write_env_file(_path, values, **_kwargs):
             key_present["value"] = bool(values.get("ANTHROPIC_API_KEY"))
 
         monkeypatch.setattr(prov, "_write_env_file", _fake_write_env_file)
@@ -400,6 +401,49 @@ class TestSetProviderKey:
             content = env_path.read_text() if env_path.exists() else ""
             assert "ANTHROPIC_API_KEY" not in content
         finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_named_profile_key_write_does_not_mutate_process_env(self, monkeypatch, tmp_path):
+        """Saving/removing a non-process-active profile key must not replace live env."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        work_home = base / "profiles" / "work"
+        work_home.mkdir(parents=True)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(profiles, "_active_profile", "default")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "default-process-key")
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import set_provider_key
+        profiles.set_request_profile("work")
+        try:
+            result = set_provider_key("anthropic", "sk-ant-work-key-12345678")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "default-process-key"
+            assert "ANTHROPIC_API_KEY=sk-ant-work-key-12345678" in (
+                work_home / ".env"
+            ).read_text(encoding="utf-8")
+
+            removed = set_provider_key("anthropic", None)
+            assert removed["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "default-process-key"
+            env_content = (work_home / ".env").read_text(encoding="utf-8")
+            assert "ANTHROPIC_API_KEY" not in env_content
+        finally:
+            profiles.clear_request_profile()
             config.cfg.clear()
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime

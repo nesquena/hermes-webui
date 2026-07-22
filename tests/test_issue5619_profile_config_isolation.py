@@ -8,7 +8,9 @@ import os
 import sys
 import threading
 import types
+from io import BytesIO
 from types import SimpleNamespace
+from urllib.parse import urlparse
 from unittest.mock import MagicMock
 
 import pytest
@@ -936,17 +938,83 @@ def test_invalid_profile_cookie_clears_cookie_and_blocks_api_dispatch(monkeypatc
     server.handle_get.assert_not_called()
 
 
-def test_delete_profile_rejects_request_active_profile(monkeypatch):
+def test_delete_profile_hands_request_active_profile_to_default(monkeypatch):
     from api import profiles
 
+    delete_calls = []
+    switch_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
     monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
     monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+
+    def switch_to_default(name, *, process_wide=True):
+        switch_calls.append((name, process_wide))
+        return {"active": name}
+
+    monkeypatch.setattr(profiles, "switch_profile", switch_to_default)
     profiles.set_request_profile("work")
     try:
-        with pytest.raises(RuntimeError, match="Switch to another profile first"):
-            profiles.delete_profile_api("work")
+        result = profiles.delete_profile_api("work")
+        assert profiles.get_active_profile_name() == "default"
     finally:
         profiles.clear_request_profile()
+
+    assert result == {"ok": True, "name": "work", "active": "default"}
+    assert switch_calls == [("default", False)]
+    assert delete_calls == [("work", True)]
+
+
+def test_delete_profile_route_sets_default_cookie_for_request_active(monkeypatch):
+    from api import auth, profiles, routes
+
+    delete_calls = []
+    switch_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+
+    def switch_to_default(name, *, process_wide=True):
+        switch_calls.append((name, process_wide))
+        return {"active": name}
+
+    monkeypatch.setattr(profiles, "switch_profile", switch_to_default)
+    handler = SimpleNamespace(
+        path="/api/profile/delete",
+        command="POST",
+        headers={"Content-Length": str(len(json.dumps({"name": "work"}).encode("utf-8")))},
+        rfile=BytesIO(json.dumps({"name": "work"}).encode("utf-8")),
+        _pending_set_cookies=[],
+        _trusted_auth_session_cookie_value=None,
+        wfile=MagicMock(),
+        send_response=MagicMock(),
+        send_header=MagicMock(),
+        end_headers=MagicMock(),
+    )
+    profiles.set_request_profile("work")
+    try:
+        handled = routes.handle_post(
+            handler,
+            urlparse("/api/profile/delete"),
+        )
+    finally:
+        profiles.clear_request_profile()
+
+    assert handled is None
+    handler.send_response.assert_called_once_with(200)
+    payload = json.loads(handler.wfile.write.call_args[0][0].decode("utf-8"))
+    assert payload == {"ok": True, "name": "work", "active": "default"}
+    profile_cookies = _sent_headers(handler, "Set-Cookie")
+    assert len(profile_cookies) == 1
+    assert profile_cookies[0].startswith("hermes_profile=default")
+    assert "HttpOnly" in profile_cookies[0]
+    assert "SameSite=Lax" in profile_cookies[0]
+    assert switch_calls == [("default", False)]
+    assert delete_calls == [("work", True)]
 
 
 def _install_delete_profile_stub(monkeypatch, delete_calls):
