@@ -314,6 +314,28 @@ def test_save_refuses_to_retain_backup_with_missing_private_media(tmp_path, monk
     assert not session.path.with_suffix(".json.bak").exists()
 
 
+def test_shrink_backup_retains_the_exact_validated_source_bytes(tmp_path, monkeypatch):
+    _configure_session_state(tmp_path, monkeypatch)
+    session = Session(
+        session_id="backup-exact-crlf",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ],
+    )
+    session.save(skip_index=True)
+    payload = json.loads(session.path.read_bytes())
+    source_before = (json.dumps(payload, indent=2) + "\n").replace("\n", "\r\n").encode()
+    session.path.write_bytes(source_before)
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    loaded.messages = [{"role": "user", "content": "first"}]
+
+    loaded.save(skip_index=True)
+
+    assert loaded.path.with_suffix(".json.bak").read_bytes() == source_before
+
+
 def test_legacy_loader_cannot_register_then_overwrite_recovered_sidecar(tmp_path, monkeypatch):
     session_dir = _configure_session_state(tmp_path, monkeypatch)
     sid = "legacy-load-recovery-race"

@@ -8,8 +8,9 @@ from the user-controlled attachment/archive extraction namespace.
 References do not encode a filesystem root.  Moving the complete WebUI state
 directory therefore moves their authority with it; changing only
 ``HERMES_WEBUI_ATTACHMENT_DIR`` does not.  Files written by the earlier
-attachment-root layout are read through a strict compatibility path and
-migrated into the state-owned store on first use.
+attachment-root layout are read through a strict compatibility path only.
+Persisting them requires an explicit offline migration with an identity-bound
+retirement backend.
 """
 import base64
 import binascii
@@ -30,8 +31,8 @@ _MIN_EXTERNALIZED_BYTES = 64 * 1024
 # retire the inode held by an open descriptor, so a replacement can always win
 # between a final identity check and the destructive syscall.  Do not create a
 # private reference until the storage backend has an identity-bound retirement
-# primitive.  Existing references remain read-compatible and are migrated back
-# to portable data URLs by Session.save().
+# primitive. Existing references remain read-compatible, but all persistence
+# paths fail closed until an explicit offline migration is performed.
 _PRIVATE_MEDIA_EXTERNALIZATION_ENABLED = False
 _MEDIA_SCHEME = "webui-media://"
 _PRIVATE_ROOT_NAME = "session-media"
