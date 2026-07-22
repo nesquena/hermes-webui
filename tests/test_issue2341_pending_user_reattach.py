@@ -7,9 +7,11 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _load_session_inflight_branch() -> str:
-    start = SESSIONS_JS.find("if(INFLIGHT[sid]){")
+    start_marker = "\n  if(INFLIGHT[sid]){"
+    end_marker = "\n  }else{\n    // Phase 2b:"
+    start = SESSIONS_JS.rfind(start_marker)
     assert start != -1, "loadSession INFLIGHT branch not found"
-    end = SESSIONS_JS.find("}else{", start)
+    end = SESSIONS_JS.find(end_marker, start)
     assert end != -1, "loadSession INFLIGHT branch end not found"
     return SESSIONS_JS[start:end]
 

@@ -658,11 +658,20 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
     active_branch_end = sessions_src.index("}else{\n      S.busy=false;", active_branch_start)
     active_branch = sessions_src[active_branch_start:active_branch_end]
     render_pos = active_branch.index("renderMessages(")
-    shell_pos = active_branch.index("ensureLiveWorklogShell")
-    assert render_pos < shell_pos, (
-        "Reloading an active stream must recreate the live worklog shell after "
-        "renderMessages() rebuilds msgInner; otherwise the stream stays invisible "
-        "until a session switch triggers another restore path."
+    defer_pos = active_branch.index("_deferActiveSessionSceneRestore(")
+    callback_pos = active_branch.find("restoreLiveSurfaceForIdleInflight()", defer_pos)
+    restore_helper_start = active_branch.index("const restoreLiveSurfaceForIdleInflight=()=>{")
+    restore_helper_end = active_branch.index("const attachLiveSceneForIdleSession=()=>{", restore_helper_start)
+    restore_helper = active_branch[restore_helper_start:restore_helper_end]
+    assert render_pos < defer_pos, (
+        "The active in-flight branch must paint messages before "
+        "deferring scene restore for the live session."
+    )
+    assert callback_pos > defer_pos, (
+        "Deferred active-session scene restore must invoke restoreLiveSurfaceForIdleInflight()."
+    )
+    assert "ensureLiveWorklogShell" in restore_helper, (
+        "Active reload restoration helper should include ensureLiveWorklogShell fallback."
     )
     assert "else appendThinking();" in active_branch, (
         "Non-simplified tool-calling must keep the legacy fallback."
@@ -732,11 +741,15 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
     # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
-    # grab the wrong one. (rfind = the substantive restore branch.)
-    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
-    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so a fixed
+    # character-window slice could grab the wrong fragment.
+    start_marker = "\n  if(INFLIGHT[sid]){"
+    phase2b_marker = "\n  }else{\n    // Phase 2b:"
+    inflight_idx = src.rfind(start_marker)
+    phase2b_idx = src.find(phase2b_marker, inflight_idx)
+    assert inflight_idx >= 0, "loadSession INFLIGHT branch not found"
+    assert phase2b_idx >= 0, "loadSession Phase 2b boundary not found"
+    inflight_block = src[inflight_idx:phase2b_idx]
     busy_pos = inflight_block.find("S.busy=")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
