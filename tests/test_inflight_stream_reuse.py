@@ -1151,9 +1151,13 @@ def test_run_journal_recovery_persists_stream_scoped_event_cursor():
     script = "\n".join(
         [
             "const assert=require('assert');",
+            "const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;",
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
             _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _function_decl(SESSIONS_JS, "_sessionAnchorCanonicalOutcomeReason"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorMarkerInt"),
             _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
             _function_decl(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
             _function_decl(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
@@ -1300,9 +1304,13 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
     script = "\n".join(
         [
             "const assert=require('assert');",
+            "const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;",
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
             _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
             _function_decl(SESSIONS_JS, "_sessionAnchorCanonicalOutcomeReason"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorMarkerInt"),
             _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
             _function_decl(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
             _function_decl(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),

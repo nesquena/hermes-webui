@@ -1046,14 +1046,14 @@
   function _activitySceneOutcomesTruncated(value){
     if(!value||typeof value!=='object'||Array.isArray(value)) return null;
     const reason=_activitySceneCanonicalOutcomeReason(_own(value,'reason'));
-    const acceptedCount=Number(_own(value,'accepted_count'));
-    const acceptedBytes=Number(_own(value,'accepted_bytes'));
-    if(!reason||!Number.isFinite(acceptedCount)||acceptedCount<0||!Number.isFinite(acceptedBytes)||acceptedBytes<0) return null;
+    const acceptedCount=_activitySceneMarkerInt(_own(value,'accepted_count'),ACTIVITY_SCENE_OUTCOME_MAX_EVENTS);
+    const acceptedBytes=_activitySceneMarkerInt(_own(value,'accepted_bytes'),ACTIVITY_SCENE_OUTCOME_MAX_BYTES);
+    if(!reason||acceptedCount===null||acceptedBytes===null) return null;
     return Object.freeze({
       reason,
-      accepted_count:Math.floor(acceptedCount),
+      accepted_count:acceptedCount,
       max_count:ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
-      accepted_bytes:Math.floor(acceptedBytes),
+      accepted_bytes:acceptedBytes,
       max_bytes:ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
       max_scene_bytes:ACTIVITY_SCENE_MAX_BYTES,
     });
@@ -1062,6 +1062,10 @@
   function _activitySceneCanonicalOutcomeReason(reason){
     const value=_cleanString(reason);
     return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
+  }
+
+  function _activitySceneMarkerInt(value, maximum){
+    return (typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=maximum)?value:null;
   }
 
   function _activitySceneUtf8ByteLength(text){

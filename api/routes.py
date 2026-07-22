@@ -3210,22 +3210,37 @@ def _run_journal_canonical_outcome_truncation_marker(marker) -> dict | None:
     reason = str(marker.get("reason") or "").strip()
     if reason not in _RUN_JOURNAL_OUTCOME_TRUNCATION_REASONS:
         return None
-    accepted_count = marker.get("accepted_count")
-    accepted_bytes = marker.get("accepted_bytes")
-    if isinstance(accepted_count, bool) or isinstance(accepted_bytes, bool):
-        return None
-    try:
-        accepted_count_int = int(accepted_count)
-        accepted_bytes_int = int(accepted_bytes)
-    except (TypeError, ValueError):
-        return None
-    if accepted_count_int < 0 or accepted_bytes_int < 0:
+    accepted_count_int = _run_journal_valid_marker_int(
+        marker.get("accepted_count"),
+        _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS,
+    )
+    accepted_bytes_int = _run_journal_valid_marker_int(
+        marker.get("accepted_bytes"),
+        _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES,
+    )
+    if accepted_count_int is None or accepted_bytes_int is None:
         return None
     return _run_journal_outcome_truncation_marker(
         reason,
         accepted_count=accepted_count_int,
         accepted_bytes=accepted_bytes_int,
     )
+
+
+def _run_journal_valid_marker_int(value, maximum: int) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        candidate = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        candidate = int(value)
+    else:
+        return None
+    if candidate < 0 or candidate > maximum:
+        return None
+    return candidate
 
 
 def _run_journal_outcome_reason_rank(reason: str) -> int:

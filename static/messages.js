@@ -2065,18 +2065,22 @@ function _messageAnchorCanonicalOutcomeReason(reason){
   return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
 }
 
+function _messageAnchorMarkerInt(value, maximum){
+  return (typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=maximum)?value:null;
+}
+
 function _anchorOutcomeTruncationMarker(scene){
   const marker=scene&&scene.outcomes_truncated;
   if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
   const reason=_messageAnchorCanonicalOutcomeReason(marker.reason);
-  const acceptedCount=Number(marker.accepted_count);
-  const acceptedBytes=Number(marker.accepted_bytes);
-  if(!reason||!Number.isFinite(acceptedCount)||acceptedCount<0||!Number.isFinite(acceptedBytes)||acceptedBytes<0) return null;
+  const acceptedCount=_messageAnchorMarkerInt(marker.accepted_count,_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS);
+  const acceptedBytes=_messageAnchorMarkerInt(marker.accepted_bytes,_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES);
+  if(!reason||acceptedCount===null||acceptedBytes===null) return null;
   return {
     reason,
-    accepted_count:Math.floor(acceptedCount),
+    accepted_count:acceptedCount,
     max_count:_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
-    accepted_bytes:Math.floor(acceptedBytes),
+    accepted_bytes:acceptedBytes,
     max_bytes:_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
     max_scene_bytes:_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
   };

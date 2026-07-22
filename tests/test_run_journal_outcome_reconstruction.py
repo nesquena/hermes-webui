@@ -12,6 +12,7 @@ REPO = Path(__file__).resolve().parent.parent
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 ANCHORS_JS = REPO / "static" / "assistant_turn_anchors.js"
+ANCHORS_JS_SOURCE = ANCHORS_JS.read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -57,10 +58,19 @@ const _MESSAGE_ANCHOR_OUTCOME_MAX_BYTES=128000;
 """
 
 
+ASSISTANT_ANCHOR_SIZE_CONSTANTS = """
+const ACTIVITY_SCENE_MAX_BYTES=256000;
+const ACTIVITY_SCENE_OUTCOME_MAX_EVENTS=512;
+const ACTIVITY_SCENE_OUTCOME_MAX_BYTES=128000;
+"""
+
+
 def _session_anchor_recovery_helper_sources() -> list[str]:
     return [
+        SESSION_ANCHOR_SIZE_CONSTANTS,
         _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorCanonicalOutcomeReason"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorMarkerInt"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
         _js_function_source(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
         _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
@@ -70,7 +80,6 @@ def _session_anchor_recovery_helper_sources() -> list[str]:
 
 def _session_anchor_merge_helper_sources() -> list[str]:
     return [
-        SESSION_ANCHOR_SIZE_CONSTANTS,
         *_session_anchor_recovery_helper_sources(),
         _js_function_source(SESSIONS_JS, "_sessionAnchorUtf8ByteLength"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorCompactSceneBytes"),
@@ -95,6 +104,7 @@ def _message_anchor_outcome_helper_sources() -> list[str]:
         _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
         _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
         _js_function_source(MESSAGES_JS, "_messageAnchorCanonicalOutcomeReason"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorMarkerInt"),
         _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
         _js_function_source(MESSAGES_JS, "_liveAnchorStrictActivitySceneIdentity"),
         _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
@@ -118,6 +128,18 @@ def _message_anchor_settlement_helper_sources() -> list[str]:
         _js_function_source(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows"),
         _js_function_source(MESSAGES_JS, "_anchorSceneHasOwnedOutcomes"),
         _js_function_source(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant"),
+    ]
+
+
+def _assistant_anchor_marker_helper_sources() -> list[str]:
+    return [
+        ASSISTANT_ANCHOR_SIZE_CONSTANTS,
+        _js_function_source(ANCHORS_JS_SOURCE, "_hasOwn"),
+        _js_function_source(ANCHORS_JS_SOURCE, "_own"),
+        _js_function_source(ANCHORS_JS_SOURCE, "_cleanString"),
+        _js_function_source(ANCHORS_JS_SOURCE, "_activitySceneCanonicalOutcomeReason"),
+        _js_function_source(ANCHORS_JS_SOURCE, "_activitySceneMarkerInt"),
+        _js_function_source(ANCHORS_JS_SOURCE, "_activitySceneOutcomesTruncated"),
     ]
 
 
@@ -870,6 +892,144 @@ def test_storage_boundary_canonicalizes_malformed_outcome_marker():
         "max_bytes": 128000,
         "max_scene_bytes": 256000,
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "remove"),
+    [
+        ("accepted_count", None, True),
+        ("accepted_bytes", None, True),
+        ("accepted_count", None, False),
+        ("accepted_bytes", None, False),
+        ("accepted_count", True, False),
+        ("accepted_bytes", False, False),
+        ("accepted_count", "1", False),
+        ("accepted_bytes", "1", False),
+        ("accepted_count", -1, False),
+        ("accepted_bytes", -1, False),
+        ("accepted_count", 1.5, False),
+        ("accepted_bytes", 1.5, False),
+        ("accepted_count", 513, False),
+        ("accepted_bytes", 128001, False),
+        ("accepted_count", float("nan"), False),
+        ("accepted_bytes", float("nan"), False),
+        ("accepted_count", float("inf"), False),
+        ("accepted_bytes", float("-inf"), False),
+    ],
+    ids=[
+        "missing-count",
+        "missing-bytes",
+        "null-count",
+        "null-bytes",
+        "bool-count",
+        "bool-bytes",
+        "string-count",
+        "string-bytes",
+        "negative-count",
+        "negative-bytes",
+        "fraction-count",
+        "fraction-bytes",
+        "over-count",
+        "over-bytes",
+        "nan-count",
+        "nan-bytes",
+        "pos-inf-count",
+        "neg-inf-bytes",
+    ],
+)
+def test_storage_boundary_drops_invalid_outcome_marker_fields(field, value, remove):
+    from api import routes
+
+    marker = {
+        "reason": "scene_bytes",
+        "accepted_count": 0,
+        "accepted_bytes": 0,
+    }
+    if remove:
+        marker.pop(field)
+    else:
+        marker[field] = value
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {
+            "session_id": "sid-storage-invalid-marker",
+            "stream_id": "stream-storage-invalid-marker",
+            "run_id": "run-storage-invalid-marker",
+        },
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+        "outcomes_truncated": marker,
+    }
+
+    sanitized = routes._sanitize_anchor_activity_scene(scene)
+
+    assert "outcomes_truncated" not in sanitized
+
+
+@pytest.mark.skipif(not NODE, reason="node is required for marker schema coverage")
+def test_frontend_marker_readers_reject_invalid_accepted_fields():
+    functions = "\n".join(
+        [
+            *_session_anchor_recovery_helper_sources(),
+            *_message_anchor_outcome_helper_sources(),
+            *_assistant_anchor_marker_helper_sources(),
+        ]
+    )
+    script = f"""
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'marker_schema_helpers.js'}});
+const readers={{
+  sessions:marker=>sandbox._sessionAnchorOutcomeTruncationMarker({{outcomes_truncated:marker}}),
+  messages:marker=>sandbox._anchorOutcomeTruncationMarker({{outcomes_truncated:marker}}),
+  assistant:marker=>sandbox._activitySceneOutcomesTruncated(marker),
+}};
+const cases=[
+  {{name:'missing-count',field:'accepted_count',missing:true}},
+  {{name:'missing-bytes',field:'accepted_bytes',missing:true}},
+  {{name:'null-count',field:'accepted_count',value:null}},
+  {{name:'null-bytes',field:'accepted_bytes',value:null}},
+  {{name:'bool-count',field:'accepted_count',value:true}},
+  {{name:'bool-bytes',field:'accepted_bytes',value:false}},
+  {{name:'string-count',field:'accepted_count',value:'1'}},
+  {{name:'string-bytes',field:'accepted_bytes',value:'1'}},
+  {{name:'negative-count',field:'accepted_count',value:-1}},
+  {{name:'negative-bytes',field:'accepted_bytes',value:-1}},
+  {{name:'fraction-count',field:'accepted_count',value:1.5}},
+  {{name:'fraction-bytes',field:'accepted_bytes',value:1.5}},
+  {{name:'over-count',field:'accepted_count',value:513}},
+  {{name:'over-bytes',field:'accepted_bytes',value:128001}},
+  {{name:'nan-count',field:'accepted_count',value:NaN}},
+  {{name:'nan-bytes',field:'accepted_bytes',value:NaN}},
+  {{name:'pos-inf-count',field:'accepted_count',value:Infinity}},
+  {{name:'neg-inf-bytes',field:'accepted_bytes',value:-Infinity}},
+];
+for(const item of cases){{
+  const marker={{reason:'scene_bytes',accepted_count:0,accepted_bytes:0}};
+  if(item.missing) delete marker[item.field];
+  else marker[item.field]=item.value;
+  for(const [name,reader] of Object.entries(readers)){{
+    assert.strictEqual(reader(marker),null,`${{name}}:${{item.name}}`);
+  }}
+}}
+const valid={{reason:'bytes',accepted_count:2,accepted_bytes:128,max_count:'bad',extra:'drop'}};
+const expected={{reason:'bytes',accepted_count:2,max_count:512,accepted_bytes:128,max_bytes:128000,max_scene_bytes:256000}};
+assert.deepStrictEqual(JSON.parse(JSON.stringify(readers.sessions(valid))),expected);
+assert.deepStrictEqual(JSON.parse(JSON.stringify(readers.messages(valid))),expected);
+assert.deepStrictEqual(JSON.parse(JSON.stringify(readers.assistant(valid))),expected);
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_storage_boundary_rejects_oversized_non_outcome_scene(monkeypatch):
