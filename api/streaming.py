@@ -10276,6 +10276,11 @@ def _run_agent_streaming(
                     requested_model=resolved_model or model,
                     requested_provider=resolved_provider,
                 )
+                # #6068: the served model must be read AFTER agent.run — the agent
+                # mutates agent.model when a fallback fires, so the pre-run
+                # resolved_model would mis-attribute exactly the turns where
+                # attribution matters most.
+                _used_model = getattr(agent, 'model', None) or resolved_model or model
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -10292,6 +10297,8 @@ def _run_agent_streaming(
                             _ttft_ms = meter().get_ttft_ms(stream_id)
                             if _ttft_ms is not None:
                                 _dm['_firstTokenMs'] = _ttft_ms
+                            if _used_model:
+                                _dm['_usedModel'] = _used_model
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -10718,6 +10725,8 @@ def _run_agent_streaming(
             _ttft_ms = meter().get_ttft_ms(stream_id)
             if _ttft_ms is not None:
                 usage['ttft_ms'] = _ttft_ms
+            if _used_model:
+                usage['used_model'] = _used_model
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
