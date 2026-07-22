@@ -60,6 +60,7 @@ const _MESSAGE_ANCHOR_OUTCOME_MAX_BYTES=128000;
 def _session_anchor_recovery_helper_sources() -> list[str]:
     return [
         _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorCanonicalOutcomeReason"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
         _js_function_source(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
         _js_function_source(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
@@ -74,11 +75,14 @@ def _session_anchor_merge_helper_sources() -> list[str]:
         _js_function_source(SESSIONS_JS, "_sessionAnchorUtf8ByteLength"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorCompactSceneBytes"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeBytes"),
-        _js_function_source(SESSIONS_JS, "_sessionAnchorMarkerLimit"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorReasonRank"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorMergedReason"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeMarker"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeSeq"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorOutcomeItems"),
         _js_function_source(SESSIONS_JS, "_sessionAnchorSceneWithOutcomeItems"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorMinimalOutcomeScene"),
+        _js_function_source(SESSIONS_JS, "_sessionAnchorBoundedActivityScene"),
         _js_function_source(SESSIONS_JS, "_serverLiveSnapshotToolId"),
         _js_function_source(SESSIONS_JS, "_serverLiveSnapshotInflight"),
         _js_function_source(SESSIONS_JS, "_mergeServerLiveSnapshotOutcomesIntoInflight"),
@@ -87,8 +91,10 @@ def _session_anchor_merge_helper_sources() -> list[str]:
 
 def _message_anchor_outcome_helper_sources() -> list[str]:
     return [
+        MESSAGE_ANCHOR_SIZE_CONSTANTS,
         _js_function_source(MESSAGES_JS, "_liveAnchorActivitySceneIdentity"),
         _js_function_source(MESSAGES_JS, "_anchorOutcomeEnvelopeIdentityKey"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorCanonicalOutcomeReason"),
         _js_function_source(MESSAGES_JS, "_anchorOutcomeTruncationMarker"),
         _js_function_source(MESSAGES_JS, "_liveAnchorStrictActivitySceneIdentity"),
         _js_function_source(MESSAGES_JS, "_applyAnchorRegistryOutcomesFromActivityScene"),
@@ -97,14 +103,17 @@ def _message_anchor_outcome_helper_sources() -> list[str]:
 
 def _message_anchor_settlement_helper_sources() -> list[str]:
     return [
-        MESSAGE_ANCHOR_SIZE_CONSTANTS,
         *_message_anchor_outcome_helper_sources(),
         _js_function_source(MESSAGES_JS, "_messageAnchorUtf8ByteLength"),
         _js_function_source(MESSAGES_JS, "_messageAnchorCompactSceneBytes"),
         _js_function_source(MESSAGES_JS, "_messageAnchorOutcomeBytes"),
         _js_function_source(MESSAGES_JS, "_messageAnchorOutcomeTruncationMarker"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorOutcomeSeq"),
         _js_function_source(MESSAGES_JS, "_messageAnchorSceneOutcomeItems"),
         _js_function_source(MESSAGES_JS, "_messageAnchorSceneWithOutcomeItems"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorReasonRank"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorMergedReason"),
+        _js_function_source(MESSAGES_JS, "_messageAnchorMinimalOutcomeScene"),
         _js_function_source(MESSAGES_JS, "_messageAnchorBoundedActivityScene"),
         _js_function_source(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows"),
         _js_function_source(MESSAGES_JS, "_anchorSceneHasOwnedOutcomes"),
@@ -734,6 +743,157 @@ def test_snapshot_caps_high_volume_outcomes_under_production_scene_limit(monkeyp
     routes._sanitize_anchor_activity_scene(scene)
 
 
+def test_storage_boundary_caps_more_than_512_tiny_outcomes_under_scene_limit():
+    from api import routes
+
+    identity = {
+        "session_id": "sid-storage-count",
+        "stream_id": "stream-storage-count",
+        "run_id": "run-storage-count",
+    }
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": identity,
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [
+            {
+                "source_event_type": "state_saved",
+                "event_id": f"run-storage-count:{seq}",
+                "session_id": identity["session_id"],
+                "stream_id": identity["stream_id"],
+                "run_id": identity["run_id"],
+                "seq": seq,
+                "payload": {"kind": "memory", "action": "saved", "name": f"state-{seq}"},
+            }
+            for seq in range(1, 531)
+        ],
+    }
+    assert routes._anchor_activity_scene_encoded_size(scene) < routes._ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+
+    sanitized = routes._sanitize_anchor_activity_scene(scene)
+
+    assert len(sanitized["side_effects"]) == routes._RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS
+    assert sanitized["side_effects"][-1]["seq"] == 512
+    assert sanitized["outcomes_truncated"] == {
+        "reason": "count",
+        "accepted_count": 512,
+        "max_count": 512,
+        "accepted_bytes": sum(
+            routes._run_journal_outcome_encoded_size(event)
+            for event in sanitized["side_effects"]
+        ),
+        "max_bytes": 128000,
+        "max_scene_bytes": 256000,
+    }
+
+
+def test_storage_boundary_caps_more_than_128kb_outcomes_under_scene_limit():
+    from api import routes
+
+    identity = {
+        "session_id": "sid-storage-bytes",
+        "stream_id": "stream-storage-bytes",
+        "run_id": "run-storage-bytes",
+    }
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": identity,
+        "activity_rows": [],
+        "artifacts": [
+            {
+                "source_event_type": "artifact_reference",
+                "event_id": f"run-storage-bytes:{seq}",
+                "session_id": identity["session_id"],
+                "stream_id": identity["stream_id"],
+                "run_id": identity["run_id"],
+                "seq": seq,
+                "payload": {
+                    "kind": "workspace_file",
+                    "path": f"reports/{seq}.md",
+                    "blob": "x" * 9000,
+                },
+            }
+            for seq in range(1, 21)
+        ],
+        "side_effects": [],
+    }
+    assert routes._anchor_activity_scene_encoded_size(scene) < routes._ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+
+    sanitized = routes._sanitize_anchor_activity_scene(scene)
+    retained_bytes = sum(
+        routes._run_journal_outcome_encoded_size(event)
+        for event in sanitized["artifacts"]
+    )
+
+    assert sanitized["outcomes_truncated"]["reason"] == "bytes"
+    assert sanitized["outcomes_truncated"]["accepted_count"] == len(sanitized["artifacts"])
+    assert sanitized["outcomes_truncated"]["accepted_bytes"] == retained_bytes
+    assert retained_bytes <= routes._RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES
+    assert len(sanitized["artifacts"]) < 20
+
+
+def test_storage_boundary_canonicalizes_malformed_outcome_marker():
+    from api import routes
+
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {
+            "session_id": "sid-storage-marker",
+            "stream_id": "stream-storage-marker",
+            "run_id": "run-storage-marker",
+        },
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+        "outcomes_truncated": {
+            "reason": "scene_bytes",
+            "accepted_count": 0,
+            "accepted_bytes": 0,
+            "max_count": "bad",
+            "max_bytes": 1,
+            "max_scene_bytes": 1,
+            "extra": "must be dropped",
+        },
+    }
+
+    sanitized = routes._sanitize_anchor_activity_scene(scene)
+
+    assert sanitized["outcomes_truncated"] == {
+        "reason": "scene_bytes",
+        "accepted_count": 0,
+        "max_count": 512,
+        "accepted_bytes": 0,
+        "max_bytes": 128000,
+        "max_scene_bytes": 256000,
+    }
+
+
+def test_storage_boundary_rejects_oversized_non_outcome_scene(monkeypatch):
+    from api import routes
+
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [
+            {
+                "row_id": "oversized-prose",
+                "role": "prose",
+                "text": "x" * 5_000,
+            }
+        ],
+        "artifacts": [],
+        "side_effects": [],
+    }
+    monkeypatch.setattr(routes, "_ANCHOR_ACTIVITY_SCENE_MAX_BYTES", 2_000)
+
+    with pytest.raises(ValueError, match="scene payload is too large"):
+        routes._sanitize_anchor_activity_scene(scene)
+
+
 @pytest.mark.skipif(not NODE, reason="node is required for recovery identity coverage")
 def test_backend_stable_scene_identity_passes_frontend_recovery_validation(monkeypatch):
     scene = _stable_outcome_scene(monkeypatch)
@@ -1244,6 +1404,73 @@ console.log(JSON.stringify(sandbox.result));
     }
 
 
+@pytest.mark.skipif(not NODE, reason="node is required for settled Anchor scene coverage")
+def test_frontend_settlement_caps_tiny_outcomes_under_scene_limit():
+    functions = "\n".join(
+        _message_anchor_settlement_helper_sources()
+    )
+    script = f"""
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{window:{{isFinalAnswerOnlyMode:()=>false}},console,Buffer}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'settlement_count_helpers.js'}});
+vm.runInContext(`
+const sideEffects=Array.from({{length:520}},(_,idx)=>{{
+  const seq=idx+1;
+    return {{
+      source_event_type:'state_saved',
+      event_id:'run-settle-count:'+seq,
+      session_id:'sid-settle-count',
+      stream_id:'stream-settle-count',
+      run_id:'run-settle-count',
+      seq,
+      payload:{{kind:'memory',action:'saved',name:'state-'+seq}},
+    }};
+  }});
+var projectedScene={{
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  identity:{{session_id:'sid-settle-count',stream_id:'stream-settle-count',run_id:'run-settle-count'}},
+  activity_rows:[],
+  artifacts:[],
+  side_effects:sideEffects,
+}};
+var _anchorRegistry={{}};
+var streamId='stream-settle-count';
+var persisted=null;
+function _projectLiveAnchorActivityScene(){{ return projectedScene; }}
+function _completeSettledAnchorSceneForTurn(messages,lastAsstIndex,scene){{ return scene; }}
+function _persistSettledAnchorScene(message,scene,messageIndex){{ persisted={{message,scene,messageIndex}}; }}
+const messages=[{{role:'assistant',content:'done'}}];
+const renderedWorklog=_attachProjectedAnchorSceneToLastAssistant(messages);
+globalThis.result={{
+  renderedWorklog,
+  persisted,
+  attached:messages[0]._anchor_activity_scene,
+}};
+`, sandbox, {{filename:'settlement_count_probe.js'}});
+console.log(JSON.stringify(sandbox.result));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    attached = data["attached"]
+    assert data["renderedWorklog"] is False
+    assert data["persisted"]["messageIndex"] == 0
+    assert len(attached["side_effects"]) == 512
+    assert attached["side_effects"][0]["seq"] == 1
+    assert attached["side_effects"][-1]["seq"] == 512
+    assert attached["outcomes_truncated"]["reason"] == "count"
+    assert attached["outcomes_truncated"]["accepted_count"] == 512
+
+
 @pytest.mark.skipif(not NODE, reason="node is required for recovery identity coverage")
 def test_outcome_merge_fails_closed_on_missing_or_wrong_scene_identity():
     functions = "\n".join(
@@ -1456,10 +1683,10 @@ const cached={{
     version:'activity_scene_v1',
     mode:'compact_worklog',
     identity,
-    activity_rows:[{{row_id:'cached-prose',role:'prose',text:'r'.repeat(90000)}}],
-    artifacts:[artifact(101,'cached-artifact.md',80000)],
-    side_effects:[sideEffect(102,'cached-state',80000)],
-    outcomes_truncated:{{reason:'count',accepted_count:2,max_count:512,accepted_bytes:160000,max_bytes:128000,max_scene_bytes:256000}},
+    activity_rows:[{{row_id:'cached-prose',role:'prose',text:'r'.repeat(150000)}}],
+    artifacts:[artifact(101,'cached-artifact.md',30000)],
+    side_effects:[sideEffect(102,'cached-state',30000)],
+    outcomes_truncated:{{reason:'count',accepted_count:2,max_count:512,accepted_bytes:60000,max_bytes:128000,max_scene_bytes:256000}},
   }},
 }};
 const journalScene={{
@@ -1467,9 +1694,9 @@ const journalScene={{
   mode:'compact_worklog',
   identity,
   activity_rows:[],
-  artifacts:[artifact(201,'journal-artifact.md',80000)],
-  side_effects:[sideEffect(202,'journal-state',80000)],
-  outcomes_truncated:{{reason:'bytes',accepted_count:2,max_count:512,accepted_bytes:160000,max_bytes:128000,max_scene_bytes:256000}},
+  artifacts:[artifact(201,'journal-artifact.md',30000)],
+  side_effects:[sideEffect(202,'journal-state',30000)],
+  outcomes_truncated:{{reason:'bytes',accepted_count:2,max_count:512,accepted_bytes:60000,max_bytes:128000,max_scene_bytes:256000}},
 }};
 const merged=sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(
   cached,
@@ -1506,6 +1733,149 @@ console.log(JSON.stringify({{
     data = json.loads(result.stdout)
     assert data["retained"] == data["marker"]["accepted_count"]
     assert data["bytes"] <= 256000
+
+
+@pytest.mark.skipif(not NODE, reason="node is required for recovery budget coverage")
+def test_outcome_merge_caps_tiny_outcomes_and_retains_mixed_sequence_order():
+    functions = "\n".join(
+        _session_anchor_merge_helper_sources()
+    )
+    script = f"""
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{Buffer}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(functions)},sandbox,{{filename:'merge_count_order_helpers.js'}});
+const identity={{session_id:'sid-order',stream_id:'stream-order',run_id:'run-order'}};
+function artifact(seq){{
+  return {{
+    source_event_type:'artifact_reference',
+    event_id:`run-order:${{seq}}`,
+    session_id:identity.session_id,
+    stream_id:identity.stream_id,
+    run_id:identity.run_id,
+    seq,
+    payload:{{kind:'workspace_file',path:`reports/${{seq}}.md`}},
+  }};
+}}
+function sideEffect(seq){{
+  return {{
+    source_event_type:'state_saved',
+    event_id:`run-order:${{seq}}`,
+    session_id:identity.session_id,
+    stream_id:identity.stream_id,
+    run_id:identity.run_id,
+    seq,
+    payload:{{kind:'memory',action:'saved',name:`state-${{seq}}`}},
+  }};
+}}
+const journalScene={{
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  identity,
+  activity_rows:[],
+  artifacts:Array.from({{length:260}},(_,idx)=>artifact(idx*2+1)),
+  side_effects:[],
+}};
+const cached={{
+  streamId:'stream-order',
+  lastRunJournalSeq:1,
+  messages:[{{role:'assistant',content:'local'}}],
+  anchorActivityScene:{{
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    identity,
+    activity_rows:[{{row_id:'cached-prose',role:'prose',text:'local'}}],
+    artifacts:[],
+    side_effects:Array.from({{length:260}},(_,idx)=>sideEffect(idx*2+2)),
+  }},
+}};
+const merged=sandbox._mergeServerLiveSnapshotOutcomesIntoInflight(
+  cached,
+  {{streamId:'stream-order',lastRunJournalSeq:520,anchorActivityScene:journalScene}},
+  'stream-order'
+);
+assert.strictEqual(merged,true);
+const scene=cached.anchorActivityScene;
+const retained=[...scene.artifacts,...scene.side_effects];
+const retainedSeqs=retained.map(event=>event.seq).sort((a,b)=>a-b);
+assert.strictEqual(retained.length,512);
+assert.strictEqual(retainedSeqs[0],1);
+assert.strictEqual(retainedSeqs[retainedSeqs.length-1],512);
+assert.deepStrictEqual(retainedSeqs,Array.from({{length:512}},(_,idx)=>idx+1));
+assert.strictEqual(scene.artifacts.length,256);
+assert.strictEqual(scene.side_effects.length,256);
+assert.strictEqual(scene.outcomes_truncated.reason,'count');
+assert.strictEqual(scene.outcomes_truncated.accepted_count,512);
+assert.strictEqual(scene.outcomes_truncated.accepted_bytes,sandbox._sessionAnchorOutcomeBytes(retained));
+console.log(JSON.stringify({{
+  marker:scene.outcomes_truncated,
+  artifactCount:scene.artifacts.length,
+  sideEffectCount:scene.side_effects.length,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["marker"]["reason"] == "count"
+    assert data["artifactCount"] == 256
+    assert data["sideEffectCount"] == 256
+
+
+@pytest.mark.skipif(not NODE, reason="node is required for Anchor projection coverage")
+def test_anchor_projection_caps_outcome_bytes_under_scene_limit():
+    script = f"""
+const fs=require('fs');
+const assert=require('assert');
+const vm=require('vm');
+const sandbox={{window:{{}},Buffer}};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync({json.dumps(str(ANCHORS_JS))},'utf8'),sandbox,{{filename:'assistant_turn_anchors.js'}});
+const api=sandbox.window.HermesAssistantTurnAnchors;
+const registry=api.createAssistantTurnAnchorRegistry({{session_id:'sid-projection',stream_id:'stream-projection',run_id:'run-projection'}});
+for(let seq=1;seq<=520;seq+=1){{
+  api.applyAssistantTurnAnchorSourceEvent(
+    registry,
+    {{
+      event:'state_saved',
+      event_id:`run-projection:${{seq}}`,
+      session_id:'sid-projection',
+      stream_id:'stream-projection',
+      run_id:'run-projection',
+      seq,
+      payload:{{kind:'memory',action:'saved',name:`state-${{seq}}`}},
+    }},
+    {{session_id:'sid-projection',stream_id:'stream-projection',run_id:'run-projection'}}
+  );
+}}
+const projected=api.projectAssistantTurnAnchorActivityScene(registry,{{mode:'compact_worklog'}});
+assert.strictEqual(projected.side_effects.length<520,true);
+assert.strictEqual(projected.side_effects[0].seq,1);
+assert.strictEqual(projected.outcomes_truncated.reason,'bytes');
+assert.strictEqual(projected.outcomes_truncated.accepted_count,projected.side_effects.length);
+assert.strictEqual(projected.outcomes_truncated.accepted_bytes<=128000,true);
+assert.strictEqual(Buffer.byteLength(JSON.stringify(projected),'utf8')<=256000,true);
+console.log(JSON.stringify({{
+  sideEffects:projected.side_effects.length,
+  marker:projected.outcomes_truncated,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["sideEffects"] < 520
+    assert data["marker"]["reason"] == "bytes"
+    assert data["marker"]["accepted_count"] == data["sideEffects"]
 
 
 @pytest.mark.skipif(not NODE, reason="node is required for Anchor registry coverage")

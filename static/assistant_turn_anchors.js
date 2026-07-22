@@ -1045,12 +1045,23 @@
 
   function _activitySceneOutcomesTruncated(value){
     if(!value||typeof value!=='object'||Array.isArray(value)) return null;
-    const reason=_cleanString(_own(value,'reason'));
-    if(!reason) return null;
+    const reason=_activitySceneCanonicalOutcomeReason(_own(value,'reason'));
+    const acceptedCount=Number(_own(value,'accepted_count'));
+    const acceptedBytes=Number(_own(value,'accepted_bytes'));
+    if(!reason||!Number.isFinite(acceptedCount)||acceptedCount<0||!Number.isFinite(acceptedBytes)||acceptedBytes<0) return null;
     return Object.freeze({
-      ..._sanitizePayload(value),
       reason,
+      accepted_count:Math.floor(acceptedCount),
+      max_count:ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
+      accepted_bytes:Math.floor(acceptedBytes),
+      max_bytes:ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
+      max_scene_bytes:ACTIVITY_SCENE_MAX_BYTES,
     });
+  }
+
+  function _activitySceneCanonicalOutcomeReason(reason){
+    const value=_cleanString(reason);
+    return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
   }
 
   function _activitySceneUtf8ByteLength(text){
@@ -1079,54 +1090,145 @@
   function _activitySceneOutcomeBytes(events){
     let total=0;
     for(const event of (Array.isArray(events)?events:[])){
-      try{ total+=_activitySceneUtf8ByteLength(JSON.stringify(event)); }catch(_){}
+      const payload=(event&&typeof event==='object'&&event.event&&typeof event.event==='object')?event.event:event;
+      try{ total+=_activitySceneUtf8ByteLength(JSON.stringify(payload)); }catch(_){}
     }
     return total;
   }
 
-  function _activitySceneOutcomeMarker(reason, events, priorMarker){
-    const marker=(priorMarker&&typeof priorMarker==='object'&&!Array.isArray(priorMarker))?priorMarker:{};
-    const accepted=Array.isArray(events)?events:[];
+  function _activitySceneOutcomeMarker(reason, items){
+    const accepted=Array.isArray(items)?items:[];
     return Object.freeze({
-      reason:_cleanString(reason)||_cleanString(_own(marker,'reason'))||'scene_bytes',
+      reason:_activitySceneCanonicalOutcomeReason(reason)||'scene_bytes',
       accepted_count:accepted.length,
-      max_count:Number(_own(marker,'max_count')||ACTIVITY_SCENE_OUTCOME_MAX_EVENTS)||ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
+      max_count:ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
       accepted_bytes:_activitySceneOutcomeBytes(accepted),
-      max_bytes:Number(_own(marker,'max_bytes')||ACTIVITY_SCENE_OUTCOME_MAX_BYTES)||ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
-      max_scene_bytes:Number(_own(marker,'max_scene_bytes')||ACTIVITY_SCENE_MAX_BYTES)||ACTIVITY_SCENE_MAX_BYTES,
+      max_bytes:ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
+      max_scene_bytes:ACTIVITY_SCENE_MAX_BYTES,
     });
+  }
+
+  function _activitySceneOutcomeSeq(event){
+    const direct=Number(event&&event.seq);
+    if(Number.isFinite(direct)&&direct>0) return direct;
+    const eventId=_cleanString(event&&(event.event_id||event.lastEventId||event.last_event_id));
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt>0&&splitAt<eventId.length-1){
+      const parsed=Number(eventId.slice(splitAt+1));
+      if(Number.isFinite(parsed)&&parsed>0) return parsed;
+    }
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  function _activitySceneOutcomeItems(scene){
+    const items=[];
+    let order=0;
+    const append=(events,type)=>{
+      for(const event of (Array.isArray(events)?events:[])){
+        if(!event||typeof event!=='object'||Array.isArray(event)) continue;
+        items.push({type,event,seq:_activitySceneOutcomeSeq(event),order:order++});
+      }
+    };
+    append(scene&&scene.artifacts,'artifact_reference');
+    append(scene&&scene.side_effects,'state_saved');
+    return items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
+  }
+
+  function _activitySceneWithOutcomeItems(scene, items, marker){
+    const next={...(scene||{})};
+    next.artifacts=Object.freeze(items.filter(item=>item.type==='artifact_reference').map(item=>item.event));
+    next.side_effects=Object.freeze(items.filter(item=>item.type==='state_saved').map(item=>item.event));
+    if(marker) next.outcomes_truncated=marker;
+    else delete next.outcomes_truncated;
+    return next;
+  }
+
+  function _activitySceneReasonRank(reason){
+    if(reason==='scene_bytes') return 3;
+    if(reason==='bytes') return 2;
+    if(reason==='count') return 1;
+    return 0;
+  }
+
+  function _activitySceneMergedReason(markers, fallback){
+    let selected=_activitySceneCanonicalOutcomeReason(fallback);
+    for(const marker of (Array.isArray(markers)?markers:[])){
+      const reason=_activitySceneCanonicalOutcomeReason(marker&&marker.reason);
+      if(_activitySceneReasonRank(reason)>_activitySceneReasonRank(selected)) selected=reason;
+    }
+    return selected;
+  }
+
+  function _activitySceneMinimalOutcomeScene(scene, marker){
+    const base={
+      version:'activity_scene_v1',
+      mode:_cleanString(scene&&scene.mode)||'compact_worklog',
+      identity:{...(((scene&&scene.identity)&&typeof scene.identity==='object')?scene.identity:{})},
+      lifecycle:{...(((scene&&scene.lifecycle)&&typeof scene.lifecycle==='object')?scene.lifecycle:{})},
+      final_answer:'',
+      final_message_ref:null,
+      terminal_state:null,
+      activity_rows:Object.freeze([]),
+      artifacts:Object.freeze([]),
+      side_effects:Object.freeze([]),
+      outcomes_truncated:marker,
+    };
+    if(_activitySceneCompactBytes(base)<=ACTIVITY_SCENE_MAX_BYTES) return base;
+    base.identity={};
+    base.lifecycle={};
+    if(_activitySceneCompactBytes(base)<=ACTIVITY_SCENE_MAX_BYTES) return base;
+    return {
+      version:'activity_scene_v1',
+      mode:'compact_worklog',
+      activity_rows:Object.freeze([]),
+      artifacts:Object.freeze([]),
+      side_effects:Object.freeze([]),
+      outcomes_truncated:marker,
+    };
   }
 
   function _activitySceneBoundedScene(scene){
     if(!scene||scene.version!=='activity_scene_v1') return scene;
-    if(_activitySceneCompactBytes(scene)<=ACTIVITY_SCENE_MAX_BYTES) return scene;
     const marker=_activitySceneOutcomesTruncated(scene.outcomes_truncated);
-    const items=[
-      ...(Array.isArray(scene.artifacts)?scene.artifacts.map(event=>['artifact_reference',event]):[]),
-      ...(Array.isArray(scene.side_effects)?scene.side_effects.map(event=>['state_saved',event]):[]),
-    ];
-    const build=(events, nextMarker)=>({
-      ...scene,
-      artifacts:Object.freeze(events.filter(item=>item[0]==='artifact_reference').map(item=>item[1])),
-      side_effects:Object.freeze(events.filter(item=>item[0]==='state_saved').map(item=>item[1])),
-      outcomes_truncated:nextMarker,
-    });
-    let nextMarker=_activitySceneOutcomeMarker('scene_bytes',items.map(item=>item[1]),marker);
-    let next=build(items,nextMarker);
-    while(items.length&&_activitySceneCompactBytes(next)>ACTIVITY_SCENE_MAX_BYTES){
-      items.pop();
-      nextMarker=_activitySceneOutcomeMarker('scene_bytes',items.map(item=>item[1]),marker);
-      next=build(items,nextMarker);
+    const base={...(scene||{}),artifacts:Object.freeze([]),side_effects:Object.freeze([])};
+    delete base.outcomes_truncated;
+    const items=_activitySceneOutcomeItems(scene);
+    const accepted=[];
+    let acceptedBytes=0;
+    let reason=_activitySceneMergedReason([marker].filter(Boolean),'');
+    for(const item of items){
+      const itemBytes=_activitySceneOutcomeBytes([item]);
+      let rejectReason='';
+      if(accepted.length+1>ACTIVITY_SCENE_OUTCOME_MAX_EVENTS) rejectReason='count';
+      else if(acceptedBytes+itemBytes>ACTIVITY_SCENE_OUTCOME_MAX_BYTES) rejectReason='bytes';
+      else{
+        const trial=[...accepted,item];
+        const trialMarker=reason?_activitySceneOutcomeMarker(reason,trial):null;
+        const trialScene=_activitySceneWithOutcomeItems(base,trial,trialMarker);
+        if(_activitySceneCompactBytes(trialScene)<=ACTIVITY_SCENE_MAX_BYTES){
+          accepted.push(item);
+          acceptedBytes+=itemBytes;
+          continue;
+        }
+        rejectReason='scene_bytes';
+      }
+      reason=_activitySceneMergedReason([{reason},{reason:rejectReason}], '');
+      break;
+    }
+    if(accepted.length<items.length&&!reason) reason='scene_bytes';
+    let nextMarker=reason?_activitySceneOutcomeMarker(reason,accepted):null;
+    let next=_activitySceneWithOutcomeItems(base,accepted,nextMarker);
+    while(accepted.length&&_activitySceneCompactBytes(next)>ACTIVITY_SCENE_MAX_BYTES){
+      const removed=accepted.pop();
+      acceptedBytes=Math.max(0,acceptedBytes-_activitySceneOutcomeBytes([removed]));
+      nextMarker=_activitySceneOutcomeMarker('scene_bytes',accepted);
+      next=_activitySceneWithOutcomeItems(base,accepted,nextMarker);
     }
     if(_activitySceneCompactBytes(next)<=ACTIVITY_SCENE_MAX_BYTES) return next;
-    nextMarker=_activitySceneOutcomeMarker('scene_bytes',[],marker);
-    return {
-      ...scene,
-      activity_rows:Object.freeze([]),
-      artifacts:Object.freeze([]),
-      side_effects:Object.freeze([]),
-      outcomes_truncated:nextMarker,
-    };
+    nextMarker=_activitySceneOutcomeMarker('scene_bytes',[]);
+    const degraded={...base,activity_rows:Object.freeze([]),artifacts:Object.freeze([]),side_effects:Object.freeze([]),outcomes_truncated:nextMarker};
+    if(_activitySceneCompactBytes(degraded)<=ACTIVITY_SCENE_MAX_BYTES) return degraded;
+    return _activitySceneMinimalOutcomeScene(scene,nextMarker);
   }
 
   function projectAssistantTurnAnchorActivityScene(input, options){

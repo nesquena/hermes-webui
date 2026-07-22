@@ -181,7 +181,18 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert record["scene"]["version"] == "activity_scene_v1"
     assert record["scene"]["artifacts"] == scene["artifacts"]
     assert record["scene"]["side_effects"] == scene["side_effects"]
-    assert record["scene"]["outcomes_truncated"] == scene["outcomes_truncated"]
+    expected_marker = {
+        "reason": "scene_bytes",
+        "accepted_count": 2,
+        "max_count": 512,
+        "accepted_bytes": sum(
+            routes._run_journal_outcome_encoded_size(event)
+            for event in [*scene["artifacts"], *scene["side_effects"]]
+        ),
+        "max_bytes": 128000,
+        "max_scene_bytes": 256000,
+    }
+    assert record["scene"]["outcomes_truncated"] == expected_marker
 
     loaded = Session.load("anchorpersist1")
     hydrated = routes._hydrate_anchor_activity_scenes(
@@ -195,7 +206,7 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
     assert hydrated[1]["_anchor_activity_scene"]["artifacts"] == scene["artifacts"]
     assert hydrated[1]["_anchor_activity_scene"]["side_effects"] == scene["side_effects"]
-    assert hydrated[1]["_anchor_activity_scene"]["outcomes_truncated"] == scene["outcomes_truncated"]
+    assert hydrated[1]["_anchor_activity_scene"]["outcomes_truncated"] == expected_marker
 
 
 def test_anchor_scene_marker_only_round_trip_outside_provider_messages(tmp_path, monkeypatch):

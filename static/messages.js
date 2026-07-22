@@ -2056,20 +2056,31 @@ function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, s
   return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
 }
 
-function _anchorOutcomeTruncationMarker(scene){
-  const marker=scene&&scene.outcomes_truncated;
-  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
-  const reason=String(marker.reason||'').trim();
-  if(!reason) return null;
-  return {
-    ...marker,
-    reason,
-  };
-}
-
 const _MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
 const _MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS=512;
 const _MESSAGE_ANCHOR_OUTCOME_MAX_BYTES=128000;
+
+function _messageAnchorCanonicalOutcomeReason(reason){
+  const value=String(reason||'').trim();
+  return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
+}
+
+function _anchorOutcomeTruncationMarker(scene){
+  const marker=scene&&scene.outcomes_truncated;
+  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
+  const reason=_messageAnchorCanonicalOutcomeReason(marker.reason);
+  const acceptedCount=Number(marker.accepted_count);
+  const acceptedBytes=Number(marker.accepted_bytes);
+  if(!reason||!Number.isFinite(acceptedCount)||acceptedCount<0||!Number.isFinite(acceptedBytes)||acceptedBytes<0) return null;
+  return {
+    reason,
+    accepted_count:Math.floor(acceptedCount),
+    max_count:_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:Math.floor(acceptedBytes),
+    max_bytes:_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
 
 function _liveAnchorStrictActivitySceneIdentity(scene){
   if(!scene||scene.version!=='activity_scene_v1') return null;
@@ -2107,61 +2118,145 @@ function _messageAnchorCompactSceneBytes(scene){
 function _messageAnchorOutcomeBytes(events){
   let total=0;
   for(const event of (Array.isArray(events)?events:[])){
-    try{ total+=_messageAnchorUtf8ByteLength(JSON.stringify(event)); }catch(_){}
+    const payload=(event&&typeof event==='object'&&event.event&&typeof event.event==='object')?event.event:event;
+    try{ total+=_messageAnchorUtf8ByteLength(JSON.stringify(payload)); }catch(_){}
   }
   return total;
 }
 
-function _messageAnchorOutcomeTruncationMarker(reason, events, priorMarker){
-  const marker=(priorMarker&&typeof priorMarker==='object'&&!Array.isArray(priorMarker))?priorMarker:{};
-  const accepted=Array.isArray(events)?events:[];
+function _messageAnchorOutcomeTruncationMarker(reason, items){
+  const accepted=Array.isArray(items)?items:[];
   return {
-    reason:String(reason||marker.reason||'scene_bytes').trim()||'scene_bytes',
+    reason:_messageAnchorCanonicalOutcomeReason(reason)||'scene_bytes',
     accepted_count:accepted.length,
-    max_count:Number(marker.max_count||_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS)||_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
+    max_count:_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
     accepted_bytes:_messageAnchorOutcomeBytes(accepted),
-    max_bytes:Number(marker.max_bytes||_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES)||_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
-    max_scene_bytes:Number(marker.max_scene_bytes||_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES)||_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+    max_bytes:_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
   };
+}
+
+function _messageAnchorOutcomeSeq(event){
+  const direct=Number(event&&event.seq);
+  if(Number.isFinite(direct)&&direct>0) return direct;
+  const eventId=String(event&&(event.event_id||event.lastEventId||event.last_event_id)||'').trim();
+  const splitAt=eventId.lastIndexOf(':');
+  if(splitAt>0&&splitAt<eventId.length-1){
+    const parsed=Number(eventId.slice(splitAt+1));
+    if(Number.isFinite(parsed)&&parsed>0) return parsed;
+  }
+  return Number.MAX_SAFE_INTEGER;
 }
 
 function _messageAnchorSceneOutcomeItems(scene){
   const items=[];
-  for(const event of (Array.isArray(scene&&scene.artifacts)?scene.artifacts:[])) items.push(['artifact_reference',event]);
-  for(const event of (Array.isArray(scene&&scene.side_effects)?scene.side_effects:[])) items.push(['state_saved',event]);
-  return items;
+  let order=0;
+  const append=(events,type)=>{
+    for(const event of (Array.isArray(events)?events:[])){
+      if(!event||typeof event!=='object'||Array.isArray(event)) continue;
+      items.push({type,event,seq:_messageAnchorOutcomeSeq(event),order:order++});
+    }
+  };
+  append(scene&&scene.artifacts,'artifact_reference');
+  append(scene&&scene.side_effects,'state_saved');
+  return items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
 }
 
 function _messageAnchorSceneWithOutcomeItems(scene, items, marker){
   const next={...(scene||{})};
-  next.artifacts=items.filter(item=>item[0]==='artifact_reference').map(item=>item[1]);
-  next.side_effects=items.filter(item=>item[0]==='state_saved').map(item=>item[1]);
+  next.artifacts=items.filter(item=>item.type==='artifact_reference').map(item=>item.event);
+  next.side_effects=items.filter(item=>item.type==='state_saved').map(item=>item.event);
   if(marker) next.outcomes_truncated=marker;
   else delete next.outcomes_truncated;
   return next;
 }
 
-function _messageAnchorBoundedActivityScene(scene){
-  if(!scene||scene.version!=='activity_scene_v1') return scene;
-  const existingMarker=_anchorOutcomeTruncationMarker(scene);
-  if(_messageAnchorCompactSceneBytes(scene)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return scene;
-  const items=_messageAnchorSceneOutcomeItems(scene);
-  let marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',items.map(item=>item[1]),existingMarker);
-  let next=_messageAnchorSceneWithOutcomeItems(scene,items,marker);
-  while(items.length&&_messageAnchorCompactSceneBytes(next)>_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
-    items.pop();
-    marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',items.map(item=>item[1]),existingMarker);
-    next=_messageAnchorSceneWithOutcomeItems(scene,items,marker);
+function _messageAnchorReasonRank(reason){
+  if(reason==='scene_bytes') return 3;
+  if(reason==='bytes') return 2;
+  if(reason==='count') return 1;
+  return 0;
+}
+
+function _messageAnchorMergedReason(markers, fallback){
+  let selected=_messageAnchorCanonicalOutcomeReason(fallback);
+  for(const marker of (Array.isArray(markers)?markers:[])){
+    const reason=_messageAnchorCanonicalOutcomeReason(marker&&marker.reason);
+    if(_messageAnchorReasonRank(reason)>_messageAnchorReasonRank(selected)) selected=reason;
   }
-  if(_messageAnchorCompactSceneBytes(next)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return next;
-  marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',[],existingMarker);
-  return {
-    ...(scene||{}),
+  return selected;
+}
+
+function _messageAnchorMinimalOutcomeScene(scene, marker){
+  const base={
+    version:'activity_scene_v1',
+    mode:String((scene&&scene.mode)||'compact_worklog')||'compact_worklog',
+    identity:{...(((scene&&scene.identity)&&typeof scene.identity==='object')?scene.identity:{})},
+    lifecycle:{...(((scene&&scene.lifecycle)&&typeof scene.lifecycle==='object')?scene.lifecycle:{})},
+    final_answer:'',
+    final_message_ref:null,
+    terminal_state:null,
     activity_rows:[],
     artifacts:[],
     side_effects:[],
     outcomes_truncated:marker,
   };
+  if(_messageAnchorCompactSceneBytes(base)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  base.identity={};
+  base.lifecycle={};
+  if(_messageAnchorCompactSceneBytes(base)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  return {
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+}
+
+function _messageAnchorBoundedActivityScene(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return scene;
+  const existingMarker=_anchorOutcomeTruncationMarker(scene);
+  let reason=_messageAnchorMergedReason([existingMarker].filter(Boolean),'');
+  const base={...(scene||{}),artifacts:[],side_effects:[]};
+  delete base.outcomes_truncated;
+  const items=_messageAnchorSceneOutcomeItems(scene);
+  const accepted=[];
+  let acceptedBytes=0;
+  for(const item of items){
+    const itemBytes=_messageAnchorOutcomeBytes([item]);
+    let rejectReason='';
+    if(accepted.length+1>_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS) rejectReason='count';
+    else if(acceptedBytes+itemBytes>_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES) rejectReason='bytes';
+    else{
+      const trial=[...accepted,item];
+      const trialMarker=reason?_messageAnchorOutcomeTruncationMarker(reason,trial):null;
+      const trialScene=_messageAnchorSceneWithOutcomeItems(base,trial,trialMarker);
+      if(_messageAnchorCompactSceneBytes(trialScene)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+        accepted.push(item);
+        acceptedBytes+=itemBytes;
+        continue;
+      }
+      rejectReason='scene_bytes';
+    }
+    reason=_messageAnchorMergedReason([{reason},{reason:rejectReason}], '');
+    break;
+  }
+  if(accepted.length<items.length&&!reason) reason='scene_bytes';
+  let marker=reason?_messageAnchorOutcomeTruncationMarker(reason,accepted):null;
+  let next=_messageAnchorSceneWithOutcomeItems(base,accepted,marker);
+  while(accepted.length&&_messageAnchorCompactSceneBytes(next)>_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    const removed=accepted.pop();
+    acceptedBytes=Math.max(0,acceptedBytes-_messageAnchorOutcomeBytes([removed]));
+    marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',accepted);
+    next=_messageAnchorSceneWithOutcomeItems(base,accepted,marker);
+  }
+  if(_messageAnchorCompactSceneBytes(next)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return next;
+  marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',[]);
+  const degraded={...base,activity_rows:[],artifacts:[],side_effects:[],outcomes_truncated:marker};
+  if(_messageAnchorCompactSceneBytes(degraded)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return degraded;
+  return _messageAnchorMinimalOutcomeScene(scene,marker);
 }
 
 function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry, scene, context){

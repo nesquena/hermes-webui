@@ -1027,20 +1027,31 @@ function _sessionAnchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedR
   return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
 }
 
-function _sessionAnchorOutcomeTruncationMarker(scene){
-  const marker=scene&&scene.outcomes_truncated;
-  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
-  const reason=String(marker.reason||'').trim();
-  if(!reason) return null;
-  return {
-    ...marker,
-    reason,
-  };
-}
-
 const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
 const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;
 const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;
+
+function _sessionAnchorCanonicalOutcomeReason(reason){
+  const value=String(reason||'').trim();
+  return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
+}
+
+function _sessionAnchorOutcomeTruncationMarker(scene){
+  const marker=scene&&scene.outcomes_truncated;
+  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
+  const reason=_sessionAnchorCanonicalOutcomeReason(marker.reason);
+  const acceptedCount=Number(marker.accepted_count);
+  const acceptedBytes=Number(marker.accepted_bytes);
+  if(!reason||!Number.isFinite(acceptedCount)||acceptedCount<0||!Number.isFinite(acceptedBytes)||acceptedBytes<0) return null;
+  return {
+    reason,
+    accepted_count:Math.floor(acceptedCount),
+    max_count:_SESSION_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:Math.floor(acceptedBytes),
+    max_bytes:_SESSION_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
 
 function _anchorActivitySceneStrictIdentity(scene){
   if(!scene||scene.version!=='activity_scene_v1') return null;
@@ -1078,16 +1089,10 @@ function _sessionAnchorCompactSceneBytes(scene){
 function _sessionAnchorOutcomeBytes(events){
   let total=0;
   for(const event of (Array.isArray(events)?events:[])){
-    try{ total+=_sessionAnchorUtf8ByteLength(JSON.stringify(event)); }catch(_){}
+    const payload=(event&&typeof event==='object'&&event.event&&typeof event.event==='object')?event.event:event;
+    try{ total+=_sessionAnchorUtf8ByteLength(JSON.stringify(payload)); }catch(_){}
   }
   return total;
-}
-
-function _sessionAnchorMarkerLimit(markers, key, fallback){
-  const values=(Array.isArray(markers)?markers:[])
-    .map(marker=>Number(marker&&marker[key]))
-    .filter(value=>Number.isFinite(value)&&value>0);
-  return values.length?Math.min(...values):fallback;
 }
 
 function _sessionAnchorReasonRank(reason){
@@ -1098,25 +1103,50 @@ function _sessionAnchorReasonRank(reason){
 }
 
 function _sessionAnchorMergedReason(markers, fallback){
-  let selected=String(fallback||'').trim();
+  let selected=_sessionAnchorCanonicalOutcomeReason(fallback);
   for(const marker of (Array.isArray(markers)?markers:[])){
-    const reason=String(marker&&marker.reason||'').trim();
+    const reason=_sessionAnchorCanonicalOutcomeReason(marker&&marker.reason);
     if(_sessionAnchorReasonRank(reason)>_sessionAnchorReasonRank(selected)) selected=reason;
   }
   return selected;
 }
 
-function _sessionAnchorOutcomeMarker(reason, events, markers){
-  const accepted=Array.isArray(events)?events:[];
-  const markerList=Array.isArray(markers)?markers:[];
+function _sessionAnchorOutcomeMarker(reason, items){
+  const accepted=Array.isArray(items)?items:[];
   return {
-    reason:String(reason||_sessionAnchorMergedReason(markerList,'')||'scene_bytes').trim()||'scene_bytes',
+    reason:_sessionAnchorCanonicalOutcomeReason(reason)||'scene_bytes',
     accepted_count:accepted.length,
-    max_count:_sessionAnchorMarkerLimit(markerList,'max_count',_SESSION_ANCHOR_OUTCOME_MAX_EVENTS),
+    max_count:_SESSION_ANCHOR_OUTCOME_MAX_EVENTS,
     accepted_bytes:_sessionAnchorOutcomeBytes(accepted),
-    max_bytes:_sessionAnchorMarkerLimit(markerList,'max_bytes',_SESSION_ANCHOR_OUTCOME_MAX_BYTES),
-    max_scene_bytes:_sessionAnchorMarkerLimit(markerList,'max_scene_bytes',_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES),
+    max_bytes:_SESSION_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
   };
+}
+
+function _sessionAnchorOutcomeSeq(event){
+  const direct=Number(event&&event.seq);
+  if(Number.isFinite(direct)&&direct>0) return direct;
+  const eventId=String(event&&(event.event_id||event.lastEventId||event.last_event_id)||'').trim();
+  const splitAt=eventId.lastIndexOf(':');
+  if(splitAt>0&&splitAt<eventId.length-1){
+    const parsed=Number(eventId.slice(splitAt+1));
+    if(Number.isFinite(parsed)&&parsed>0) return parsed;
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function _sessionAnchorOutcomeItems(scene){
+  const items=[];
+  let order=0;
+  const append=(events,type)=>{
+    for(const event of (Array.isArray(events)?events:[])){
+      if(!event||typeof event!=='object'||Array.isArray(event)) continue;
+      items.push({type,event,seq:_sessionAnchorOutcomeSeq(event),order:order++});
+    }
+  };
+  append(scene&&scene.artifacts,'artifact_reference');
+  append(scene&&scene.side_effects,'state_saved');
+  return items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
 }
 
 function _sessionAnchorSceneWithOutcomeItems(scene, items, marker){
@@ -1126,6 +1156,78 @@ function _sessionAnchorSceneWithOutcomeItems(scene, items, marker){
   if(marker) next.outcomes_truncated=marker;
   else delete next.outcomes_truncated;
   return next;
+}
+
+function _sessionAnchorMinimalOutcomeScene(scene, marker){
+  const base={
+    version:'activity_scene_v1',
+    mode:String((scene&&scene.mode)||'compact_worklog')||'compact_worklog',
+    identity:{...(((scene&&scene.identity)&&typeof scene.identity==='object')?scene.identity:{})},
+    lifecycle:{...(((scene&&scene.lifecycle)&&typeof scene.lifecycle==='object')?scene.lifecycle:{})},
+    final_answer:'',
+    final_message_ref:null,
+    terminal_state:null,
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+  if(_sessionAnchorCompactSceneBytes(base)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  base.identity={};
+  base.lifecycle={};
+  if(_sessionAnchorCompactSceneBytes(base)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  return {
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+}
+
+function _sessionAnchorBoundedActivityScene(scene, preferredReason){
+  if(!scene||scene.version!=='activity_scene_v1') return scene;
+  const priorMarker=_sessionAnchorOutcomeTruncationMarker(scene);
+  const base={...(scene||{}),artifacts:[],side_effects:[]};
+  delete base.outcomes_truncated;
+  const items=_sessionAnchorOutcomeItems(scene);
+  const accepted=[];
+  let acceptedBytes=0;
+  let reason=_sessionAnchorMergedReason([priorMarker].filter(Boolean), preferredReason);
+  for(const item of items){
+    const itemBytes=_sessionAnchorOutcomeBytes([item]);
+    let rejectReason='';
+    if(accepted.length+1>_SESSION_ANCHOR_OUTCOME_MAX_EVENTS) rejectReason='count';
+    else if(acceptedBytes+itemBytes>_SESSION_ANCHOR_OUTCOME_MAX_BYTES) rejectReason='bytes';
+    else{
+      const trial=[...accepted,item];
+      const trialMarker=reason?_sessionAnchorOutcomeMarker(reason,trial):null;
+      const trialScene=_sessionAnchorSceneWithOutcomeItems(base,trial,trialMarker);
+      if(_sessionAnchorCompactSceneBytes(trialScene)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+        accepted.push(item);
+        acceptedBytes+=itemBytes;
+        continue;
+      }
+      rejectReason='scene_bytes';
+    }
+    reason=_sessionAnchorMergedReason([{reason},{reason:rejectReason}], '');
+    break;
+  }
+  if(accepted.length<items.length&&!reason) reason='scene_bytes';
+  let marker=reason?_sessionAnchorOutcomeMarker(reason,accepted):null;
+  let next=_sessionAnchorSceneWithOutcomeItems(base,accepted,marker);
+  while(accepted.length&&_sessionAnchorCompactSceneBytes(next)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    const removed=accepted.pop();
+    acceptedBytes=Math.max(0,acceptedBytes-_sessionAnchorOutcomeBytes([removed]));
+    marker=_sessionAnchorOutcomeMarker('scene_bytes',accepted);
+    next=_sessionAnchorSceneWithOutcomeItems(base,accepted,marker);
+  }
+  if(_sessionAnchorCompactSceneBytes(next)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return next;
+  marker=_sessionAnchorOutcomeMarker('scene_bytes',[]);
+  const degraded={...base,activity_rows:[],artifacts:[],side_effects:[],outcomes_truncated:marker};
+  if(_sessionAnchorCompactSceneBytes(degraded)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return degraded;
+  return _sessionAnchorMinimalOutcomeScene(scene,marker);
 }
 
 function _anchorActivitySceneHasRecoveryState(scene){
@@ -1263,19 +1365,21 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
   const journalRun=journalIdentity.runId;
   const items=[];
   const seen=new Set();
+  let order=0;
   const appendCollection=(events,expectedType,expectedRun,identity)=>{
     for(const event of (Array.isArray(events)?events:[])){
       const identityKey=_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
       const seenKey=`${expectedType}:${identityKey}`;
       if(!identityKey||seen.has(seenKey)) continue;
       seen.add(seenKey);
-      items.push({type:expectedType,event});
+      items.push({type:expectedType,event,seq:_sessionAnchorOutcomeSeq(event),order:order++});
     }
   };
   appendCollection(journalScene.artifacts,'artifact_reference',journalRun,journalIdentity);
   appendCollection(journalScene.side_effects,'state_saved',journalRun,journalIdentity);
   appendCollection(cachedScene&&cachedScene.artifacts,'artifact_reference',cachedRun,cachedIdentity);
   appendCollection(cachedScene&&cachedScene.side_effects,'state_saved',cachedRun,cachedIdentity);
+  items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
   const markerList=[
     _sessionAnchorOutcomeTruncationMarker(journalScene),
     _sessionAnchorOutcomeTruncationMarker(cachedScene),
@@ -1288,29 +1392,11 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
       ...((journalScene&&journalScene.identity)||{}),
     },
   };
-  let reason=_sessionAnchorMergedReason(markerList,'');
-  let marker=reason?_sessionAnchorOutcomeMarker(reason,items.map(item=>item.event),markerList):null;
-  let mergedScene=_sessionAnchorSceneWithOutcomeItems(baseScene,items,marker);
-  if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
-    reason='scene_bytes';
-    marker=_sessionAnchorOutcomeMarker(reason,items.map(item=>item.event),markerList);
-    mergedScene=_sessionAnchorSceneWithOutcomeItems(baseScene,items,marker);
-  }
-  while(items.length&&_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
-    items.pop();
-    marker=_sessionAnchorOutcomeMarker('scene_bytes',items.map(item=>item.event),markerList);
-    mergedScene=_sessionAnchorSceneWithOutcomeItems(baseScene,items,marker);
-  }
-  if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
-    marker=_sessionAnchorOutcomeMarker('scene_bytes',[],markerList);
-    mergedScene={
-      ...baseScene,
-      activity_rows:[],
-      artifacts:[],
-      side_effects:[],
-      outcomes_truncated:marker,
-    };
-  }
+  const reason=_sessionAnchorMergedReason(markerList,'');
+  const mergedScene=_sessionAnchorBoundedActivityScene(
+    _sessionAnchorSceneWithOutcomeItems(baseScene,items,reason?_sessionAnchorOutcomeMarker(reason,[]):null),
+    reason
+  );
   if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return false;
   inflight.anchorActivityScene=mergedScene;
   const journalSeq=Number(serverSnapshot.lastRunJournalSeq||0);
