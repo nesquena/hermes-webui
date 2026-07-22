@@ -3467,7 +3467,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!row||typeof row!=='object') return false;
     const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
     const values=[row.row_id,row.local_id,row.event_id,identity.local_id,identity.event_id];
-    return values.some(value=>String(value||'').startsWith('live-'));
+    if(values.some(value=>String(value||'').startsWith('live-'))) return true;
+    // Provider tool-call IDs do not use the live prefix. A stream owner without
+    // a settled assistant index still identifies a projected live row.
+    const group=row.group&&typeof row.group==='object'?row.group:{};
+    const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);
+    const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;
+    return hasStreamOwner&&!hasAssistantMessageIndex;
   }
   function _anchorSceneMessageRowsHaveThinking(messageRows){
     if(!(messageRows instanceof Map)) return false;
@@ -3482,7 +3488,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(String(row.status||'').toLowerCase()!=='running') return row;
     if(!_anchorSceneRowHasLiveIdentity(row)) return row;
     if(row.role==='thinking'&&hasSettledThinking) return null;
-    return {...row,status:'completed'};
+    const sealed={...row,status:'completed'};
+    if(row.payload&&typeof row.payload==='object'){
+      sealed.payload={...row.payload,status:'completed'};
+      if(row.role==='tool') sealed.payload.done=true;
+    }
+    if(row.role==='tool'&&row.tool&&typeof row.tool==='object'){
+      sealed.tool={...row.tool,done:true};
+    }
+    return sealed;
   }
   function _anchorSceneRowLooksLikeFinalAnswer(rowTextKey, finalKey){
     if(!rowTextKey||!finalKey) return false;
@@ -6490,6 +6504,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
   const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  function _isHistoricalAnchorActivityScene(scene){
+    if(!scene||typeof scene!=='object') return false;
+    const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+    const turnId=identity&&typeof identity.turn_id==='string'?identity.turn_id:'';
+    return turnId.indexOf('historical:')===0;
+  }
   function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
@@ -6504,6 +6524,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const k=_messageIdentityKey(nm); if(!k) continue;
       const pm=prevIdx.get(k); if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
+        if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
         if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
       }
     }

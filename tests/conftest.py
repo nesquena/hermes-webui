@@ -181,6 +181,20 @@ os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # tests that read/write config.yaml stay inside the isolated test home.
 os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
+# Model-selection env overrides must NOT leak from the runner into tests.
+# get_effective_default_model() (api/config.py) treats HERMES_MODEL / OPENAI_MODEL
+# / LLM_MODEL as the highest-priority default-model source — above the isolated
+# test config. When the pytest process runs inside a live Hermes agent session,
+# HERMES_MODEL is exported to the agent's runtime model (e.g. "opus-4.8"), which
+# then overrides the sandbox config and pollutes the model picker/catalog. That
+# broke test_sprint12 (default-model readback), test_issue1538 (Nous @nous:
+# prefix invariant) and test_issue1567 (picker capacity/symmetry) whenever the
+# suite ran on a box with HERMES_MODEL set. Strip them at module level so the
+# isolated config is authoritative for the pytest process; the out-of-process
+# test server env is scrubbed identically in the test_server fixture below.
+for _model_env in ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
+    os.environ.pop(_model_env, None)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_hermes_config_path():
@@ -987,6 +1001,13 @@ def test_server():
     for _k in list(env):
         if any(_k.startswith(p) for p in _CRED_ENV_PREFIXES):
             del env[_k]
+    # Model-selection overrides must not reach the test server either. They are
+    # already popped from the pytest process env at module level, but strip them
+    # explicitly here so the subprocess default model comes only from the isolated
+    # config / HERMES_WEBUI_DEFAULT_MODEL below — never a runner-exported
+    # HERMES_MODEL (get_effective_default_model gives these env vars top priority).
+    for _model_env in ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
+        env.pop(_model_env, None)
     # Belt-and-suspenders: keep IMDS disabled in the spawn env too (we set it
     # at module level above for the pytest process, but make it explicit here
     # so it's never accidentally cleared by an env.update later).

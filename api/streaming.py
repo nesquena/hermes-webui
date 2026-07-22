@@ -7,6 +7,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -6501,6 +6502,22 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     return True
 
 
+def _terminal_turn_duration(session, *, now: float | None = None) -> float | None:
+    """Freeze a valid turn timer before terminal cleanup clears its origin."""
+    started_at = getattr(session, 'pending_started_at', None)
+    try:
+        started = float(started_at)
+        ended = float(time.time() if now is None else now)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(started) or not math.isfinite(ended) or started <= 0:
+        return None
+    elapsed = ended - started
+    if elapsed < 0:
+        return None
+    return round(elapsed, 3)
+
+
 def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | None:
     """Build a _partial assistant message from raw streaming buffers.
 
@@ -9640,14 +9657,7 @@ def _run_agent_streaming(
                                     + 'send a message, switch the model/provider, or fix the credentials.'
                                 )
                                 _error_payload['hint'] = _err_hint
-                        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
-                        _turn_duration_seconds = 0.0
-                        try:
-                            _pending_ts = getattr(s, 'pending_started_at', None)
-                            if _pending_ts:
-                                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
-                        except Exception:
-                            pass
+                        _turn_duration = _terminal_turn_duration(s)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
@@ -9667,8 +9677,9 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
-                            '_turnDuration': round(_turn_duration_seconds, 3),
                         }
+                        if _turn_duration is not None:
+                            _error_message['_turnDuration'] = _turn_duration
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
                                 s,
@@ -10873,14 +10884,7 @@ def _run_agent_streaming(
                             + 'send a message, switch the model/provider, or fix the credentials.'
                         )
                         _error_payload['hint'] = _exc_hint
-                # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
-                _turn_duration_seconds = 0.0
-                try:
-                    _pending_ts = getattr(s, 'pending_started_at', None)
-                    if _pending_ts:
-                        _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
-                except Exception:
-                    pass
+                _turn_duration = _terminal_turn_duration(s)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -10896,8 +10900,9 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
-                    '_turnDuration': round(_turn_duration_seconds, 3),
                 }
+                if _turn_duration is not None:
+                    _error_message['_turnDuration'] = _turn_duration
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(
                         s,
@@ -10996,6 +11001,9 @@ def _run_agent_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
             unregister_active_run(stream_id)
+            # Clean up the stream-owner registry so stale stream_id→session_id
+            # mappings do not accumulate over thousands of completed streams (#6351).
+            unregister_stream_owner(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`
