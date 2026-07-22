@@ -4411,6 +4411,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-turn-footer .lf-time{color:var(--text);}
 .transparent-turn-footer .lf-sep{opacity:.4;}
 .transparent-turn-footer .lf-status{color:var(--muted);opacity:.85;}
+.transparent-turn-footer .lf-model{color:var(--muted);opacity:.85;}
 .transparent-turn-footer .lf-ttft{color:var(--accent);opacity:.9;}
 .transparent-turn-footer .lf-tokens{font-variant-numeric:tabular-nums;}
 
@@ -6110,6 +6111,7 @@ main.main > #mainPlugin{display:none;}
 .msg-usage-inline,
 .msg-duration-inline,
 .msg-gateway-inline,
+.msg-used-model-inline,
 .gateway-failover-inline,
 .msg-model-warning-inline {
   font-size: 11px;
