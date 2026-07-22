@@ -159,6 +159,7 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     except FileNotFoundError:
         existing_stat = None
     mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    special_mode_bits = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
 
     def _verify_symlink_target() -> None:
         if symlink_target is not None and path.resolve(strict=False) != symlink_target:
@@ -241,6 +242,12 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+            if mode is not None and (mode & special_mode_bits) and hasattr(os, "fchmod"):
+                # Some filesystems clear special mode bits when file data is written.
+                os.fchmod(f.fileno(), mode)
+                os.fsync(f.fileno())
+        if mode is not None and (mode & special_mode_bits) and not hasattr(os, "fchmod"):
+            os.chmod(tmp, mode)
         _verify_symlink_target()
         os.replace(tmp, write_path)
         _fsync_directory(write_path.parent)
