@@ -1455,6 +1455,46 @@ class Session:
                         self.active_stream_id,
                     )
                     return
+                # ── #6299 cross-client merge ──────────────────────────────
+                # Another client may have appended messages concurrently since
+                # we loaded this session.  If disk has messages we don't know
+                # about AND the shared prefix is identical, merge the extra
+                # disk messages so our save doesn't clobber a concurrent
+                # append (last-writer-wins desync).
+                if existing_msg_count > incoming_msg_count:
+                    existing_msgs = existing.get('messages') or []
+                    our_msgs = self.messages or []
+                    if our_msgs and len(existing_msgs) >= len(our_msgs):
+                        _prefix_matches = True
+                        for _i in range(len(our_msgs)):
+                            if _i >= len(existing_msgs):
+                                _prefix_matches = False
+                                break
+                            _our_msg = our_msgs[_i]
+                            _disk_msg = existing_msgs[_i]
+                            if not isinstance(_our_msg, dict) or not isinstance(_disk_msg, dict):
+                                _prefix_matches = False
+                                break
+                            _our_id = _our_msg.get('id')
+                            _disk_id = _disk_msg.get('id')
+                            if _our_id is not None and _disk_id is not None:
+                                if _our_id != _disk_id:
+                                    _prefix_matches = False
+                                    break
+                            elif (_our_msg.get('role'), _our_msg.get('content')) != (_disk_msg.get('role'), _disk_msg.get('content')):
+                                _prefix_matches = False
+                                break
+                        if _prefix_matches:
+                            _disk_tail = existing_msgs[len(our_msgs):]
+                            if _disk_tail:
+                                self.messages = list(our_msgs) + list(_disk_tail)
+                                incoming_msg_count = len(self.messages)
+                                # Rebuild payload with merged messages so the
+                                # atomic write below reflects the combined
+                                # transcript, not just our local snapshot.
+                                meta['message_count'] = len(self.messages)
+                                meta['messages'] = self.messages
+                                payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
