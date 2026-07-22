@@ -689,6 +689,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           if (blocks) blocks.insertBefore(group, segment);
           return true;
         }}
+        function _hasHiddenProcessWakeupBoundaryBefore() {{ return false; }}
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
