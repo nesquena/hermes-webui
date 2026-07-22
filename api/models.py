@@ -874,6 +874,7 @@ def _append_recovered_context_projection(
                 recovered.get('timestamp'),
                 recovered.get('_source'),
                 recovered.get('attachments'),
+                pending_turn_id=recovered.get('_turn_id'),
             ):
                 return
         else:
@@ -923,6 +924,9 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     stamp_message_source(recovered, pending_source)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
+    pending_turn_id = getattr(session, 'pending_turn_id', None) or getattr(session, 'active_stream_id', None)
+    if pending_turn_id:
+        recovered['_turn_id'] = pending_turn_id
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
     # The new user turn is now committed to messages (#3831): advance the
@@ -1477,7 +1481,7 @@ class Session:
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
-            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_id',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -2383,8 +2387,13 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments, pending_turn_id=None):
     if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    # Per-turn turn_id collision protection (#6407): require exact ID match.
+    # Fail safe — return False when no ID exists on either side.
+    msg_turn_id = message.get('_turn_id')
+    if not pending_turn_id or not msg_turn_id or str(msg_turn_id) != str(pending_turn_id):
         return False
     try:
         message_timestamp = int(message.get('timestamp'))
@@ -2890,6 +2899,7 @@ def _append_journaled_partial_output(
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            pending_turn_id=getattr(session, 'pending_turn_id', None) or session.active_stream_id,
         ):
             return False
 
@@ -2904,6 +2914,7 @@ def _append_journaled_partial_output(
                 session.pending_started_at,
                 session.pending_user_source,
                 session.pending_attachments,
+                pending_turn_id=getattr(session, 'pending_turn_id', None) or session.active_stream_id,
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3494,6 +3505,7 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts,
             session.pending_user_source,
             session.pending_attachments,
+            pending_turn_id=getattr(session, 'pending_turn_id', None) or stream_id_for_recheck or session.active_stream_id,
         )
         _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
             session.messages[-1],
@@ -3513,6 +3525,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_turn_id = None
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: cleared stale pending state for completed stream %s without error marker",
@@ -3534,6 +3547,9 @@ def _apply_core_sync_or_error_marker(
                 recovered['_source'] = pending_source
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
+            _pending_turn_id = getattr(session, 'pending_turn_id', None) or _stream_id
+            if _pending_turn_id:
+                recovered['_turn_id'] = _pending_turn_id
             _append_recovered_turn_to_context(session, recovered)
         recovered_output, terminal_error_recovered = (
             _recover_journaled_output_and_terminal_error(
@@ -3547,13 +3563,12 @@ def _apply_core_sync_or_error_marker(
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
-        if not terminal_error_recovered:
-            session.messages.append(
-                _build_recovery_marker_with_retry_hook(
-                    recovered_output=recovered_output,
-                    stream_id=_stream_id,
-                    pending_started_at=_pending_started_at,
-                )
+        session.pending_turn_id = None
+        session.messages.append(
+            _build_recovery_marker_with_retry_hook(
+                recovered_output=recovered_output,
+                stream_id=_stream_id,
+                pending_started_at=_pending_started_at,
             )
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
@@ -3584,6 +3599,7 @@ def _apply_core_sync_or_error_marker(
                 _recovered_ts,
                 session.pending_user_source,
                 session.pending_attachments,
+                pending_turn_id=getattr(session, 'pending_turn_id', None) or stream_id_for_recheck or session.active_stream_id,
             )
             _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
                 session.messages[-1] if session.messages else None,
@@ -3612,7 +3628,8 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
-            if recovered_output and not terminal_error_recovered:
+            session.pending_turn_id = None
+            if recovered_output:
                 session.messages.append(
                     _interrupted_recovery_marker(
                         recovered_output=True,
@@ -3662,13 +3679,12 @@ def _apply_core_sync_or_error_marker(
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    if not terminal_error_recovered:
-        session.messages.append(
-            _build_recovery_marker_with_retry_hook(
-                recovered_output=recovered_output,
-                stream_id=_stream_id,
-                pending_started_at=_pending_started_at,
-            )
+    session.pending_turn_id = None
+    session.messages.append(
+        _build_recovery_marker_with_retry_hook(
+            recovered_output=recovered_output,
+            stream_id=_stream_id,
+            pending_started_at=_pending_started_at,
         )
     session.save(touch_updated_at=touch_updated_at)
     logger.info("Session %s: no core transcript found, added error marker", sid)
