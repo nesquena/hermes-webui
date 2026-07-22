@@ -5955,10 +5955,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // render also populates the cache with the correctly-collapsed DOM, and
           // the same-frame JS restore absorbs the collapse so there is no jump.
           // (#5260 gate-cert: keep-open must be transient + uncached for everyone.)
+          // #6385: capture the scroll snapshot from the LIVE DOM before arming
+          // keep-open, so the collapse render below anchors to the content the
+          // reader was actually viewing — not to a stale intermediate state where
+          // the worklog was temporarily expanded.
+          const _doneLiveScrollSnapshot=typeof _captureMessageScrollSnapshot==='function'
+            ? _captureMessageScrollSnapshot()
+            : null;
           if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
           syncTopbar();renderMessages({preserveScroll:true});
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
-          if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot();
+          if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
           else renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
