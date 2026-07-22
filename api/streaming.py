@@ -4169,15 +4169,20 @@ def _preserve_pre_compression_snapshot(
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
 
 
-def _clone_session_media_for_compression_rotation(s, old_sid: str, new_sid: str) -> None:
-    """Migrate legacy compact media before compression changes identity."""
+def _clone_session_media_for_compression_rotation(
+    messages,
+    context_messages,
+    old_sid: str,
+    new_sid: str,
+) -> None:
+    """Clone only a staged transcript before compression changes identity."""
     try:
         from api.session_media import (
             clone_session_media_references,
         )
 
         clone_session_media_references(
-            [s.messages, s.context_messages],
+            [messages, context_messages],
             old_sid,
             new_sid,
         )
@@ -4215,10 +4220,10 @@ def _publish_compression_continuation(
     # clone.  Disk rollback alone is insufficient: a failed clone/publish
     # must not leave callers holding a transcript that differs from the
     # restored old sidecar.
-    saved_transcript = (
-        copy.deepcopy(getattr(s, "messages", None)),
-        copy.deepcopy(getattr(s, "context_messages", None)),
-    )
+    saved_transcript = (s.messages, s.context_messages)
+    # Clone the pair as one graph, not two independent deep copies: aliases
+    # across visible and model history are part of the caller-visible state.
+    staged_transcript = copy.deepcopy(saved_transcript)
     from api.models import (
         SESSION_DIR as live_session_dir,
         _INDEX_WRITE_LOCK,
@@ -4316,7 +4321,13 @@ def _publish_compression_continuation(
                 intent,
                 "source_archived",
             )
-            _clone_session_media_for_compression_rotation(s, old_sid, new_sid)
+            _clone_session_media_for_compression_rotation(
+                staged_transcript[0],
+                staged_transcript[1],
+                old_sid,
+                new_sid,
+            )
+            s.messages, s.context_messages = staged_transcript
             s.session_id = new_sid
             reservation.bind(s)
             if not s.profile and resolved_profile_name:

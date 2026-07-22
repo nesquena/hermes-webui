@@ -611,6 +611,30 @@ def _validate_session_payload_identity(
     return data
 
 
+def _read_portable_session_payload_bytes(
+    payload_bytes: bytes,
+    expected_session_id: str,
+    *,
+    source_name: str,
+    context: str,
+) -> dict:
+    """Parse one exact sidecar buffer and reject non-portable media refs.
+
+    Backups and recovery are alternate publication authorities.  They must
+    validate the same bytes they retain or restore, never an equivalent value
+    reconstructed through a text-mode read/write path.
+    """
+    payload = _validate_session_payload_identity(
+        json.loads(payload_bytes),
+        expected_session_id,
+        source_name=source_name,
+    )
+    from api.session_media import assert_no_session_media_references
+
+    assert_no_session_media_references(payload, context=context)
+    return payload
+
+
 _SESSION_DESTINATION_RESERVATIONS = threading.local()
 
 
@@ -2899,17 +2923,16 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
+                existing_bytes = self.path.read_bytes()
                 try:
-                    existing = json.loads(existing_text)
-                    if not isinstance(existing, dict) or existing.get("session_id") != self.session_id:
-                        raise RuntimeError("Existing session sidecar identity mismatch")
                     # A backup remains a recovery publication candidate. It
                     # must be portable too: compact refs require an explicit
                     # offline migration rather than silently retaining bytes
                     # whose namespace cannot be retired safely.
-                    assert_no_session_media_references(
-                        existing,
+                    existing = _read_portable_session_payload_bytes(
+                        existing_bytes,
+                        self.session_id,
+                        source_name=self.path.name,
                         context="session backup; use an explicit offline media migration",
                     )
                     existing_msg_count = len(existing.get('messages') or [])
@@ -2932,30 +2955,15 @@ class Session:
                     return
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
-                    # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
-                    # mirroring the main save() pattern below. Prevents a
-                    # torn .bak from a crash mid-write or a concurrent
-                    # backup-producing save. Recovery defends against a
-                    # torn .bak (JSONDecodeError → no_action), so the
-                    # failure mode pre-fix was "backup is lost"; with
-                    # this fix the backup either lands cleanly or doesn't
-                    # land at all.
+                    # Retain exactly the byte buffer that was parsed and
+                    # validated above. Text mode would normalize CRLF/lone-CR
+                    # whitespace and turn the recovery authority into a
+                    # different payload.
                     try:
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{uuid.uuid4().hex}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
-                        _fsync_parent_directory(bak_path)
+                        _durable_replace_bytes(bak_path, existing_bytes)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        pass
         except OSError:
             pass
 

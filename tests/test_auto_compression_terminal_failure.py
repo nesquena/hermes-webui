@@ -39,7 +39,8 @@ def test_compression_media_clone_failure_keeps_source_identity(monkeypatch):
 
     with pytest.raises(RuntimeError, match="compression continuation"):
         streaming._clone_session_media_for_compression_rotation(
-            session,
+            session.messages,
+            session.context_messages,
             "old-media-session",
             "new-media-session",
         )
@@ -63,13 +64,22 @@ def test_compression_publication_failure_rolls_back_only_reserved_destination(
     new_sid = "compression-new-rollback"
     image_raw = b"\x89PNG\r\n\x1a\n" + (b"x" * (70 * 1024))
     image_data_url = "data:image/png;base64," + base64.b64encode(image_raw).decode("ascii")
+    shared_nested = {"stable": "destination publication identity"}
+    shared_message = {
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {"url": image_data_url}}],
+        "metadata": shared_nested,
+    }
+    shared_root = [shared_message]
     session = Session(
         session_id=old_sid,
-        messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_data_url}}]}],
-        context_messages=[],
+        messages=shared_root,
+        context_messages=shared_root,
     )
     session.save(skip_index=True)
     old_generation = session._publication_generation
+    messages_root = session.messages
+    context_root = session.context_messages
     original_save = Session.save
 
     def publish_then_fail(self, *args, **kwargs):
@@ -83,6 +93,11 @@ def test_compression_publication_failure_rolls_back_only_reserved_destination(
 
     assert session.session_id == old_sid
     assert session._publication_generation is old_generation
+    assert session.messages is messages_root
+    assert session.context_messages is context_root
+    assert session.messages is session.context_messages
+    assert session.messages[0] is shared_message
+    assert session.messages[0]["metadata"] is shared_nested
     assert (session_dir / f"{old_sid}.json").exists()
     assert not (session_dir / f"{new_sid}.json").exists()
     assert not session_media._session_media_dir(new_sid).exists()
@@ -212,8 +227,17 @@ def test_compression_failure_after_source_archival_restores_exact_source(
     stream_id = "compression-archive-stream"
     session = Session(
         session_id=old_sid,
-        messages=[{"role": "user", "content": "history"}],
+        messages=[],
     )
+    shared_nested = {"stable": "nested identity"}
+    shared_message = {
+        "role": "user",
+        "content": "history",
+        "metadata": shared_nested,
+    }
+    shared_root = [shared_message]
+    session.messages = shared_root
+    session.context_messages = shared_root
     session.active_stream_id = stream_id
     session.pending_user_message = "continue"
     session.pending_attachments = [{"name": "pending.txt"}]
@@ -223,17 +247,20 @@ def test_compression_failure_after_source_archival_restores_exact_source(
     models.SESSIONS[old_sid] = session
     source_before = session.path.read_bytes()
     index_before = models.SESSION_INDEX_FILE.read_bytes()
-    transcript_before = copy.deepcopy((session.messages, session.context_messages))
+    messages_root = session.messages
+    context_root = session.context_messages
+    nested_before = shared_nested
     observed = {}
 
-    def fail_after_archive(_session, source_sid, _destination_sid):
+    def fail_after_archive(messages, context_messages, source_sid, _destination_sid):
         archived = json.loads(
             (session_dir / f"{source_sid}.json").read_text(encoding="utf-8")
         )
         observed["source_archived"] = archived["pre_compression_snapshot"] is True
         observed["runtime_cleared"] = archived["active_stream_id"] is None
-        _session.messages[:] = [{"role": "user", "content": "mutated before failure"}]
-        _session.context_messages[:] = [{"role": "assistant", "content": "mutated before failure"}]
+        assert messages is context_messages
+        messages[0]["metadata"]["stable"] = "mutated staged graph"
+        messages[:] = [{"role": "user", "content": "mutated before failure"}]
         raise OSError("injected post-archive failure")
 
     monkeypatch.setattr(
@@ -259,7 +286,12 @@ def test_compression_failure_after_source_archival_restores_exact_source(
     assert session.pending_attachments == [{"name": "pending.txt"}]
     assert session.pending_started_at == 123.0
     assert session.pending_user_source == "webui"
-    assert (session.messages, session.context_messages) == transcript_before
+    assert session.messages is messages_root
+    assert session.context_messages is context_root
+    assert session.messages is session.context_messages
+    assert session.messages[0] is shared_message
+    assert session.messages[0]["metadata"] is nested_before
+    assert nested_before == {"stable": "nested identity"}
     assert not (session_dir / f"{new_sid}.json").exists()
     assert not session_media._session_media_dir(new_sid).exists()
     assert not (session_dir / "_compression_transactions" / f"{new_sid}.json").exists()
@@ -330,7 +362,7 @@ def test_streaming_rotation_failure_after_source_archival_restores_transaction(
         def interrupt(self, _message):
             return None
 
-    def fail_after_archive(_session, source_sid, destination_sid):
+    def fail_after_archive(_messages, _context_messages, source_sid, destination_sid):
         archived = json.loads(
             (session_dir / f"{source_sid}.json").read_text(encoding="utf-8")
         )

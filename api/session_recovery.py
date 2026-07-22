@@ -260,17 +260,14 @@ def _read_recovery_payload(path: Path, expected_sid: str) -> dict:
     )
 
 def _read_recovery_payload_bytes(payload_bytes: bytes, expected_sid: str, *, source_name: str) -> dict:
-    from api.models import _validate_session_payload_identity
-    from api.session_media import assert_no_session_media_references
+    from api.models import _read_portable_session_payload_bytes
 
-    payload = _validate_session_payload_identity(
-        json.loads(payload_bytes), expected_sid, source_name=source_name
-    )
-    assert_no_session_media_references(
-        payload,
+    return _read_portable_session_payload_bytes(
+        payload_bytes,
+        expected_sid,
+        source_name=source_name,
         context="recovery payload; use an explicit offline media migration",
     )
-    return payload
 
 
 def _msg_count(p: Path) -> int:
