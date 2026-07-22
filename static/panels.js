@@ -8592,6 +8592,7 @@ const _SETTINGS_SPEECH_STORAGE_KEYS={
   tts_voice:'hermes-tts-voice',
   tts_rate:'hermes-tts-rate',
   tts_pitch:'hermes-tts-pitch',
+  tts_split:'hermes-tts-split',
   voice_mode_button:'hermes-voice-mode-button',
   voice_continuous:'hermes-voice-continuous',
   voice_silence_ms:'hermes-voice-silence-ms',
@@ -8724,6 +8725,8 @@ function _speechPreferencesPayloadFromUi(){
   if(ttsRateSlider) _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(ttsRateSlider.value));
   const ttsPitchSlider=$('settingsTtsPitch');
   if(ttsPitchSlider) _setOwnedSpeechPayload(payload,'tts_pitch',parseFloat(ttsPitchSlider.value));
+  const ttsSplitSelP=$('settingsTtsSplit');
+  if(ttsSplitSelP) _setOwnedSpeechPayload(payload,'tts_split',ttsSplitSelP.value||'punctuation');
   const voiceModeCb=$('settingsVoiceModeEnabled');
   if(voiceModeCb) _setOwnedSpeechPayload(payload,'voice_mode_button',voiceModeCb.checked);
   const rawAudioCb=$('settingsRawAudio');
@@ -9430,6 +9433,98 @@ async function loadSettingsPanel(){
         window._populateTtsVoices();
         _schedulePreferencesAutosave();
       };
+    }
+    // Response splitting for TTS playback (punctuation | paragraphs | none).
+    const ttsSplitSel=$('settingsTtsSplit');
+    if(ttsSplitSel){
+      const savedSplit=String(_speechSetting('tts_split','hermes-tts-split','punctuation')||'punctuation');
+      ttsSplitSel.value=(savedSplit==='paragraphs'||savedSplit==='none')?savedSplit:'punctuation';
+      _syncSpeechPreferenceCache('tts_split',ttsSplitSel.value);
+      ttsSplitSel.onchange=function(){
+        _markSpeechPreferenceChanged('tts_split');
+        localStorage.setItem('hermes-tts-split',this.value);
+        _schedulePreferencesAutosave();
+      };
+    }
+    // Self-hosted STT/TTS endpoints (server-side config.yaml, via /api/voice/config).
+    _wireVoiceEndpoints();
+    function _wireVoiceEndpoints(){
+      const box=$('settingsVoiceEndpoints');
+      if(!box || box._wired) return;
+      box._wired=true;
+      const g=function(id){return $(id);};
+      const setVal=function(id,v){const el=g(id); if(el) el.value=(v==null?'':String(v));};
+      const status=g('settingsVoiceEndpointsStatus');
+      const roNote=g('settingsVoiceEndpointsRO');
+      const saveBtn=g('settingsVoiceEndpointsSave');
+      function selectProvider(sel,prov,known){
+        // Known providers select their fixed option; any other configured
+        // provider (e.g. a custom fork engine) is shown as a dynamic option
+        // instead of silently rendering as "(unchanged / not set)".
+        if(!sel) return;
+        if(!prov||known.indexOf(prov)>=0){ sel.value=prov||''; return; }
+        let opt=sel.querySelector('option[data-dynamic]');
+        if(!opt){ opt=document.createElement('option'); opt.setAttribute('data-dynamic','1'); sel.appendChild(opt); }
+        opt.value=prov; opt.textContent=prov+' (current)';
+        sel.value=prov;
+      }
+      function fillSection(prefix,sec){
+        sec=sec||{};
+        if(prefix==='Stt'){
+          selectProvider(g('settingsSttEngine'),String(sec.provider||''),['openai','local']);
+          setVal('settingsSttBaseUrl',sec.base_url);
+          setVal('settingsSttModel',sec.model);
+          setVal('settingsSttLanguage',sec.language);
+          setVal('settingsSttMimeTypes',sec.mime_types);
+          setVal('settingsSttResponseFormat',sec.response_format);
+          const rf=g('settingsSttRequestFormat');
+          if(rf) rf.value=(sec.request_format==='json'||sec.request_format==='json_base64')?'json':'';
+          const k=g('settingsSttApiKey'); if(k){k.value=''; k.placeholder=sec.api_key_set?'•••• (set — leave blank to keep)':'(none)';}
+        } else {
+          selectProvider(g('settingsTtsEndpointEngine'),String(sec.provider||''),['openai']);
+          setVal('settingsTtsBaseUrl',sec.base_url);
+          setVal('settingsTtsModel',sec.model);
+          setVal('settingsTtsVoiceId',sec.voice);
+          try{ setVal('settingsTtsExtraParams', sec.extra_params&&Object.keys(sec.extra_params).length?JSON.stringify(sec.extra_params):''); }catch(_e){}
+          const k=g('settingsTtsApiKey'); if(k){k.value=''; k.placeholder=sec.api_key_set?'•••• (set — leave blank to keep)':'(none)';}
+        }
+      }
+      fetch('api/voice/config',{headers:{'Accept':'application/json'}}).then(function(r){return r.json();}).then(function(d){
+        if(!d||d.ok!==true) return;
+        fillSection('Stt',d.stt); fillSection('Tts',d.tts);
+        const writable=d.writable===true;
+        if(roNote) roNote.style.display=writable?'none':'block';
+        if(saveBtn) saveBtn.disabled=!writable;
+      }).catch(function(){ if(status) status.textContent='Could not load current config'; });
+      if(saveBtn){
+        saveBtn.onclick=function(){
+          const val=function(id){const el=g(id); return el?String(el.value||'').trim():'';};
+          const stt={}, tts={};
+          const se=val('settingsSttEngine'); if(se) stt.provider=se;
+          stt.base_url=val('settingsSttBaseUrl'); stt.model=val('settingsSttModel');
+          stt.language=val('settingsSttLanguage'); stt.mime_types=val('settingsSttMimeTypes');
+          stt.response_format=val('settingsSttResponseFormat');
+          stt.request_format=val('settingsSttRequestFormat');
+          const sk=val('settingsSttApiKey'); if(sk) stt.api_key=sk;
+          const te=val('settingsTtsEndpointEngine'); if(te) tts.provider=te;
+          tts.base_url=val('settingsTtsBaseUrl'); tts.model=val('settingsTtsModel');
+          tts.voice=val('settingsTtsVoiceId');
+          const tk=val('settingsTtsApiKey'); if(tk) tts.api_key=tk;
+          const ep=val('settingsTtsExtraParams');
+          if(ep){ try{ tts.extra_params=JSON.parse(ep); }catch(_e){ if(status){status.style.color='var(--err,#c33)'; status.textContent='Extra parameters must be valid JSON';} return; } }
+          if(status){status.style.color='var(--muted)'; status.textContent='Saving…';}
+          fetch('api/voice/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stt:stt,tts:tts})})
+            .then(function(r){return r.json().then(function(b){return {ok:r.ok,body:b};});})
+            .then(function(res){
+              if(res.ok && res.body && res.body.ok){
+                if(status){status.style.color='var(--ok,#3a7)'; status.textContent='Saved.';}
+                fillSection('Stt',res.body.stt); fillSection('Tts',res.body.tts);
+              } else {
+                if(status){status.style.color='var(--err,#c33)'; status.textContent=(res.body&&res.body.error)||'Save failed';}
+              }
+            }).catch(function(){ if(status){status.style.color='var(--err,#c33)'; status.textContent='Save failed';} });
+        };
+      }
     }
     // Populate voice selector based on engine
     const ttsVoiceSel=$('settingsTtsVoice');

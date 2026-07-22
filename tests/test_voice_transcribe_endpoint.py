@@ -96,7 +96,28 @@ def test_handle_transcribe_surfaces_provider_error(monkeypatch):
     handle_transcribe(handler)
 
     assert handler.status == 503
-    assert handler.payload()["error"] == "STT not configured"
+    # "not configured" → unavailable category; raw provider text is not leaked.
+    assert handler.payload()["error"] == "Speech-to-text is not available on this server"
+
+
+def test_handle_transcribe_does_not_leak_provider_internals(monkeypatch):
+    """A provider error carrying a server temp path / ffmpeg stderr must not
+    reach the client verbatim — a generic category is returned instead."""
+    leaky = "API error: 500 - ffmpeg ... /tmp/webui-stt-abc123.webm: Invalid data"
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.transcribe_audio = lambda path: {"success": False, "error": leaky}
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
+
+    body, content_type = _multipart_body(
+        files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_transcribe(handler)
+
+    assert handler.status == 400
+    err = handler.payload()["error"]
+    assert "/tmp/" not in err and "ffmpeg" not in err
+    assert err == "Could not transcribe the audio (unsupported or corrupt file)"
 
 
 def test_handle_transcribe_capability_reports_unavailable_without_provider(monkeypatch):

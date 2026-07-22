@@ -1478,11 +1478,15 @@ window.renderTranscript=function(container, messages, opts){
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  const hasSTT=!(!SpeechRecognition);
+  const hasSR=!(!SpeechRecognition);
+  const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
   const hasTTS=!!('speechSynthesis' in window);
 
-  // Need both STT and TTS for turn-based voice mode
-  if(!hasSTT||!hasTTS) return;
+  // Need TTS plus at least one STT path — the browser recognizer OR a
+  // MediaRecorder→server (/api/transcribe) capture. The latter lets voice mode
+  // run entirely on a self-hosted STT server, including on browsers with no
+  // SpeechRecognition (e.g. Firefox).
+  if((!hasSR&&!_canRecordAudio)||!hasTTS) return;
 
   const modeBtn=$('btnVoiceMode');
   const bar=$('voiceModeBar');
@@ -1516,6 +1520,32 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+
+  // Spoken-reply toggle: when off, voice mode still transcribes speech and
+  // sends it to the LLM, but the reply is only shown (not read aloud) — the
+  // mic re-arms as soon as the turn completes. Persisted per browser.
+  let _voiceReplyTts = (function(){
+    try{ return localStorage.getItem('hermes-voice-reply-tts')!=='false'; }catch(_){ return true; }
+  })();
+  const _voiceReplyBtn = $('btnVoiceReplyToggle');
+  function _renderVoiceReplyToggle(){
+    if(!_voiceReplyBtn) return;
+    _voiceReplyBtn.textContent = _voiceReplyTts ? '🔊 Reply' : '🔇 Silent';
+    _voiceReplyBtn.setAttribute('aria-pressed', _voiceReplyTts ? 'true' : 'false');
+  }
+  if(_voiceReplyBtn){
+    _renderVoiceReplyToggle();
+    _voiceReplyBtn.onclick=function(){
+      _voiceReplyTts=!_voiceReplyTts;
+      try{ localStorage.setItem('hermes-voice-reply-tts', _voiceReplyTts?'true':'false'); }catch(_){}
+      _renderVoiceReplyToggle();
+      // If turning silent mid-speech, stop the current utterance and re-listen.
+      if(!_voiceReplyTts && _voiceModeState==='speaking'){
+        if(typeof stopTTS==='function') stopTTS();
+        if(_voiceModeActive) _startListening();
+      }
+    };
+  }
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1578,6 +1608,162 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display=_voiceModeActive?(state==='idle'?'none':''):'none';
   }
 
+  // ── Server-STT listening leg (self-hosted /api/transcribe) ─────────────
+  // When a server STT provider is configured we keep the listening audio on
+  // the user's own server instead of the browser's cloud recognizer. Capture
+  // via MediaRecorder, end the utterance with simple energy-based silence
+  // detection (no Web Speech API), then POST the blob to /api/transcribe.
+  let _voiceServerStt=false, _voiceServerSttProbed=false;
+  let _vmStream=null, _vmRecorder=null, _vmChunks=[], _vmAudioCtx=null, _vmAnalyser=null, _vmVadRaf=null, _vmMaxTimer=null;
+  let _vmSpoke=false, _vmHadVad=false;
+
+  function _probeVoiceServerStt(){
+    if(_voiceServerSttProbed||!_canRecordAudio) return;
+    _voiceServerSttProbed=true;
+    try{
+      fetch('api/transcribe/capability',{headers:{'Accept':'application/json'}})
+        .then(r=>r&&r.ok?r.json():null)
+        .then(d=>{
+          if(d){ _voiceServerStt=!!d.available; }
+          else{ _voiceServerSttProbed=false; } // transient failure — retry on next activation
+        })
+        .catch(()=>{ _voiceServerSttProbed=false; });
+    }catch(_){ _voiceServerSttProbed=false; }
+  }
+  _probeVoiceServerStt();
+
+  // Prefer server STT when available; it's the only option when the browser
+  // has no SpeechRecognition.
+  function _useServerStt(){ return _canRecordAudio&&(_voiceServerStt||!hasSR); }
+
+  function _voiceLang(){
+    const tag=(typeof _locale!=='undefined'&&_locale._speech)||'';
+    const primary=String(tag).replace('_','-').split('-')[0].toLowerCase();
+    return (primary.length>=2&&primary.length<=3)?primary:'';
+  }
+
+  function _vmStopAudio(){
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    try{ if(_vmRecorder&&_vmRecorder.state!=='inactive') _vmRecorder.stop(); }catch(_){}
+    _vmRecorder=null;
+    try{ if(_vmStream) _vmStream.getTracks().forEach(tr=>tr.stop()); }catch(_){}
+    _vmStream=null;
+    try{ if(_vmAudioCtx&&_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){}
+    _vmAudioCtx=null; _vmAnalyser=null;
+  }
+
+  function _vmStopRecordingForSend(){
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    try{ if(_vmRecorder&&_vmRecorder.state!=='inactive') _vmRecorder.stop(); }catch(_){}
+  }
+
+  function _vmRunVad(){
+    if(!_vmAnalyser) return; // no analyser → rely on the max-duration timer
+    const buf=new Uint8Array(_vmAnalyser.fftSize);
+    let spoke=false, silenceStart=0;
+    const speechThresh=0.02; // RMS over [-1,1]
+    const tick=()=>{
+      if(!_voiceModeActive||_voiceModeState!=='listening'||!_vmAnalyser) return;
+      _vmAnalyser.getByteTimeDomainData(buf);
+      let sum=0;
+      for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
+      const rms=Math.sqrt(sum/buf.length);
+      const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+      if(rms>speechThresh){ spoke=true; _vmSpoke=true; silenceStart=0; }
+      else if(spoke){
+        if(!silenceStart){ silenceStart=now; }
+        else if(now-silenceStart>=_voiceSilenceMs()){ _vmStopRecordingForSend(); return; }
+      }
+      _vmVadRaf=requestAnimationFrame(tick);
+    };
+    _vmVadRaf=requestAnimationFrame(tick);
+  }
+
+  async function _startListeningServer(){
+    if(!_voiceModeActive) return;
+    _clearBrowserTtsRecovery();
+    _setState('listening');
+    let stream;
+    try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+    catch(e){
+      if(hasSR){ _voiceServerStt=false; if(_voiceModeActive) _startListening(); return; }
+      _deactivate();
+      const key=_micToastKeyForRecognitionError&&e?_micToastKeyForRecognitionError(e.name):null;
+      showToast(key?t(key):t('mic_error')+((e&&e.name)||''));
+      return;
+    }
+    if(!_voiceModeActive){ try{ stream.getTracks().forEach(tr=>tr.stop()); }catch(_){} return; }
+    _vmStream=stream; _vmChunks=[]; _vmSpoke=false; _vmHadVad=false;
+    let mime='';
+    const prefs=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
+    for(let i=0;i<prefs.length;i++){ if(window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(prefs[i])){ mime=prefs[i]; break; } }
+    try{ _vmRecorder=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream); }
+    catch(_){ try{ _vmRecorder=new MediaRecorder(stream); }catch(__){ _vmStopAudio(); if(hasSR){ _voiceServerStt=false; _startListening(); } return; } }
+    _vmRecorder.ondataavailable=(ev)=>{ if(ev.data&&ev.data.size) _vmChunks.push(ev.data); };
+    _vmRecorder.onstop=()=>{ _vmFinishServerUtterance(); };
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(AC){
+        _vmAudioCtx=new AC();
+        const srcNode=_vmAudioCtx.createMediaStreamSource(stream);
+        _vmAnalyser=_vmAudioCtx.createAnalyser();
+        _vmAnalyser.fftSize=2048;
+        srcNode.connect(_vmAnalyser);
+        _vmHadVad=true;
+      }
+    }catch(_){ _vmAnalyser=null; _vmHadVad=false; }
+    try{ _vmRecorder.start(); }
+    catch(_){ _vmStopAudio(); setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800); return; }
+    // Hard cap so a noisy room / missing analyser can't record forever.
+    _vmMaxTimer=setTimeout(()=>{ _vmStopRecordingForSend(); },20000);
+    _vmRunVad();
+  }
+
+  async function _vmFinishServerUtterance(){
+    const chunks=_vmChunks; _vmChunks=[];
+    try{ if(_vmStream) _vmStream.getTracks().forEach(tr=>tr.stop()); }catch(_){}
+    _vmStream=null;
+    try{ if(_vmAudioCtx&&_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){}
+    _vmAudioCtx=null; _vmAnalyser=null;
+    if(_vmVadRaf){ try{ cancelAnimationFrame(_vmVadRaf); }catch(_){} _vmVadRaf=null; }
+    if(_vmMaxTimer){ clearTimeout(_vmMaxTimer); _vmMaxTimer=null; }
+    const rec=_vmRecorder; _vmRecorder=null;
+    if(!_voiceModeActive||_voiceModeState!=='listening') return;
+    const type=(rec&&rec.mimeType)||(chunks[0]&&chunks[0].type)||'audio/webm';
+    const blob=chunks.length?new Blob(chunks,{type}):null;
+    // When the VAD ran and never saw speech (max-duration timer fired on a
+    // silent room), don't post 20s of silence to the STT server — just
+    // listen again. Without a working analyser we can't tell, so we post.
+    if(!blob||blob.size<1200||(_vmHadVad&&!_vmSpoke)){
+      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
+      return;
+    }
+    try{
+      const ext=(type.indexOf('ogg')>=0)?'ogg':'webm';
+      const form=new FormData();
+      form.append('file',new File([blob],'voice-input.'+ext,{type}));
+      const lang=_voiceLang(); if(lang) form.append('language',lang);
+      const res=await fetch('api/transcribe',{method:'POST',body:form});
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok){
+        if(hasSR){ _voiceServerStt=false; if(_voiceModeActive) _startListening(); return; }
+        if(_voiceModeActive) setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
+        return;
+      }
+      const transcript=String((data&&data.transcript)||'').trim();
+      if(!transcript){ setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250); return; }
+      // Re-check after the server round-trip: the user may have deactivated
+      // voice mode (and started typing) while transcription was in flight.
+      if(!_voiceModeActive) return;
+      ta.value=transcript; autoResize();
+      _voiceModeSend();
+    }catch(_){
+      if(_voiceModeActive) setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
+    }
+  }
+
   function _startListening(){
     if(!_voiceModeActive) return;
     if(_micOriginNeedsSecureContext()){
@@ -1585,6 +1771,7 @@ window.renderTranscript=function(container, messages, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    if(_useServerStt()){ _startListeningServer(); return; }
     _clearBrowserTtsRecovery();
     _setState('listening');
 
@@ -1670,11 +1857,45 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
+    _vmStopAudio();
+    _armThinkingWatchdog();
     // send() is global from boot.js
     if(typeof send==='function') send();
   }
 
+  // Recovery for a 'thinking' turn that never reaches the done→autoRead hook:
+  // a dropped SSE stream, a cancelled or errored agent run, or a settle that
+  // takes a different code path all leave voice mode stuck on the "thinking"
+  // indicator with the mic never re-arming. Poll S.busy — once the turn is no
+  // longer running, either speak the reply (if one landed) or drop back to
+  // listening. A hard ceiling bounds the wait so a wedged backend can't pin
+  // voice mode forever.
+  let _vmThinkTimer=null, _vmThinkStart=0;
+  function _clearThinkingWatchdog(){ if(_vmThinkTimer){ clearInterval(_vmThinkTimer); _vmThinkTimer=null; } }
+  function _armThinkingWatchdog(){
+    _clearThinkingWatchdog();
+    _vmThinkStart=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+    _vmThinkTimer=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='thinking'){ _clearThinkingWatchdog(); return; }
+      const now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+      const busy=(typeof S!=='undefined')&&S.busy;
+      // Give the normal done→autoReadLastAssistant path a moment to fire first;
+      // only step in once the run has clearly stopped, or after a hard timeout.
+      if(!busy){
+        _clearThinkingWatchdog();
+        setTimeout(()=>{
+          if(_voiceModeActive&&_voiceModeState==='thinking') _speakResponse();
+        },600);
+      }else if(now-_vmThinkStart>180000){
+        _clearThinkingWatchdog();
+        if(typeof showToast==='function') showToast(t('voice_mode_timeout')||'Voice mode: no response, listening again',3000);
+        if(_voiceModeActive) _startListening();
+      }
+    },1000);
+  }
+
   function _speakResponse(){
+    _clearThinkingWatchdog();
     if(!_voiceModeActive) return;
     // Bail out if the user navigated to a different session between send and
     // stream completion. The patched autoReadLastAssistant fires globally;
@@ -1687,6 +1908,13 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     _voiceModeThinkingSid=null;
+
+    // Spoken-reply toggle off → don't synthesize; the reply is on screen, just
+    // re-arm the mic for the next turn (STT + LLM, no TTS).
+    if(!_voiceReplyTts){
+      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },250);
+      return;
+    }
     _setState('speaking');
 
     // Find last assistant message
@@ -1712,212 +1940,80 @@ window.renderTranscript=function(container, messages, opts){
         .trim();
     }
     if(!clean){ _startListening(); return; }
+    // Response splitting (Preferences → "Response splitting"): chunk the RAW
+    // text so paragraph mode still sees blank lines; fall back to the single
+    // stripped blob when ui.js isn't loaded (shared global scope normally).
+    const chunks=(typeof _ttsChunksFor==='function')?_ttsChunksFor(rawText):[clean];
+    if(!chunks.length){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
-    // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
-    // via the extension, then play through the same Audio lifecycle as edge.
-    if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-      _ttsSpeaking=true;
-      const _opts={
-        voice: localStorage.getItem("hermes-tts-voice")||'',
-        rate: parseFloat(localStorage.getItem("hermes-tts-rate")),
-        pitch: parseFloat(localStorage.getItem("hermes-tts-pitch")),
-      };
-      Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-        .then(function(buf){
-          const blob=new Blob([buf]);
-          const url=URL.createObjectURL(blob);
-          const audio=new Audio(url);
-          _playingEdgeAudio=audio;
-          audio.onended=function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
-          };
-          audio.onerror=function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-          };
-          audio.play().catch(function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-          });
-        })
-        .catch(function(){
-          _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-        });
-      return;
-    }
-    if(engine==="elevenlabs"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(e => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    if(engine==="openai"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'openai'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(() => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    if(engine==="edge"){
-      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
-      const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
-      const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
-      let rate='', pitch='';
-      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        // Register with the shared handle (declared in ui.js, same global scope;
-        // both scripts are fully evaluated before any voice interaction) so
-        // stopTTS() — called from _deactivate() — can actually pause hands-free
-        // Edge playback. Without this the audio is local here and unstoppable.
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(e => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    const utter=new SpeechSynthesisUtterance(clean);
-
-    // Apply saved voice preferences
-    const savedVoice=localStorage.getItem('hermes-tts-voice');
-    const voices=speechSynthesis.getVoices();
-    if(savedVoice&&voices.length){
-      const match=voices.find(v=>v.name===savedVoice);
-      if(match) utter.voice=match;
-    }
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
-    utter.onend=()=>{
-      _browserTtsSuppressNextErrorRearm=false;
-      _clearBrowserTtsRecovery();
-      // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+    // Voice-mode completion hook shared by the chunked players: resume
+    // listening after the last chunk (or after a failure, with backoff).
+    const _resumeAfterTts=function(err){
+      // A failed read-back must not be silent — before this toast, a TTS
+      // timeout/error just dropped voice mode back to listening with no
+      // explanation (the answer stays on screen either way).
+      if(err&&typeof showToast==='function') showToast(t('voice_tts_failed')||('Voice reply TTS failed: '+((err&&err.message)||err)),4000,'error');
+      if(_voiceModeActive) setTimeout(function(){_startListening();}, err?1000:500);
     };
-    utter.onerror=()=>{
-      _clearBrowserTtsRecovery();
-      if(_browserTtsSuppressNextErrorRearm){
-        _browserTtsSuppressNextErrorRearm=false;
+    // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
+    // chunk-by-chunk via the extension (shared player from ui.js).
+    if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+      if(typeof _playRegisteredTtsChunks==='function'){
+        _playRegisteredTtsChunks(engine, chunks, null, _resumeAfterTts);
         return;
       }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-    };
-
-    _armBrowserTtsRecovery(clean, utter.rate);
-    try{
-      speechSynthesis.speak(utter);
-    }catch(_){
-      _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
     }
+    if(engine==="elevenlabs"||engine==="openai"||engine==="edge"){
+      // Shared sequential chunk player from ui.js (fetches /api/tts per chunk,
+      // prefetches the next chunk while the current one plays, honours
+      // stopTTS() via the queue token so _deactivate() interrupts cleanly).
+      const bodyFor=(engine==="edge")
+        ? _edgeTtsBodyBuilder()
+        : function(chunk){ return {text:chunk, engine:engine}; };
+      _playServerTtsChunks(chunks, bodyFor, null, 'TTS', _resumeAfterTts);
+      return;
+    }
+    // Browser speechSynthesis: speak the chunks sequentially, arming the
+    // stall-recovery watchdog per chunk. Length caps apply on top of the
+    // chosen splitting mode (long single utterances stall Chrome).
+    const bChunks=(typeof _browserTtsChunks==='function')?_browserTtsChunks(rawText):chunks;
+    const savedVoice=localStorage.getItem('hermes-tts-voice');
+    const voices=speechSynthesis.getVoices();
+    const voiceMatch=(savedVoice&&voices.length)?voices.find(v=>v.name===savedVoice):null;
+    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+    const _speakBrowserChunk=function(idx){
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(idx>=bChunks.length){
+        if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+        return;
+      }
+      const utter=new SpeechSynthesisUtterance(bChunks[idx]);
+      if(voiceMatch) utter.voice=voiceMatch;
+      if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
+      if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
+      utter.onend=()=>{
+        _browserTtsSuppressNextErrorRearm=false;
+        _clearBrowserTtsRecovery();
+        _speakBrowserChunk(idx+1);
+      };
+      utter.onerror=()=>{
+        _clearBrowserTtsRecovery();
+        if(_browserTtsSuppressNextErrorRearm){
+          _browserTtsSuppressNextErrorRearm=false;
+          return;
+        }
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      };
+      _armBrowserTtsRecovery(bChunks[idx], utter.rate);
+      try{
+        speechSynthesis.speak(utter);
+      }catch(_){
+        _clearBrowserTtsRecovery();
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      }
+    };
+    _speakBrowserChunk(0);
   }
 
   // Hook into response completion — observe when the agent finishes
@@ -1948,8 +2044,13 @@ window.renderTranscript=function(container, messages, opts){
   // own speak-and-resume flow instead of the default auto-read.
   const _origAutoRead=(typeof autoReadLastAssistant==='function')?autoReadLastAssistant:null;
   window.autoReadLastAssistant=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      _speakResponse();
+    // While voice mode is active it OWNS reading the reply — never also invoke
+    // the browser auto-read, or a race between the thinking-watchdog and this
+    // done-hook double-reads the answer (watchdog fires first, state leaves
+    // 'thinking', this call would otherwise fall through to _origAutoRead when
+    // the separate "auto-read" preference is on).
+    if(_voiceModeActive){
+      if(_voiceModeState==='thinking') _speakResponse();
       return;
     }
     if(_origAutoRead) _origAutoRead.apply(this,arguments);
@@ -1960,6 +2061,7 @@ window.renderTranscript=function(container, messages, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    _probeVoiceServerStt();
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -1984,11 +2086,16 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _clearThinkingWatchdog();
+    _vmStopAudio();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    // NOTE: the autoReadLastAssistant wrapper is installed once at init and
+    // left in place — it already delegates to the original whenever voice mode
+    // is inactive (the _voiceModeActive guard above). Restoring the original
+    // here used to break re-activation: after off→on the wrapper was never
+    // re-installed, so the spoken reply + listen-again loop silently stopped.
     // Clear textarea if it was only voice input
     ta.value='';
     autoResize();
@@ -3193,6 +3300,7 @@ function _mirrorSpeechSettingsFromServer(s){
     ['tts_voice','hermes-tts-voice'],
     ['tts_rate','hermes-tts-rate'],
     ['tts_pitch','hermes-tts-pitch'],
+    ['tts_split','hermes-tts-split'],
     ['voice_silence_ms','hermes-voice-silence-ms'],
   ].forEach(([settingKey,storageKey])=>{
     if(hasServerValue(settingKey)){

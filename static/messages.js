@@ -8484,6 +8484,10 @@ function _completionNotificationPreviewText(lastAssistantMessage, options){
 
 function playNotificationSound(){
   if(!window._soundEnabled) return;
+  // In hands-free voice mode the spoken TTS reply IS the completion signal —
+  // the chime would play right before every answer ("beep, then the reply").
+  // Suppress it while voice mode is active.
+  try{ if(typeof window._voiceModeActive==='function' && window._voiceModeActive()) return; }catch(_){}
   try{
     const ctx=new (window.AudioContext||window.webkitAudioContext)();
     const osc=ctx.createOscillator();

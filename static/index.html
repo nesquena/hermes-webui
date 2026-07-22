@@ -591,6 +591,7 @@
         <div class="voice-mode-bar" id="voiceModeBar" style="display:none">
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
+          <button type="button" id="btnVoiceReplyToggle" class="voice-reply-toggle has-tooltip" data-tooltip="Spoken reply" data-i18n-title="voice_reply_toggle" aria-pressed="true" style="margin-left:auto;background:none;border:1px solid var(--border2);border-radius:6px;color:var(--text);font-size:11px;padding:2px 8px;cursor:pointer">🔊 Reply</button>
         </div>
         <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
         <div id="composerWorkspaceContext" class="sr-only"></div>
@@ -1271,6 +1272,53 @@
                 <input type="range" id="settingsTtsPitch" min="0" max="2" step="0.1" value="1" style="flex:1;accent-color:var(--accent)">
                 <span id="settingsTtsPitchValue" style="font-size:12px;color:var(--muted);min-width:32px;text-align:right">1.0</span>
               </div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsTtsSplit" data-i18n="settings_label_tts_split">Response splitting</label><select id="settingsTtsSplit" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="punctuation">By punctuation (sentences)</option><option value="paragraphs">By paragraphs</option><option value="none">No splitting (whole reply)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_split">How replies are divided into speech chunks. Sentence splitting starts playback sooner on slow TTS servers; browser speech always length-caps very long chunks.</div>
+            </div>
+            <div class="settings-field">
+              <details id="settingsVoiceEndpoints" style="border:1px solid var(--border2);border-radius:6px;padding:8px 10px">
+                <summary style="cursor:pointer;font-weight:600">Self-hosted voice endpoints (Speech-to-Text / Text-to-Speech)</summary>
+                <div style="font-size:11px;color:var(--muted);margin:6px 0 10px">Point Dictate and TTS at your own OpenAI-compatible servers. Stored server-side in <code>config.yaml</code>. Editing requires <code>HERMES_WEBUI_ALLOW_VOICE_CONFIG_WRITE=1</code>; a private-LAN TTS base URL over http also needs <code>HERMES_WEBUI_TTS_ALLOW_LAN=1</code> + <code>HERMES_WEBUI_TTS_ALLOW_HOSTS</code>.</div>
+                <div id="settingsVoiceEndpointsRO" style="display:none;font-size:11px;color:var(--warn,#c93);margin-bottom:8px">Read-only: server editing is disabled. Fields show the current configuration.</div>
+
+                <div style="font-weight:600;font-size:12px;margin:4px 0 6px">Speech-to-Text (Dictate)</div>
+                <label style="font-size:12px">Engine</label>
+                <select id="settingsSttEngine" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="">(unchanged / not set)</option><option value="openai">OpenAI-compatible (server)</option><option value="local">Local (faster-whisper)</option></select>
+                <label style="font-size:12px">Base URL</label>
+                <input type="text" id="settingsSttBaseUrl" placeholder="http://192.168.1.50:5094/v1" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">API key (leave blank to keep current)</label>
+                <input type="password" id="settingsSttApiKey" autocomplete="off" placeholder="•••• (unchanged)" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Model</label>
+                <input type="text" id="settingsSttModel" placeholder="nemotron-3.5-asr-streaming" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Request format</label>
+                <select id="settingsSttRequestFormat" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="">Multipart upload (default)</option><option value="json">JSON (Base64)</option></select>
+                <label style="font-size:12px">Language (ISO-639-1, blank = auto)</label>
+                <input type="text" id="settingsSttLanguage" placeholder="de" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Supported MIME types (optional)</label>
+                <input type="text" id="settingsSttMimeTypes" placeholder="audio/webm,audio/ogg" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Response format (optional)</label>
+                <input type="text" id="settingsSttResponseFormat" placeholder="json" style="width:100%;padding:7px;margin-bottom:10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+
+                <div style="font-weight:600;font-size:12px;margin:4px 0 6px">Text-to-Speech</div>
+                <label style="font-size:12px">Engine</label>
+                <select id="settingsTtsEndpointEngine" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="">(unchanged / not set)</option><option value="openai">OpenAI-compatible (server)</option></select>
+                <label style="font-size:12px">Base URL</label>
+                <input type="text" id="settingsTtsBaseUrl" placeholder="http://192.168.1.50:7036/v1" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">API key (leave blank to keep current)</label>
+                <input type="password" id="settingsTtsApiKey" autocomplete="off" placeholder="•••• (unchanged)" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Model</label>
+                <input type="text" id="settingsTtsModel" placeholder="qwen3-tts" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Voice</label>
+                <input type="text" id="settingsTtsVoiceId" placeholder="Serena" style="width:100%;padding:7px;margin-bottom:6px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <label style="font-size:12px">Extra parameters (JSON, optional)</label>
+                <input type="text" id="settingsTtsExtraParams" placeholder="{}" style="width:100%;padding:7px;margin-bottom:10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+
+                <div style="display:flex;gap:10px;align-items:center">
+                  <button type="button" class="sm-btn" id="settingsVoiceEndpointsSave" disabled title="Loads after the current configuration is fetched" style="padding:6px 12px;font-size:12px">Save endpoints</button>
+                  <span id="settingsVoiceEndpointsStatus" style="font-size:11px;color:var(--muted)"></span>
+                </div>
+              </details>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
