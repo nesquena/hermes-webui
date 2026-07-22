@@ -8101,24 +8101,35 @@ function renderSessionListFromCache(){
     }
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
+    const _groupedFinePointer=window._sidebarGroupByProject&&window.matchMedia&&window.matchMedia('(pointer: fine)').matches;
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
-    if(window._sidebarGroupByProject&&!readOnly&&window.matchMedia&&window.matchMedia('(pointer: fine)').matches){
-      const dragHandle=document.createElement('span');
-      dragHandle.className='session-project-drag-handle';
-      dragHandle.textContent='⋮⋮';
-      dragHandle.title=typeof t==='function'?t('sidebar_group_drag_to_project'):'Drag to move to a project';
-      dragHandle.draggable=true;
-      dragHandle.addEventListener('dragstart',(e)=>{
+    if(_groupedFinePointer&&!readOnly){
+      titleRow.classList.add('session-title-row-draggable');
+      titleRow.draggable=true;
+      const isGroupedDragControl=(target)=>{
+        const dragTarget=target&&target.nodeType===1?target:target&&target.parentElement;
+        return !!(dragTarget&&dragTarget.closest('button,input,label,.session-tag,[contenteditable=""],[contenteditable="true"]'));
+      };
+      titleRow.addEventListener('dragstart',(e)=>{
+        if(isGroupedDragControl(e.target)){
+          e.preventDefault();
+          return;
+        }
         e.stopPropagation();
+        if(!e.dataTransfer) return;
         e.dataTransfer.effectAllowed='move';
         _setSessionProjectDragData(e.dataTransfer,s.session_id);
         el.classList.add('dragging');
       });
-      dragHandle.addEventListener('dragend',()=>{
+      titleRow.addEventListener('dragend',()=>{
         _clearSessionProjectDragData();
         el.classList.remove('dragging');
       });
+      const dragHandle=document.createElement('span');
+      dragHandle.className='session-project-drag-handle';
+      dragHandle.textContent='⋮⋮';
+      dragHandle.title=typeof t==='function'?t('sidebar_group_drag_to_project'):'Drag to move to a project';
       titleRow.appendChild(dragHandle);
     }
     if(s.pinned&&!isPinnedGroup){
@@ -8677,7 +8688,6 @@ function renderSessionListFromCache(){
       _openSessionActionMenu(s, actions||el);
     };
 
-    const _groupedFinePointer=window._sidebarGroupByProject&&window.matchMedia&&window.matchMedia('(pointer: fine)').matches;
     const _hasCoarsePointer=window.matchMedia&&window.matchMedia('(any-pointer: coarse)').matches;
     if(!readOnly&&(!_groupedFinePointer||_hasCoarsePointer)){
       el.append(
