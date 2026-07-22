@@ -617,7 +617,10 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
+  if(m._source === 'process_wakeup'){
+    if(window._showBackgroundWakeups===false) return false;
+    return !!(msgContent(m)||m.attachments?.length);
+  }
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -626,6 +629,15 @@ function _messageIsRenderable(m){
   const hasReasoningAnchor=hasTc||hasTu||_messageHasReasoningPayload(m);
   const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
+}
+function _hasHiddenProcessWakeupBoundaryBefore(rawIdx){
+  if(window._showBackgroundWakeups!==false) return false;
+  for(let idx=Number(rawIdx)-1;idx>=0;idx--){
+    const previous=(S.messages||[])[idx];
+    if(previous&&previous._source==='process_wakeup') return true;
+    if(_messageIsRenderable(previous)) return false;
+  }
+  return false;
 }
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
@@ -15985,6 +15997,7 @@ function renderMessages(options){
       }
     }
     const isProcessWakeup=m&&m._source==='process_wakeup';
+    if(_hasHiddenProcessWakeupBoundaryBefore(rawIdx)) currentAssistantTurn=null;
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
