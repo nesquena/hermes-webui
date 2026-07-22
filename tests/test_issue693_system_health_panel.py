@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import pathlib
 import sys
@@ -637,8 +638,11 @@ def test_system_health_uses_request_profile_config_without_mutating_global_confi
     monkeypatch, tmp_path
 ):
     from api import config
+    from api import models
     from api import profiles
+    from api import routes
     from api import system_health
+    from api.models import new_session
 
     default_path = tmp_path / "default-config.yaml"
     work_path = tmp_path / "work-config.yaml"
@@ -650,7 +654,8 @@ def test_system_health_uses_request_profile_config_without_mutating_global_confi
     }
     default_path.write_text("default", encoding="utf-8")
     work_path.write_text("work", encoding="utf-8")
-    global_cache = dict(default_config)
+    expected_default_config = copy.deepcopy(default_config)
+    global_cache = copy.deepcopy(default_config)
 
     monkeypatch.setattr(config, "_cfg_cache", global_cache)
     monkeypatch.setattr(config, "cfg", global_cache)
@@ -663,12 +668,14 @@ def test_system_health_uses_request_profile_config_without_mutating_global_confi
     monkeypatch.setattr(
         config,
         "_load_yaml_config_file",
-        lambda path: dict(work_config if path == work_path else default_config),
+        lambda path: copy.deepcopy(
+            work_config if path == work_path else default_config
+        ),
     )
     monkeypatch.setattr(
         config,
         "_load_yaml_config_file_raw",
-        lambda path, **kwargs: dict(
+        lambda path, **kwargs: copy.deepcopy(
             work_config if path == work_path else default_config
         ),
     )
@@ -686,26 +693,36 @@ def test_system_health_uses_request_profile_config_without_mutating_global_confi
 
     assert runtime["sessions"]["effective_cap"] == 202
     assert config._cfg_path == default_path
-    assert config._cfg_cache == global_cache == default_config
-    assert config.cfg == default_config
-
-    from api import routes
-    from api.models import new_session
+    assert config._cfg_cache == global_cache == expected_default_config
+    assert config.cfg == expected_default_config
 
     monkeypatch.setattr(config, "_get_config_path", lambda: default_path)
-    session = new_session(workspace=str(tmp_path))
-    routes._prepare_chat_start_session_for_stream(
-        session,
-        msg="default eager checkpoint",
-        attachments=[],
-        workspace=str(tmp_path),
-        model=session.model,
-        model_provider=session.model_provider,
-        stream_id="stream_default_eager",
-        started_at=123.0,
-    )
-    saved = json.loads(session.path.read_text(encoding="utf-8"))
-    assert [message["role"] for message in saved["messages"]] == ["user"]
+    session_dir = tmp_path / "isolated-sessions"
+    session_dir.mkdir()
+    index_path = session_dir / "_index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_path)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_path, raising=False)
+
+    session = None
+    try:
+        session = new_session(workspace=str(tmp_path))
+        routes._prepare_chat_start_session_for_stream(
+            session,
+            msg="default eager checkpoint",
+            attachments=[],
+            workspace=str(tmp_path),
+            model=session.model,
+            model_provider=session.model_provider,
+            stream_id="stream_default_eager",
+            started_at=123.0,
+        )
+        saved = json.loads(session.path.read_text(encoding="utf-8"))
+        assert [message["role"] for message in saved["messages"]] == ["user"]
+    finally:
+        if session is not None:
+            with models.LOCK:
+                models.SESSIONS.pop(session.session_id, None)
 
 
 def test_system_health_route_does_not_wait_for_busy_models_cache_lock(monkeypatch):
