@@ -109,15 +109,40 @@ def _strip_media_references(text: str) -> str:
       - URL-encoded file:// variants (e.g. file://%2Ftmp%2Ffile)
     while preserving fenced and inline-code regions byte-for-byte (the
     renderer keeps file:// inert inside code/preformatted content).
+
+    Process order matches the real renderer's (ui.js) pipeline:
+      1. CRLF normalisation (renderer normalises before any parsing)
+      2. MEDIA: replacement (renderer converts MEDIA: to media tokens
+         before fenced/inline code processing, so MEDIA: inside code
+         regions is also rendered — matching that here means MEDIA:
+         never survives into a public payload)
+      3. Fenced code stashing (only complete balanced fences — an
+         unmatched opener stays as active prose for sanitisation)
+      4. Inline code stashing
+      5. file:// URL replacement (bare + markdown forms)
+      6. Code restoration
     """
     if not isinstance(text, str) or not text:
         return text
+
+    # (1) Normalise CRLF / bare CR to LF — renderMd() does this first
+    # so the close-fence regex does not miss \r\n-terminated lines.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     placeholder = "[Local attachment omitted from public share]"
 
-    # Stash fenced code blocks, matching the renderer's line-anchored
-    # variable-length fence grammar (#6285). Opening fence:
-    # ``^[ ]{0,3}(`{3,})([^`]*)$`` — closing fence:
-    # ``^[ ]{0,3}(`{3,})[ \t]*$`` with length >= opening length.
+    # (2) Replace MEDIA: EVERYWHERE before code stashing — the renderer
+    # converts MEDIA: to media-stash tokens before fenced/inline code
+    # processing, so MEDIA: inside code regions would also be rendered
+    # as /api/media links.
+    text = re.sub(r"MEDIA:\S+", placeholder, text)
+
+    # (3) Stash fenced code blocks.  Match the renderer's line-anchored
+    # variable-length fence grammar exactly.  Only stash a COMPLETE
+    # balanced fence — an unmatched opener (no valid closing fence) stays
+    # as active prose for sanitisation (review #6285 issue 1).
+    # Opening fence: ^[ ]{0,3}(`{3,})([^`]*)$
+    # Closing fence: ^[ ]{0,3}(`{3,})[ \t]*$  (length >= opening length)
     _fenced: list[str] = []
     _lines = text.split("\n")
     _fence_parts: list[str] = []
@@ -128,20 +153,29 @@ def _strip_media_references(text: str) -> str:
             _open_len = len(_om.group(1))
             _start = _i
             _i += 1
+            _found_close = False
             while _i < len(_lines):
                 _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_i])
                 if _cm and len(_cm.group(1)) >= _open_len:
                     _i += 1
+                    _found_close = True
                     break
                 _i += 1
-            _block = "\n".join(_lines[_start:_i])
-            _fenced.append(_block)
-            _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+            if _found_close:
+                _block = "\n".join(_lines[_start:_i])
+                _fenced.append(_block)
+                _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+            else:
+                # No matching close — treat opener and subsequent lines
+                # as active prose (matching renderMd() behaviour).
+                for _j in range(_start, _i):
+                    _fence_parts.append(_lines[_j])
         else:
             _fence_parts.append(_lines[_i])
             _i += 1
     text = "\n".join(_fence_parts)
-    # Stash inline code spans (`...`) so file:// inside them is preserved.
+
+    # (4) Stash inline code spans (`...`) so file:// inside them is preserved.
     _inline: list[str] = []
     text = re.sub(
         r"`[^`\n]+`",
@@ -149,9 +183,7 @@ def _strip_media_references(text: str) -> str:
         text,
     )
 
-    # MEDIA:<path-or-url> tokens (may already have their path redacted)
-    text = re.sub(r"MEDIA:\S+", placeholder, text)
-
+    # (5) file:// URL replacement
     # Markdown images: ![alt](file:(?://)?...) → placeholder
     text = re.sub(r"!\[[^\]]*\]\(file:(?://)?[^\s)]+\)", placeholder, text)
 
@@ -164,7 +196,7 @@ def _strip_media_references(text: str) -> str:
     # file:/path forms in addition to standard file:// and file:/// variants.
     text = re.sub(r"(^|\s)file:(?://)?[^\s<>\"')\]]+", r"\1" + placeholder, text)
 
-    # Restore stashed code regions.
+    # (6) Restore stashed code regions.
     for i, s in enumerate(_fenced):
         text = text.replace(f"\x00F{i}\x00", s)
     for i, s in enumerate(_inline):
