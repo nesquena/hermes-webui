@@ -136,6 +136,14 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
                 "payload": {"action": "saved", "kind": "memory", "name": "memory"},
             }
         ],
+        "outcomes_truncated": {
+            "reason": "scene_bytes",
+            "accepted_count": 2,
+            "max_count": 512,
+            "accepted_bytes": 256,
+            "max_bytes": 128000,
+            "max_scene_bytes": 256000,
+        },
         "final_answer": "final answer",
     }
     request_body = {
@@ -173,6 +181,7 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert record["scene"]["version"] == "activity_scene_v1"
     assert record["scene"]["artifacts"] == scene["artifacts"]
     assert record["scene"]["side_effects"] == scene["side_effects"]
+    assert record["scene"]["outcomes_truncated"] == scene["outcomes_truncated"]
 
     loaded = Session.load("anchorpersist1")
     hydrated = routes._hydrate_anchor_activity_scenes(
@@ -186,6 +195,7 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
     assert hydrated[1]["_anchor_activity_scene"]["artifacts"] == scene["artifacts"]
     assert hydrated[1]["_anchor_activity_scene"]["side_effects"] == scene["side_effects"]
+    assert hydrated[1]["_anchor_activity_scene"]["outcomes_truncated"] == scene["outcomes_truncated"]
 
 
 def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypatch):

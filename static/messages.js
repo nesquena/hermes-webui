@@ -2022,9 +2022,11 @@ function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, s
   ).trim();
   if(sourceType!==expectedType) return '';
   const identity=(sceneIdentity&&typeof sceneIdentity==='object')?sceneIdentity:{};
+  const requiresCompleteSceneIdentity=!!(sceneIdentity&&typeof sceneIdentity==='object');
   const expectedSession=String(identity.sessionId||identity.session_id||'').trim();
   const expectedStream=String(identity.streamId||identity.stream_id||'').trim();
   const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
+  if(requiresCompleteSceneIdentity&&(!expectedSession||!expectedStream||!expectedRun)) return '';
   const eventSession=String(event.session_id||event.sessionId||'').trim();
   const eventStream=String(event.stream_id||event.streamId||'').trim();
   if(expectedSession&&eventSession!==expectedSession) return '';
@@ -2054,6 +2056,17 @@ function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, s
   return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
 }
 
+function _anchorOutcomeTruncationMarker(scene){
+  const marker=scene&&scene.outcomes_truncated;
+  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
+  const reason=String(marker.reason||'').trim();
+  if(!reason) return null;
+  return {
+    ...marker,
+    reason,
+  };
+}
+
 function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry, scene, context){
   if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function'||!anchorRegistry) return false;
   if(!scene||scene.version!=='activity_scene_v1') return false;
@@ -2062,14 +2075,18 @@ function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry
   const contextStream=String(context&&context.stream_id||'').trim();
   const contextRun=String(context&&context.run_id||'').trim();
   if(
-    !sceneIdentity.streamId||!sceneIdentity.runId
-    ||(sceneIdentity.sessionId&&contextSession&&sceneIdentity.sessionId!==contextSession)
+    !sceneIdentity.sessionId||!sceneIdentity.streamId||!sceneIdentity.runId
+    ||(contextSession&&sceneIdentity.sessionId!==contextSession)
     ||(contextStream&&sceneIdentity.streamId!==contextStream)
     ||(contextRun&&sceneIdentity.runId!==contextRun)
   ) return false;
+  const truncationMarker=_anchorOutcomeTruncationMarker(scene);
+  if(truncationMarker&&anchorRegistry.anchor&&typeof anchorRegistry.anchor==='object'){
+    anchorRegistry.anchor.outcomes_truncated=truncationMarker;
+  }
   const outcomeContext={
     ...(context||{}),
-    session_id:sceneIdentity.sessionId||contextSession,
+    session_id:sceneIdentity.sessionId,
     stream_id:sceneIdentity.streamId,
     run_id:sceneIdentity.runId,
   };
@@ -2091,7 +2108,7 @@ function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry
       if(result&&(result.applied||result.reason==='duplicate')) accepted=true;
     }
   }
-  return accepted;
+  return accepted||!!truncationMarker;
 }
 
 function _liveAnchorActivitySceneIdentity(scene, fallbackStreamId){

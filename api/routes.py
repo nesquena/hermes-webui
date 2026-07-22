@@ -3164,6 +3164,17 @@ _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS = 512
 _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES = 128_000
 
 
+def _anchor_activity_scene_encoded_size(scene: dict) -> int:
+    return len(
+        json.dumps(
+            scene,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
+
+
 def _run_journal_outcome_encoded_size(outcome: dict) -> int:
     return len(
         json.dumps(
@@ -3174,6 +3185,127 @@ def _run_journal_outcome_encoded_size(outcome: dict) -> int:
             default=str,
         ).encode("utf-8")
     )
+
+
+def _run_journal_outcome_truncation_marker(
+    reason: str,
+    *,
+    accepted_count: int,
+    accepted_bytes: int,
+) -> dict:
+    return {
+        "reason": reason,
+        "accepted_count": max(0, int(accepted_count or 0)),
+        "max_count": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS,
+        "accepted_bytes": max(0, int(accepted_bytes or 0)),
+        "max_bytes": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES,
+        "max_scene_bytes": _ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+    }
+
+
+def _run_journal_anchor_scene_with_outcomes(
+    base_scene: dict,
+    accepted_outcomes: list[tuple[str, dict, int]],
+    truncation_marker: dict | None,
+) -> dict:
+    scene = copy.deepcopy(base_scene)
+    scene["artifacts"] = [
+        copy.deepcopy(outcome)
+        for event_name, outcome, _encoded_size in accepted_outcomes
+        if event_name == "artifact_reference"
+    ]
+    scene["side_effects"] = [
+        copy.deepcopy(outcome)
+        for event_name, outcome, _encoded_size in accepted_outcomes
+        if event_name == "state_saved"
+    ]
+    if truncation_marker is not None:
+        scene["outcomes_truncated"] = copy.deepcopy(truncation_marker)
+    else:
+        scene.pop("outcomes_truncated", None)
+    return scene
+
+
+def _run_journal_degraded_outcome_scene(base_scene: dict, reason: str) -> dict:
+    marker = _run_journal_outcome_truncation_marker(
+        reason,
+        accepted_count=0,
+        accepted_bytes=0,
+    )
+    scene = copy.deepcopy(base_scene)
+    scene["activity_rows"] = []
+    scene["artifacts"] = []
+    scene["side_effects"] = []
+    scene["outcomes_truncated"] = marker
+    if _anchor_activity_scene_encoded_size(scene) <= _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+        return scene
+    return {
+        "version": "activity_scene_v1",
+        "mode": scene.get("mode") or "compact_worklog",
+        "identity": copy.deepcopy(scene.get("identity") if isinstance(scene.get("identity"), dict) else {}),
+        "lifecycle": copy.deepcopy(scene.get("lifecycle") if isinstance(scene.get("lifecycle"), dict) else {}),
+        "final_answer": "",
+        "final_message_ref": None,
+        "terminal_state": None,
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+        "outcomes_truncated": marker,
+    }
+
+
+def _run_journal_fit_outcomes_to_anchor_scene(
+    base_scene: dict,
+    outcome_candidates: list[tuple[str, dict, int]],
+    initial_truncation: dict | None,
+) -> dict:
+    if _anchor_activity_scene_encoded_size(base_scene) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+        return _run_journal_degraded_outcome_scene(base_scene, "scene_bytes")
+
+    accepted: list[tuple[str, dict, int]] = []
+    accepted_bytes = 0
+    truncation_reason = str((initial_truncation or {}).get("reason") or "")
+
+    for event_name, outcome, encoded_size in outcome_candidates:
+        trial = [*accepted, (event_name, outcome, encoded_size)]
+        marker = (
+            _run_journal_outcome_truncation_marker(
+                truncation_reason,
+                accepted_count=len(trial),
+                accepted_bytes=accepted_bytes + encoded_size,
+            )
+            if truncation_reason
+            else None
+        )
+        trial_scene = _run_journal_anchor_scene_with_outcomes(base_scene, trial, marker)
+        if _anchor_activity_scene_encoded_size(trial_scene) <= _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+            accepted = trial
+            accepted_bytes += encoded_size
+            continue
+        truncation_reason = "scene_bytes"
+        break
+
+    if not truncation_reason:
+        return _run_journal_anchor_scene_with_outcomes(base_scene, accepted, None)
+
+    marker = _run_journal_outcome_truncation_marker(
+        truncation_reason,
+        accepted_count=len(accepted),
+        accepted_bytes=accepted_bytes,
+    )
+    scene = _run_journal_anchor_scene_with_outcomes(base_scene, accepted, marker)
+    while accepted and _anchor_activity_scene_encoded_size(scene) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+        _event_name, _outcome, removed_size = accepted.pop()
+        accepted_bytes = max(0, accepted_bytes - removed_size)
+        marker = _run_journal_outcome_truncation_marker(
+            "scene_bytes",
+            accepted_count=len(accepted),
+            accepted_bytes=accepted_bytes,
+        )
+        scene = _run_journal_anchor_scene_with_outcomes(base_scene, accepted, marker)
+    if _anchor_activity_scene_encoded_size(scene) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+        return _run_journal_degraded_outcome_scene(base_scene, "scene_bytes")
+    return scene
 
 
 def _run_journal_outcome_event(
@@ -3409,8 +3541,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
-    anchor_artifacts: list[dict] = []
-    anchor_side_effects: list[dict] = []
+    outcome_candidates: list[tuple[str, dict, int]] = []
     seen_outcome_event_ids: set[str] = set()
     outcome_count = 0
     outcome_encoded_bytes = 0
@@ -3421,30 +3552,26 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     last_ts = None
     reasoning_first_tool_count: int | None = None
 
-    def append_outcome(target: list[dict], outcome: dict) -> None:
+    def append_outcome(event_name: str, outcome: dict) -> None:
         nonlocal outcome_count, outcome_encoded_bytes, outcome_truncation
         if outcome_truncation is not None:
             return
         if outcome_count >= _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS:
-            outcome_truncation = {
-                "reason": "count",
-                "accepted_count": outcome_count,
-                "max_count": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS,
-                "accepted_bytes": outcome_encoded_bytes,
-                "max_bytes": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES,
-            }
+            outcome_truncation = _run_journal_outcome_truncation_marker(
+                "count",
+                accepted_count=outcome_count,
+                accepted_bytes=outcome_encoded_bytes,
+            )
             return
         encoded_size = _run_journal_outcome_encoded_size(outcome)
         if outcome_encoded_bytes + encoded_size > _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES:
-            outcome_truncation = {
-                "reason": "bytes",
-                "accepted_count": outcome_count,
-                "max_count": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_EVENTS,
-                "accepted_bytes": outcome_encoded_bytes,
-                "max_bytes": _RUN_JOURNAL_RECONSTRUCTED_OUTCOME_MAX_BYTES,
-            }
+            outcome_truncation = _run_journal_outcome_truncation_marker(
+                "bytes",
+                accepted_count=outcome_count,
+                accepted_bytes=outcome_encoded_bytes,
+            )
             return
-        target.append(outcome)
+        outcome_candidates.append((event_name, outcome, encoded_size))
         outcome_count += 1
         outcome_encoded_bytes += encoded_size
 
@@ -3540,8 +3667,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             )
             if outcome and outcome["event_id"] not in seen_outcome_event_ids:
                 seen_outcome_event_ids.add(outcome["event_id"])
-                target = anchor_artifacts if event_name == "artifact_reference" else anchor_side_effects
-                append_outcome(target, outcome)
+                append_outcome(event_name, outcome)
             continue
         if event_name == "token":
             text = str(payload.get("text") or "")
@@ -3871,7 +3997,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
-    has_reconstructed_outcomes = bool(anchor_artifacts or anchor_side_effects)
+    has_reconstructed_outcomes = bool(outcome_candidates)
     if not anchor_activity_rows and events and not has_reconstructed_outcomes:
         anchor_activity_rows.append(
             {
@@ -3937,6 +4063,32 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     # Keep returning a live snapshot even when the journal has events but no
     # projected message/tool rows yet. The frontend treats the empty activity
     # scene as "nothing renderable yet" while preserving the live cursor.
+    anchor_activity_scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {
+            "session_id": session_id,
+            "stream_id": stream_id,
+            "run_id": run_id,
+            "source_message_refs": [],
+        },
+        "lifecycle": {
+            "status": "running",
+            "terminal_state": None,
+        },
+        "final_answer": "",
+        "final_message_ref": None,
+        "terminal_state": None,
+        "activity_rows": anchor_activity_rows,
+        "artifacts": [],
+        "side_effects": [],
+    }
+    anchor_activity_scene = _run_journal_fit_outcomes_to_anchor_scene(
+        anchor_activity_scene,
+        outcome_candidates,
+        outcome_truncation,
+    )
+
     snapshot = {
         "session_id": session_id,
         "stream_id": stream_id,
@@ -3951,29 +4103,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "activity_burst_anchors": activity_burst_anchors,
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
-        "anchor_activity_scene": {
-            "version": "activity_scene_v1",
-            "mode": "compact_worklog",
-            "identity": {
-                "session_id": session_id,
-                "stream_id": stream_id,
-                "run_id": run_id,
-                "source_message_refs": [],
-            },
-            "lifecycle": {
-                "status": "running",
-                "terminal_state": None,
-            },
-            "final_answer": "",
-            "final_message_ref": None,
-            "terminal_state": None,
-            "activity_rows": anchor_activity_rows,
-            "artifacts": anchor_artifacts,
-            "side_effects": anchor_side_effects,
-        },
+        "anchor_activity_scene": anchor_activity_scene,
     }
-    if outcome_truncation is not None:
-        snapshot["anchor_activity_scene"]["outcomes_truncated"] = outcome_truncation
     return snapshot
 
 
@@ -4045,9 +4176,9 @@ def _sanitize_anchor_activity_scene(scene):
     if len(rows) > _ANCHOR_ACTIVITY_SCENE_MAX_ROWS:
         raise ValueError("scene.activity_rows is too large")
     scene_copy = copy.deepcopy(scene)
-    encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
-    if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+    if _anchor_activity_scene_encoded_size(scene_copy) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
+    encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     return json.loads(encoded.decode("utf-8"))
 
 

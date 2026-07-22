@@ -1040,6 +1040,16 @@
     return Object.freeze(events.map(_activitySceneOutcomeEvent).filter(Boolean));
   }
 
+  function _activitySceneOutcomesTruncated(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)) return null;
+    const reason=_cleanString(_own(value,'reason'));
+    if(!reason) return null;
+    return Object.freeze({
+      ..._sanitizePayload(value),
+      reason,
+    });
+  }
+
   function projectAssistantTurnAnchorActivityScene(input, options){
     const anchor=_anchorFromProjectionInput(input);
     const opts=(options&&typeof options==='object')?options:{};
@@ -1063,7 +1073,7 @@
       .map((event,index)=>_activitySceneRow(event,index,mode));
     const lifecycle=_copyObject(anchor.lifecycle);
     const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
-    return Object.freeze({
+    const scene={
       version:'activity_scene_v1',
       mode,
       identity:_frozenIdentityCopy(anchor.identity||{}),
@@ -1074,7 +1084,10 @@
       activity_rows:Object.freeze(rows),
       artifacts:_activitySceneOutcomeEvents(anchor.artifacts),
       side_effects:_activitySceneOutcomeEvents(anchor.side_effects),
-    });
+    };
+    const outcomesTruncated=_activitySceneOutcomesTruncated(anchor.outcomes_truncated);
+    if(outcomesTruncated) scene.outcomes_truncated=outcomesTruncated;
+    return Object.freeze(scene);
   }
 
   function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){
@@ -1679,6 +1692,7 @@
       side_effects:[],
       metadata_events:[],
       transport_events:[],
+      outcomes_truncated:_activitySceneOutcomesTruncated(opts.outcomes_truncated),
       usage:null,
     };
   }

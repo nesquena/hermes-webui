@@ -993,8 +993,11 @@ function _sessionAnchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedR
   ).trim();
   if(sourceType!==expectedType) return '';
   const identity=(sceneIdentity&&typeof sceneIdentity==='object')?sceneIdentity:{};
+  const requiresCompleteSceneIdentity=!!(sceneIdentity&&typeof sceneIdentity==='object');
   const expectedSession=String(identity.sessionId||identity.session_id||'').trim();
   const expectedStream=String(identity.streamId||identity.stream_id||'').trim();
+  const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
+  if(requiresCompleteSceneIdentity&&(!expectedSession||!expectedStream||!expectedRun)) return '';
   const eventSession=String(event.session_id||event.sessionId||'').trim();
   const eventStream=String(event.stream_id||event.streamId||'').trim();
   if(expectedSession&&eventSession!==expectedSession) return '';
@@ -1012,9 +1015,7 @@ function _sessionAnchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedR
   }
   if(eventRunId&&eventIdRunId&&eventRunId!==eventIdRunId) return '';
   const effectiveRunId=eventRunId||eventIdRunId;
-  const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
-  if(expectedRun&&!effectiveRunId) return '';
-  if(expectedRun&&effectiveRunId&&effectiveRunId!==expectedRun) return '';
+  if(expectedRun&&(!effectiveRunId||effectiveRunId!==expectedRun)) return '';
   const hasSeq=event.seq!==undefined&&event.seq!==null&&event.seq!=='';
   let seqText='';
   if(hasSeq){
@@ -1026,20 +1027,36 @@ function _sessionAnchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedR
   return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
 }
 
-function _anchorActivitySceneHasRecoveryState(scene) {
+function _sessionAnchorOutcomeTruncationMarker(scene){
+  const marker=scene&&scene.outcomes_truncated;
+  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
+  const reason=String(marker.reason||'').trim();
+  if(!reason) return null;
+  return {
+    ...marker,
+    reason,
+  };
+}
+
+function _anchorActivitySceneHasRecoveryState(scene){
   if (!scene || scene.version !== 'activity_scene_v1') return false;
-  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
-  const expectedRunId=String(identity.run_id||identity.stream_id||'').trim();
+  const sceneIdentity=_anchorActivitySceneMergeIdentity(scene);
+  const hasVisibleRows=Array.isArray(scene.activity_rows) && scene.activity_rows.length;
+  if(!sceneIdentity||!sceneIdentity.sessionId||!sceneIdentity.streamId||!sceneIdentity.runId){
+    return !!hasVisibleRows;
+  }
+  const expectedRunId=sceneIdentity.runId;
   const hasOutcome=(events,expectedType)=>Array.isArray(events)
-    &&events.some((event)=>!!_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRunId));
+    &&events.some((event)=>!!_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRunId,sceneIdentity));
   return Boolean(
-    (Array.isArray(scene.activity_rows) && scene.activity_rows.length)
+    hasVisibleRows
     || hasOutcome(scene.artifacts,'artifact_reference')
     || hasOutcome(scene.side_effects,'state_saved')
+    || _sessionAnchorOutcomeTruncationMarker(scene)
   );
 }
 
-function _anchorActivitySceneMergeIdentity(scene) {
+function _anchorActivitySceneMergeIdentity(scene){
   if(!scene||scene.version!=='activity_scene_v1') return null;
   const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
   const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
@@ -1048,7 +1065,7 @@ function _anchorActivitySceneMergeIdentity(scene) {
   return {sessionId,streamId,runId};
 }
 
-function _inflightHasVisibleLiveState(inflight) {
+function _inflightHasVisibleLiveState(inflight){
   if (!inflight || typeof inflight !== 'object') return false;
   if (String(inflight.lastAssistantText || '').trim()) return true;
   if (String(inflight.lastReasoningText || '').trim()) return true;
@@ -1172,7 +1189,9 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
   };
   const artifacts=mergeCollection(journalScene.artifacts,cachedScene&&cachedScene.artifacts,'artifact_reference');
   const sideEffects=mergeCollection(journalScene.side_effects,cachedScene&&cachedScene.side_effects,'state_saved');
-  if(!artifacts.length&&!sideEffects.length) return false;
+  const truncationMarker=_sessionAnchorOutcomeTruncationMarker(journalScene)
+    ||_sessionAnchorOutcomeTruncationMarker(cachedScene);
+  if(!artifacts.length&&!sideEffects.length&&!truncationMarker) return false;
   inflight.anchorActivityScene={
     ...(cachedScene||journalScene),
     identity:{
@@ -1182,6 +1201,8 @@ function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, 
     artifacts,
     side_effects:sideEffects,
   };
+  if(truncationMarker) inflight.anchorActivityScene.outcomes_truncated=truncationMarker;
+  else delete inflight.anchorActivityScene.outcomes_truncated;
   const journalSeq=Number(serverSnapshot.lastRunJournalSeq||0);
   const cachedSeq=Number(inflight.lastRunJournalSeq||0);
   inflight.lastRunJournalSeq=Math.max(
