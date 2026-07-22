@@ -280,52 +280,111 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     # the wrong one. rfind = the substantive restore branch.
     inflight_idx = body.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = body[inflight_idx : inflight_idx + 4200]
-    assert "INFLIGHT[sid].reattach" in inflight_block, (
-        "loadSession()'s INFLIGHT branch must gate the SSE reattach on the "
-        "reattach flag so closeLiveStream()'s marking flows through"
+    inflight_block = body[inflight_idx : inflight_idx + 9000]
+    assert "attachLiveSceneForActiveSession" in inflight_block or "const attachLiveSceneForActiveSession" in inflight_block, (
+        "loadSession()'s INFLIGHT branch must route reattach through the owned "
+        "active session restore callback"
+    )
+    assert "currentInflight.reattach" in inflight_block, (
+        "loadSession()'s INFLIGHT branch should still require reattach=true from "
+        "the current inflight entry"
     )
     reattach_gate = re.search(
-        r"if\(INFLIGHT\[sid\]\.reattach\s*&&\s*activeStreamId.*?attachLiveStream\(sid, activeStreamId",
+        r"const\s+currentInflight=INFLIGHT\[sid\];[\s\S]*?if\s*\(!currentInflight\|\|!currentInflight\.reattach\|\|!activeStreamId",
         inflight_block,
         re.DOTALL,
     )
     assert reattach_gate, (
-        "loadSession() must reattach via attachLiveStream() when "
-        "INFLIGHT[sid].reattach && activeStreamId"
+        "loadSession() must gate active-session attach on currentInflight.reattach and "
+        "activeStreamId before calling attachLiveStream()"
     )
 
 
-def test_load_session_attaches_sse_before_auxiliary_work():
-    """Live SSE reattach is the primary recovery path.
+def test_load_session_replays_live_scene_after_transcript_with_deferred_attach():
+    """Session restore should render bounded transcript first, then defer
+    live-scene ownership and attach/watch through the scheduler.
 
-    Rendering, workspace refresh, badges, and side-channel pollers must not run
-    before attachLiveStream(), because any synchronous failure in those paths
-    would otherwise leave the backend stream active with no browser subscriber.
+    This preserves backend-observable side effects on the main path (badge,
+    status, pollers) while ensuring the expensive scene restore/attach work is
+    deferred and executed only after transcript paint.
     """
     body = _function_body(SESSIONS_JS, "loadSession")
-    active_branch = body[body.find("if(activeStreamId){") : body.find("}else{", body.find("if(activeStreamId){"))]
-    active_attach = active_branch.find("attachLiveStream(sid, activeStreamId")
-    assert active_attach != -1
-    # #3899 inserted restoreLiveTurnHtmlForSession between renderMessages and
-    # appendThinking, and renderMessages now takes a preserveScroll arg — so the
-    # old contiguous "syncTopbar();renderMessages();appendThinking();loadDir('.');"
-    # literal no longer exists. Assert each auxiliary call individually; all must
-    # still run AFTER attachLiveStream (the invariant this test protects). The
-    # workspace refresh is now scheduled through a first-paint deferral helper
-    # rather than calling loadDir('.') inline.
-    for marker in (
-        "updateSendBtn();",
-        "syncTopbar();",
-        "renderMessages(",
-        "appendThinking();",
-        "_deferWorkspaceRefreshForSession(sid);",
-        "updateQueueBadge(sid);",
-        "startApprovalPolling(sid)",
-    ):
-        pos = active_branch.find(marker)
-        assert pos != -1, f"{marker} not found in active-stream branch"
-        assert active_attach < pos, f"attachLiveStream() must run before {marker}"
+    inflight_idx = body.rfind("if(INFLIGHT[sid]){")
+    assert inflight_idx != -1, "INFLIGHT branch not found"
+    inflight_branch = body[inflight_idx : inflight_idx + 9000]
+    inflight_defer = inflight_branch.find("_deferActiveSessionSceneRestore(")
+    assert inflight_defer != -1, "active INFLIGHT branch should defer live restore path"
+    inflight_sync_topbar_pos = inflight_branch.find("syncTopbar();")
+    inflight_render_messages_pos = inflight_branch.find("renderMessages(")
+    inflight_busy_pos = inflight_branch.find("setBusy(true)")
+    inflight_composer_status_pos = inflight_branch.find("setComposerStatus('')")
+    inflight_start_approval_pos = inflight_branch.find("startApprovalPolling(sid)")
+    inflight_start_clarify_pos = inflight_branch.find("startClarifyPolling")
+    inflight_defer_workspace_pos = inflight_branch.find("_deferWorkspaceRefreshForSession(sid)")
+    assert inflight_sync_topbar_pos != -1, "inflight branch should call syncTopbar() before deferring restore"
+    assert inflight_sync_topbar_pos < inflight_defer
+    assert inflight_render_messages_pos != -1, "inflight branch should render messages before deferring restore"
+    assert inflight_render_messages_pos < inflight_defer
+    assert inflight_busy_pos != -1, "inflight branch should set busy before deferring restore"
+    assert inflight_busy_pos < inflight_defer
+    assert inflight_composer_status_pos != -1, "inflight branch should clear composer status before deferring restore"
+    assert inflight_composer_status_pos < inflight_defer
+    assert inflight_start_approval_pos != -1, "inflight branch should restart approval polling before deferring restore"
+    assert inflight_start_approval_pos < inflight_defer
+    assert inflight_start_clarify_pos != -1, "inflight branch should restart clarify polling before deferring restore"
+    assert inflight_start_clarify_pos < inflight_defer
+    assert inflight_defer_workspace_pos != -1, "inflight branch should defer workspace refresh before deferring restore"
+    assert inflight_defer_workspace_pos < inflight_defer
+
+    active_inflight_order_re = re.search(
+        r"_deferActiveSessionSceneRestore\([\s\S]*?restoreLiveSurfaceForActiveInflight\(\)[\s\S]*?attachLiveSceneForActiveSession\(\)",
+        inflight_branch,
+    )
+    assert active_inflight_order_re is not None, "INFLIGHT path should restore live scene ownership before attach/watch"
+
+    idle_anchor = body.find("if(activeStreamId){")
+    assert idle_anchor != -1, "discovered active stream branch not found"
+    active_idle = body[idle_anchor : idle_anchor + 2400]
+    idle_defer = active_idle.find("_deferActiveSessionSceneRestore(")
+    assert idle_defer != -1, "discovered active stream branch should defer live restore path"
+    active_idle_sync_topbar_pos = active_idle.find("syncTopbar();")
+    active_idle_render_messages_pos = active_idle.find("renderMessages(")
+    active_idle_busy_pos = active_idle.find("S.busy=true")
+    active_idle_set_status_pos = active_idle.find("setStatus('')")
+    active_idle_composer_status_pos = active_idle.find("setComposerStatus('')")
+    active_idle_update_queue_pos = active_idle.find("updateQueueBadge(sid)")
+    active_idle_start_approval_pos = active_idle.find("startApprovalPolling(sid)")
+    active_idle_start_clarify_pos = active_idle.find("startClarifyPolling")
+    active_idle_defer_workspace_pos = active_idle.find("_deferWorkspaceRefreshForSession(sid)")
+    assert active_idle_sync_topbar_pos != -1, "active discovered branch should call syncTopbar() before deferring restore"
+    assert active_idle_sync_topbar_pos < idle_defer
+    assert active_idle_render_messages_pos != -1, "active discovered branch should render messages before deferring restore"
+    assert active_idle_render_messages_pos < idle_defer
+    assert active_idle_busy_pos != -1, "active discovered branch should set S.busy=true before deferring restore"
+    assert active_idle_busy_pos < idle_defer
+    assert active_idle_set_status_pos != -1, "active discovered branch should clear status before deferring restore"
+    assert active_idle_set_status_pos < idle_defer
+    assert active_idle_composer_status_pos != -1, "active discovered branch should clear composer status before deferring restore"
+    assert active_idle_composer_status_pos < idle_defer
+    assert active_idle_update_queue_pos != -1, "active discovered branch should update queue badge before deferring restore"
+    assert active_idle_update_queue_pos < idle_defer
+    assert active_idle_start_approval_pos != -1, "active discovered branch should restart approval polling before deferring restore"
+    assert active_idle_start_approval_pos < idle_defer
+    assert active_idle_start_clarify_pos != -1, "active discovered branch should restart clarify polling before deferring restore"
+    assert active_idle_start_clarify_pos < idle_defer
+    assert active_idle_defer_workspace_pos != -1, "active discovered branch should defer workspace refresh before deferring restore"
+    assert active_idle_defer_workspace_pos < idle_defer
+
+    active_idle_order_re = re.search(
+        r"_deferActiveSessionSceneRestore\([\s\S]*?restoreLiveSurfaceForIdleInflight\(\)[\s\S]*?attachLiveSceneForIdleSession\(\)",
+        active_idle,
+    )
+    assert active_idle_order_re is not None, "idle active-stream reattach path should establish live ownership before attach/watch"
+
+
+def test_load_session_active_scene_restore_is_deferred_after_transcript_render():
+    # Backward compatibility shim for existing dashboards/coverage references.
+    test_load_session_replays_live_scene_after_transcript_with_deferred_attach()
 
 
 def test_running_reattach_refreshes_single_live_assistant_from_server_progress():
@@ -917,43 +976,63 @@ def test_load_session_restores_worklog_shell_before_reattach_replay():
 
 
 def test_restore_succeeded_reconnect_replays_tool_cards():
-    """When reconnect replay succeeds in restoring the live turn HTML, tool cards
-    are still repainted from the persisted live-call list instead of waiting for a
-    future SSE event to reintroduce them."""
-    body = _function_body(SESSIONS_JS, "loadSession")
-    replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
-    reattach_pos = body.find("if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function')")
-    restore_pos = body.find("restoreLiveTurnHtmlForSession", reattach_pos if reattach_pos != -1 else 0)
-    fallback_pos = body.find("if(!restoredLiveTurn){", restore_pos)
-    restore_replay_pos = body.find("if(restoredLiveTurn&&didReconnect){", restore_pos)
-    restore_replay_block = body[restore_replay_pos:fallback_pos]
-    helper_replay_call = restore_replay_block.find("replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});")
-    assert reattach_pos != -1, "loadSession must keep the reconnect reattach branch"
-    assert replay_fn != -1, "loadSession should extract live tool replay into a helper"
-    assert restore_pos != -1, "loadSession must still execute restoreLiveTurnHtmlForSession"
-    assert reattach_pos > replay_fn, "live-tool replay helper must be defined before reattach branch"
-    assert restore_pos > reattach_pos, "restore/fallback branch should be after reattach handling in INFLIGHT flow"
-    assert restore_replay_pos != -1, "restored live turns must explicitly replay tools on reconnect"
-    assert helper_replay_call != -1, "replay helper must be executed so reconnect can repopulate tool cards"
-    assert replay_fn < restore_replay_pos < fallback_pos, "restore+reconnect replay should run before fallback"
-    assert restore_replay_block.strip().startswith("if(restoredLiveTurn&&didReconnect){")
-    assert (
-        "if(restoredLiveTurn&&didReconnect){"
-        "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});"
-        "}"
-    ) in re.sub(r"\s+", "", restore_replay_block)
+    """Legacy HTML-only restore still repaints persisted live tool cards.
 
-
-def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
-    """Restored snapshots can already contain legacy tool rows without live tids.
-
-    Replaying an unkeyed persisted tool over that restored DOM would append a
-    duplicate, so the restore-success reconnect path should only replay unkeyed
-    tools when the restored turn has no visible tool rows to preserve.
+    An authoritative Anchor scene already contains the current-turn worklog and
+    must skip this session-wide replay; the browser regression covers that path.
     """
     body = _function_body(SESSIONS_JS, "loadSession")
     replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
-    restore_replay_pos = body.find("if(restoredLiveTurn&&didReconnect){")
+    reattach_pos = body.find("const attachLiveSceneForActiveSession=()=>{")
+    restore_pos = body.find("restoreLiveTurnHtmlForSession", reattach_pos if reattach_pos != -1 else 0)
+    fallback_pos = body.find("if(!restoredLiveTurn){", restore_pos)
+    restore_replay_block = ""
+    restore_replay_match = re.search(
+        r"replayPersistedLiveToolCards\(\s*\{skipUnkeyedRestoredDuplicates:\s*true\}\s*\)",
+        body,
+        re.DOTALL,
+    )
+    restore_replay_pos = restore_replay_match.start() if restore_replay_match else -1
+    guard_match = re.search(
+        r"if\s*\(\s*didReconnect\s*&&\s*restoreResult\s*&&\s*restoreResult\.restoredLiveTurn\s*&&\s*!restoreResult\.restoredAnchorScene\s*\)\s*\{",
+        body,
+        re.DOTALL,
+    )
+    guard_pos = guard_match.start() if guard_match else -1
+    restore_replay_block = body[guard_pos:fallback_pos] if guard_pos != -1 else ""
+    helper_replay_call = restore_replay_block.find("replayPersistedLiveToolCards")
+    assert reattach_pos != -1, "loadSession must keep the reconnect reattach helper"
+    assert replay_fn != -1, "loadSession should extract live tool replay into a helper"
+    assert restore_pos != -1, "loadSession must still execute restoreLiveTurnHtmlForSession"
+    assert reattach_pos > replay_fn, "live-tool replay helper must be defined before reattach branch"
+    assert restore_pos > reattach_pos, "restore/fallback branch should be after reattach helper in INFLIGHT flow"
+    assert guard_pos != -1, "HTML-only restored live turns must gate tool replay on reconnect"
+    assert restore_replay_pos != -1, "HTML-only restored live turns must explicitly replay tools"
+    assert helper_replay_call != -1, "HTML-only reconnect must repopulate persisted tool cards"
+    assert replay_fn < guard_pos < fallback_pos, "restore+reconnect replay should run before fallback"
+    assert guard_match is not None
+    assert restore_replay_match is not None
+    assert (
+        re.search(
+            r"if\s*\(\s*didReconnect\s*&&\s*restoreResult\s*&&\s*restoreResult\.restoredLiveTurn\s*&&\s*!restoreResult\.restoredAnchorScene\s*\)\s*\{",
+            restore_replay_block,
+        )
+        is not None
+    )
+
+
+def test_restore_succeeded_reconnect_skips_anchor_scene_and_unkeyed_tool_duplicates():
+    """Restored snapshots can already contain authoritative or legacy tool rows.
+
+    Anchor scenes skip the session-wide replay entirely. HTML-only restores keep
+    replay, but skip unkeyed rows when restored DOM already has visible tool rows.
+    """
+    body = _function_body(SESSIONS_JS, "loadSession")
+    replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
+    restore_replay_pos = body.find(
+        "if(didReconnect&&restoreResult&&restoreResult.restoredLiveTurn&&!restoreResult.restoredAnchorScene){"
+    )
+    assert restore_replay_pos != -1, "loadSession must keep reconnect replay guard"
     fallback_pos = body.find("if(!restoredLiveTurn){", restore_replay_pos)
     assert replay_fn != -1, "loadSession should keep replay options on the helper"
     assert "const liveToolReplayId=(tc)=>" in body
@@ -961,12 +1040,18 @@ def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
     helper_block = body[replay_fn:restore_replay_pos]
     assert "skipUnkeyedRestoredDuplicates" in helper_block
     assert "restoredLiveTurn.querySelector('.tool-card-row')" in helper_block
-    assert "hasRestoredLiveToolRows&&!liveToolReplayId(tc)" in helper_block
-    restore_block = body[restore_replay_pos:fallback_pos]
-    assert "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});" in restore_block
-    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
-    assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
-    assert "replayPersistedLiveToolCards();" in body[fallback_pos:refresh_pos]
+    assert "hasCurrentWorklogContent&&!liveToolReplayId(tc)" in helper_block
+    assert "restoredAnchorScene: !!restoredAnchorScene" in body
+    active_fallback_pos = body.find("if(!restoredLiveTurn){", replay_fn)
+    assert active_fallback_pos != -1, "active branch should include a restored-live fallback"
+    active_refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", active_fallback_pos)
+    assert active_refresh_pos != -1, "active branch should schedule workspace refresh after first paint"
+    restore_guard_tail = body[restore_replay_pos:restore_replay_pos + 400]
+    assert re.search(
+        r"replayPersistedLiveToolCards\s*\(\s*\{skipUnkeyedRestoredDuplicates:\s*true\}\s*\)",
+        restore_guard_tail,
+    ) is not None
+    assert "replayPersistedLiveToolCards();" in body[active_fallback_pos:active_refresh_pos]
 
 
 def test_merge_inflight_tail_preserves_all_segmented_live_progress():
