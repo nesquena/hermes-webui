@@ -21679,6 +21679,19 @@ def start_session_turn(
         route="start_session_turn",
     )
 
+    # Normalize legacy adapter responses: a stream_id without _status is a
+    # successful start, but _is_dispatch_accepted requires _status to be an
+    # explicit integer in 200..299. Belt-and-suspenders: the default code path
+    # via _start_chat_stream_for_session now always sets _status=200, but a
+    # custom runtime adapter may still return the old shape.
+    if isinstance(resp, dict) and resp.get("_status") is None and str(resp.get("stream_id") or "").strip():
+        # A stream_id alongside an explicit error is a half-formed response,
+        # not a successful start — do NOT normalize it to 200. Only a
+        # stream_id with no error is a genuine legacy success shape.
+        if not resp.get("error"):
+            resp = dict(resp)
+            resp["_status"] = 200
+
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is
     # attached to the new STREAMS[stream_id] (the browser only opens

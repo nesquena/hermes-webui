@@ -112,6 +112,7 @@ from api.routes import handle_delete, handle_get, handle_patch, handle_post, han
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
+from api.kanban_notifications import install_kanban_notification_watcher, uninstall_kanban_notification_watcher
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -632,19 +633,8 @@ def main() -> None:
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     try:
-        from api.gateway_watcher import start_watcher
-
-        def _start_watcher_safe():
-            try:
-                start_watcher()
-            except Exception as e:
-                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
-
-        t = threading.Thread(target=_start_watcher_safe, daemon=True)
-        t.start()
-        t.join(timeout=5)
-        if t.is_alive():
-            print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
+        from api.gateway_watcher import start_gateway_watcher_safe
+        start_gateway_watcher_safe()
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
@@ -661,6 +651,11 @@ def main() -> None:
             print('[ok] SessionChannel reaper thread started', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
+
+    try:
+        install_kanban_notification_watcher(print)
+    except Exception as e:
+        print(f'[!!] WARNING: Kanban notification watcher failed to start: {e}', flush=True)
 
     try:
         from api.plugins import load_plugins
@@ -725,6 +720,9 @@ def main() -> None:
     finally:
         httpd.server_close()
         _log_shutdown_audit()
+        # Stop the Kanban notifier first — it can spawn new daemon turns,
+        # and those must not land after the drain snapshot (addendum 5).
+        uninstall_kanban_notification_watcher()
         try:
             from api.gateway_watcher import stop_watcher
             stop_watcher()
@@ -745,5 +743,6 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
+
 if __name__ == '__main__':
     main()
