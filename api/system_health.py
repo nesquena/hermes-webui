@@ -213,29 +213,10 @@ def _cached_profile_sessions_cache_cap(_config) -> tuple[int, bool]:
         name = _profiles.get_active_profile_name()
         if not name:
             name = "default"
-        if name == "default":
-            home = _profiles._DEFAULT_HERMES_HOME
-        elif _profiles._PROFILE_ID_RE.fullmatch(name):
-            home = _profiles.get_cached_profile_home_for_diagnostics(name)
-            if home is None:
-                return _config.get_sessions_cache_max({}), False
-        else:
+        home = _profiles.get_cached_profile_home_for_diagnostics(name)
+        if home is None:
             return _config.get_sessions_cache_max({}), False
-        process_authority = None
-        cfg_path = getattr(_config, "_cfg_path", None)
-        if cfg_path is not None:
-            try:
-                if _config._sessions_cap_home_key(
-                    home
-                ) == _config._sessions_cap_home_key(Path(cfg_path).parent):
-                    process_authority = _config._sessions_cap_home_key(
-                        Path(cfg_path).parent
-                    )
-            except Exception:
-                pass
-        return _config.try_get_sessions_cap_snapshot(
-            home, process_authority=process_authority
-        )
+        return _config.try_get_sessions_cap_snapshot(home)
     except Exception:
         return _config.get_sessions_cache_max({}), False
 

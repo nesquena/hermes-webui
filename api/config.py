@@ -22,13 +22,11 @@ import socket
 import sys
 import threading
 import time
-import traceback
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
@@ -603,6 +601,31 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                     _cfg_mtime = 0.0
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
+    target_home = Path(config_path).parent
+    cfg_stat = None
+    env_stat = None
+    try:
+        cfg_stat = config_path.stat()
+        env_path = target_home / ".env"
+        env_stat = env_path.stat() if env_path.exists() else None
+    except OSError:
+        pass
+    generation = observe_sessions_cap_sources(
+        target_home,
+        (cfg_stat.st_mtime_ns, cfg_stat.st_size) if cfg_stat else None,
+        (env_stat.st_mtime_ns, env_stat.st_size) if env_stat else None,
+    )
+    process_authority = _process_interpolation_authority()
+    if (
+        _sessions_cap_home_key(target_home) == process_authority
+        and "get_sessions_cache_max" in globals()
+    ):
+        publish_sessions_cap_snapshot(
+            target_home,
+            _cfg_cache,
+            generation=generation,
+            process_authority=process_authority,
+        )
     _apply_config_defaults(_cfg_cache)
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
@@ -649,6 +672,10 @@ def _sessions_cap_home_key(profile_home: Path | str) -> str:
         return str(Path(profile_home).expanduser())
 
 
+def _process_interpolation_authority() -> str:
+    return _sessions_cap_home_key(os.getenv("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+
+
 def observe_sessions_cap_sources(profile_home: Path | str, config_signature: Any, env_signature: Any) -> int:
     key = _sessions_cap_home_key(profile_home)
     signature = (config_signature, env_signature)
@@ -677,7 +704,7 @@ def publish_sessions_cap_snapshot(profile_home: Path | str, config_data: dict, *
         if current is None or current[2] != generation:
             return
         existing = _sessions_cap_snapshots.get(key)
-        if existing and existing.get("process_authority") is not None and process_authority is None:
+        if existing and existing.get("process_authority") is None:
             return
         _sessions_cap_snapshots[key] = {
             "generation": generation,
@@ -717,8 +744,10 @@ def try_get_sessions_cap_snapshot(profile_home: Path | str, *, process_authority
         if not record or not generation or record["generation"] != generation[2]:
             return fallback, False
         attached = record.get("process_authority")
-        if attached is not None and attached != process_authority:
-            return fallback, False
+        if attached is not None:
+            current_authority = process_authority or _process_interpolation_authority()
+            if attached != key or attached != current_authority:
+                return fallback, False
         _sessions_cap_snapshots.move_to_end(key)
         return int(record["cap"]), True
     finally:
@@ -750,7 +779,6 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         st = config_path.stat()
     except OSError:
         # Missing or unstattable file — preserve the original "no config" contract.
-        observe_sessions_cap_sources(config_path.parent, None, None)
         return {}
 
     cache_key = str(config_path)
@@ -769,7 +797,6 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
         logger.debug("Failed to parse yaml config from %s", config_path)
-        observe_sessions_cap_sources(config_path.parent, (st.st_mtime_ns, st.st_size), None)
         return {}
 
     raw = loaded if isinstance(loaded, dict) else {}
@@ -784,30 +811,9 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     # deep-copy the raw dict first (keeps the /api/reasoning hot path cheap).
     raw = _load_yaml_config_file_raw(config_path, _copy=False)
     if not raw:
-        try:
-            observe_sessions_cap_sources(config_path.parent, None, None)
-        except Exception:
-            pass
         return {}
     expanded = _expand_env_vars(raw)
     result = expanded if isinstance(expanded, dict) else {}
-    try:
-        env_path = config_path.parent / ".env"
-        cfg_stat = config_path.stat()
-        env_stat = env_path.stat() if env_path.exists() else None
-        generation = observe_sessions_cap_sources(
-            config_path.parent,
-            (cfg_stat.st_mtime_ns, cfg_stat.st_size),
-            (env_stat.st_mtime_ns, env_stat.st_size) if env_stat else None,
-        )
-        publish_sessions_cap_snapshot(
-            config_path.parent,
-            result,
-            generation=generation,
-            process_authority=_sessions_cap_home_key(config_path.parent),
-        )
-    except OSError:
-        pass
     return result
 
 
@@ -9964,6 +9970,13 @@ try:
     init_profile_state()
 except ImportError:
     pass  # hermes_cli not available -- default profile only
+
+# The first reload runs before get_sessions_cache_max is defined. Reload once
+# after profile initialization so the startup profile has a diagnostic snapshot.
+try:
+    reload_config()
+except Exception:
+    logger.debug("Failed to publish startup session cap snapshot", exc_info=True)
 
 
 # Run the provider-model seeder once at import time. Must be at the END of the

@@ -386,6 +386,55 @@ def _read_active_profile_file() -> str:
 _root_profile_name_cache: set[str] = {'default'}
 _root_profile_name_cache_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
+_profile_home_snapshot: dict[str, Path] = {'default': _DEFAULT_HERMES_HOME}
+_profile_home_snapshot_version = 0
+
+
+def _canonical_profile_home(home: Path | str) -> Path:
+    return Path(home).expanduser().resolve()
+
+
+def _remember_profile_home(name: str, home: Path) -> None:
+    global _profile_home_snapshot, _profile_home_snapshot_version
+    if not name or not _PROFILE_ID_RE.fullmatch(name):
+        return
+    canonical_home = _canonical_profile_home(home)
+    with _root_profile_name_cache_lock:
+        snapshot = dict(_profile_home_snapshot)
+        snapshot[name] = canonical_home
+        _profile_home_snapshot = snapshot
+        _profile_home_snapshot_version += 1
+
+
+def _forget_profile_home(name: str, home: Path) -> None:
+    global _profile_home_snapshot, _profile_home_snapshot_version
+    with _root_profile_name_cache_lock:
+        if _profile_home_snapshot.get(name) != home:
+            return
+        snapshot = dict(_profile_home_snapshot)
+        snapshot.pop(name, None)
+        _profile_home_snapshot = snapshot
+        _profile_home_snapshot_version += 1
+
+
+def _publish_profile_home_snapshot(infos) -> None:
+    global _profile_home_snapshot, _profile_home_snapshot_version
+    snapshot = {'default': _DEFAULT_HERMES_HOME}
+    for profile in infos:
+        try:
+            name = profile.get('name')
+            if not name or not _PROFILE_ID_RE.fullmatch(name):
+                continue
+            if profile.get('is_default'):
+                snapshot[name] = _DEFAULT_HERMES_HOME
+            else:
+                profile_home = profile.get('path') or _DEFAULT_HERMES_HOME / 'profiles' / name
+                snapshot[name] = _canonical_profile_home(profile_home)
+        except (AttributeError, TypeError):
+            continue
+    with _root_profile_name_cache_lock:
+        _profile_home_snapshot = snapshot
+        _profile_home_snapshot_version += 1
 
 
 def _invalidate_root_profile_cache() -> None:
@@ -395,11 +444,12 @@ def _invalidate_root_profile_cache() -> None:
     delete, rename. The next _is_root_profile() call repopulates from
     list_profiles_api().
     """
-    global _root_profile_name_cache_loaded
+    global _root_profile_name_cache_loaded, _profile_home_snapshot_version
     with _root_profile_name_cache_lock:
         _root_profile_name_cache.clear()
         _root_profile_name_cache.add('default')
         _root_profile_name_cache_loaded = False
+        _profile_home_snapshot_version += 1
 
 
 def _is_root_profile(name: str) -> bool:
@@ -434,7 +484,9 @@ def _is_root_profile(name: str) -> bool:
             except (AttributeError, TypeError):
                 continue
         _root_profile_name_cache_loaded = True
-        return name in _root_profile_name_cache
+        result = name in _root_profile_name_cache
+    _publish_profile_home_snapshot(infos)
+    return result
 
 
 def _profiles_match(row_profile, active_profile) -> bool:
@@ -512,7 +564,7 @@ def _resolve_profile_home_for_name(name: str) -> Path:
     # startup HERMES_HOME so callers cannot resolve a foreign profile path.
     if _is_isolated_profile_mode():
         isolated_name = _isolated_profile_name()
-        isolated_home = Path(_INITIAL_HERMES_HOME).expanduser()
+        isolated_home = _canonical_profile_home(_INITIAL_HERMES_HOME)
         if name and not _profiles_match(name, isolated_name):
             logger.warning(
                 "Ignoring profile lookup %r in isolated profile mode; using pinned profile %r",
@@ -533,7 +585,7 @@ def get_active_hermes_home() -> Path:
     is respected, not just the process-level global.
     """
     if _is_isolated_profile_mode():
-        return Path(_INITIAL_HERMES_HOME).expanduser()
+        return _canonical_profile_home(_INITIAL_HERMES_HOME)
     return _resolve_profile_home_for_name(get_active_profile_name())
 
 
@@ -875,6 +927,7 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     """
     home = Path(home).expanduser()
     env: dict[str, str] = {}
+    _remember_profile_home(home.name, home)
 
     try:
         import yaml as _yaml
@@ -962,20 +1015,12 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
 
 
 def get_cached_profile_home_for_diagnostics(name: str) -> Path | None:
-    """Resolve a request profile without subprocesses or filesystem work."""
+    """Read the last authoritative profile-home identity without blocking."""
     if not name:
         name = "default"
-    if name == "default":
-        return _DEFAULT_HERMES_HOME
-    with _root_profile_name_cache_lock:
-        if _root_profile_name_cache_loaded and name in _root_profile_name_cache:
-            return _DEFAULT_HERMES_HOME
     if not _PROFILE_ID_RE.fullmatch(name):
         return None
-    with _root_profile_name_cache_lock:
-        if not _root_profile_name_cache_loaded:
-            return _DEFAULT_HERMES_HOME / "profiles" / name
-    return get_hermes_home_for_profile(name)
+    return _profile_home_snapshot.get(name)
 
 
 # Match Hermes Agent gateway behavior: profile-scoped WebUI runs should
@@ -1574,6 +1619,7 @@ def profile_scope_for_detached_worker(
 
 def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
+    home = _canonical_profile_home(home)
     os.environ['HERMES_HOME'] = str(home)
 
     patch_skill_home_modules(home)
@@ -1654,6 +1700,7 @@ def init_profile_state() -> None:
     else:
         _active_profile = _read_active_profile_file()
         home = get_active_hermes_home()
+    _remember_profile_home(_active_profile, home)
     _set_hermes_home(home)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
@@ -1715,6 +1762,8 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
+    _remember_profile_home(name, home)
+
     with _profile_lock:
         _SKILLS_STATS_CACHE.clear()
         if process_wide:
@@ -1733,6 +1782,8 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
 
         # Reload config.yaml from the new profile
         reload_config()
+    else:
+        get_profile_runtime_env(home)
 
     # Return profile-specific defaults so frontend can apply them.
     # For process_wide=False (per-client switch), read the target profile's
@@ -2709,6 +2760,13 @@ def delete_profile_api(name: str) -> dict:
     if _is_root_profile(name):
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
+    profile_home = _resolve_named_profile_home(name)
+    _forget_profile_home(name, profile_home)
+    try:
+        from api import config as _config
+        _config.invalidate_sessions_cap_snapshot(profile_home)
+    except Exception:
+        logger.debug("Failed to invalidate session cap snapshot", exc_info=True)
 
     # If deleting the active profile, switch to default first
     if _active_profile == name:
@@ -2718,7 +2776,7 @@ def delete_profile_api(name: str) -> dict:
             raise RuntimeError(
                 f"Cannot delete active profile '{name}' while an agent is running. "
                 "Cancel or wait for it to finish."
-            )
+            ) from None
 
     try:
         from hermes_cli.profiles import delete_profile
@@ -2726,11 +2784,11 @@ def delete_profile_api(name: str) -> dict:
     except ImportError:
         # Manual fallback: just remove the directory
         import shutil
-        profile_dir = _resolve_named_profile_home(name)
+        profile_dir = profile_home
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:
-            raise ValueError(f"Profile '{name}' does not exist.")
+            raise ValueError(f"Profile '{name}' does not exist.") from None
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
@@ -2738,7 +2796,7 @@ def delete_profile_api(name: str) -> dict:
     _invalidate_root_profile_cache()
     try:
         from api import config as _config
-        _config.invalidate_sessions_cap_snapshot(_resolve_named_profile_home(name))
+        _config.invalidate_sessions_cap_snapshot(profile_home)
     except Exception:
         logger.debug("Failed to invalidate session cap snapshot", exc_info=True)
     return {'ok': True, 'name': name}
