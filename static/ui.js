@@ -6495,17 +6495,17 @@ function _syncMobileCtxDisplay(state){
     }
     return;
   }
-  (function updateCtxRing(pct) {
+  (function updateCtxRing(pct, nativeManaged) {
     var arc = document.getElementById('ctx-arc');
     var num = document.getElementById('ctx-num');
     if (!arc || !num) return;
     var offset = 87.96 * (1 - Math.min(pct, 100) / 100);
     arc.setAttribute('stroke-dashoffset', offset);
     num.textContent = Math.round(pct);
-    arc.setAttribute('stroke',
-      pct <= 50 ? '#22c55e' : pct <= 85 ? '#f97316' : '#ef4444'
-    );
-  })(state.pct);
+    arc.setAttribute('stroke',nativeManaged
+      ? (getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()||'#7cb9ff')
+      : (pct <= 50 ? '#22c55e' : pct <= 85 ? '#f97316' : '#ef4444'));
+  })(state.pct,state.nativeManaged);
   if(mobileConfigBtn){
     mobileConfigBtn.setAttribute('aria-label',`${_MOBILE_CONFIG_BASE_LABEL}; ${state.label}`);
     mobileConfigBtn.setAttribute('title',`${_MOBILE_CONFIG_BASE_LABEL} \u00b7 ${state.label}`);
@@ -6513,8 +6513,9 @@ function _syncMobileCtxDisplay(state){
   if(row){
     row.style.display='';
     row.setAttribute('aria-label',state.label);
-    row.classList.toggle('ctx-mid',state.pct>50&&state.pct<=75);
-    row.classList.toggle('ctx-high',state.pct>75);
+    row.classList.toggle('ctx-native',!!state.nativeManaged);
+    row.classList.toggle('ctx-mid',!state.nativeManaged&&state.pct>50&&state.pct<=75);
+    row.classList.toggle('ctx-high',!state.nativeManaged&&state.pct>75);
   }
   if(usageLine)usageLine.textContent=state.usageText||'';
   if(tokensLine)tokensLine.textContent=state.tokensText||'';
@@ -6566,6 +6567,16 @@ function _mergeUsageForCtxIndicator(latest, fallback){
   return merged;
 }
 
+function _isCodexNativeContext(){
+  const provider=String(
+    (typeof S!=='undefined'&&S.session&&S.session.model_provider)
+    ||window._activeProvider
+    ||''
+  ).trim().toLowerCase();
+  return provider==='openai-codex'
+    &&String(window._codexAppServerAutoCompaction||'native').toLowerCase()==='native';
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
@@ -6608,6 +6619,7 @@ function _syncCtxIndicator(usage){
   }
   let hasPromptTok=!!promptTok;
   if(hasPostCompressionEstimate) hasPromptTok=true;
+  const nativeManaged=_isCodexNativeContext();
   const rawPct=hasPromptTok?Math.round((contextPromptTok/ctxWindow)*100):0;
   const pct=Math.min(100,rawPct);
   const overflowed=rawPct>100;
@@ -6624,32 +6636,47 @@ function _syncCtxIndicator(usage){
   }
   if(center) center.textContent=hasPromptTok?String(pct):'\u00b7';
   const hasExplicitCtx=!!usage.context_length;
-  el.classList.toggle('ctx-mid',pct>50&&pct<=75);
-  el.classList.toggle('ctx-high',pct>75);
+  el.classList.toggle('ctx-native',nativeManaged);
+  el.classList.toggle('ctx-mid',!nativeManaged&&pct>50&&pct<=75);
+  el.classList.toggle('ctx-high',!nativeManaged&&pct>75);
   // ── Compress affordance (#524) ──
   // Show a hint in the tooltip when context usage is high so users
   // discover /compress without having to know the slash command.
   const compressWrap=$('ctxTooltipCompress');
   const compressBtn=$('ctxCompressBtn');
-  const compressText=pct>=75?t('ctx_compress_action'):(pct>=50?t('ctx_compress_hint'):'');
+  const compressText=nativeManaged?'':(pct>=75?t('ctx_compress_action'):(pct>=50?t('ctx_compress_hint'):''));
   if(compressWrap) compressWrap.style.display=compressText?'':'none';
   _setCtxCompressButton(compressBtn,compressText);
   const cacheHitPct=usage.cache_hit_percent;
   const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
   const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
-  let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  let label=hasPromptTok
+    ? (nativeManaged?`Hermes context estimate ${pct}%`:`${contextLabel} ${pct}% used`)
+    : `${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
-  const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  const tokensText=hasPromptTok?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasPromptTok
+    ? (nativeManaged
+      ? `Hermes local estimate: ${pct}%`
+      : (overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`))
+    : `${_fmtTokens(totalTok)} tokens used`;
+  const tokensText=hasPromptTok
+    ? (nativeManaged
+      ? `${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} estimated locally`
+      : `${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`)
+    : `In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
   if(usageLine) usageLine.textContent=usageText;
   if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;
   let thresholdText='';
   if(thresholdLine){
-    if(threshold&&ctxWindow){
+    if(nativeManaged){
+      thresholdText='Compaction managed automatically by Codex';
+      thresholdLine.style.display='';
+      thresholdLine.textContent=thresholdText;
+    }else if(threshold&&ctxWindow){
       thresholdText=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
       thresholdLine.style.display='';
       thresholdLine.textContent=thresholdText;
@@ -6677,6 +6704,7 @@ function _syncCtxIndicator(usage){
   _syncMobileCtxDisplay({
     visible:true,
     hasPromptTok,
+    nativeManaged,
     pct,
     label,
     usageText,
