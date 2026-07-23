@@ -7473,6 +7473,8 @@ let _extensionsGalleryLoaded = false;
 let _extensionsActiveTab = 'gallery';
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
+let _appearanceAutosaveGeneration = 0;
+let _appearanceAutosaveWriteQueue=Promise.resolve();
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
@@ -8424,6 +8426,7 @@ function _appearancePayloadFromUi(){
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
     project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
+    sidebar_group_by_project: !!($('settingsSidebarGroupByProject')||{}).checked,
     ..._structuredCodeViewFromUi(),
     show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
@@ -8511,12 +8514,33 @@ function _scheduleAppearanceAutosave(){
   _settingsAppearanceAutosaveRetryPayload=payload;
   _setAppearanceAutosaveStatus('saving');
   if(_settingsAppearanceAutosaveTimer) clearTimeout(_settingsAppearanceAutosaveTimer);
-  _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload),350);
+  const generation=++_appearanceAutosaveGeneration;
+  _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload,generation),350);
+}
+
+function _queueAppearanceSettingsWrite(payload){
+  const write=_appearanceAutosaveWriteQueue.then(()=>api('/api/settings',{method:'POST',body:JSON.stringify(payload)}));
+  _appearanceAutosaveWriteQueue=write.catch(()=>{});
+  return write;
+}
+
+function _writeSettingsWithAppearanceBarrier(payload){
+  if(_settingsAppearanceAutosaveTimer){
+    clearTimeout(_settingsAppearanceAutosaveTimer);
+    _settingsAppearanceAutosaveTimer=null;
+  }
+  _appearanceAutosaveGeneration++;
+  _settingsAppearanceAutosaveRetryPayload=null;
+  _setAppearanceAutosaveStatus();
+  return _queueAppearanceSettingsWrite(payload);
 }
 
 async function _autosaveAppearanceSettings(payload){
+  const generation=arguments.length>1&&arguments[1]!=null?arguments[1]:_appearanceAutosaveGeneration;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const write=_queueAppearanceSettingsWrite(payload);
+    const saved=await write;
+    if(generation!==_appearanceAutosaveGeneration) return;
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
@@ -8540,6 +8564,8 @@ async function _autosaveAppearanceSettings(payload){
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
+    window._sidebarGroupByProject=!!(saved&&saved.sidebar_group_by_project);
+    if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
       // globals match exactly what was persisted.
@@ -8572,6 +8598,7 @@ async function _autosaveAppearanceSettings(payload){
     }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
+    if(generation!==_appearanceAutosaveGeneration) return;
     console.warn('[settings] appearance autosave failed', e);
     _setAppearanceAutosaveStatus('failed');
   }
@@ -8580,7 +8607,7 @@ async function _autosaveAppearanceSettings(payload){
 function _retryAppearanceAutosave(){
   const payload=_settingsAppearanceAutosaveRetryPayload||_appearancePayloadFromUi();
   _setAppearanceAutosaveStatus('saving');
-  _autosaveAppearanceSettings(payload);
+  _autosaveAppearanceSettings(payload,++_appearanceAutosaveGeneration);
 }
 
 // ── Phase 2: Preferences autosave (Issue #1003) ───────────────────────
@@ -9024,6 +9051,16 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const groupByProjectCb=$('settingsSidebarGroupByProject');
+    if(groupByProjectCb){
+      groupByProjectCb.checked=!!settings.sidebar_group_by_project;
+      window._sidebarGroupByProject=groupByProjectCb.checked;
+      groupByProjectCb.onchange=function(){
+        window._sidebarGroupByProject=this.checked;
+        try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+        _scheduleAppearanceAutosave();
+      };
+    }
     const structuredCodeModeSel=$('settingsStructuredCodeMode');
     const structuredCodeLinesField=$('settingsStructuredCodeAutoLines');
     if(structuredCodeModeSel){
@@ -9156,6 +9193,10 @@ async function loadSettingsPanel(){
     const langSel=$('settingsLanguage');
     if(langSel){
       langSel.innerHTML='';
+      langSel.addEventListener('change',function(){
+        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();}
+        _schedulePreferencesAutosave();
+      },{once:false});
       if(typeof LOCALES!=='undefined'){
         for(const [code,bundle] of Object.entries(LOCALES)){
           const opt=document.createElement('option');
@@ -9164,10 +9205,6 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
-        _schedulePreferencesAutosave();
-      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -11868,6 +11905,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
   window._projectQuickCreate=!!body.project_quick_create_buttons;
+  window._sidebarGroupByProject=!!body.sidebar_group_by_project;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
@@ -12502,6 +12540,7 @@ async function saveSettings(andClose){
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
   body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
+  body.sidebar_group_by_project=!!($('settingsSidebarGroupByProject')||{}).checked;
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
@@ -12558,7 +12597,8 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      // Keep the password-save path visibly on the shared api('/api/settings'...) surface the preflight guard audits.
+      const saved=await _writeSettingsWithAppearanceBarrier(payload);
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -12588,7 +12628,7 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _writeSettingsWithAppearanceBarrier(body);
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});

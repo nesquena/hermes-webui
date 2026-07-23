@@ -1100,6 +1100,13 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_project_quick_create">When enabled, each project chip in the sidebar gets a + button to start a conversation in that project.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSidebarGroupByProject" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_sidebar_group_by_project">Group sidebar conversations by project</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sidebar_group_by_project">When enabled, conversations are shown under project headings, with unassigned conversations last.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
               <label for="settingsStructuredCodeMode" data-i18n="settings_label_structured_code">JSON/YAML code blocks</label>
               <select id="settingsStructuredCodeMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="auto" data-i18n="settings_option_structured_code_auto">Auto: Tree for long blocks</option>
