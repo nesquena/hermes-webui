@@ -1352,6 +1352,11 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
+            try:
+                from api.route_approvals import force_clean_pending_approvals
+                force_clean_pending_approvals(session_id)
+            except Exception:
+                logger.debug("Failed to force-clean pending approvals at teardown")
         with STREAMS_LOCK:
             AGENT_INSTANCES.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

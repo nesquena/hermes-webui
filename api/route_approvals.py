@@ -142,11 +142,17 @@ def _normalize_pending_queue_locked(session_key: str) -> list[dict]:
 def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | None, int, bool]:
     """Purge stale gateway mirrors and ensure at most one live head mirror exists.
 
-    CALLER MUST HOLD `_lock`.
+    CALLER MUST HOLD ``_lock``.
+
+    When *session_key* is tombstoned (callback unregistered at teardown),
+    this function treats the live gateway queue as empty — no new mirrors
+    are created from lingering gateway entries.  This closes the
+    post-unregister re-enqueue race (#6100): a surviving sub-agent thread
+    cannot recreate a stale mirror after the parent stream has torn down.
     """
     changed = False
     queue_list = list(_normalize_pending_queue_locked(session_key))
-    live_gateway_queue = _gateway_queues.get(session_key) or []
+    live_gateway_queue: list = (_gateway_queues.get(session_key) or []) if session_key not in _approval_tombstones else []
 
     live_head_entry = live_gateway_queue[0] if live_gateway_queue else None
     live_head_data = getattr(live_head_entry, "data", None) or {}
@@ -636,3 +642,57 @@ def submit_pending(session_key: str, approval: dict) -> None:
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
+
+
+# ── Post-unregister tombstone set ───────────────────────────────────────────
+# Sessions whose approval callback has been unregistered (teardown).  When
+# a surviving sub-agent thread later calls submit_pending / the gateway
+# mirror callback under the old session key, the tombstone prevents new
+# mirrors or pending entries from being created for a dead stream (#6100).
+_approval_tombstones: set[str] = set()
+
+
+def mark_approval_tombstone(session_key: str) -> None:
+    """Mark *session_key* as tombstoned — no new mirrors/pendings are accepted.
+
+    Must be called after ``unregister_gateway_notify`` so the agent-side
+    callback is already dropped.  Any surviving sub-agent thread that tries
+    to enqueue an approval under the old session key will see the tombstone
+    and skip creating a stale entry.
+    """
+    with _lock:
+        _approval_tombstones.add(session_key)
+
+
+def clear_approval_tombstone(session_key: str) -> None:
+    """Remove the tombstone, e.g. when a new stream starts for this session."""
+    with _lock:
+        _approval_tombstones.discard(session_key)
+
+
+def force_clean_pending_approvals(session_key: str) -> None:
+    """Reconcile the approval mirror for *session_key* at stream teardown.
+
+    This function does **not** wipe the entire ``_pending`` dict or the
+    ``_gateway_queues`` for the session.  Instead it delegates to
+    ``reconcile_gateway_pending_mirror_locked`` which:
+
+    * purges stale gateway mirrors (underlying gateway entry is gone)
+    * preserves still-live gateway mirrors (underlying gateway entry exists)
+    * preserves non-gateway local pending entries
+
+    The session-wide wipe that existed before was too aggressive — it deleted
+    approvals it did not own, including a still-live gateway mirror and
+    non-gateway local approvals that should survive teardown.
+
+    The post-unregister re-enqueue race is closed by the
+    ``_approval_tombstones`` set: after ``unregister_gateway_notify`` the
+    teardown path calls ``mark_approval_tombstone``, and
+    ``reconcile_gateway_pending_mirror_locked`` will refuse to create new
+    mirrors from the live gateway queue for tombstoned sessions.
+    """
+    with _lock:
+        head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    if changed:
+        publish_session_list_changed("attention_pending")
