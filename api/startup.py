@@ -3,6 +3,11 @@ from __future__ import annotations
 import os, stat, subprocess, sys
 from pathlib import Path
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - resource is Unix-only
+    resource = None
+
 # Credential files that should never be world-readable
 _SENSITIVE_FILES = (
     '.env',
@@ -11,6 +16,27 @@ _SENSITIVE_FILES = (
     '.signing_key',
     'auth.json',
 )
+
+
+def _raise_fd_soft_limit(target: int = 4096) -> dict:
+    """Best-effort raise of RLIMIT_NOFILE for persistent WebUI hosts."""
+    if resource is None:
+        return {"status": "unsupported"}
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+    desired = int(target)
+    if hard not in (-1, getattr(resource, "RLIM_INFINITY", object())):
+        desired = min(desired, int(hard))
+    if soft >= desired:
+        return {"status": "unchanged", "soft": soft, "hard": hard}
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+    except Exception as exc:
+        return {"status": "error", "soft": soft, "hard": hard, "error": str(exc)}
+    return {"status": "raised", "soft": desired, "hard": hard, "previous_soft": soft}
 
 
 def fix_credential_permissions() -> None:

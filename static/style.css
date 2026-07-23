@@ -5059,6 +5059,23 @@ main.main > #mainPlugin{display:none;}
   cursor:not-allowed;
 }
 
+/* Custom wallpaper control: restrained native settings treatment. */
+.wallpaper-settings{display:grid;gap:10px;}
+.wallpaper-description,.wallpaper-file-name,.wallpaper-status{font-size:11px;color:var(--muted);}
+.wallpaper-drop-zone{position:relative;min-height:118px;border:1px dashed var(--border2);border-radius:10px;background:var(--surface);display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:pointer;text-align:center;}
+.wallpaper-drop-zone:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.wallpaper-drop-copy{display:grid;gap:4px;padding:18px;color:var(--muted);font-size:11px;}
+.wallpaper-drop-copy strong{font-size:13px;color:var(--text);font-weight:600;}
+#wallpaperPreview{position:absolute;inset:0;width:100%;height:100%;aspect-ratio:16/9;object-fit:cover;background:var(--bg);}
+.wallpaper-control-row{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+#wallpaperOpacity{width:100%;accent-color:var(--accent);}
+.wallpaper-scope{border:0;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:12px 18px;}
+.wallpaper-scope legend{font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px;}
+.wallpaper-scope label{font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer;}
+.wallpaper-scope input{accent-color:var(--accent);}
+.wallpaper-status{min-height:16px;}.wallpaper-status.is-error{color:var(--error);}
+.wallpaper-actions{display:flex;gap:8px;flex-wrap:wrap;}
+
 /* Sidebar tab visibility — hide nav-tab and matching rail-btn when toggled off by user */
 .nav-tab-hidden{display:none!important;}
 
@@ -7276,3 +7293,48 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+/* Active wallpaper rendering — every override is guarded; inactive layout is unchanged. */
+#wallpaperLayer{position:fixed;inset:0;background-image:var(--wallpaper-image);background-position:center;background-size:cover;background-repeat:no-repeat;opacity:var(--wallpaper-opacity);pointer-events:none;z-index:0;display:none;}
+:root[data-wallpaper="active"] #wallpaperLayer{display:block;}
+:root[data-wallpaper="active"] .layout{position:relative;z-index:1;}
+
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .main{background:transparent;}
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .main-view:not(#mainChat){background:var(--bg);}
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] #mainChat,
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .messages-shell,
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .messages,
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .empty-state{background:transparent;}
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .composer-wrap{background:color-mix(in srgb,var(--bg) 82%,transparent);}
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,color-mix(in srgb,var(--bg) 82%,transparent));}
+:root[data-wallpaper="active"][data-wallpaper-scope="chat"] .composer-box{background:color-mix(in srgb,var(--input-bg) 90%,transparent);}
+
+:root[data-wallpaper="active"][data-wallpaper-scope="app"]{--wallpaper-chrome:color-mix(in srgb,var(--sidebar) 82%,transparent);--wallpaper-main:color-mix(in srgb,var(--bg) 82%,transparent);--wallpaper-composer:color-mix(in srgb,var(--input-bg) 90%,transparent);}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .app-titlebar,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .rail,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .sidebar,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .rightpanel{background:var(--wallpaper-chrome);}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .sidebar .panel-view,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .rightpanel .panel-header,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .workspace-panel-tabs{background:transparent;}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .main,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .topbar,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap{background:var(--wallpaper-main);}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .main-view,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] #mainChat,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .messages-shell,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .messages,
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .empty-state{background:transparent;}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--wallpaper-main));}
+:root[data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box{background:var(--wallpaper-composer);}
+
+:root[data-skin="graphite"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
+:root[data-skin="github"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
+:root[data-skin="codex"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
+:root[data-skin="terracotta"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap,
+:root[data-skin="geist-contrast"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-wrap{background:var(--wallpaper-main)!important;}
+:root[data-skin="graphite"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
+:root[data-skin="github"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
+:root[data-skin="codex"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
+:root[data-skin="terracotta"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box,
+:root[data-skin="geist-contrast"][data-wallpaper="active"][data-wallpaper-scope="app"] .composer-box{background:var(--wallpaper-composer)!important;}

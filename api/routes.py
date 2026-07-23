@@ -13,6 +13,7 @@ import gzip
 import json
 from api.sse_chunked import end_sse_headers
 import logging
+import math
 import os
 import queue
 import re
@@ -2815,6 +2816,8 @@ from api.config import (
     load_settings,
     persisted_speech_settings_keys,
     save_settings,
+    WALLPAPER_SETTINGS_KEYS,
+    _public_settings,
     SETTINGS_FILE,
     set_hermes_default_model,
     canonical_model_provider_lane,
@@ -11976,6 +11979,52 @@ def _render_index_shell_base() -> str:
     return base
 
 
+def _wallpaper_info_payload(info) -> dict:
+    return {
+        "has_wallpaper": info.has_wallpaper,
+        "opacity": info.opacity,
+        "scope": info.scope,
+        "mime_type": info.mime_type,
+        "image_version": info.image_version,
+    }
+
+
+def _wallpaper_etag_matches(raw_header: str | None, etag: str) -> bool:
+    if not raw_header:
+        return False
+    return any(token.strip() in {"*", etag} for token in raw_header.split(","))
+
+
+def _handle_wallpaper_info(handler) -> bool:
+    from api.wallpaper import get_wallpaper_info
+
+    return j(handler, _wallpaper_info_payload(get_wallpaper_info())) or True
+
+
+def _handle_wallpaper_image(handler) -> bool:
+    from api.wallpaper import open_wallpaper_snapshot
+
+    snapshot = open_wallpaper_snapshot()
+    if snapshot is None:
+        return bad(handler, "Wallpaper not found", status=404) or True
+
+    with snapshot:
+        not_modified = _wallpaper_etag_matches(
+            handler.headers.get("If-None-Match"), snapshot.etag
+        )
+        handler.send_response(304 if not_modified else 200)
+        if not not_modified:
+            handler.send_header("Content-Type", snapshot.mime_type)
+            handler.send_header("Content-Length", str(snapshot.size))
+        handler.send_header("ETag", snapshot.etag)
+        handler.send_header("Cache-Control", "private, no-cache")
+        _security_headers(handler)
+        handler.end_headers()
+        if not not_modified:
+            shutil.copyfileobj(snapshot.file, handler.wfile, length=64 * 1024)
+    return True
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -12224,6 +12273,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/api/") and not _guard_request_session_visibility(handler, parsed, method="GET"):
         return True
 
+    if parsed.path == "/api/wallpaper/info":
+        return _handle_wallpaper_info(handler)
+    if parsed.path == "/api/wallpaper/image":
+        return _handle_wallpaper_image(handler)
+
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
@@ -12429,10 +12483,8 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, get_provider_cost_history(provider_id, days))
 
     if parsed.path == "/api/settings":
-        settings = load_settings()
+        settings = _public_settings(load_settings())
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
-        # Never expose the stored password hash to clients
-        settings.pop("password_hash", None)
         settings.setdefault("max_tokens", None)
         settings.setdefault("max_tokens_effective", None)
         settings.setdefault("max_tokens_fallback", None)
@@ -13899,6 +13951,182 @@ def _validate_session_toolsets_shape(toolsets):
         raise ValueError("each toolset must be a non-empty string")
     return toolsets
 
+WALLPAPER_UPLOAD_TIMEOUT_SECONDS = 30.0
+WALLPAPER_UPLOAD_FRAMING_GRACE_SECONDS = 0.10
+_WALLPAPER_UPLOAD_CHUNK_BYTES = 64 * 1024
+_WALLPAPER_OPACITY_RE = re.compile(r"(?:0|1|0\.[0-9]+|1\.0+)\Z")
+_WALLPAPER_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _wallpaper_header_values(handler, name: str) -> list[str]:
+    headers = handler.headers
+    if hasattr(headers, "get_all"):
+        return list(headers.get_all(name, []))
+    value = headers.get(name)
+    return [] if value is None else [value]
+
+
+def _wallpaper_error(handler, exc: Exception) -> bool:
+    from api.wallpaper import (
+        WallpaperCollisionError,
+        WallpaperNotFoundError,
+        WallpaperPersistenceError,
+        WallpaperTooLargeError,
+        WallpaperUnavailableError,
+        WallpaperValidationError,
+    )
+
+    if isinstance(exc, WallpaperTooLargeError):
+        status, message = 413, "Wallpaper exceeds encoded size limit"
+    elif isinstance(exc, WallpaperValidationError):
+        status, message = 400, "Invalid wallpaper image"
+    elif isinstance(exc, WallpaperNotFoundError):
+        status, message = 404, "Wallpaper not found"
+    elif isinstance(
+        exc,
+        (WallpaperCollisionError, WallpaperUnavailableError, WallpaperPersistenceError),
+    ):
+        status, message = 500, "Wallpaper storage operation failed"
+    else:
+        logger.exception("Unexpected wallpaper route failure")
+        status, message = 500, "Wallpaper operation failed"
+    return bad(handler, message, status=status) or True
+
+
+def _wallpaper_upload_error(handler, message: str, status: int = 400) -> bool:
+    handler.close_connection = True
+    return bad(handler, message, status=status) or True
+
+
+def _parse_wallpaper_content_length(handler) -> int:
+    if _wallpaper_header_values(handler, "Transfer-Encoding"):
+        raise ValueError("Transfer-Encoding is not supported")
+    content_types = _wallpaper_header_values(handler, "Content-Type")
+    if content_types != ["application/octet-stream"]:
+        raise ValueError("Content-Type must be application/octet-stream")
+    lengths = _wallpaper_header_values(handler, "Content-Length")
+    if len(lengths) != 1:
+        raise ValueError("Exactly one Content-Length is required")
+    raw = lengths[0]
+    if not isinstance(raw, str) or not raw or re.fullmatch(r"[0-9]+", raw) is None:
+        raise ValueError("Invalid Content-Length")
+    normalized = raw.lstrip("0") or "0"
+    maximum = str(10 * 1024 * 1024)
+    if len(normalized) > len(maximum) or (
+        len(normalized) == len(maximum) and normalized > maximum
+    ):
+        raise OverflowError("Wallpaper exceeds encoded size limit")
+    length = int(normalized)
+    if length == 0:
+        raise ValueError("Wallpaper body is empty")
+    return length
+
+
+def _decode_wallpaper_query_component(raw: str) -> str:
+    if _WALLPAPER_PERCENT_RE.search(raw):
+        raise ValueError("Malformed wallpaper query")
+    from urllib.parse import unquote_to_bytes
+
+    decoded = unquote_to_bytes(raw)
+    if any(byte < 0x20 or byte > 0x7E for byte in decoded):
+        raise ValueError("Invalid wallpaper query characters")
+    return decoded.decode("ascii")
+
+
+def _parse_wallpaper_upload_query(parsed) -> tuple[float, str]:
+    if getattr(parsed, "fragment", "") or not parsed.query or ";" in parsed.query:
+        raise ValueError("Invalid wallpaper query")
+    values: dict[str, list[str]] = {}
+    for field in parsed.query.split("&"):
+        if "=" not in field:
+            raise ValueError("Invalid wallpaper query")
+        raw_key, raw_value = field.split("=", 1)
+        key = _decode_wallpaper_query_component(raw_key)
+        value = _decode_wallpaper_query_component(raw_value)
+        values.setdefault(key, []).append(value)
+    if set(values) != {"opacity", "scope"} or any(
+        len(items) != 1 or not items[0] for items in values.values()
+    ):
+        raise ValueError("Wallpaper query requires opacity and scope")
+    opacity_text = values["opacity"][0]
+    scope = values["scope"][0]
+    if _WALLPAPER_OPACITY_RE.fullmatch(opacity_text) is None:
+        raise ValueError("Invalid wallpaper opacity")
+    opacity = float(opacity_text)
+    if opacity < 0 or opacity > 1:
+        raise ValueError("Invalid wallpaper opacity")
+    if scope not in {"chat", "app"}:
+        raise ValueError("Invalid wallpaper scope")
+    return opacity, scope
+
+
+def _wallpaper_request_socket(handler):
+    request = getattr(handler, "request", None)
+    return request if hasattr(request, "settimeout") else None
+
+
+def _read_wallpaper_upload_body(handler, length: int) -> bytes:
+    deadline = time.monotonic() + WALLPAPER_UPLOAD_TIMEOUT_SECONDS
+    sock = _wallpaper_request_socket(handler)
+    old_timeout = sock.gettimeout() if sock is not None else None
+    chunks = []
+    remaining = length
+    try:
+        while remaining:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise TimeoutError("Wallpaper upload timed out")
+            if sock is not None:
+                sock.settimeout(timeout)
+            chunk = handler.rfile.read(min(_WALLPAPER_UPLOAD_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise ValueError("Wallpaper upload body is incomplete")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+
+        if sock is None:
+            trailing = handler.rfile.read(1)
+        else:
+            grace = min(
+                WALLPAPER_UPLOAD_FRAMING_GRACE_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            )
+            if grace <= 0:
+                raise TimeoutError("Wallpaper upload timed out")
+            sock.settimeout(grace)
+            try:
+                trailing = handler.rfile.peek(1)[:1]
+            except (_socket.timeout, TimeoutError):
+                trailing = b""
+        if trailing:
+            if length == 10 * 1024 * 1024:
+                raise OverflowError("Wallpaper exceeds encoded size limit")
+            raise ValueError("Wallpaper upload contains trailing data")
+        return b"".join(chunks)
+    finally:
+        if sock is not None:
+            sock.settimeout(old_timeout)
+
+
+def _handle_wallpaper_upload(handler, parsed) -> bool:
+    from api.wallpaper import replace_wallpaper
+
+    handler.close_connection = True
+    try:
+        length = _parse_wallpaper_content_length(handler)
+        opacity, scope = _parse_wallpaper_upload_query(parsed)
+        image = _read_wallpaper_upload_body(handler, length)
+    except OverflowError:
+        return _wallpaper_upload_error(handler, "Wallpaper exceeds encoded size limit", 413)
+    except (ValueError, _socket.timeout, TimeoutError, OSError):
+        return _wallpaper_upload_error(handler, "Invalid wallpaper upload")
+    try:
+        info = replace_wallpaper(image, opacity=opacity, scope=scope)
+    except Exception as exc:
+        return _wallpaper_error(handler, exc)
+    return j(handler, _wallpaper_info_payload(info)) or True
+
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -13981,6 +14209,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
+
+    if parsed.path == "/api/wallpaper":
+        return _handle_wallpaper_upload(handler, parsed)
 
     if parsed.path == "/api/client-events/log":
         if diag:
@@ -15644,6 +15875,11 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
+        if not isinstance(body, dict):
+            return bad(handler, "Settings payload must be a JSON object")
+        if set(body).intersection(WALLPAPER_SETTINGS_KEYS):
+            return bad(handler, "Wallpaper settings require the dedicated wallpaper API")
+
         from api.auth import (
             create_session,
             get_password_hash,
@@ -15742,11 +15978,10 @@ def handle_post(handler, parsed) -> bool:
 
         from api.config import get_max_tokens_status, set_max_tokens
 
-        saved = save_settings(body)
+        saved = _public_settings(save_settings(body))
         saved["persisted_speech_keys"] = persisted_speech_settings_keys()
         if max_tokens_provided:
             max_tokens_status = set_max_tokens(max_tokens_value)
-        saved.pop("password_hash", None)  # never expose hash to client
         saved.update(max_tokens_status if max_tokens_provided else get_max_tokens_status())
 
         # Settings that change which sessions appear in the sidebar must
@@ -16557,10 +16792,93 @@ def handle_post(handler, parsed) -> bool:
     return False  # 404
 
 
+def _strict_wallpaper_json_object(handler) -> dict:
+    lengths = _wallpaper_header_values(handler, "Content-Length")
+    if len(lengths) != 1 or re.fullmatch(r"[0-9]+", lengths[0] or "") is None:
+        raise ValueError("Invalid Content-Length")
+    length = int(lengths[0])
+    if length <= 0 or length > MAX_BODY_BYTES:
+        raise ValueError("Invalid wallpaper metadata body")
+    raw = handler.rfile.read(length)
+    if len(raw) != length:
+        raise ValueError("Incomplete wallpaper metadata body")
+
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate wallpaper metadata key")
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError("Invalid wallpaper metadata number")
+
+    try:
+        body = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=unique_pairs,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid wallpaper metadata JSON") from exc
+    if not isinstance(body, dict) or set(body) != {"opacity", "scope"}:
+        raise ValueError("Wallpaper metadata requires exactly opacity and scope")
+    opacity = body["opacity"]
+    scope = body["scope"]
+    if (
+        isinstance(opacity, bool)
+        or not isinstance(opacity, (int, float))
+        or not math.isfinite(opacity)
+        or opacity < 0
+        or opacity > 1
+    ):
+        raise ValueError("Invalid wallpaper opacity")
+    if scope not in {"chat", "app"}:
+        raise ValueError("Invalid wallpaper scope")
+    return {"opacity": opacity, "scope": scope}
+
+
+def _handle_wallpaper_patch(handler) -> bool:
+    from api.wallpaper import update_wallpaper_metadata
+
+    try:
+        metadata = _strict_wallpaper_json_object(handler)
+    except (TypeError, ValueError):
+        return bad(handler, "Invalid wallpaper metadata", status=400) or True
+    try:
+        info = update_wallpaper_metadata(**metadata)
+    except Exception as exc:
+        return _wallpaper_error(handler, exc)
+    return j(handler, _wallpaper_info_payload(info)) or True
+
+
+def _handle_wallpaper_delete(handler) -> bool:
+    from api.wallpaper import clear_wallpaper
+
+    transfers = _wallpaper_header_values(handler, "Transfer-Encoding")
+    lengths = _wallpaper_header_values(handler, "Content-Length")
+    valid_length = not lengths or (
+        len(lengths) == 1
+        and re.fullmatch(r"[0-9]+", lengths[0] or "") is not None
+        and int(lengths[0]) == 0
+    )
+    if transfers or not valid_length:
+        handler.close_connection = True
+        return bad(handler, "DELETE wallpaper request must be bodyless", status=400) or True
+    try:
+        info = clear_wallpaper()
+    except Exception as exc:
+        return _wallpaper_error(handler, exc)
+    return j(handler, _wallpaper_info_payload(info)) or True
+
+
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    if parsed.path == "/api/wallpaper":
+        return _handle_wallpaper_patch(handler)
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,
@@ -16589,6 +16907,8 @@ def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    if parsed.path == "/api/wallpaper":
+        return _handle_wallpaper_delete(handler)
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,

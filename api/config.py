@@ -11,10 +11,12 @@ Discovery order for all paths:
 
 import collections
 import copy
+import errno
 import hashlib
 import json
 import logging
 import math
+import numbers
 import os
 import queue
 import re
@@ -9271,7 +9273,77 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
+    "wallpaper_file": "",
+    "wallpaper_opacity": 0.8,
+    "wallpaper_scope": "chat",
 }
+WALLPAPER_SETTINGS_KEYS = {
+    "wallpaper_file",
+    "wallpaper_opacity",
+    "wallpaper_scope",
+}
+_WALLPAPER_FILE_RE = re.compile(r"^wallpaper-[0-9a-f]{64}\.(?:jpg|png|webp)$")
+
+
+def _public_settings(settings: dict) -> dict:
+    """Project internal settings into the generic settings API schema."""
+    public = dict(settings)
+    public.pop("password_hash", None)
+    for key in WALLPAPER_SETTINGS_KEYS:
+        public.pop(key, None)
+    return public
+
+
+def _validate_wallpaper_internal_update(update: dict) -> None:
+    """Validate a trusted wallpaper-service settings update without coercion."""
+    if not isinstance(update, dict):
+        raise TypeError("wallpaper update must be a dict")
+    unknown_keys = set(update) - WALLPAPER_SETTINGS_KEYS
+    if unknown_keys:
+        raise ValueError(f"unsupported wallpaper settings keys: {sorted(unknown_keys)!r}")
+
+    if "wallpaper_file" in update:
+        value = update["wallpaper_file"]
+        if not isinstance(value, str) or (
+            value != "" and _WALLPAPER_FILE_RE.fullmatch(value) is None
+        ):
+            raise ValueError("invalid wallpaper_file")
+    if "wallpaper_opacity" in update:
+        value = update["wallpaper_opacity"]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, numbers.Real)
+            or not math.isfinite(value)
+            or value < 0
+            or value > 1
+        ):
+            raise ValueError("invalid wallpaper_opacity")
+    if "wallpaper_scope" in update:
+        value = update["wallpaper_scope"]
+        if not isinstance(value, str) or value not in {"chat", "app"}:
+            raise ValueError("invalid wallpaper_scope")
+
+
+def _normalize_persisted_wallpaper_state(stored: dict) -> dict:
+    """Return safe wallpaper metadata without inspecting any referenced file."""
+    normalized = {
+        "wallpaper_file": "",
+        "wallpaper_opacity": 0.8,
+        "wallpaper_scope": "chat",
+    }
+    if not isinstance(stored, dict):
+        return normalized
+    for key in WALLPAPER_SETTINGS_KEYS:
+        if key not in stored:
+            continue
+        try:
+            _validate_wallpaper_internal_update({key: stored[key]})
+        except (TypeError, ValueError):
+            continue
+        normalized[key] = stored[key]
+    return normalized
+
+
 _SETTINGS_SPEECH_KEYS = {
     "tts_enabled",
     "tts_auto_read",
@@ -9460,6 +9532,7 @@ def load_settings() -> dict:
         # Honor a stored True only when that marker is present.
         if not bool(stored.get("virtualize_transcript_optin")):
             settings["virtualize_transcript"] = False
+    settings.update(_normalize_persisted_wallpaper_state(stored))
     settings["theme"], settings["skin"] = _normalize_appearance(
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
@@ -9478,6 +9551,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
     "simplified_tool_calling",
+    *WALLPAPER_SETTINGS_KEYS,
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
@@ -9568,7 +9642,48 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 _SETTINGS_WRITE_VERSION = 0
-_SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+_SETTINGS_WRITE_LOCK = threading.RLock()
+_WALLPAPER_WRITE_CAPABILITY = object()
+
+
+class SettingsPersistenceError(RuntimeError):
+    """Settings write failure with explicit replacement commit state."""
+
+    NOT_COMMITTED = "NOT_COMMITTED"
+    COMMITTED_OR_INDETERMINATE = "COMMITTED_OR_INDETERMINATE"
+
+    def __init__(self, commit_state: str) -> None:
+        self.commit_state = commit_state
+        super().__init__(f"Settings persistence failed ({commit_state})")
+
+
+_DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS = {
+    errno.EINVAL,
+    errno.ENOTSUP,
+    errno.EOPNOTSUPP,
+    errno.EBADF,
+}
+
+
+def _fsync_settings_parent(parent: Path) -> None:
+    """Fsync *parent* when supported so a replaced directory entry is durable."""
+    o_directory = getattr(os, "O_DIRECTORY", None)
+    if o_directory is None:
+        return
+    try:
+        fd = os.open(parent, os.O_RDONLY | o_directory)
+    except OSError as exc:
+        if exc.errno in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
+            return
+        raise
+    try:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
+                raise
+    finally:
+        os.close(fd)
 
 
 def _atomic_write_settings_text(path: Path, text: str) -> None:
@@ -9598,17 +9713,28 @@ def _atomic_write_settings_text(path: Path, text: str) -> None:
     tmp = write_path.with_name(
         f".{write_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
+    replaced = False
     try:
-        mode = os.stat(write_path).st_mode & 0o777
-    except FileNotFoundError:
-        mode = 0o666 & ~_current_umask()
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, write_path)
+        try:
+            try:
+                mode = os.stat(write_path).st_mode & 0o777
+            except FileNotFoundError:
+                mode = 0o666 & ~_current_umask()
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, mode)
+            os.replace(tmp, write_path)
+            replaced = True
+            _fsync_settings_parent(write_path.parent)
+        except Exception as exc:
+            commit_state = (
+                SettingsPersistenceError.COMMITTED_OR_INDETERMINATE
+                if replaced
+                else SettingsPersistenceError.NOT_COMMITTED
+            )
+            raise SettingsPersistenceError(commit_state) from exc
     finally:
         try:
             os.unlink(tmp)
@@ -9642,6 +9768,27 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+    with _SETTINGS_WRITE_LOCK:
+        return _save_settings_locked(settings)
+
+
+def _settings_lock_is_owned() -> bool:
+    is_owned = getattr(_SETTINGS_WRITE_LOCK, "_is_owned", None)
+    return bool(is_owned and is_owned())
+
+
+def _save_wallpaper_settings_locked(update: dict) -> dict:
+    """Persist strict internal wallpaper metadata while the shared lock is held."""
+    assert _settings_lock_is_owned(), "caller must own _SETTINGS_WRITE_LOCK"
+    _validate_wallpaper_internal_update(update)
+    return _save_settings_locked(update, _capability=_WALLPAPER_WRITE_CAPABILITY)
+
+
+def _save_settings_locked(settings: dict, *, _capability: object | None = None) -> dict:
+    """Merge and persist settings; caller must own _SETTINGS_WRITE_LOCK."""
+    wallpaper_update: dict = {}
+    if _capability is _WALLPAPER_WRITE_CAPABILITY:
+        wallpaper_update = {key: settings[key] for key in WALLPAPER_SETTINGS_KEYS if key in settings}
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
@@ -9773,6 +9920,7 @@ def save_settings(settings: dict) -> dict:
             current[k] = v
             if key_is_speech:
                 applied_speech_keys.add(k)
+    current.update(wallpaper_update)
     theme_value = pending_theme
     skin_value = pending_skin
     if theme_was_explicit and not skin_was_explicit:
@@ -9787,14 +9935,19 @@ def save_settings(settings: dict) -> dict:
     effective_persisted_speech_keys = set(persisted_speech_keys)
     effective_persisted_speech_keys.update(applied_speech_keys)
     persisted = _settings_payload_for_write(current, effective_persisted_speech_keys)
+    if _capability is not _WALLPAPER_WRITE_CAPABILITY:
+        for key in WALLPAPER_SETTINGS_KEYS:
+            if key in raw_settings:
+                persisted[key] = raw_settings[key]
+            else:
+                persisted.pop(key, None)
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_settings_text(
         SETTINGS_FILE,
         json.dumps(persisted, ensure_ascii=False, indent=2),
     )
     global _SETTINGS_WRITE_VERSION
-    with _SETTINGS_WRITE_LOCK:
-        _SETTINGS_WRITE_VERSION += 1
+    _SETTINGS_WRITE_VERSION += 1
     # Invalidate the in-memory password hash cache so the next call to
     # get_password_hash() picks up the new value from disk immediately.
     if _password_changed:
