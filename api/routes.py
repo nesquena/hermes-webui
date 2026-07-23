@@ -3208,6 +3208,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
+    artifacts: list[dict] = []
+    side_effects: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
     last_ts = None
@@ -3349,6 +3351,37 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name == "artifact_reference":
+            if isinstance(payload, dict) and payload:
+                entry: dict = {
+                    "source_event_type": "artifact_reference",
+                    "payload": dict(payload),
+                }
+                for key in ("kind", "path"):
+                    value = payload.get(key)
+                    if value is not None:
+                        entry[key] = str(value)
+                event_id = event.get("event_id")
+                if event_id:
+                    entry["event_id"] = str(event_id)
+                artifacts.append(entry)
+            continue
+        if event_name == "state_saved":
+            if isinstance(payload, dict) and payload:
+                entry: dict = {
+                    "source_event_type": "state_saved",
+                    "payload": dict(payload),
+                }
+                for key in ("kind", "name", "action"):
+                    value = payload.get(key)
+                    if value is not None:
+                        entry[key] = str(value)
+                event_id = event.get("event_id")
+                if event_id:
+                    entry["event_id"] = str(event_id)
+                side_effects.append(entry)
+            continue
 
     if assistant_text or reasoning_text:
         message = {
@@ -3719,6 +3752,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "artifacts": artifacts,
+            "side_effects": side_effects,
         },
     }
 
@@ -18919,7 +18954,7 @@ def _handle_media(handler, parsed):
         "video/mp4", "video/quicktime", "video/webm", "video/ogg",
         "application/pdf",
     }
-    _SESSION_MEDIA_TOKEN_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | {"text/html"}
+    _SESSION_MEDIA_TOKEN_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | {"text/html", "text/markdown"}
     session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
         target,
