@@ -1576,18 +1576,46 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
-def _cleanup_ephemeral_cancelled_turn(session) -> None:
-    """Remove transient /btw session state after a cancel without saving it."""
+def _cleanup_ephemeral_session(
+    session,
+    *,
+    checkpoint_stop=None,
+    checkpoint_thread=None,
+) -> None:
+    """Stop checkpoint publication, then remove transient /btw storage."""
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    if checkpoint_stop is not None:
+        checkpoint_stop.set()
+    if (
+        checkpoint_thread is not None
+        and checkpoint_thread is not threading.current_thread()
+    ):
+        # Deletion must happen after a checkpoint already inside Session.save()
+        # exits; otherwise that writer can recreate both files after cleanup.
+        checkpoint_thread.join()
+    sid = getattr(session, 'session_id', None)
+    if sid:
+        try:
+            from api.models import delete_session_sidecar_and_tail_cache
+
+            delete_session_sidecar_and_tail_cache(sid)
+            return
+        except Exception:
+            logger.debug("Failed to clean up ephemeral session storage", exc_info=True)
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
     except Exception:
-        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+        logger.debug("Failed to clean up ephemeral session sidecar", exc_info=True)
+
+
+def _cleanup_ephemeral_cancelled_turn(session) -> None:
+    """Remove transient /btw session state after a cancel without saving it."""
+    _cleanup_ephemeral_session(session)
 
 
 def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
@@ -9076,13 +9104,17 @@ def _run_agent_streaming(
             # sub-100ms window reaches the live Thinking view before the terminal done event.
             _flush_reasoning_buffer()
             if cancel_event.is_set():
-                if _checkpoint_stop is not None:
-                    _checkpoint_stop.set()
-                if _ckpt_thread is not None:
-                    _ckpt_thread.join(timeout=15)
                 if ephemeral:
-                    _cleanup_ephemeral_cancelled_turn(s)
+                    _cleanup_ephemeral_session(
+                        s,
+                        checkpoint_stop=_checkpoint_stop,
+                        checkpoint_thread=_ckpt_thread,
+                    )
                 else:
+                    if _checkpoint_stop is not None:
+                        _checkpoint_stop.set()
+                    if _ckpt_thread is not None:
+                        _ckpt_thread.join(timeout=15)
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
@@ -9112,13 +9144,11 @@ def _run_agent_streaming(
                     'ephemeral': True,
                     'answer': _answer,
                 })
-                if _checkpoint_stop is not None:
-                    _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                _cleanup_ephemeral_session(
+                    s,
+                    checkpoint_stop=_checkpoint_stop,
+                    checkpoint_thread=_ckpt_thread,
+                )
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
