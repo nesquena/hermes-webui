@@ -1397,8 +1397,15 @@ def _read_text_bounded(
     full; larger files are read only up to the cap (decoding on a byte boundary
     with errors="replace" so a truncated multibyte sequence is safe) and the
     ``truncated`` flag is set so the caller can surface it to the client. The
-    cap mirrors the git-diff DIFF_SIZE_LIMIT bound. St_size is checked BEFORE the
-    read so an over-cap file is never fully materialized.
+    cap mirrors the git-diff DIFF_SIZE_LIMIT bound.
+
+    Memory-safety contract (#6141 gate blocker 1): the file is opened ONCE in
+    binary mode and ``os.fstat`` is taken on that descriptor, so there is no
+    stat→open check-use gap. A replace/growth race between a separate stat and
+    open previously let an oversized file be read unbounded; fstat on the open
+    descriptor closes that window. There is NO unbounded fallback: on any
+    OSError (missing/unreadable file, or stat failure on the descriptor) the
+    function returns ``("", False)`` rather than reading the whole file.
 
     ``tail=True`` reads the TRAILING ``max_bytes`` (seek-to-end) instead of the
     leading bytes — used by cron output reads where the ``## Response`` section
@@ -1407,21 +1414,29 @@ def _read_text_bounded(
     A line split at the seek boundary is discarded.
     """
     try:
-        size = path.stat().st_size
+        fh = open(path, "rb")
     except OSError:
-        # Fall back to a direct read; the caller's own error handling covers
-        # missing/unreadable files. This branch is reached only if stat fails.
+        # Missing/unreadable file — caller's error handling covers this. Return
+        # empty (NOT an unbounded read) so the bound is never bypassed.
+        return "", False
+    try:
+        # fstat on the open descriptor — no stat→open check-use gap. A separate
+        # stat() before open() could observe a small size, then the file grows
+        # (or is replaced) before the read, yielding an unbounded materialization.
         try:
-            return path.read_text(encoding="utf-8", errors="replace"), False
+            st = os.fstat(fh.fileno())
         except OSError:
             return "", False
-    if size <= max_bytes:
-        return path.read_text(encoding="utf-8", errors="replace"), False
-    # Over cap: read only max_bytes. Head or tail per ``tail``.
-    with open(path, "rb") as fh:
+        size = st.st_size
+        if size <= max_bytes:
+            raw = fh.read()
+            return raw.decode("utf-8", errors="replace"), False
+        # Over cap: read only max_bytes. Head or tail per ``tail``.
         if tail:
-            fh.seek(size - max_bytes)
+            fh.seek(max(0, size - max_bytes))
         raw = fh.read(max_bytes)
+    finally:
+        fh.close()
     text = raw.decode("utf-8", errors="replace")
     if tail:
         # Drop the partial first line at the seek boundary — BUT only if doing so
@@ -1460,40 +1475,27 @@ def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) ->
     text, truncated = _read_text_bounded(path, max_bytes=max_bytes)
     if not truncated:
         return text, False
-    # Over cap. If the ## Response marker is in the head AND has body content
-    # after it in the head, the head carries frontmatter + marker + leading body
-    # — return it. But finding the marker alone is NOT proof the body is present:
-    # when the marker heading ends exactly at the head boundary, zero body bytes
-    # follow it in the head and the early return would yield snippet: "(empty)".
-    # In that case fall through to the tail-splice so the body survives.
+    # Over cap: ALWAYS tail-splice so the response body at EOF survives. A
+    # previous head-only early return (when the ## Response marker plus a byte
+    # or two of body sat in the head) silently reduced the reply to its prefix.
+    # Splicing the tail on every truncation keeps the body intact regardless of
+    # where the marker lands. (#6141 gate blocker 2)
     marker_idx = _cron_response_marker_index(text)
-    if marker_idx >= 0:
-        after_marker = text[marker_idx:]
-        # Is there real body content after the marker line in the head?
-        nl = after_marker.find("\n")
-        body_in_head = (after_marker[nl + 1:].strip()) if nl >= 0 else ""
-        if body_in_head:
-            return text, True
-        # Marker present but no body in head — fall through to tail-splice.
-    # Marker not in head (prompt pushed it past cap, or seek split it) OR marker
-    # at the boundary with no body. Composite head (frontmatter/usage) + tail
-    # (body), re-injecting the marker only if it isn't already in the head (to
-    # avoid showing it twice).
     # NOTE: _read_text_bounded(tail=True) already drops the partial first line at
     # the seek boundary, so tail_text is clean complete lines — do NOT re-drop here.
     tail_text, _ = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
     marker_in_tail = _cron_response_marker_index(tail_text) >= 0
     if marker_in_tail:
-        # The tail contains the marker. If the head ALSO has it (marker_idx >= 0,
-        # the boundary case), strip the marker (and anything before it) from the
-        # tail so the spliced result has exactly one marker. Otherwise keep the
-        # tail from its marker onward.
+        # The tail contains the marker (and therefore the complete body at EOF).
+        # If the head ALSO has the marker, the head's post-marker body is a
+        # truncated PREFIX of the tail's body — splicing both would duplicate
+        # the body. Drop the head's partial body (keep head only for frontmatter
+        # up to the marker) and let the tail carry the full marker + body.
+        # (#6141 gate blocker 2: de-duplicate overlapping marker/body bytes)
         if marker_idx >= 0:
-            tm = _cron_response_marker_index(tail_text)
-            tail_text = tail_text[tm:]  # keep marker + body from the tail
-            # Drop the marker line itself since the head already has it; keep body.
-            tnl = tail_text.find("\n")
-            tail_text = tail_text[tnl + 1:] if tnl >= 0 else ""
+            text = text[:marker_idx].rstrip()
+        tm = _cron_response_marker_index(tail_text)
+        tail_text = tail_text[tm:]  # keep marker + body from the tail
     elif tail_text.strip() and marker_idx < 0:
         # Marker not in tail AND not in head: the seek split it — re-inject.
         # Safe: a body at EOF implies a marker preceded it.
@@ -20449,7 +20451,6 @@ def _handle_cron_output(handler, parsed):
             if spent > 0 and spent + charge > total_budget:
                 truncated_files = True
                 break
-            spent += charge
             try:
                 # Per-file bound with head-then-tail bias: a large prompt
                 # section pushes ## Response past a pure head cap, so use the
@@ -20461,6 +20462,13 @@ def _handle_cron_output(handler, parsed):
                 if file_truncated:
                     entry["truncated"] = True
                 outputs.append(entry)
+                # Charge the budget ONLY after a successful read that appended
+                # an entry. Charging before the read (the previous shape) let two
+                # unreadable large files consume the budget via `spent += charge`
+                # in their except branches, so a later valid older file hit the
+                # cap and broke — returning outputs: [] with valid output on
+                # disk. (#6141 gate blocker 3)
+                spent += charge
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
     result = {"job_id": job_id, "outputs": outputs}
