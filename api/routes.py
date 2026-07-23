@@ -13811,10 +13811,141 @@ def handle_get(handler, parsed) -> bool:
                 return False
             dashboard_dir = _PLUGIN_STATIC_ROOTS.get(name)
             if dashboard_dir:
+                dashboard_path = dashboard_dir.resolve()
+
+                webui_manifest = manifest.get("webui", {}) if isinstance(manifest.get("webui", {}), dict) else {}
+
+                def _safe_js_global(value: str) -> str | None:
+                    """Return a safe dotted JS global name from manifest config."""
+                    parts = str(value or "").split(".")
+                    if not parts:
+                        return None
+                    if all(re.match(r"^[A-Za-z_$][A-Za-z0-9_$]*$", part or "") for part in parts):
+                        return ".".join(parts)
+                    return None
+
+                def _plugin_inline_payload(
+                    _webui_manifest=webui_manifest,
+                    _dashboard_path=dashboard_path,
+                ) -> tuple[str, str | None]:
+                    """Return manifest-declared read-only bootstrap payload script."""
+                    payload_cfg = _webui_manifest.get("inline_payload", {})
+                    if not isinstance(payload_cfg, dict):
+                        return "", None
+                    global_name = _safe_js_global(payload_cfg.get("global"))
+                    candidates = payload_cfg.get("candidates", [])
+                    if not global_name or not isinstance(candidates, list):
+                        return "", global_name
+                    for rel in candidates:
+                        if not isinstance(rel, str):
+                            continue
+                        payload_path = (_dashboard_path / rel).resolve()
+                        try:
+                            payload_path.relative_to(_dashboard_path)
+                        except ValueError:
+                            continue
+                        if not payload_path.is_file():
+                            continue
+                        try:
+                            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+                            encoded = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+                            return f"<script>{global_name}={encoded};</script>\n", global_name
+                        except Exception:
+                            logger.debug("Failed to embed dashboard plugin payload from %s", payload_path, exc_info=True)
+                    return "", global_name
+
+                def _inline_declared_dist_assets(
+                    html_text: str,
+                    _webui_manifest=webui_manifest,
+                    _manifest=manifest,
+                    _dashboard_path=dashboard_path,
+                    _name=name,
+                ) -> str:
+                    """Inline manifest-approved dist CSS/JS for sandboxed WebUI plugin iframes."""
+                    if _webui_manifest.get("inline_dist_assets") is not True:
+                        return html_text
+                    css_rel = _manifest.get("css") or "dist/style.css"
+                    entry_rel = _manifest.get("entry") or "dist/index.js"
+                    if isinstance(css_rel, str):
+                        css_path = (_dashboard_path / css_rel).resolve()
+                        try:
+                            css_path.relative_to(_dashboard_path)
+                        except ValueError:
+                            css_path = None
+                        if css_path and css_path.is_file():
+                            style_text = css_path.read_text(encoding="utf-8").replace("</style", "<\\/style")
+                            html_text = html_text.replace(
+                                '<link rel="stylesheet" href="style.css">',
+                                f"<style>{style_text}</style>",
+                                1,
+                            )
+                            html_text = html_text.replace(
+                                f'<link rel="stylesheet" href="/{_name}/style.css">',
+                                f"<style>{style_text}</style>",
+                                1,
+                            )
+                    if isinstance(entry_rel, str):
+                        script_path = (_dashboard_path / entry_rel).resolve()
+                        try:
+                            script_path.relative_to(_dashboard_path)
+                        except ValueError:
+                            script_path = None
+                        if script_path and script_path.is_file():
+                            script_text = script_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
+                            inline_bundle = f"  <script>{script_text}</script>"
+                            script_marker = '<script src="index.js"></script>'
+                            if script_marker in html_text:
+                                return html_text.replace(script_marker, inline_bundle, 1)
+                            if "</body>" in html_text:
+                                return html_text.replace("</body>", inline_bundle + "</body>", 1)
+                            return html_text + inline_bundle
+                    return html_text
+
+                def _inject_plugin_payload(
+                    html_text: str,
+                    _webui_manifest=webui_manifest,
+                    _name=name,
+                ) -> str:
+                    payload_script, payload_global = _plugin_inline_payload()
+                    html_text = _inline_declared_dist_assets(html_text)
+                    # Generic plugin fallback: a plugin's dist/index.html is served
+                    # at tab.path (for example /demo), so relative dist assets like
+                    # "index.js" would resolve to /index.js. Rebase known bundle
+                    # assets to the authenticated dashboard-plugin route unless
+                    # the manifest requested inline self-containment above.
+                    name_escaped_for_path = _name.replace('"', '')
+                    if _webui_manifest.get("inline_dist_assets") is not True:
+                        html_text = html_text.replace(
+                            'href="style.css"',
+                            f'href="/dashboard-plugins/{name_escaped_for_path}/dist/style.css"',
+                            1,
+                        )
+                        script_marker = '<script src="index.js"></script>'
+                        rebased_script = f'<script src="/dashboard-plugins/{name_escaped_for_path}/dist/index.js"></script>'
+                        if script_marker in html_text:
+                            replacement = rebased_script
+                            html_text = html_text.replace(script_marker, replacement, 1)
+                    payload_assignment = f"{payload_global}=" if payload_global else ""
+                    payload_already_injected = False
+                    if payload_assignment and payload_global:
+                        payload_re = re.compile(
+                            rf"<script\b[^>]*>[^<]*{re.escape(payload_global)}\s*=",
+                            re.I | re.S,
+                        )
+                        payload_already_injected = bool(payload_re.search(html_text))
+                    if payload_script and not payload_already_injected:
+                        first_script = html_text.find("<script")
+                        if first_script >= 0:
+                            return html_text[:first_script] + payload_script + html_text[first_script:]
+                        if "</body>" in html_text:
+                            return html_text.replace("</body>", payload_script + "</body>", 1)
+                        return html_text + payload_script
+                    return html_text
+
                 # 1) dashboard/dist/index.html (full SPA build)
                 index_html = dashboard_dir / "dist" / "index.html"
                 if index_html.is_file():
-                    data = index_html.read_bytes()
+                    data = _inject_plugin_payload(index_html.read_text(encoding="utf-8")).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
                     handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
@@ -13826,7 +13957,7 @@ def handle_get(handler, parsed) -> bool:
                 plugin_root = dashboard_dir.parent
                 static_html = plugin_root / "static" / "index.html"
                 if static_html.is_file():
-                    data = static_html.read_bytes()
+                    data = _inject_plugin_payload(static_html.read_text(encoding="utf-8")).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
                     handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
@@ -13842,6 +13973,7 @@ def handle_get(handler, parsed) -> bool:
                     css = html.escape(manifest.get("css", ""))
                     name_escaped = html.escape(name)
                     css_tag = f'<link rel="stylesheet" href="/dashboard-plugins/{name_escaped}/{css}">' if css else ""
+                    payload_script, _payload_global = _plugin_inline_payload()
                     html_content = (
                         f"<!doctype html>\n"
                         f"<html lang=\"en\">\n"
@@ -13852,6 +13984,7 @@ def handle_get(handler, parsed) -> bool:
                         f"</head>\n"
                         f"<body>\n"
                         f'  <div id="pluginPageContainer"></div>\n'
+                        f"  {payload_script}"
                         f'  <script src="/dashboard-plugins/{name_escaped}/dist/index.js"></script>\n'
                         f"</body>\n"
                         f"</html>\n"
