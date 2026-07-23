@@ -1395,8 +1395,8 @@ async function send(){
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
-          showToast(t('busy_interrupt_confirm'),2000);
-          await cancelStream('busy-interrupt');
+          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
+          else showToast(t('cancel_failed'),null,'error');
         } else {
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
         }
@@ -5619,7 +5619,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
-      showApprovalForSession(activeSid, d, 1);
+      showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
       sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
     });
@@ -7106,7 +7106,9 @@ function showApprovalCard(pending, pendingCount) {
   const counter = $("approvalCounter");
   if (counter) {
     if (pendingCount && pendingCount > 1) {
-      counter.textContent = "1 of " + pendingCount + " pending";
+      counter.textContent = (typeof t === "function")
+        ? t("approval_pending_count", pendingCount)
+        : ("1 of " + pendingCount + " pending");
       counter.style.display = "";
     } else {
       counter.style.display = "none";

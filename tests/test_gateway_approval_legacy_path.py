@@ -6,6 +6,7 @@ PR #4495 fixed the runs API path but left the legacy path without approval handl
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -336,6 +337,19 @@ def test_legacy_approval_records_run_id_for_response_relay():
         # (connection still open, run parked) — this test's stream already ran to
         # completion, which cleared active_stream_id and popped the mapping.
         _STREAM_RUN_IDS[stream_id] = "run-legacy-1"
+        from types import SimpleNamespace
+        from api import route_approvals as ra
+        with ra._lock:
+            ra._gateway_queues["sess-legacy-runid"] = [SimpleNamespace(data={
+                "command": "rm -rf /tmp/test",
+                "description": "Delete temporary files",
+                "pattern_key": "dangerous_command",
+                "pattern_keys": ["dangerous_command"],
+                "approval_id": "appr-legacy-runid",
+                "run_id": "run-legacy-1",
+            })]
+            live_entry = ra._gateway_queues["sess-legacy-runid"][0]
+        ra.submit_gateway_pending_mirror("sess-legacy-runid", live_entry.data)
         relay_session = MagicMock()
         relay_session.active_stream_id = stream_id
         captured = {}
@@ -360,7 +374,7 @@ def test_legacy_approval_records_run_id_for_response_relay():
         assert captured.get("url", "") == "http://gw:8642/v1/runs/run-legacy-1/approval", (
             f"approval respond must relay to the gateway run; got {captured.get('url')!r}"
         )
-        assert captured["body"] == {"choice": "once", "approval_id": "appr-legacy-runid"}
+        assert captured["body"] == {"choice": "once", "approval_id": ""}
         handler.send_response.assert_called_with(200)
     finally:
         with STREAMS_LOCK:
@@ -447,8 +461,8 @@ def test_legacy_teardown_clears_stale_gateway_mirror_and_notifies_empty_state():
             ra._gateway_queues.pop(session_id, None)
 
 
-def test_legacy_teardown_preserves_live_gateway_head_mirror():
-    """A live gateway head must still be mirrored after legacy teardown runs."""
+def test_legacy_teardown_retires_live_gateway_head_mirror():
+    """A mapped legacy run retires its live gateway mirror during outer teardown."""
     from types import SimpleNamespace
     from api import route_approvals as ra
     from api.config import STREAMS, STREAMS_LOCK
@@ -507,14 +521,11 @@ def test_legacy_teardown_preserves_live_gateway_head_mirror():
 
         payloads = _drain_queue(subscriber)
         assert payloads, "Expected mirrored approval notifications"
-        assert payloads[-1]["pending"]["_gateway_mirror"] is True
-        assert payloads[-1]["pending_count"] == 1
+        assert payloads[-1]["pending"] is None
+        assert payloads[-1]["pending_count"] == 0
         with ra._lock:
             pending = ra._pending.get(session_id)
-            assert isinstance(pending, list)
-            assert len(pending) == 1
-            assert pending[0]["approval_id"] == approval_data["approval_id"]
-            assert pending[0]["_gateway_mirror"] is True
+            assert pending is None
     finally:
         ra._approval_sse_unsubscribe(session_id, subscriber)
         with STREAMS_LOCK:
@@ -686,7 +697,7 @@ def test_mirrored_run_id_survives_active_stream_loss():
         assert captured.get("url", "") == f"http://gw:8642/v1/runs/{run_id}/approval", (
             f"approval respond must relay to the mirrored gateway run; got {captured.get('url')!r}"
         )
-        assert captured["body"] == {"choice": "once", "approval_id": approval_id}
+        assert captured["body"] == {"choice": "once", "approval_id": ""}
         handler.send_response.assert_called_with(200)
         assert entry.event.is_set(), "mirrored gateway approval was not resolved"
         assert entry.result == "once"
@@ -752,8 +763,8 @@ def test_gateway_mode_no_pending_click_stays_non_409():
     assert captured["payload"].get("code") != "gateway_run_unavailable"
 
 
-def test_legacy_approval_without_run_id_stays_actionable():
-    """Legacy approvals without a run_id must fail explicitly and keep the mirror live."""
+def test_legacy_approval_without_run_id_retires_locally():
+    """A no-run legacy mirror retires locally instead of becoming a ghost card."""
     from types import SimpleNamespace
     from api import routes as r
     from api import route_approvals as ra
@@ -832,22 +843,15 @@ def test_legacy_approval_without_run_id_stays_actionable():
         ]
         assert approval_events
         approval_data = approval_events[0][1]
+        local_entry = SimpleNamespace(data=dict(approval_data), event=threading.Event(), result=None)
         with ra._lock:
-            r._gateway_queues[session_id] = [SimpleNamespace(data=dict(approval_data))]
+            r._gateway_queues[session_id] = [local_entry]
         ra.submit_gateway_pending_mirror(session_id, approval_data)
         with ra._lock:
             pending_queue = r._pending.get(session_id)
             assert isinstance(pending_queue, list)
             approval_id = pending_queue[0]["approval_id"]
 
-        # The relay-unavailable 409 is only meaningful when the WebUI is
-        # actually running the gateway chat backend. On a gateway deployment
-        # the backend env is process-wide (not just during the stream), so
-        # assert the 409 with HERMES_WEBUI_CHAT_BACKEND=gateway active at
-        # respond time. Without this scope the handler now (correctly) treats
-        # a mirrored approval on the default LOCAL backend as locally
-        # resolvable and falls through instead of 409ing — see
-        # test_issue4771_local_approval_regression.py (#4771 follow-up).
         with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}), \
              patch("api.routes.get_session", return_value=mock_session), \
              patch("api.routes.j", new=fake_j):
@@ -856,13 +860,12 @@ def test_legacy_approval_without_run_id_stays_actionable():
                 {"session_id": session_id, "choice": "once", "approval_id": approval_id},
             )
 
-        assert captured["status"] == 409
-        assert captured["payload"]["code"] == "gateway_run_unavailable"
-        assert captured["payload"]["error"] == r._GATEWAY_APPROVAL_RELAY_UNAVAILABLE
+        assert captured["status"] == 200
+        assert captured["payload"] == {"ok": True, "choice": "once", "local_retired": True}
+        assert local_entry.event.is_set()
+        assert local_entry.result == "once"
         with ra._lock:
-            pending_queue = r._pending.get(session_id)
-            assert isinstance(pending_queue, list)
-            assert pending_queue[0]["approval_id"] == approval_id
+            assert session_id not in r._pending
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

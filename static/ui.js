@@ -7912,7 +7912,7 @@ async function handleComposerPrimaryAction(){
   const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
   if(action==='disabled') return;
   if(action==='stop'){
-    if(typeof cancelStream==='function') await cancelStream('composer-stop');
+    if(typeof cancelStream==='function' && !await cancelStream('composer-stop')) showToast(t('cancel_failed'),null,'error');
     return;
   }
   await send();
