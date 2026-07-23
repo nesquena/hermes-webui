@@ -7402,6 +7402,8 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliArchivedCount=0;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    // #6373: filter out delegated subagent (child) sessions when the preference is disabled
+    if(window._showDelegatedSubagentSessions===false&&_isChildSession(s)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;

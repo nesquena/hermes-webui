@@ -8676,6 +8676,8 @@ function _preferencesPayloadFromUi(){
   if(showWebhookCb) payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
+  const showDelegatedSubagentCb=$('settingsShowDelegatedSubagentSessions');
+  if(showDelegatedSubagentCb) payload.show_delegated_subagent_sessions=showDelegatedSubagentCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
@@ -9307,6 +9309,8 @@ async function loadSettingsPanel(){
     }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showDelegatedSubagentCb=$('settingsShowDelegatedSubagentSessions');
+    if(showDelegatedSubagentCb){showDelegatedSubagentCb.checked=settings.show_delegated_subagent_sessions!==false;showDelegatedSubagentCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
@@ -11846,6 +11850,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
+  window._showDelegatedSubagentSessions=body.show_delegated_subagent_sessions!==false;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
@@ -12475,6 +12480,7 @@ async function saveSettings(andClose){
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
+  const showDelegatedSubagentSessions=($('settingsShowDelegatedSubagentSessions')||{}).checked!==false;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
@@ -12531,6 +12537,7 @@ async function saveSettings(andClose){
   body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_webhook_sessions=showCliSessions&&showWebhookSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
+  body.show_delegated_subagent_sessions=showDelegatedSubagentSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
