@@ -14317,7 +14317,11 @@ def handle_post(handler, parsed) -> bool:
                 or str(raw_worktree).strip().lower() in {"1", "true", "yes", "on"}
             )
         else:
-            worktree_requested = _worktree_default_from_config(body.get("profile") or None)
+            # SECURITY (profile isolation): worktree config must come from the
+            # request-scoped active profile, never a body-supplied profile (Codex
+            # #5510 re-gate — a profile-A request must not read profile B's
+            # worktree default by POSTing {"profile":"B"}).
+            worktree_requested = _worktree_default_from_config(_request_profile)
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
@@ -14407,7 +14411,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            profile=_request_profile,
             project_id=_body_project_id,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,

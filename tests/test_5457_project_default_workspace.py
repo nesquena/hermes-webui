@@ -326,6 +326,13 @@ def test_session_new_rejects_foreign_body_profile_project(project_env, monkeypat
         f"alice's default_workspace {ws_path!r} must NOT leak to a default-profile request; "
         f"got {captured[0]['workspace']!r}"
     )
+    # The created session must be tagged with the ACTIVE profile, not the body
+    # profile — a mismatched body profile must not control session ownership or
+    # (indirectly) profile B's worktree config (Codex #5510 re-gate, sites 14320/14410).
+    assert captured[0].get("profile") == "default", (
+        f"session must be tagged with the active profile 'default', not the body "
+        f"profile 'alice'; got {captured[0].get('profile')!r}"
+    )
 
 
 def test_session_new_uses_active_profile_project_default(project_env, monkeypatch, tmp_path):
