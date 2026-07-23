@@ -189,6 +189,75 @@ def test_public_share_snapshot_preserves_renderer_inert_file_uri_parser_differen
     assert content.count(OMITTED_ATTACHMENT) == 0
 
 
+def test_public_share_snapshot_preserves_nested_and_entity_blockquote_fence_literals():
+    import api.shares as shares
+
+    nested_blockquote_fence = (
+        ">> ```text\n"
+        ">> file:///fixture-not-redacted/nested-quote.txt\n"
+        ">> ```"
+    )
+    entity_blockquote_fence = (
+        "&gt; ```text\n"
+        "&gt; file:///fixture-not-redacted/entity-quote.txt\n"
+        "&gt; ```"
+    )
+    valid_entity_pre = "&lt;pre&gt;file:///fixture-not-redacted/valid-pre.txt&lt;/pre&gt;"
+    session = SimpleNamespace(
+        title="Nested blockquote share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    f"{nested_blockquote_fence}\n"
+                    f"{entity_blockquote_fence}\n"
+                    f"{valid_entity_pre}"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert nested_blockquote_fence in content
+    assert entity_blockquote_fence in content
+    assert valid_entity_pre in content
+    assert content.count(OMITTED_ATTACHMENT) == 0
+
+
+def test_public_share_snapshot_omits_parser_divergent_active_file_uri_shapes():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Title `label\rfile:///private-not-known/title-cr-leak.png`",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "Inline `label\rfile:///private-not-known/message-cr-leak.png`\n"
+                    "Malformed &lt;pre file:///private-not-known/malformed-pre.txt&lt;/pre&gt;\n"
+                    "Case &LT;pre&gt; file:///private-not-known/case-pre.txt &LT;/pre&gt;"
+                ),
+            }
+        ],
+    )
+
+    snapshot = shares.build_share_snapshot(session)
+    content = snapshot["messages"][0]["content"]
+    title = snapshot["title"]
+
+    assert "file://" not in content
+    assert "private-not-known" not in content
+    assert "message-cr-leak" not in content
+    assert "malformed-pre" not in content
+    assert "case-pre" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 3
+    assert "file://" not in title
+    assert "private-not-known" not in title
+    assert "title-cr-leak" not in title
+    assert title.count(OMITTED_ATTACHMENT) == 1
+
+
 def test_public_share_snapshot_redacts_known_paths_inside_code_regions():
     import api.shares as shares
 

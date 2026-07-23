@@ -128,17 +128,21 @@ _ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
 _FILE_URI_RE = re.compile(r"(^|\s)(file://[^\s<>'\"\)\]]+)", re.IGNORECASE)
 _API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
 _RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
-_ENTITY_PRE_REGION_RE = re.compile(r"&lt;pre\b[\s\S]*?&lt;/pre&gt;", re.IGNORECASE)
+_ENTITY_PRE_REGION_RE = re.compile(
+    r"&lt;pre\b(?:[^&]|&(?!gt;))*&gt;[\s\S]*?&lt;/pre&gt;"
+)
 _BLOCKQUOTE_FENCED_CODE_REGION_RE = re.compile(
-    r"(^|\r?\n)> ?[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)\r?\n"
-    r"(?:> ?.*(?:\r?\n))*?"
-    r"> ?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r?\n|$)"
+    r"(^|\r\n|\r|\n)(?:(?:>|&gt;) ?)+[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)"
+    r"(?:\r\n|\r|\n)"
+    r"(?:(?:(?:>|&gt;) ?)+[^\r\n]*(?:\r\n|\r|\n))*?"
+    r"(?:(?:>|&gt;) ?)+[ ]{0,3}(?P=fence)`*[ \t]*(?=\r\n|\r|\n|$)"
 )
 _FENCED_CODE_REGION_RE = re.compile(
-    r"(^|\r?\n)[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)\r?\n"
-    r"(?:[\s\S]*?\r?\n)?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r?\n|$)"
+    r"(^|\r\n|\r|\n)[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)"
+    r"(?:\r\n|\r|\n)"
+    r"(?:[\s\S]*?(?:\r\n|\r|\n))?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r\n|\r|\n|$)"
 )
-_INLINE_CODE_REGION_RE = re.compile(r"`[^`\n]+`")
+_INLINE_CODE_REGION_RE = re.compile(r"`[^`\r\n]+`")
 _DATA_IMAGE_RE = re.compile(
     r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
     re.IGNORECASE,
