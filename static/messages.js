@@ -3943,8 +3943,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         scene.terminal_state||
         (scene.lifecycle&&scene.lifecycle.terminal_state)
       );
-      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes||shouldPersistTerminalLifecycle;
-      if(!shouldPersistScene) return false;
+      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
+      if(!shouldPersistScene&&!shouldPersistTerminalLifecycle) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, attachOptions);
