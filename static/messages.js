@@ -2363,7 +2363,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
     _streamEndRecoveryTimer=null;
-    const status=await _restoreSettledSession(source,{status:true});
+    const status=await _restoreSettledSession(source,{status:true,allowUnmarkedShorterTerminalSnapshot:true});
     if(status==='restored'){
       _clearStreamEndRecovery();
       return;
@@ -6062,7 +6062,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      const status=await _restoreSettledSession(source,{status:true});
+      const status=await _restoreSettledSession(source,{status:true,allowUnmarkedShorterTerminalSnapshot:true});
       if(status==='restored'){
         return;
       }
@@ -6574,6 +6574,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
+    const allowUnmarkedShorterTerminalSnapshot=!!(options&&options.allowUnmarkedShorterTerminalSnapshot);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return returnStatus?'stale':false;
@@ -6621,14 +6622,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _stagedMatchesCurrentPrefix=(
           _stagedMessages.length>0 &&
           _stagedMessages.length<_currentVisibleMessages.length &&
-          _currentVisibleEndsWithTerminalMarker &&
+          (_currentVisibleEndsWithTerminalMarker || allowUnmarkedShorterTerminalSnapshot) &&
           _stagedMessages.every((message, idx)=>{
             const stagedKey=_messageIdentityKey(message);
             const currentKey=_messageIdentityKey(_currentVisibleMessages[idx]);
             return !!stagedKey && stagedKey===currentKey;
           })
         );
-        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&_stagedMatchesCurrentPrefix;
+        const _preserveCurrentTranscript=(preserveVisibleOnShorterTerminalSnapshot||allowUnmarkedShorterTerminalSnapshot)&&_stagedMatchesCurrentPrefix;
         const _resolvedMessages=_preserveCurrentTranscript
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;
