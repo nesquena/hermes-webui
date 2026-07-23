@@ -22,12 +22,14 @@ import socket
 import sys
 import threading
 import time
+import tempfile
 import traceback
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
@@ -632,6 +634,52 @@ def reload_config() -> None:
 # is picked up on the next read.
 _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
+_yaml_config_write_lock = threading.RLock()
+
+
+def _yaml_process_lock_path(config_path: Path) -> Path:
+    """Return the stable sidecar used to serialize cross-process config writes."""
+    write_path, _link_identity = _yaml_write_binding(Path(config_path))
+    return write_path.with_name(f".{write_path.name}.hermes-webui.lock")
+
+
+@contextmanager
+def _yaml_config_write_guard(config_path: Path):
+    """Serialize one config transaction across WebUI threads and TTS children."""
+    with _yaml_config_write_lock:
+        lock_path = _yaml_process_lock_path(Path(config_path))
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            if os.name == "nt":  # pragma: no cover - Windows CI is unavailable
+                import msvcrt
+
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                if os.name == "nt":  # pragma: no cover - Windows CI is unavailable
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
@@ -773,24 +821,137 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
-def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+def _yaml_write_binding(path: Path) -> tuple[Path, tuple[int, int] | None]:
+    """Bind one save to the current referent and optional link inode."""
+    path = Path(path)
+    try:
+        link_stat = os.lstat(path)
+    except FileNotFoundError:
+        return path, None
+    if not os.path.islink(path):
+        return path, None
+    return path.resolve(strict=False), (link_stat.st_dev, link_stat.st_ino)
+
+
+def _verify_yaml_write_binding(
+    original_path: Path,
+    write_path: Path,
+    link_identity: tuple[int, int] | None,
+) -> None:
+    if link_identity is None:
+        return
+    try:
+        current = os.lstat(original_path)
+        current_target = original_path.resolve(strict=False)
+    except OSError as exc:
+        raise RuntimeError("config symlink binding changed during save") from exc
+    if (
+        not os.path.islink(original_path)
+        or (current.st_dev, current.st_ino) != link_identity
+        or current_target != write_path
+    ):
+        raise RuntimeError("config symlink binding changed during save")
+
+
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(directory, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_yaml_config_text(path: Path, text: str) -> None:
+    """Durably replace a config referent without replacing its symlink inode."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_path, link_identity = _yaml_write_binding(path)
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = os.stat(write_path).st_mode & 0o777
+    except FileNotFoundError:
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+        mode = 0o666 & ~current_umask
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{write_path.name}.", suffix=".tmp", dir=write_path.parent
+    )
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=True) as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_yaml_write_binding(path, write_path, link_identity)
+        os.replace(tmp, write_path)
+        _fsync_directory(write_path.parent)
+        _verify_yaml_write_binding(path, write_path, link_identity)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _save_yaml_config_file(
+    config_path: Path,
+    config_data: dict,
+    *,
+    _guarded: bool = False,
+) -> None:
     try:
         import yaml as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    _paths._atomic_write_text(
-        config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
+    config_path = Path(config_path)
+    text = _yaml.safe_dump(
+        _config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True
     )
-    # Invalidate the memoized parse for this path so the next read re-parses the
-    # bytes we just wrote. mtime_ns+size keying normally catches edits, but a
-    # WebUI save that preserves size with a coarse/unchanged mtime could otherwise
-    # serve a stale dict (#4650 review) — evicting on our own write closes that gap.
-    with _yaml_file_cache_lock:
-        _yaml_file_cache.pop(str(config_path), None)
+    cache_keys = {str(config_path)}
+    try:
+        cache_keys.add(str(config_path.resolve(strict=False)))
+    except OSError:
+        pass
+    def save() -> None:
+        try:
+            _atomic_write_yaml_config_text(config_path, text)
+        finally:
+            with _yaml_file_cache_lock:
+                for cache_key in cache_keys:
+                    _yaml_file_cache.pop(cache_key, None)
+
+    if _guarded:
+        save()
+    else:
+        with _yaml_config_write_guard(config_path):
+            save()
+
+
+def update_yaml_config_file(
+    config_path: Path,
+    mutate: Callable[[dict], Any],
+) -> dict:
+    """Serialize a raw read-modify-write update of one config.yaml.
+
+    Raw YAML is used deliberately so unrelated ``${ENV_VAR}`` references are
+    preserved rather than expanded and written back as secret values.
+    """
+    config_path = Path(config_path)
+    with _yaml_config_write_guard(config_path):
+        current = _load_yaml_config_file_raw(config_path)
+        if not isinstance(current, dict):
+            current = {}
+        mutate(current)
+        _save_yaml_config_file(config_path, current, _guarded=True)
+        return current
 
 
 # Initial load
@@ -9568,7 +9729,7 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 _SETTINGS_WRITE_VERSION = 0
-_SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+_SETTINGS_WRITE_LOCK = __import__("threading").RLock()
 
 
 def _atomic_write_settings_text(path: Path, text: str) -> None:
@@ -9640,8 +9801,8 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
     return rounded
 
 
-def save_settings(settings: dict) -> dict:
-    """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+def _save_settings_unlocked(settings: dict) -> dict:
+    """Save settings while the caller owns ``_SETTINGS_WRITE_LOCK``."""
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
@@ -9807,6 +9968,73 @@ def save_settings(settings: dict) -> dict:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
     current["default_model"] = get_effective_default_model()
     return current
+
+
+def save_settings(settings: dict) -> dict:
+    """Atomically merge settings while serializing read-modify-write callers."""
+    with _SETTINGS_WRITE_LOCK:
+        return _save_settings_unlocked(settings)
+
+
+def save_settings_revisioned(expected_revision: int, settings: dict) -> dict:
+    """Compare-and-set a settings merge against the shared write revision."""
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("invalid_settings_revision")
+    with _SETTINGS_WRITE_LOCK:
+        if expected_revision != _SETTINGS_WRITE_VERSION:
+            raise RuntimeError("settings_conflict")
+        return _save_settings_unlocked(settings)
+
+
+def speech_settings_snapshot() -> dict:
+    """Return revision plus exact sparse persisted speech-key state."""
+    with _SETTINGS_WRITE_LOCK:
+        raw = _read_raw_settings_file()
+        values = {
+            key: copy.deepcopy(raw[key])
+            for key in _SETTINGS_SPEECH_KEYS
+            if key in raw
+        }
+        return {
+            "revision": _SETTINGS_WRITE_VERSION,
+            "values": values,
+            "present_keys": sorted(values),
+        }
+
+
+def set_tts_engine_revisioned(expected_revision: int, engine: str) -> dict:
+    """Compare-and-set only sparse ``tts_engine`` without touching voice state."""
+    if type(expected_revision) is not int or engine not in {"agent", "browser"}:
+        raise ValueError("invalid_speech_settings_update")
+    global _SETTINGS_WRITE_VERSION
+    with _SETTINGS_WRITE_LOCK:
+        if expected_revision != _SETTINGS_WRITE_VERSION:
+            raise RuntimeError("settings_conflict")
+        raw = _read_raw_settings_file()
+        before = {
+            key: copy.deepcopy(raw[key])
+            for key in _SETTINGS_SPEECH_KEYS
+            if key in raw
+        }
+        updated = copy.deepcopy(raw)
+        updated["tts_engine"] = engine
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_settings_text(
+            SETTINGS_FILE,
+            json.dumps(updated, ensure_ascii=False, indent=2),
+        )
+        _SETTINGS_WRITE_VERSION += 1
+        after = {
+            key: copy.deepcopy(updated[key])
+            for key in _SETTINGS_SPEECH_KEYS
+            if key in updated
+        }
+        return {
+            "before": before,
+            "revision": _SETTINGS_WRITE_VERSION,
+            "values": after,
+            "present_keys": sorted(after),
+        }
 
 
 # Apply saved settings on startup (override env-derived defaults)
