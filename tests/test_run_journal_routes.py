@@ -255,7 +255,7 @@ def test_live_sse_uses_each_queue_items_own_event_id():
 
 def test_replay_emits_event_ids_and_stale_restart_diagnostic():
     replay_pos = ROUTES_SRC.index("def _replay_run_journal")
-    block = ROUTES_SRC[replay_pos : replay_pos + 1200]
+    block = ROUTES_SRC[replay_pos : replay_pos + 2400]
 
     assert "read_run_events" in block
     assert "_sse_with_id" in block
@@ -534,6 +534,89 @@ def test_replay_run_journal_honors_after_seq_cursor(monkeypatch):
     body = handler.wfile.getvalue().decode("utf-8")
     assert "id: run_1:4\n" in body
     assert "event: done\n" in body
+
+
+def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):
+    import api.run_journal as run_journal
+    import api.routes as routes
+
+    session_id = "session_1"
+    run_id = "run_long"
+    for seq in range(1, 2049):
+        run_journal.append_run_event(session_id, run_id, "token", {"text": str(seq)}, session_dir=tmp_path, seq=seq)
+    run_journal.append_run_event(session_id, run_id, "token", {"text": "suffix"}, session_dir=tmp_path, seq=2049)
+    run_journal.append_run_event(session_id, run_id, "done", {"session": {}}, session_dir=tmp_path, seq=2050)
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=tmp_path),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=tmp_path,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 2048, include_stale=False) is True
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_long:2048\n" not in body
+    assert "id: run_long:2049\n" in body
+    assert "event: token\n" in body
+    assert "id: run_long:2050\n" in body
+    assert "event: done\n" in body
+
+
+def test_replay_run_journal_returns_complete_after_paged_boundary(monkeypatch):
+    import api.routes as routes
+
+    calls = []
+    handler = SimpleNamespace(wfile=io.BytesIO())
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": True,
+        },
+    )
+
+    def fake_read_run_events(session_id, run_id, after_seq=None, max_seq=None):
+        calls.append(after_seq)
+        if after_seq == 0:
+            return {
+                "events": [
+                    {"event": "token", "payload": {"text": "a"}, "event_id": f"{run_id}:1", "seq": 1},
+                    {"event": "token", "payload": {"text": "b"}, "event_id": f"{run_id}:2", "seq": 2},
+                ],
+                "malformed": [{"line": 3, "reason": "replay_limit_rows"}],
+                "complete": False,
+                "limit_reason": "replay_limit_rows",
+                "next_after_seq": 2,
+            }
+        return {
+            "events": [
+                {"event": "done", "payload": {"session": {"session_id": session_id}}, "event_id": f"{run_id}:3", "seq": 3}
+            ],
+            "malformed": [],
+            "complete": True,
+            "limit_reason": None,
+            "next_after_seq": 3,
+        }
+
+    monkeypatch.setattr(routes, "read_run_events", fake_read_run_events)
+
+    assert routes._replay_run_journal(handler, "run_1", 0, include_stale=False) is True
+    assert calls == [0, 2]
 
 
 def test_active_stream_replay_keeps_items_for_new_run_with_same_seq_range(monkeypatch):

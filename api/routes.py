@@ -3305,12 +3305,115 @@ def _terminal_anchor_scene_disposition_from_payload(
     }
 
 
+_RUN_JOURNAL_COMPLETE_READ_MAX_PAGES = 128
+
+
+def _run_journal_page_complete(journal: dict) -> bool:
+    return bool(journal.get("complete", not journal.get("malformed")))
+
+
+def _read_run_journal_until_complete(
+    session_id: str,
+    stream_id: str,
+    *,
+    after_seq: int | None = None,
+    max_seq: int | None = None,
+) -> dict:
+    events: list[dict] = []
+    malformed: list[dict] = []
+    cursor = after_seq
+    complete = True
+    limit_reason: str | None = None
+    boundary_reasons = {"replay_limit_rows", "replay_limit_bytes"}
+    for _page_idx in range(_RUN_JOURNAL_COMPLETE_READ_MAX_PAGES):
+        if cursor is None and max_seq is None:
+            journal = read_run_events(session_id, stream_id)
+        else:
+            journal = read_run_events(
+                session_id,
+                stream_id,
+                after_seq=cursor,
+                max_seq=max_seq,
+            )
+        page_events = [
+            event for event in (journal.get("events") or []) if isinstance(event, dict)
+        ]
+        events.extend(page_events)
+        page_malformed = [
+            row for row in (journal.get("malformed") or []) if isinstance(row, dict)
+        ]
+        non_boundary_malformed = [
+            row for row in page_malformed if row.get("reason") not in boundary_reasons
+        ]
+        malformed.extend(non_boundary_malformed)
+        limit_reason = journal.get("limit_reason") or limit_reason
+        if _run_journal_page_complete(journal):
+            malformed.extend(
+                row for row in page_malformed if row.get("reason") in boundary_reasons
+            )
+            return {
+                "session_id": session_id,
+                "run_id": stream_id,
+                "events": events,
+                "malformed": malformed,
+                "complete": not malformed,
+                "limit_reason": limit_reason,
+                "next_after_seq": journal.get("next_after_seq", cursor),
+            }
+        complete = False
+        if non_boundary_malformed:
+            break
+        if not page_events:
+            malformed.extend(
+                row for row in page_malformed if row.get("reason") in boundary_reasons
+            )
+            break
+        try:
+            next_cursor = int(journal.get("next_after_seq"))
+        except (TypeError, ValueError):
+            try:
+                next_cursor = int(page_events[-1].get("seq") or 0)
+            except (TypeError, ValueError):
+                break
+        if cursor is not None and next_cursor <= int(cursor):
+            break
+        cursor = next_cursor
+    malformed.append({"line": None, "reason": limit_reason or "replay_incomplete"})
+    return {
+        "session_id": session_id,
+        "run_id": stream_id,
+        "events": events,
+        "malformed": malformed,
+        "complete": complete and not malformed,
+        "limit_reason": limit_reason or "replay_incomplete",
+        "next_after_seq": cursor,
+    }
+
+
+def _run_journal_incomplete_snapshot(
+    session_id: str,
+    stream_id: str,
+    reason: str | None,
+) -> dict:
+    return {
+        "_run_journal_incomplete": True,
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "reason": reason or "replay_incomplete",
+    }
+
+
+def _is_run_journal_incomplete_snapshot(snapshot: object) -> bool:
+    return isinstance(snapshot, dict) and bool(snapshot.get("_run_journal_incomplete"))
+
+
 def _run_journal_live_snapshot(
     stream_id: str | None,
     *,
     handler=None,
     settled: bool = False,
     summary: dict | None = None,
+    return_incomplete: bool = False,
 ) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3327,7 +3430,15 @@ def _run_journal_live_snapshot(
     session_id = str(summary.get("session_id") or "")
     if not session_id:
         return None
-    journal = read_run_events(session_id, stream_id)
+    journal = _read_run_journal_until_complete(session_id, stream_id)
+    if not _run_journal_page_complete(journal):
+        if return_incomplete:
+            return _run_journal_incomplete_snapshot(
+                session_id,
+                stream_id,
+                journal.get("limit_reason") or "replay_incomplete",
+            )
+        return None
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
@@ -5864,18 +5975,7 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
             candidate_cursor = _terminal_anchor_reconciliation_page_cursor(page)
             current_cursor = _terminal_anchor_reconciliation_cursor(progress)
             expected_cursor = page.get("_input_index_cursor") if isinstance(page.get("_input_index_cursor"), dict) else None
-            if _terminal_anchor_reconciliation_cursor_publish_allowed(
-                current_cursor,
-                expected_cursor,
-                candidate_cursor,
-            ):
-                if _terminal_anchor_reconciliation_set_cursor(
-                    progress,
-                    index_size=index_size,
-                    index_generation=page.get("index_generation"),
-                    end_offset=next_end_offset,
-                ):
-                    changed = True
+            page_can_advance_cursor = True
             progress_streams = _terminal_anchor_reconciliation_stream_ids(session)
             for summary in summaries:
                 stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
@@ -5890,7 +5990,11 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
                     handler=handler,
                     settled=True,
                     summary=summary,
+                    return_incomplete=True,
                 )
+                if _is_run_journal_incomplete_snapshot(snapshot):
+                    page_can_advance_cursor = False
+                    break
                 if not isinstance(snapshot, dict):
                     if _record_terminal_anchor_scene_non_materializable(
                         progress,
@@ -5986,6 +6090,20 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
                     "updated_at": time.time(),
                 }
                 changed = True
+            if not page_can_advance_cursor:
+                break
+            if _terminal_anchor_reconciliation_cursor_publish_allowed(
+                current_cursor,
+                expected_cursor,
+                candidate_cursor,
+            ):
+                if _terminal_anchor_reconciliation_set_cursor(
+                    progress,
+                    index_size=index_size,
+                    index_generation=page.get("index_generation"),
+                    end_offset=next_end_offset,
+                ):
+                    changed = True
         materialized_changed = changed
         if changed:
             if len(records) > 256:
@@ -18249,28 +18367,50 @@ def _replay_run_journal(
     summary = find_run_summary(stream_id)
     if not summary:
         return False
-    journal = read_run_events(
-        str(summary.get("session_id") or ""),
-        stream_id,
-        after_seq=after_seq,
-        max_seq=max_seq,
-    )
-    for entry in journal.get("events") or []:
-        _sse_with_id(
-            handler,
-            entry.get("event") or entry.get("type") or "message",
-            entry.get("payload"),
-            entry.get("event_id"),
+    session_id = str(summary.get("session_id") or "")
+    cursor = after_seq
+    replay_complete = False
+    for _page_idx in range(_RUN_JOURNAL_COMPLETE_READ_MAX_PAGES):
+        journal = read_run_events(
+            session_id,
+            stream_id,
+            after_seq=cursor,
+            max_seq=max_seq,
         )
-    if include_stale and not summary.get("terminal"):
+        page_events = [
+            entry for entry in (journal.get("events") or []) if isinstance(entry, dict)
+        ]
+        for entry in page_events:
+            _sse_with_id(
+                handler,
+                entry.get("event") or entry.get("type") or "message",
+                entry.get("payload"),
+                entry.get("event_id"),
+            )
+        if _run_journal_page_complete(journal):
+            replay_complete = True
+            break
+        if not page_events:
+            break
+        try:
+            next_cursor = int(journal.get("next_after_seq"))
+        except (TypeError, ValueError):
+            try:
+                next_cursor = int(page_events[-1].get("seq") or 0)
+            except (TypeError, ValueError):
+                break
+        if cursor is not None and next_cursor <= int(cursor):
+            break
+        cursor = next_cursor
+    if include_stale and replay_complete and not summary.get("terminal"):
         stale = stale_interrupted_event(
-            str(summary.get("session_id") or ""),
+            session_id,
             stream_id,
             after_seq=after_seq,
         )
         if stale:
             _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
-    return True
+    return replay_complete
 
 
 def _run_journal_same_run_seq(event_id: str | None, stream_id: str) -> int | None:
@@ -18308,7 +18448,7 @@ def _run_journal_covers_offline_gap(
         summary = find_run_summary(stream_id)
         if not summary:
             return False
-        journal = read_run_events(
+        journal = _read_run_journal_until_complete(
             str(summary.get("session_id") or ""),
             stream_id,
             after_seq=floor,
@@ -18321,6 +18461,8 @@ def _run_journal_covers_offline_gap(
         return False
     cutoff = int(cutoff_seq)
     seqs = set()
+    if not _run_journal_page_complete(journal):
+        return False
     for entry in journal.get("events") or []:
         try:
             seq = int(entry.get("seq") or 0)

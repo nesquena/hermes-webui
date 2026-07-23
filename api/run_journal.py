@@ -970,16 +970,98 @@ def read_run_events(
     max_rows: int | None = _RUN_EVENTS_MAX_ROWS,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
-    if after_seq is not None:
-        events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
-    if max_seq is not None:
-        events = [event for event in events if int(event.get("seq") or 0) <= int(max_seq)]
+    events: list[dict] = []
+    malformed: list[dict] = []
+    emitted_rows = 0
+    emitted_bytes = 0
+    complete = True
+    limit_reason: str | None = None
+    next_after_seq = int(after_seq) if after_seq is not None else None
+    floor = int(after_seq) if after_seq is not None else None
+    ceiling = int(max_seq) if max_seq is not None else None
+    row_cap = None if max_rows is None else max(0, int(max_rows))
+    byte_cap = None if max_bytes is None else max(0, int(max_bytes))
+    if ceiling is not None and ceiling <= (floor or 0):
+        return {
+            "session_id": str(session_id),
+            "run_id": str(run_id),
+            "events": events,
+            "malformed": malformed,
+            "complete": True,
+            "limit_reason": None,
+            "next_after_seq": next_after_seq,
+        }
+    try:
+        fh = path.open("rb")
+    except FileNotFoundError:
+        return {
+            "session_id": str(session_id),
+            "run_id": str(run_id),
+            "events": events,
+            "malformed": malformed,
+            "complete": True,
+            "limit_reason": None,
+            "next_after_seq": next_after_seq,
+        }
+    with fh:
+        for line_no, raw_bytes in enumerate(fh, 1):
+            if not raw_bytes.strip():
+                continue
+            if (
+                (floor is None or floor <= 0)
+                and byte_cap is not None
+                and emitted_bytes + len(raw_bytes) > byte_cap
+            ):
+                limit_reason = "replay_limit_bytes"
+                malformed.append({"line": None, "reason": limit_reason})
+                complete = False
+                break
+            try:
+                raw = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                malformed.append({"line": line_no, "raw": ""})
+                complete = False
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
+                complete = False
+                continue
+            if not isinstance(parsed, dict):
+                malformed.append({"line": line_no, "raw": raw.rstrip("\n")})
+                complete = False
+                continue
+            try:
+                seq = int(parsed.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if floor is not None and seq <= floor:
+                continue
+            if ceiling is not None and seq > ceiling:
+                break
+            if row_cap is not None and emitted_rows >= row_cap:
+                limit_reason = "replay_limit_rows"
+                malformed.append({"line": line_no, "reason": limit_reason})
+                complete = False
+                break
+            if byte_cap is not None and emitted_bytes + len(raw_bytes) > byte_cap:
+                limit_reason = "replay_limit_bytes"
+                malformed.append({"line": None, "reason": limit_reason})
+                complete = False
+                break
+            events.append(parsed)
+            emitted_rows += 1
+            emitted_bytes += len(raw_bytes)
+            next_after_seq = seq
     return {
         "session_id": str(session_id),
         "run_id": str(run_id),
         "events": events,
         "malformed": malformed,
+        "complete": complete and not malformed,
+        "limit_reason": limit_reason,
+        "next_after_seq": next_after_seq,
     }
 
 
@@ -1365,8 +1447,6 @@ def terminal_run_summary_page_for_session(
             sid,
             run_id,
             session_dir=root,
-            max_bytes=_RUN_EVENTS_MAX_BYTES,
-            max_rows=_RUN_EVENTS_MAX_ROWS,
         )
         if not summary.get("terminal"):
             continue
@@ -1455,6 +1535,18 @@ def read_session_run_events(
 ) -> dict:
     """Replay durable run-journal rows for one session after an opaque cursor."""
     sid = _validate_id(session_id, "session_id")
+    byte_cap = None if max_bytes is None else max(0, int(max_bytes))
+    row_cap = None if max_rows is None else max(0, int(max_rows))
+
+    def error(status: str) -> dict:
+        return {
+            "session_id": sid,
+            "cursor_run_id": cursor_run_id,
+            "cursor_seq": cursor_seq,
+            "status": status,
+            "events": [],
+        }
+
     cursor_run_id, cursor_seq = _parse_run_journal_event_id(after_event_id)
     raw_cursor = str(after_event_id or "").strip()
     if raw_cursor and cursor_run_id is not None:
@@ -1469,13 +1561,7 @@ def read_session_run_events(
         except (TypeError, ValueError):
             pass
     if raw_cursor and (cursor_run_id is None or cursor_seq is None or cursor_seq <= 0):
-        return {
-            "session_id": sid,
-            "cursor_run_id": cursor_run_id,
-            "cursor_seq": cursor_seq,
-            "status": "cursor_invalid",
-            "events": [],
-        }
+        return error("cursor_invalid")
     if not raw_cursor:
         return {
             "session_id": sid,
@@ -1486,9 +1572,74 @@ def read_session_run_events(
         }
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     session_root = root / RUN_JOURNAL_DIR_NAME / sid
-    runs: list[tuple[float, str, list[dict]]] = []
+    runs: list[tuple[float, str, Path]] = []
     retained_rows = 0
     retained_bytes = 0
+
+    def first_event_created_at(path: Path) -> float:
+        fallback = path.stat().st_mtime
+        try:
+            with path.open("rb") as fh:
+                for raw in fh:
+                    if not raw.strip():
+                        continue
+                    # Ordering is advisory only here. The replay pass below
+                    # validates every row it will trust before emitting it.
+                    if byte_cap is not None and len(raw) > byte_cap:
+                        return fallback
+                    try:
+                        event = json.loads(raw.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        return fallback
+                    if isinstance(event, dict):
+                        return _event_created_at(event, fallback=fallback)
+                    return fallback
+        except FileNotFoundError:
+            return fallback
+        return fallback
+
+    def parse_replay_run(path: Path, run_id: str, *, after_seq: int | None = None) -> tuple[str, list[dict]]:
+        nonlocal retained_rows, retained_bytes
+        events: list[dict] = []
+        expected_seq = 1
+        cursor_seen = after_seq is None
+        try:
+            with path.open("rb") as fh:
+                for raw in fh:
+                    if not raw.strip():
+                        continue
+                    if byte_cap is not None and len(raw) > byte_cap:
+                        return "replay_limit_bytes", []
+                    try:
+                        event = json.loads(raw.decode("utf-8"))
+                        seq = int(event.get("seq")) if isinstance(event, dict) else 0
+                    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                        return "replay_malformed", []
+                    if (
+                        seq != expected_seq
+                        or event.get("event_id") != f"{run_id}:{seq}"
+                        or event.get("run_id") != run_id
+                        or event.get("session_id") != sid
+                    ):
+                        return "replay_noncontiguous", []
+                    expected_seq += 1
+                    if after_seq is not None and seq == after_seq:
+                        cursor_seen = True
+                    if after_seq is not None and seq <= after_seq:
+                        continue
+                    if row_cap is not None and retained_rows >= row_cap:
+                        return "replay_limit_rows", []
+                    if byte_cap is not None and retained_bytes + len(raw) > byte_cap:
+                        return "replay_limit_bytes", []
+                    retained_rows += 1
+                    retained_bytes += len(raw)
+                    events.append(event)
+        except FileNotFoundError:
+            return "missing", []
+        if not cursor_seen:
+            return "cursor_event_missing", []
+        return "ok", events
+
     for path in sorted(session_root.glob("*.jsonl")) if session_root.exists() else []:
         if path.name == TERMINAL_RUN_INDEX_NAME:
             continue
@@ -1497,44 +1648,9 @@ def read_session_run_events(
             run_id = _validate_id(run_id, "run_id")
         except ValueError:
             continue
-        events: list[dict] = []
-        expected_seq = 1
-        try:
-            for _line_no, raw, total_bytes in _iter_bounded_raw_jsonl_lines(
-                path,
-                max_bytes=max_bytes,
-                retained_bytes=retained_bytes,
-            ):
-                retained_bytes = total_bytes
-                if not raw.strip():
-                    continue
-                try:
-                    event = json.loads(raw.decode("utf-8"))
-                    seq = int(event.get("seq")) if isinstance(event, dict) else 0
-                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_malformed", "events": []}
-                if (
-                    seq != expected_seq
-                    or event.get("event_id") != f"{run_id}:{seq}"
-                    or event.get("run_id") != run_id
-                    or event.get("session_id") != sid
-                ):
-                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_noncontiguous", "events": []}
-                expected_seq += 1
-                retained_rows += 1
-                if retained_rows > max_rows:
-                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_rows", "events": []}
-                events.append(event)
-        except FileNotFoundError:
-            continue
-        except ValueError as exc:
-            if str(exc) == "replay_limit_bytes":
-                return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_bytes", "events": []}
-            raise
-        created_at = min((_event_created_at(event) for event in events), default=path.stat().st_mtime)
-        runs.append((created_at, run_id, events))
+        runs.append((first_event_created_at(path), run_id, path))
     runs.sort(key=lambda run: (run[0], run[1]))
-    cursor_index = next((index for index, (_created_at, run_id, _events) in enumerate(runs) if run_id == cursor_run_id), None)
+    cursor_index = next((index for index, (_created_at, run_id, _path) in enumerate(runs) if run_id == cursor_run_id), None)
     if cursor_index is None:
         foreign_paths = root.joinpath(RUN_JOURNAL_DIR_NAME).glob(f"*/{cursor_run_id}.jsonl") if cursor_run_id else []
         foreign_session_id = next((path.parent.name for path in foreign_paths if path.parent.name != sid), "")
@@ -1548,11 +1664,23 @@ def read_session_run_events(
             "status": status,
             "events": [],
         }
-    cursor_events = runs[cursor_index][2]
-    if cursor_seq is None or cursor_seq > len(cursor_events):
-        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "cursor_event_missing", "events": []}
-    replay_events = [event for event in cursor_events if event["seq"] > cursor_seq]
-    for _created_at, _run_id, events in runs[cursor_index + 1:]:
+    if cursor_seq is None:
+        return error("cursor_event_missing")
+    cursor_status, replay_events = parse_replay_run(
+        runs[cursor_index][2],
+        str(cursor_run_id),
+        after_seq=cursor_seq,
+    )
+    if cursor_status == "missing":
+        return error("cursor_run_missing")
+    if cursor_status != "ok":
+        return error(cursor_status)
+    for _created_at, run_id, path in runs[cursor_index + 1:]:
+        status, events = parse_replay_run(path, run_id)
+        if status == "missing":
+            continue
+        if status != "ok":
+            return error(status)
         replay_events.extend(events)
     return {
         "session_id": sid,

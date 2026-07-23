@@ -2258,6 +2258,44 @@ def test_runtime_journal_anchor_scene_matches_settled_hydrated_visible_semantics
     )
 
 
+def test_run_journal_live_snapshot_pages_terminal_after_default_row_cap(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.run_journal import RunJournalWriter
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+
+    session_id = "session-long-terminal"
+    stream_id = "stream-long-terminal"
+    assistant = {"role": "assistant", "content": "suffix final", "_ts": 9.0}
+    writer = RunJournalWriter(session_id, stream_id, session_dir=session_dir)
+    for seq in range(1, 2049):
+        writer.append_sse_event("reasoning", {"text": f"step {seq}"})
+    writer.append_sse_event("token", {"text": "suffix final"})
+    writer.append_sse_event(
+        "done",
+        {
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": session_id,
+                "run_id": stream_id,
+                "stream_id": stream_id,
+                "message_index": 1,
+                "message_ref": _client_anchor_scene_message_ref(assistant),
+            }
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id, settled=True)
+
+    assert snapshot is not None
+    assert snapshot["terminal_state"] == "completed"
+    assert snapshot["terminal_message_index"] == 1
+    assert snapshot["anchor_activity_scene"]["final_answer"] == "suffix final"
+
+
 def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatch):
     from api import routes
 
@@ -2600,6 +2638,66 @@ def test_terminal_journal_materialization_fails_closed_without_terminal_target(m
     assert stream_id in progress["recent_stream_ids"]
     assert progress["last_non_materializable"]["stream_id"] == stream_id
     assert progress["last_non_materializable"]["reason"] == "missing_terminal_target"
+
+
+def test_terminal_journal_materialization_keeps_cursor_pending_for_incomplete_page(monkeypatch):
+    from api import routes
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+
+    session_id = "session-incomplete-terminal"
+    stream_id = "stream-incomplete-terminal"
+    generation = {"dev": 1, "ino": 1, "size": 64, "mtime_ns": 1, "ctime_ns": 1}
+    summary = {
+        "session_id": session_id,
+        "run_id": stream_id,
+        "last_seq": 4096,
+        "last_event_id": f"{stream_id}:4096",
+        "terminal": True,
+        "terminal_state": "completed",
+    }
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    messages = [
+        {"role": "user", "content": "do work"},
+        {"role": "assistant", "content": "partial"},
+    ]
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        routes,
+        "terminal_run_summary_page_for_session",
+        lambda *args, **kwargs: {
+            "summaries": [summary],
+            "index_size": 64,
+            "index_generation": generation,
+            "next_index_end_offset": 0,
+            "exhausted": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {
+            "events": [],
+            "malformed": [{"line": None, "reason": "replay_limit_rows"}],
+            "complete": False,
+            "limit_reason": "replay_limit_rows",
+            "next_after_seq": 2048,
+        },
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is False
+    assert session.save_calls == 0
+    assert session.anchor_activity_scenes == {}
+    progress = session.terminal_anchor_reconciliation
+    assert "index_cursor" not in progress
+    assert stream_id not in progress["recent_stream_ids"]
 
 
 def test_terminal_journal_materialization_fails_closed_without_message_ref(monkeypatch):

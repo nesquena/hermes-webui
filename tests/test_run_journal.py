@@ -65,6 +65,20 @@ def test_run_journal_reads_bounded_replay_window(tmp_path):
     assert [event["payload"]["text"] for event in journal["events"]] == ["two", "three"]
 
 
+def test_run_journal_reads_suffix_after_default_row_cap(tmp_path):
+    for seq in range(1, 2049):
+        append_run_event("session_1", "run_long", "token", {"text": str(seq)}, session_dir=tmp_path, seq=seq)
+    append_run_event("session_1", "run_long", "token", {"text": "suffix"}, session_dir=tmp_path, seq=2049)
+    append_run_event("session_1", "run_long", "done", {"session": {}}, session_dir=tmp_path, seq=2050)
+
+    journal = read_run_events("session_1", "run_long", after_seq=2048, session_dir=tmp_path)
+
+    assert journal["complete"] is True
+    assert journal["malformed"] == []
+    assert [event["seq"] for event in journal["events"]] == [2049, 2050]
+    assert [event["event"] for event in journal["events"]] == ["token", "done"]
+
+
 def test_run_journal_rejects_single_over_cap_row_before_json_parse(tmp_path):
     path = tmp_path / "_run_journal" / "session_1" / "run_giant.jsonl"
     path.parent.mkdir(parents=True)
@@ -688,7 +702,7 @@ def test_terminal_index_process_lock_uses_windows_locking_when_fcntl_unavailable
     assert fake.calls == [(fake.LK_LOCK, 1), (fake.LK_UNLCK, 1)]
 
 
-def test_terminal_run_summaries_uses_bounded_legacy_summary_fallback(tmp_path, monkeypatch):
+def test_terminal_run_summaries_uses_complete_legacy_summary_fallback(tmp_path, monkeypatch):
     path = tmp_path / "_run_journal" / "session_1" / "legacy_run.jsonl"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -734,7 +748,7 @@ def test_terminal_run_summaries_uses_bounded_legacy_summary_fallback(tmp_path, m
     summaries = terminal_run_summaries_for_session("session_1", session_dir=tmp_path, limit=1)
 
     assert [summary["run_id"] for summary in summaries] == ["legacy_run"]
-    assert calls == [{"max_bytes": 2 * 1024 * 1024, "max_rows": 2048}]
+    assert calls == [{"max_bytes": None, "max_rows": None}]
 
 
 def test_terminal_run_summary_pages_advance_with_compact_index_cursor(tmp_path):
