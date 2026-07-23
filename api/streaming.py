@@ -21,8 +21,10 @@ import threading
 import time
 import traceback
 import copy
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import zoneinfo
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,9 @@ def _cancel_event_payload(
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+_TIMESTAMP_PREFIX_RE = re.compile(r'^\[Time:\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\]\n')
+
 _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
 _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -2435,7 +2440,26 @@ def _resolve_image_input_mode(cfg: dict) -> str:
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None):
+def _time_context_prefix(turn_started_at: float) -> str:
+    """Format a ``[Time: …]\\n`` prefix for the given Unix timestamp.
+
+    Uses the system timezone (``time.tzname[0]``) via ``zoneinfo`` so the
+    prefix reflects the local offset of the machine running WebUI. Falls back
+    to UTC silently on any error — never raises.
+    """
+    try:
+        tz = zoneinfo.ZoneInfo(time.tzname[0])
+        dt = datetime.fromtimestamp(turn_started_at, tz=tz)
+        return f"[Time: {dt.strftime('%Y-%m-%dT%H:%M:%S%z')}]\n"
+    except Exception:
+        try:
+            dt = datetime.fromtimestamp(turn_started_at, tz=zoneinfo.ZoneInfo("UTC"))
+            return f"[Time: {dt.strftime('%Y-%m-%dT%H:%M:%S%z')}]\n"
+        except Exception:
+            return ""
+
+
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, turn_started_at: Optional[float] = None):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -2447,6 +2471,16 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     mode is ``"text"``, returns a plain string (attachments are not embedded) so
     the agent's text-mode pipeline (``vision_analyze``) handles images.
     """
+    # Prepend message-timestamp prefix when configured
+    _timestamp_enabled = bool(
+        isinstance(cfg, dict)
+        and cfg.get('gateway', {}).get('message_timestamps', {}).get('enabled')
+    )
+    if _timestamp_enabled and turn_started_at is not None:
+        _ts_prefix = _time_context_prefix(turn_started_at)
+        if _ts_prefix:
+            workspace_ctx = _ts_prefix + workspace_ctx
+
     if not attachments:
         return workspace_ctx + msg_text
 
@@ -2959,6 +2993,7 @@ def _looks_like_current_user_turn(msg, msg_text) -> bool:
     if not needle:
         return False
     text = _message_text(msg.get('content', ''))
+    text = _TIMESTAMP_PREFIX_RE.sub('', text)
     candidates = [_strip_workspace_prefix(text, include_legacy=True)]
     for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
         for match in pattern.finditer(text):
@@ -5264,6 +5299,7 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
 def _strip_workspace_prefixes_for_compare(text: str) -> str:
     """Remove WebUI workspace sentinels anywhere before text comparison."""
     value = _strip_workspace_prefix(text, include_legacy=True)
+    value = _TIMESTAMP_PREFIX_RE.sub('', value)
     for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
         value = pattern.sub('', value)
     return value.strip()
@@ -9021,7 +9057,7 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, turn_started_at=_turn_started_at)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = dict(
                 user_message=user_message,
