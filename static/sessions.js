@@ -497,19 +497,15 @@ function _setSessionViewedCount(sid, messageCount = 0, consumeManualOnVisit = fa
     typeof _isSessionActivelyViewedForList === 'function' &&
     _isSessionActivelyViewedForList(sid)
   ) {
-    // Keep explicit manual-unread markers for the first active-session reconcile
-    // after the user marks unread.
-    if (existingMarker.manual_pending === true) {
+    // Passive reconciles get one protective pass after the manual action. An
+    // explicit visit is different: it is the user's read acknowledgement and
+    // must consume the marker even while that protection is pending.
+    if (existingMarker.manual_pending === true && !(isVisitAcknowledgment && consumeManualOnVisit)) {
       existingMarker.manual_pending = false;
       _saveSessionCompletionUnread();
       return;
     }
 
-    // Only an explicit visit acknowledgement should clear a manual marker after
-    // the first protective pass. A same-session re-select should not consume the
-    // unread intent immediately; it will be cleared on a later explicit visit.
-    // `consumeManualOnVisit` is set by _acknowledgeSessionVisit() callers that
-    // represent explicit read acknowledgements.
     if (isVisitAcknowledgment && consumeManualOnVisit) {
       _clearSessionCompletionUnread(sid);
     }
@@ -1173,6 +1169,30 @@ function _markSessionCompletedInList(session, previousSid = null) {
   if (!session || !Array.isArray(_allSessions)) return;
   const finalSid = session.session_id || previousSid;
   if (!finalSid) return;
+  if (previousSid && previousSid !== finalSid) {
+    const unread = _getSessionCompletionUnread();
+    const previousMarker = unread[previousSid];
+    if (previousMarker && typeof previousMarker === 'object' && !Array.isArray(previousMarker)) {
+      const finalMarker = unread[finalSid];
+      if (finalMarker && typeof finalMarker === 'object' && !Array.isArray(finalMarker)) {
+        const mergedMarker = {...previousMarker, ...finalMarker};
+        if (previousMarker.manual === true || finalMarker.manual === true) {
+          mergedMarker.manual = true;
+          if (
+            !Object.prototype.hasOwnProperty.call(finalMarker, 'manual_pending')
+            && Object.prototype.hasOwnProperty.call(previousMarker, 'manual_pending')
+          ) {
+            mergedMarker.manual_pending = previousMarker.manual_pending;
+          }
+        }
+        unread[finalSid] = mergedMarker;
+      } else {
+        unread[finalSid] = previousMarker;
+      }
+      delete unread[previousSid];
+      _saveSessionCompletionUnread();
+    }
+  }
   const finalIdx = _allSessions.findIndex(s => s && s.session_id === finalSid);
   const previousIdx = previousSid ? _allSessions.findIndex(s => s && s.session_id === previousSid) : -1;
   const idx = finalIdx >= 0 ? finalIdx : previousIdx;
@@ -1725,7 +1745,7 @@ async function loadSession(sid){
         sid,
         Number(S.session.message_count || 0),
         Number(S.session.last_message_at || S.session.updated_at || 0),
-        false
+        true
       );
     }
     return;
