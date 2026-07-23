@@ -20469,7 +20469,13 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
+function _syncComposerFiles(){
+  if(S.session&&S.session.session_id&&typeof _rememberComposerPendingFiles==='function'){
+    _rememberComposerPendingFiles(S.session.session_id,S.pendingFiles);
+  }
+}
 function renderTray(){ // non-media files use paperclip chip
+  _syncComposerFiles();
   const tray=$('attachTray');tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');
@@ -20511,6 +20517,16 @@ function _showUploadTooLarge(file){
   else if(typeof showToast==='function')showToast(message,5000,'error');
 }
 function addFiles(files){
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+    // OS drag/drop can still reach this helper while the native controls are
+    // disabled. Replay those File objects after the transition settles so they
+    // belong to whichever session actually remains visible (new on success,
+    // source on failure) instead of being cleared at the ownership boundary.
+    const deferredFiles=Array.from(files||[]);
+    const replay=()=>setTimeout(()=>addFiles(deferredFiles),0);
+    Promise.resolve(_newSessionInFlight).then(replay,replay);
+    return;
+  }
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
