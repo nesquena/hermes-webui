@@ -2140,6 +2140,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // new reasoning belongs to a fresh Anchor segment; seeding its live buffer
   // with the aggregate would repeat every restored Thinking row in that card.
   let liveReasoningText = reconnecting ? '' : reasoningText;
+  let _liveReasoningSegmentSeq=0;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
@@ -2518,10 +2519,59 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _liveThinkingText(){
     return String(liveReasoningText||'').trim() || 'Thinking…';
   }
+  function _positiveLiveSegmentSeq(value){
+    const seq=Number(value);
+    return Number.isFinite(seq)&&seq>0?Math.floor(seq):0;
+  }
+  function _liveLocalIdSegmentSeq(value){
+    const raw=String(value||'');
+    if(!raw.startsWith('live-reasoning:')&&!raw.startsWith('live-prose:')) return 0;
+    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):'';
+    return _positiveLiveSegmentSeq(tail);
+  }
+  function _anchorActivityMaxSegmentSeq(){
+    const events=_anchorActivityEvents();
+    if(!events) return 0;
+    let maxSeq=0;
+    const visit=(value)=>{
+      const seq=_positiveLiveSegmentSeq(value);
+      if(seq>maxSeq) maxSeq=seq;
+    };
+    for(const event of events){
+      if(!event||typeof event!=='object') continue;
+      visit(event.activitySegmentSeq);
+      visit(event.activity_segment_seq);
+      visit(event.segmentSeq);
+      visit(event.segment_seq);
+      visit(_liveLocalIdSegmentSeq(event.local_id));
+      visit(_liveLocalIdSegmentSeq(event.row_id));
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      visit(payload.activitySegmentSeq);
+      visit(payload.activity_segment_seq);
+      visit(payload.segmentSeq);
+      visit(payload.segment_seq);
+      const group=(event.group&&typeof event.group==='object')?event.group:{};
+      visit(group.activitySegmentSeq);
+      visit(group.activity_segment_seq);
+      visit(group.segmentSeq);
+      visit(group.segment_seq);
+      const identity=(event.identity&&typeof event.identity==='object')?event.identity:{};
+      visit(identity.activitySegmentSeq);
+      visit(identity.activity_segment_seq);
+      visit(identity.segmentSeq);
+      visit(identity.segment_seq);
+      visit(_liveLocalIdSegmentSeq(identity.local_id));
+    }
+    return maxSeq;
+  }
   function _liveThinkingPlacement(){
     const activeSeq=Number(_assistantSegmentSeq||0);
-    const nextSeq=Number(_currentLiveSegmentSeq||0)+1;
-    const segmentSeq=(!assistantRow||_freshSegment||!activeSeq)?nextSeq:activeSeq;
+    const reasoningSeq=_positiveLiveSegmentSeq(_liveReasoningSegmentSeq);
+    const restoredAnchorSeq=_anchorActivityMaxSegmentSeq();
+    const currentSeq=Number(_currentLiveSegmentSeq||0);
+    const nextSeq=Math.max(Number.isFinite(currentSeq)?currentSeq:0,restoredAnchorSeq)+1;
+    let segmentSeq=(!assistantRow||_freshSegment||!activeSeq)?nextSeq:activeSeq;
+    if(reasoningSeq>0&&String(liveReasoningText||'').trim()) segmentSeq=reasoningSeq;
     return {
       activityKey:S.activeStreamId?'live:'+S.activeStreamId:null,
       segmentSeq,
@@ -3738,7 +3788,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
     const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
-    const sceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromScene(base);
+    const rawSceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromScene(base);
+    const sceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromTranscript(rawSceneFinalAnswerHint,base)||rawSceneFinalAnswerHint;
     const finalAnswerHint=sceneFinalAnswerHint;
     const optionFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint;
     const transcriptFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer;
@@ -4092,6 +4143,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
     const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
+    if(Number.isFinite(segmentSeq)&&segmentSeq>0) _liveReasoningSegmentSeq=segmentSeq;
     if(options&&typeof options==='object'){
       options.anchorReasoningLocalId=localId;
       options.segmentSeq=segmentSeq;
@@ -4209,6 +4261,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText=live.text;
       removed=true;
     }
+    if(!String(liveReasoningText||'').trim()) _liveReasoningSegmentSeq=0;
     const anchorRemoved=_stripAnchorReasoningEcho(visible);
     const domRemoved=_removeLiveReasoningEchoRows(visible);
     if(removed) syncInflightAssistantMessage();
@@ -5221,6 +5274,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantBody=null;
     segmentStart=assistantText.length;
     _freshSegment=true;
+    _liveReasoningSegmentSeq=0;
     _smdEndParser();
     _resetStreamFadeState();
   }
@@ -5668,6 +5722,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(reasoningEcho) _stripLiveReasoningEcho(visible);
       liveReasoningText='';
+      _liveReasoningSegmentSeq=0;
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
           recordActivityBoundary();
@@ -5784,6 +5839,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // tool cards. Close the current live card before appending a tool row.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       liveReasoningText='';
+      _liveReasoningSegmentSeq=0;
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       const pendingDisplayText=segmentStart===0
         ? (_parseStreamState().displayText||'')

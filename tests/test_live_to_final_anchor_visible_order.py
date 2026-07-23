@@ -1106,7 +1106,7 @@ const scene = _completeSettledAnchorSceneForTurn([
   {{role:'assistant', content:{json.dumps(final_answer)}, id:'assistant-1'}},
 ], 1, {{
   mode:'compact_worklog',
-  final_answer:'',
+  final_answer:{json.dumps(final_answer)},
   activity_rows:[
     {{role:'thinking', text:'Checking the fixture', status:'running', local_id:'live-thinking:stream:1'}},
     {{
@@ -1138,6 +1138,20 @@ process.stdout.write(JSON.stringify({{
         {"role": "prose", "source": "token", "text": prefix_text},
         {"role": "tool", "source": "", "text": "tool output"},
     ]
+
+
+def test_live_reasoning_placement_advances_after_restored_anchor_segments():
+    attach = _function_body(MESSAGES_JS, "attachLiveStream")
+
+    assert "let _liveReasoningSegmentSeq=0;" in attach
+    assert "function _anchorActivityMaxSegmentSeq()" in attach
+    assert "visit(payload.activitySegmentSeq);" in attach
+    assert "visit(group.activity_segment_seq);" in attach
+    assert "visit(_liveLocalIdSegmentSeq(event.local_id));" in attach
+    assert "const restoredAnchorSeq=_anchorActivityMaxSegmentSeq();" in attach
+    assert "Math.max(Number.isFinite(currentSeq)?currentSeq:0,restoredAnchorSeq)+1" in attach
+    assert "if(reasoningSeq>0&&String(liveReasoningText||'').trim()) segmentSeq=reasoningSeq;" in attach
+    assert "if(Number.isFinite(segmentSeq)&&segmentSeq>0) _liveReasoningSegmentSeq=segmentSeq;" in attach
 
 
 def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
