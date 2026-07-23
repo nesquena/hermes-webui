@@ -938,6 +938,38 @@ function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
   const containerRect=container.getBoundingClientRect();
+  // The server-older button is a real viewport anchor too. In a paginated long
+  // session the reader can be looking at this button while the first rendered
+  // message row sits thousands of pixels away (virtual window / load-earlier gap).
+  // The old row-only capture then recorded that distant row's offset; after a
+  // stream re-render its semantic realign wrote scrollTop by -6k px (field stack:
+  // _restoreMessageViewportAnchor -> _restoreMessageScrollSnapshot, with
+  // top[BUTTON.load-older-indicator]). Capture the button itself under a stable
+  // sentinel key so its own offset — not a distant message row — is restored.
+  const olderButton=container.querySelector('#loadOlderIndicator');
+  if(olderButton&&typeof olderButton.getBoundingClientRect==='function'){
+    const rect=olderButton.getBoundingClientRect();
+    if(rect.bottom>containerRect.top+1&&rect.top<containerRect.bottom-1){
+      // Record the REAL current top-spacer height (not 0). If this sentinel ever
+      // reaches the topPad-delta fallback in _compensateScrollForMeasurementDelta,
+      // a hard-coded 0 would make an unchanged 8000px virtual spacer look like
+      // 8000px of growth and add the whole spacer to scrollTop (greptile P1). The
+      // load-older button only renders when the virtual window starts at row 0
+      // (topPad 0), so this is normally 0 anyway — but read it so the fallback math
+      // is correct if the window ever shifts between capture and restore.
+      const _spacer=container.querySelector('[data-virtual-spacer="before"]');
+      const _topPad=_spacer?parseFloat(_spacer.style.height||'0')||0:0;
+      return {
+        rawIdx:null,
+        sessionIdx:null,
+        key:'__load_older_indicator__',
+        topOffset:rect.top-containerRect.top,
+        topPadBefore:_topPad,
+        scrollHeightAtCapture:container.scrollHeight,
+        special:'load-older',
+      };
+    }
+  }
   const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
   for(const row of rows){
     const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
@@ -982,6 +1014,31 @@ function _captureMessageViewportAnchor(){
 // test is more robust than a matchMedia('(hover:hover) and (pointer:fine)')
 // check because it reflects the real resting value, including any inline
 // override, not just the viewport media state.
+// Ownership-safe wipe-guard for #msgInner.minHeight (maintainer gate #1).
+// Multiple render paths can pin/clear it; mint a unique token on each pin and
+// allow only the current owner to restore the recorded baseline.
+let _wipeGuardSeq=0;
+function _pinWipeMinHeight(inner, height){
+  if(!inner||!inner.style||!inner.dataset||!(height>0)) return null;
+  const token=String(++_wipeGuardSeq);
+  const prev=inner.style.minHeight||'';
+  if(!inner.dataset.wipeGuardToken) inner.dataset.wipeGuardPrevMinHeight=prev;
+  inner.dataset.wipeGuardToken=token;
+  let target=Math.round(height);
+  const prevPx=parseFloat(prev)||0;
+  if(prevPx>target) target=Math.round(prevPx);
+  inner.style.minHeight=target+'px';
+  return token;
+}
+function _releaseWipeMinHeight(inner, token){
+  if(!inner||!inner.style||!inner.dataset||!token) return false;
+  if(inner.dataset.wipeGuardToken!==String(token)) return false;
+  inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||'';
+  delete inner.dataset.wipeGuardToken;
+  delete inner.dataset.wipeGuardPrevMinHeight;
+  return true;
+}
+
 function _browserOverflowAnchorActive(el){
   if(!el) return false;
   try{ return getComputedStyle(el).overflowAnchor==='auto'; }catch(_){ return false; }
@@ -1038,7 +1095,12 @@ function _isTouchLikeMessageViewport(el){
   // refusal's premise fails — treat it like desktop (keep the semantic realign).
   if(_isIOSWebKit()) return false;
   try{
-    if(typeof matchMedia==='function' && matchMedia('(pointer:coarse)').matches) return true;
+    if(typeof matchMedia==='function'){
+      // Mirror CSS: any precise pointer or hover-capable input disables native
+      // anchoring, even when the primary pointer on a hybrid laptop is coarse.
+      if(matchMedia('(any-pointer:fine)').matches || matchMedia('(any-hover:hover)').matches) return false;
+      if(matchMedia('(pointer:coarse)').matches) return true;
+    }
   }catch(_){}
   // Best-effort fallback for the (today essentially non-existent) no-matchMedia
   // environment: the computed-anchor probe can transiently read 'none' during a
@@ -1070,6 +1132,36 @@ function _suppressBrowserOverflowAnchor(container){
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const container=$('messages');
   if(!container||!anchor) return false;
+  const containerRect=container.getBoundingClientRect();
+  // Stable non-message viewport anchor for paginated transcripts. The button is
+  // recreated on every render, but its id is stable. Restore its own viewport
+  // offset and never degrade this sentinel to message rawIdx 0 when it disappears.
+  if(anchor.special==='load-older'||anchor.key==='__load_older_indicator__'){
+    const button=container.querySelector('#loadOlderIndicator');
+    if(button&&typeof button.getBoundingClientRect==='function'){
+      const rect=button.getBoundingClientRect();
+      const targetTop=Number(anchor.topOffset)||0;
+      _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+      container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+      if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+      else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+      return true;
+    }
+    // The sentinel disappeared mid-render. Compensate by the prepend-height delta
+    // and treat it as fully handled; never fall through to generic message remounting.
+    const _shAtCap=Number(anchor.scrollHeightAtCapture);
+    if(Number.isFinite(_shAtCap)){
+      const _grew=container.scrollHeight-_shAtCap;
+      if(Math.abs(_grew)>=2){
+        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+        container.scrollTop=Math.max(0,container.scrollTop+_grew);
+        _lastScrollTop=container.scrollTop;
+        if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+        else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+      }
+    }
+    return true;
+  }
   const anchorKey=String(anchor.key||'');
   const sessionIdx=Number(anchor.sessionIdx);
   const hasSessionIdx=Number.isFinite(sessionIdx);
@@ -1095,7 +1187,6 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const targetIdx=Number(anchor.rawIdx)+Number(rawIdxDelta||0);
   if(!row&&Number.isFinite(targetIdx)) row=container.querySelector(`[data-msg-idx="${targetIdx}"]`);
   if(!row) return false;
-  const containerRect=container.getBoundingClientRect();
   const rect=row.getBoundingClientRect();
   const targetTop=Number(anchor.topOffset)||0;
   // Streaming stale-anchor guard (issue #5637). During a live stream, content grows
@@ -1151,6 +1242,9 @@ let _messageViewportAnchorRemounting=false;
 function _remountMessageViewportAnchor(anchor){
   const container=$('messages');
   if(!container||!anchor||_messageViewportAnchorRemounting) return false;
+  // A load-older sentinel is not a message row. Its restore path fully handles
+  // both the present-button and disappeared-button cases.
+  if(anchor.special==='load-older'||anchor.key==='__load_older_indicator__') return false;
   const anchorKey=String(anchor.key||'');
   const visibleKeyNode=anchorKey
     ? Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(node=>node&&node.dataset&&node.dataset.messageAnchorKey===anchorKey&&(!node.getClientRects||node.getClientRects().length>0))
@@ -1196,59 +1290,130 @@ function _compensateScrollForMeasurementDelta(renderFn){
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
+  // Wipe-guard for the VIRTUALIZED measurement re-render path (not just the
+  // innerHTML='' path in renderMessages). On a huge session (900+ msgs, 130k+px)
+  // a measurement-driven re-window RECYCLES many rendered rows to height 0 and
+  // rebuilds the window, collapsing #messages.scrollHeight by tens of thousands of
+  // px in one frame (telemetry: SHRINK 131767->92811 dH-38956, mhnone, flick rows
+  // 0>1353 / 1278>0). If the reader's anchor row is among the recycled rows, the
+  // topPad-delta fallback below under-compensates and the browser clamps scrollTop
+  // (dTop≈dH BIG-JUMP). Pin #msgInner.minHeight to the pre-render content height
+  // for the duration of the re-render+compensation so maxTop can't collapse and the
+  // clamp never fires; release on the next frame after compensation lands.
+  const _inner=$('msgInner');
+  const _guardH=(_inner&&Number.isFinite(_inner.scrollHeight))?_inner.scrollHeight:0;
+  // Only unpinned readers need height held against browser clamping. Pinned
+  // readers must leave scrollHeight free so auto-follow can land at the true tail.
+  const _compUnpinned=(typeof _messageUserUnpinned!=='undefined')&&_messageUserUnpinned;
+  const _outerToken=_compUnpinned?_pinWipeMinHeight(_inner,_guardH):null;
   container.classList.add('vscroll-measuring');
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
-  if(!anchorBefore) return;
-  if(scrollTopBefore<1){
-    const spacer=container.querySelector('[data-virtual-spacer="before"]');
-    if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
+  let _renderCompleted=false;
+  try{
+    renderFn();
+    _renderCompleted=true;
+  }finally{
+    container.classList.remove('vscroll-measuring');
+    // If the nested render throws before installing its successor token, release
+    // this outer guard now. Owner-checking makes this harmless if it was superseded.
+    if(!_renderCompleted&&_outerToken) _releaseWipeMinHeight(_inner,_outerToken);
   }
-  // Re-find the anchor row after the measurement-driven re-render. The primary
-  // lookup is by rawIdx (the DOM index), but on a big virtualized session a large
-  // scroll delta can RECYCLE the old anchor row out of the render window entirely
-  // (verified via real-device telemetry: DOM collapsed to 1 row, scrollHeight
-  // lurched by tens of thousands of px). The old code did `if(!row) return` here,
-  // abandoning compensation → the full estimated↔measured height lurch hit
-  // scrollTop uncompensated and threw the viewport to the top (the recurring
-  // mobile scroll jump-back). Fall back to the stable sessionIdx anchor (captured in
-  // _captureMessageViewportAnchor) before giving up, mirroring the "recover via
-  // sessionIdx when the primary anchor key is gone" approach used elsewhere but for
-  // the virtualization-measurement compensation path.
-  let row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
-  if(!row&&Number.isFinite(Number(anchorBefore.sessionIdx))){
-    row=container.querySelector(`[data-session-msg-idx="${anchorBefore.sessionIdx}"]`);
-  }
-  if(!row){
-    // Anchor row is no longer rendered (recycled out of the virtual window). We
-    // cannot measure its live offset, but we CAN keep the viewport visually
-    // stable by compensating for the top-spacer (topPad) height change: the
-    // whole reason scrollHeight lurched is that the estimated topPad was replaced
-    // by a measured one. Shift scrollTop by that same delta so content under the
-    // viewport does not appear to jump. Without this the browser lands at an
-    // uncompensated absolute scrollTop against a wildly different scrollHeight.
-    const spacerAfter=container.querySelector('[data-virtual-spacer="before"]');
-    const topPadAfter=spacerAfter?parseFloat(spacerAfter.style.height||'0')||0:0;
-    const topPadBefore=Number(anchorBefore.topPadBefore);
-    if(Number.isFinite(topPadBefore)){
-      const padDelta=topPadAfter-topPadBefore;
-      if(Math.abs(padDelta)>=2){
-        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-        container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
-        _lastScrollTop=container.scrollTop;
-        _deferClearProgrammaticScroll();
-      }
+  // The inner render supersedes the outer token. Re-pin after renderFn as the final
+  // owner, hold through two frames, then release and restore the semantic anchor.
+  const _settleH=Math.max(_guardH,(_inner&&Number.isFinite(_inner.scrollHeight))?_inner.scrollHeight:0);
+  const _settleToken=_compUnpinned?_pinWipeMinHeight(_inner,_settleH):null;
+  // Delayed-restore movement guard (maintainer gate): the settle release runs two
+  // frames later. If the reader keeps scrolling during that window, restoring the
+  // pre-render `anchorBefore` would snap them back to the stale position (repro:
+  // scrollTop 200 -> 260 during the window, then forced back to 200). The baseline
+  // is the scrollTop the SYNCHRONOUS compensation below settles on (captured right
+  // after it runs, so movement BEFORE the first frame is caught too). At release we
+  // decide movement PURELY on position delta — never on _programmaticScroll, which
+  // this same compensation sets true for the whole two-frame window — and we make
+  // that decision BEFORE releasing minHeight, since the release itself reflows
+  // scrollHeight and can clamp scrollTop into a false "moved" reading.
+  const _releaseSettledGuard=(expectedTop)=>{
+    if(!_settleToken) return;
+    const _moved=Number.isFinite(expectedTop)&&Math.abs(container.scrollTop-expectedTop)>3;
+    // A newer render may supersede this delayed guard. Never apply the old
+    // semantic anchor unless this callback still owned and released the token.
+    if(!_releaseWipeMinHeight(_inner,_settleToken)) return;
+    void container.scrollHeight;
+    if(!anchorBefore) return;
+    // The reader scrolled during the window — respect the fresh position, do NOT
+    // restore the stale anchor.
+    if(_moved){
+      _lastScrollTop=container.scrollTop;
+      return;
     }
-    return;
+    _restoreMessageViewportAnchor(anchorBefore);
+  };
+  // Synchronous compensation for the measurement-driven re-render. Runs INLINE (a
+  // nested fn so its early returns don't skip the release scheduling below), then we
+  // capture the settled scrollTop as the delayed-restore movement baseline.
+  const _applySyncCompensation=()=>{
+    if(!anchorBefore){
+      return;
+    }
+    if(scrollTopBefore<1){
+      const spacer=container.querySelector('[data-virtual-spacer="before"]');
+      if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
+    }
+    // Re-find the anchor row after the measurement-driven re-render. The primary
+    // lookup is by rawIdx (the DOM index), but on a big virtualized session a large
+    // scroll delta can RECYCLE the old anchor row out of the render window entirely
+    // (verified via real-device telemetry: DOM collapsed to 1 row, scrollHeight
+    // lurched by tens of thousands of px). The old code did `if(!row) return` here,
+    // abandoning compensation → the full estimated↔measured height lurch hit
+    // scrollTop uncompensated and threw the viewport to the top (the recurring
+    // mobile scroll jump-back). Fall back to the stable sessionIdx anchor (captured in
+    // _captureMessageViewportAnchor) before giving up, mirroring the "recover via
+    // sessionIdx when the primary anchor key is gone" approach used elsewhere but for
+    // the virtualization-measurement compensation path.
+    let row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
+    if(!row&&Number.isFinite(Number(anchorBefore.sessionIdx))){
+      row=container.querySelector(`[data-session-msg-idx="${anchorBefore.sessionIdx}"]`);
+    }
+    if(!row){
+      // Anchor row is no longer rendered (recycled out of the virtual window). We
+      // cannot measure its live offset, but we CAN keep the viewport visually
+      // stable by compensating for the top-spacer (topPad) height change: the
+      // whole reason scrollHeight lurched is that the estimated topPad was replaced
+      // by a measured one. Shift scrollTop by that same delta so content under the
+      // viewport does not appear to jump. Without this the browser lands at an
+      // uncompensated absolute scrollTop against a wildly different scrollHeight.
+      const spacerAfter=container.querySelector('[data-virtual-spacer="before"]');
+      const topPadAfter=spacerAfter?parseFloat(spacerAfter.style.height||'0')||0:0;
+      const topPadBefore=Number(anchorBefore.topPadBefore);
+      if(Number.isFinite(topPadBefore)){
+        const padDelta=topPadAfter-topPadBefore;
+        if(Math.abs(padDelta)>=2){
+          _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+          container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
+          _lastScrollTop=container.scrollTop;
+          _deferClearProgrammaticScroll();
+        }
+      }
+      return;
+    }
+    const containerRect=container.getBoundingClientRect();
+    const rowRect=row.getBoundingClientRect();
+    const actualOffset=rowRect.top-containerRect.top;
+    const delta=actualOffset-anchorBefore.topOffset;
+    if(Math.abs(delta)<2) return;
+    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+    container.scrollTop=scrollTopBefore+delta;
+    _lastScrollTop=container.scrollTop;
+    _deferClearProgrammaticScroll();
+  };
+  _applySyncCompensation();
+  // Baseline = the scrollTop compensation just settled on. Any later user scroll
+  // (before frame one or between frames) diverges from it and cancels the restore.
+  const _settledTop=container.scrollTop;
+  if(typeof requestAnimationFrame==='function'){
+    requestAnimationFrame(()=>requestAnimationFrame(()=>_releaseSettledGuard(_settledTop)));
+  }else{
+    _releaseSettledGuard(_settledTop);
   }
-  const containerRect=container.getBoundingClientRect();
-  const rowRect=row.getBoundingClientRect();
-  const actualOffset=rowRect.top-containerRect.top;
-  const delta=actualOffset-anchorBefore.topOffset;
-  if(Math.abs(delta)<2) return;
-  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  container.scrollTop=scrollTopBefore+delta;
-  _lastScrollTop=container.scrollTop;
-  _deferClearProgrammaticScroll();
 }
 function _messageViewportIntersectsRenderedRow(){
   const container=$('messages');
@@ -12693,23 +12858,11 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   _nearBottomCount=0;
   const msgInner=$('msgInner');
   if(!msgInner||!msgInner.style) return {readerAwayFromBottom:true,release:null};
-  const guardPreviousKey='liveAnchorScrollGuardPreviousMinHeight';
-  let previousMinHeight=msgInner.style.minHeight||'';
-  if(msgInner.dataset&&Object.prototype.hasOwnProperty.call(msgInner.dataset,guardPreviousKey)){
-    previousMinHeight=msgInner.dataset[guardPreviousKey]||'';
-  }else if(msgInner.dataset){
-    msgInner.dataset[guardPreviousKey]=previousMinHeight;
-  }
   const guardHeight=Math.max(messagesEl.scrollHeight,Number(scrollSnapshot.scrollHeight)||0);
-  if(guardHeight>0) msgInner.style.minHeight=`${guardHeight}px`;
+  const token=_pinWipeMinHeight(msgInner,guardHeight);
   return {
     readerAwayFromBottom:true,
-    release:()=>{
-      msgInner.style.minHeight=previousMinHeight;
-      if(msgInner.dataset&&msgInner.dataset[guardPreviousKey]===previousMinHeight){
-        delete msgInner.dataset[guardPreviousKey];
-      }
-    },
+    release:token?()=>_releaseWipeMinHeight(msgInner,token):null,
   };
 }
 function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
@@ -12787,6 +12940,18 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _scheduleLiveAnchorScrollRebuildGuardRelease(guard,scrollSnapshot){
+  if(!guard||typeof guard.release!=='function') return false;
+  const finish=()=>{
+    // A newer render may supersede this token before the delayed callback runs.
+    // Restore the old snapshot only when this guard still owned and released it.
+    const released=guard.release();
+    if(released&&_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(finish);
+  else finish();
+  return true;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12836,6 +13001,8 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  let scrollRebuildGuardReleaseScheduled=false;
+  try{
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
@@ -12861,17 +13028,15 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _dedupeLiveProcessedWorklogAnchors(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(scrollRebuildGuard&&scrollRebuildGuard.release){
-    requestAnimationFrame(()=>{
-      scrollRebuildGuard.release();
-      // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
-      // rAF time. If they re-pinned between guard-engage and this frame, the
-      // stale re-restore would yank them back off the bottom (Opus gate finding).
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    });
-  }
+  scrollRebuildGuardReleaseScheduled=_scheduleLiveAnchorScrollRebuildGuardRelease(scrollRebuildGuard,scrollSnapshot);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
+  }finally{
+    // Exceptions in any DOM renderer above must not strand the transcript floor.
+    if(!scrollRebuildGuardReleaseScheduled&&scrollRebuildGuard&&scrollRebuildGuard.release){
+      scrollRebuildGuard.release();
+    }
+  }
 }
 function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   opts=opts||{};
@@ -12895,6 +13060,8 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  let scrollRebuildGuardReleaseScheduled=false;
+  try{
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
@@ -12975,14 +13142,14 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(scrollRebuildGuard&&scrollRebuildGuard.release){
-    requestAnimationFrame(()=>{
-      scrollRebuildGuard.release();
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    });
-  }
+  scrollRebuildGuardReleaseScheduled=_scheduleLiveAnchorScrollRebuildGuardRelease(scrollRebuildGuard,scrollSnapshot);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return !!renderedRows.length;
+  }finally{
+    if(!scrollRebuildGuardReleaseScheduled&&scrollRebuildGuard&&scrollRebuildGuard.release){
+      scrollRebuildGuard.release();
+    }
+  }
 }
 
 function _transparentLiveRowKey(node, streamId){
@@ -15693,6 +15860,12 @@ function renderMessages(options){
   // renderMessages() in this window. Keep the existing loading placeholder.
   if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
+  // Self-heal only a tokenized orphan and restore its recorded baseline; never
+  // unconditionally clear a minHeight owned by another feature.
+  if(inner&&inner.dataset&&inner.dataset.wipeGuardToken){
+    _releaseWipeMinHeight(inner,inner.dataset.wipeGuardToken);
+  }
+  let _mainWipeGuardToken=null;
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
@@ -15733,6 +15906,11 @@ function renderMessages(options){
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
+      const _cachePrewipeH=(inner&&Number.isFinite(inner.scrollHeight))?inner.scrollHeight:0;
+      const _cacheReaderUnpinned=!!(scrollSnapshot&&(scrollSnapshot.userUnpinned===true||scrollSnapshot.pinned===false))||_messageUserUnpinned;
+      const _cacheGuardToken=_cacheReaderUnpinned?_pinWipeMinHeight(inner,_cachePrewipeH):null;
+      let _cacheGuardCleanupArmed=!!_cacheGuardToken;
+      try{
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
@@ -15741,12 +15919,37 @@ function renderMessages(options){
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+      if(_cacheGuardToken){
+        const _innerRel=inner;
+        const _releaseCacheGuard=()=>{
+          // A superseding render owns the height now; do not apply this stale
+          // snapshot/bottom restore when the release no longer owns the token.
+          if(!_releaseWipeMinHeight(_innerRel,_cacheGuardToken)) return;
+          void $('messages').scrollHeight;
+          if((preserveScroll||_messageUserUnpinned)&&scrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
+            _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+          }else if(typeof scrollToBottom==='function'){
+            scrollToBottom();
+          }
+        };
+        if(typeof requestAnimationFrame==='function'){
+          requestAnimationFrame(()=>requestAnimationFrame(_releaseCacheGuard));
+          _cacheGuardCleanupArmed=false;
+        }else{
+          _releaseCacheGuard();
+          _cacheGuardCleanupArmed=false;
+        }
+      }
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
+      }finally{
+        // Any cache rehydrate/render exception must release the token immediately.
+        if(_cacheGuardCleanupArmed&&_cacheGuardToken) _releaseWipeMinHeight(inner,_cacheGuardToken);
+      }
     }
   }
   // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
@@ -15848,6 +16051,22 @@ function renderMessages(options){
   // the live reply stops following / appears to jump backward.
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
+  // Jump-back root fix: pin #msgInner's minHeight to the pre-wipe content height
+  // BEFORE the innerHTML='' wipe. The wipe empties the content container, which
+  // would collapse #messages.scrollHeight toward one viewport and FORCE the
+  // browser to clamp scrollTop down to the new (tiny) maxTop — a clamp the JS
+  // scroll-restore below cannot undo cleanly because it happens as a browser
+  // layout primitive between the wipe and the rebuild (telemetry: JS=none big
+  // jumps, scrollH SHRINK ...->786 ATCLAMP). Holding minHeight across the wipe
+  // keeps maxTop stable so scrollTop is never clamped; it is released after the
+  // rebuild appends real rows, right before the scroll snapshot is restored.
+  // (Desktop-safe: no-op visually — the placeholder height is immediately
+  // superseded by real rows in the same synchronous render stack.)
+  const _prewipeScrollHeight=(inner&&Number.isFinite(inner.scrollHeight))?inner.scrollHeight:0;
+  const _readerUnpinnedForGuard=!!(scrollSnapshot&&(scrollSnapshot.userUnpinned===true||scrollSnapshot.pinned===false))||_messageUserUnpinned;
+  _mainWipeGuardToken=_readerUnpinnedForGuard?_pinWipeMinHeight(inner,_prewipeScrollHeight):null;
+  let _mainGuardCompleted=false;
+  try{
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -17259,7 +17478,28 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  // Restore the reader's position WHILE the wipe-guard minHeight is still holding
+  // the content height. Releasing before this (the original bug in this fix) let
+  // scrollHeight collapse to the real — possibly shorter — value between release
+  // and restore, so the browser clamped scrollTop to the new small maxTop and the
+  // restore then read/wrote against a clamped position → the residual dTop≫dH
+  // BROWSER-ANCHOR jump seen in telemetry (cOA=none, flick=none, JS=none). Keeping
+  // the guard up through the restore means maxTop stays stable, the restore's
+  // scrollTop write lands exactly, and only AFTER that (next frame) do we release
+  // the placeholder so any excess height collapses BELOW the settled viewport,
+  // which never moves an already-anchored reader above it.
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  // Measure while the owner guard still holds; measured rows may settle shorter.
+  _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+  if(_mainWipeGuardToken){
+    const _innerToRelease=inner;
+    const _tokenToRelease=_mainWipeGuardToken;
+    if(typeof requestAnimationFrame==='function'){
+      requestAnimationFrame(()=>{ _releaseWipeMinHeight(_innerToRelease,_tokenToRelease); });
+    }else{
+      _releaseWipeMinHeight(_innerToRelease,_tokenToRelease);
+    }
+  }
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
@@ -17288,7 +17528,6 @@ function renderMessages(options){
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
-  _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
   // not synchronously: inside this render sync stack the browser still reports a transient
   // scrollHeight (layout is batched), so a synchronous re-anchor would read the SAME short
@@ -17305,6 +17544,12 @@ function renderMessages(options){
   }
   _recycleStash.clear();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
+  _mainGuardCompleted=true;
+  }finally{
+    // A synchronous render failure anywhere after the pin must never freeze the
+    // transcript. This immediate owner-checked release also invalidates any stale rAF.
+    if(!_mainGuardCompleted&&_mainWipeGuardToken) _releaseWipeMinHeight(inner,_mainWipeGuardToken);
+  }
 }
 
 function _toolDisplayName(tc){

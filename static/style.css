@@ -2266,7 +2266,22 @@
   .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
   .messages{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:contain;overflow-anchor:auto;}
+/* Disable the browser's native scroll-anchoring wherever a PRECISE pointer is
+   available. The old `(hover:hover) and (pointer:fine)` required the PRIMARY
+   pointer to be fine AND hover-capable — which silently FAILS on hybrid/touch
+   laptops and some remote-desktop/VM setups whose primary pointer reports coarse
+   (or hover:none) even though a mouse is present. There the container stayed at
+   overflow-anchor:auto, so Chromium's scroll-anchoring engine compensated
+   scrollTop during streaming content growth and yanked the reader's visible row
+   (reproduced: cOA=auto → a stable row jumped -707px with dH=0). `any-pointer:fine`
+   is true whenever ANY available pointer is precise (mouse on a touch laptop
+   included), so a desktop/mouse user gets overflow-anchor:none regardless of which
+   pointer is primary, while a pure-touch phone (no fine pointer at all) keeps the
+   native anchoring the mobile guards rely on. `any-hover:hover` is the belt-and-
+   suspenders companion for mouse-capable devices that under-report pointer. */
 @media (hover:hover) and (pointer:fine){.messages{overflow-anchor:none;}}
+@media (any-pointer:fine){.messages{overflow-anchor:none;}}
+@media (any-hover:hover){.messages{overflow-anchor:none;}}
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
   .scroll-to-bottom-btn{position:absolute;right:20px;bottom:16px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
   .scroll-to-bottom-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);}
@@ -3735,7 +3750,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-body{
   padding-left:0;
 }
-.activity-body{overflow:hidden;max-height:0;opacity:0;transition:max-height .34s ease,opacity .22s ease;}
+.activity-body{overflow:hidden;max-height:0;opacity:0;transition:max-height .34s ease,opacity .22s ease;overflow-anchor:none;}
 .activity.open .activity-body{max-height:none;overflow:visible;opacity:1;margin-top:10px;}
 .tool-worklog-list{
   --worklog-rail:24px;
@@ -3961,7 +3976,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-tool-group-running,
 .tg-run{display:none;color:var(--accent-text);font-family:'SF Mono',ui-monospace,monospace;font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;}
 .tool-worklog-tool-group-body,
-.tool-group-body{overflow:hidden;max-height:0;transition:max-height .3s ease;}
+.tool-group-body{overflow:hidden;max-height:0;transition:max-height .3s ease;overflow-anchor:none;}
 .tool-worklog-tool-group.open .tool-worklog-tool-group-body,
 .tool-group.open .tool-group-body{max-height:1600px;}
 .tool-worklog-tool-group-collapsed .tool-worklog-tool-group-body,
@@ -4034,7 +4049,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-duration{display:none;font-size:var(--font-size-xs);color:var(--muted);opacity:.72;white-space:nowrap;margin-left:auto;}
 .tool-card-toggle,.tl-caret{margin-left:auto;font-size:10px;color:var(--muted);opacity:.4;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .tool-card.open .tool-card-toggle,.tl.open .tl-caret{transform:rotate(90deg);}
-.tool-card-detail,.tl-detail{display:block;max-height:0;opacity:0;overflow:hidden;width:100%;max-width:100%;box-sizing:border-box;min-width:0;border-top:1px solid transparent;padding:0;margin-left:0;transition:max-height .26s ease,opacity .2s ease,padding .22s ease,border-top-color .22s ease;background:var(--code-bg);border-radius:8px;}
+.tool-card-detail,.tl-detail{display:block;max-height:0;opacity:0;overflow:hidden;width:100%;max-width:100%;box-sizing:border-box;min-width:0;border-top:1px solid transparent;padding:0;margin-left:0;transition:max-height .26s ease,opacity .2s ease,padding .22s ease,border-top-color .22s ease;background:var(--code-bg);border-radius:8px;overflow-anchor:none;}
 .tool-card.open .tool-card-detail,.tl.open .tl-detail{max-height:320px;opacity:1;padding:0;border-top-color:transparent;overflow:auto;margin-top:4px;}
 .tl-detail-inner{padding:9px 12px 11px;}
 .tool-card-detail-lead,.tool-card-args,.tool-card-result{width:100%;max-width:100%;box-sizing:border-box;min-width:0;}

@@ -476,6 +476,7 @@ for(const name of [
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
   '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
+  '_scheduleLiveAnchorScrollRebuildGuardRelease',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
   '_renderLiveAnchorActivitySceneForStream','appendThinking','updateThinking',
 ]) eval(extractFunc(uiSrc,name));
