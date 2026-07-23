@@ -1305,6 +1305,11 @@ async function send(){
   // instead of silently dropping it.
   if (_sendInProgress) {
     const _text=_composerTextWithPendingSelections().trim();
+    const _mentions=typeof getPluginMentions==='function'?getPluginMentions():[];
+    if(_mentions.length){
+      showToast('Plugin mentions cannot be queued or steered. Wait for the current turn to finish.',3200);
+      return;
+    }
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
@@ -1344,6 +1349,7 @@ async function send(){
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
   const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const _submittedPluginMentions=typeof getPluginMentions==='function'?getPluginMentions():[];
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1355,6 +1361,10 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
+      if(_submittedPluginMentions.length){
+        showToast('Plugin mentions cannot be queued or steered. Wait for the current turn to finish.',3200);
+        return;
+      }
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
@@ -1746,7 +1756,7 @@ async function send(){
     // pick. (#3739/#3737, Codex catch)
     if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
-    const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+    const _plainStartPayload={
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
@@ -1756,7 +1766,16 @@ async function send(){
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
-    })});
+    };
+    const _pluginPayloadHelperAvailable=typeof PluginMentions!=='undefined'&&PluginMentions&&typeof PluginMentions.withPayload==='function';
+    if(_submittedPluginMentions.length&&!_pluginPayloadHelperAvailable){
+      throw new Error('Plugin mentions are unavailable because the WebUI assets are out of sync. Reload and try again.');
+    }
+    const _startPayload=_pluginPayloadHelperAvailable
+      ? PluginMentions.withPayload(_plainStartPayload,_submittedPluginMentions)
+      : _plainStartPayload;
+    const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify(_startPayload)});
+    if(_submittedPluginMentions.length&&typeof clearPluginMentions==='function') clearPluginMentions(_submittedPluginMentions);
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){

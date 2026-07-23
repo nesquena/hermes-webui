@@ -8914,6 +8914,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
             features = {}
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
+        caps["plugin_mentions"] = bool(features.get("plugin_mentions"))
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"
@@ -8951,6 +8952,11 @@ def gateway_supports_approval(base_url: str, api_key: str = "") -> bool:
     """True only when the gateway advertises both approval_events and run_approval_response."""
     caps = get_gateway_caps(base_url, api_key)
     return bool(caps.get("approval_events") and caps.get("run_approval_response"))
+
+
+def gateway_supports_plugin_mentions(base_url: str, api_key: str = "") -> bool:
+    """True only when the gateway explicitly advertises structured plugin mentions."""
+    return bool(get_gateway_caps(base_url, api_key).get("plugin_mentions"))
 
 
 def invalidate_gateway_caps(base_url: str | None = None) -> None:

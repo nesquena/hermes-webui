@@ -26,6 +26,7 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
+    gateway_supports_plugin_mentions,
     register_active_run,
     unregister_active_run,
     unregister_stream_owner,
@@ -45,6 +46,10 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+
+
+def gateway_accepts_plugin_mentions(cfg) -> bool:
+    return gateway_supports_plugin_mentions(_gateway_base_url(cfg), _gateway_api_key())
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -653,6 +658,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    plugin_mentions=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -785,6 +791,11 @@ def _run_gateway_chat_streaming(
         _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
+            if plugin_mentions:
+                body_extras["original_user_message"] = {
+                    "content": msg_text,
+                    "plugin_mentions": plugin_mentions,
+                }
             if model_provider:
                 body_extras["provider"] = model_provider
             if reasoning_effort is not None:
@@ -860,6 +871,11 @@ def _run_gateway_chat_streaming(
                 "stream": True,
                 "messages": [*prefill_messages, {"role": "user", "content": message_content}],
             }
+            if plugin_mentions:
+                body["original_user_message"] = {
+                    "content": msg_text,
+                    "plugin_mentions": plugin_mentions,
+                }
             if model_provider:
                 body["provider"] = model_provider
             if reasoning_effort is not None:

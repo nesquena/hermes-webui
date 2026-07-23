@@ -7096,6 +7096,26 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _add_plugin_mentions_to_run_kwargs(agent, run_kwargs, *, msg_text, plugin_mentions):
+    """Use the companion Hermes structured-message keyword when it exists."""
+    if not plugin_mentions:
+        return True
+    try:
+        import inspect
+
+        parameters = inspect.signature(agent.run_conversation).parameters
+        supports_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+        if "original_user_message" in parameters or supports_kwargs:
+            run_kwargs["original_user_message"] = {
+                "content": msg_text,
+                "plugin_mentions": plugin_mentions,
+            }
+            return True
+    except (TypeError, ValueError):
+        logger.debug("Could not inspect Hermes run_conversation signature", exc_info=True)
+    return False
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -7108,6 +7128,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    plugin_mentions=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -9057,6 +9078,17 @@ def _run_agent_streaming(
             # run_conversation() predates the moa_config kwarg.
             if moa_config is not None:
                 _run_conversation_kwargs["moa_config"] = moa_config
+            _plugin_mentions_supported = _add_plugin_mentions_to_run_kwargs(
+                agent,
+                _run_conversation_kwargs,
+                msg_text=msg_text,
+                plugin_mentions=plugin_mentions,
+            )
+            if plugin_mentions and not _plugin_mentions_supported:
+                put('warning', {
+                    'type': 'plugin_mentions_unsupported',
+                    'message': 'Selected plugins were not used because this Hermes runtime does not support plugin mentions.',
+                })
 
             # Finalize durable delegation claims at the current-turn acceptance
             # boundary: immediately before invoking the agent with the message

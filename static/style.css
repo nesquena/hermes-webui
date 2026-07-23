@@ -3375,6 +3375,17 @@
 .cmd-item-desc{font-size:11px;color:var(--muted);margin-top:1px;}
 .cmd-item-badge{flex-shrink:0;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 6px;border-radius:999px;border:1px solid var(--border2);color:var(--muted);background:var(--hover-bg);}
 .cmd-item-badge-skill{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+.plugin-mention-dropdown{position:absolute;left:0;right:0;bottom:calc(100% + 4px);max-width:100%;max-height:min(240px,40vh);overflow-y:auto;overscroll-behavior:contain;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:210;box-sizing:border-box;}
+.plugin-mention-dropdown[hidden]{display:none;}
+.plugin-mention-option{display:block;width:100%;min-width:0;padding:8px 14px;border:0;background:transparent;color:var(--text);text-align:left;cursor:pointer;box-sizing:border-box;}
+.plugin-mention-option:hover,.plugin-mention-option.selected{background:var(--accent-bg);outline:1px solid var(--accent-bg-strong);}
+.plugin-mention-option-name{display:block;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.plugin-mention-option-desc{display:block;margin-top:1px;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.plugin-mention-chips{display:flex;flex-wrap:wrap;gap:6px;padding:10px 14px 0;max-width:100%;overflow:hidden;}
+.plugin-mention-chip{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;padding:4px 8px 4px 10px;border:1px solid var(--accent-bg-strong);border-radius:999px;background:var(--accent-bg);color:var(--accent-text);font-size:12px;}
+.plugin-mention-chip-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.plugin-mention-chip-remove{flex:0 0 auto;border:0;background:transparent;color:inherit;cursor:pointer;font-size:15px;line-height:1;padding:2px 3px;}
+@media (hover:none) and (pointer:coarse){.plugin-mention-option,.plugin-mention-chip-remove{min-height:44px;}.plugin-mention-dropdown{max-height:min(36dvh,240px);}}
 .ws-action-btn.danger:hover{background:rgba(239,83,80,.1);color:var(--error);border-color:var(--error);}
 .ws-add-row{display:flex;gap:8px;align-items:center;padding:10px 0 4px;}
 .ws-add-input-wrap{flex:1;min-width:0;}
