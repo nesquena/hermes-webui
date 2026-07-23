@@ -47,6 +47,15 @@ def test_cache_render_purges_stale_non_streaming_inflight_entries():
 def test_stale_inflight_purge_executes_without_undeclared_session_map():
     purge_block = _function_block("_purgeStaleInflightEntries", "_rememberRenderedStreamingState")
     script = f"""
+let S = {{
+  session: null,
+  activeStreamId: null,
+  busy: false,
+}};
+let _sessionListSourceById = new Map();
+let _allSessionsScope = null;
+let _sendInProgress = false;
+let _sendInProgressSid = null;
 let _allSessions = [
   {{session_id: 'done-session', is_streaming: false}},
   {{session_id: 'running-session', is_streaming: true}}

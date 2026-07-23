@@ -2015,8 +2015,114 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+// A reconnecting loadSession() call does not own a transport until its async
+// status preflight completes. Track that gap explicitly so a newer pane/load
+// owner can supersede it before EventSource construction.
+const _PENDING_LIVE_ATTACHES=Object.create(null);
+
+function _pendingLiveAttachIdentity(activeSid, streamId, options={}){
+  if(typeof options.isCurrentOwner!=='function') return null;
+  return {
+    sid:String(activeSid||''),
+    streamId:String(streamId||''),
+    ownerToken:String(options.ownerToken||''),
+    loadGeneration:Number.isFinite(Number(options.loadGeneration))?Number(options.loadGeneration):null,
+    isCurrentOwner:options.isCurrentOwner,
+    onAttached:typeof options.onAttached==='function'?options.onAttached:null,
+  };
+}
+
+function _claimPendingLiveAttach(activeSid, streamId, options={}){
+  const claim=_pendingLiveAttachIdentity(activeSid,streamId,options);
+  if(!claim||!claim.sid||!claim.streamId) return null;
+  const existing=_PENDING_LIVE_ATTACHES[claim.sid];
+  if(existing&&existing.streamId===claim.streamId&&
+    existing.ownerToken===claim.ownerToken&&
+    existing.loadGeneration===claim.loadGeneration){
+    return {claim:existing,shouldStart:false};
+  }
+  _PENDING_LIVE_ATTACHES[claim.sid]=claim;
+  return {claim,shouldStart:true};
+}
+
+function _ownsPendingLiveAttach(claim){
+  if(!claim||_PENDING_LIVE_ATTACHES[claim.sid]!==claim) return false;
+  try{return !!claim.isCurrentOwner();}catch(_){return false;}
+}
+
+function _finishPendingLiveAttach(claim, attached){
+  if(!claim) return attached;
+  if(_PENDING_LIVE_ATTACHES[claim.sid]===claim) delete _PENDING_LIVE_ATTACHES[claim.sid];
+  if(attached&&claim.onAttached){try{claim.onAttached();}catch(_){}}
+  return attached;
+}
+
+function _invalidatePendingLiveAttachClaims(){
+  for(const sid of Object.keys(_PENDING_LIVE_ATTACHES)) delete _PENDING_LIVE_ATTACHES[sid];
+}
+
+function _attachLiveStreamWithOwnership({
+  activeSid,
+  streamId,
+  reconnecting=false,
+  ownsAttach,
+  finishAttach,
+  statusDecision,
+  replayParamsForAttach,
+  connectSource,
+  wireSource,
+}){
+  const _ownsAttach=typeof ownsAttach==='function'?ownsAttach:()=>true;
+  const _finishAttach=typeof finishAttach==='function'?finishAttach:(attached)=>attached;
+  const _decide=typeof statusDecision==='function'?statusDecision:()=>({shouldConnect:true,replayOnly:false});
+  const _replayParams=typeof replayParamsForAttach==='function'?replayParamsForAttach:()=>'';
+  const _makeSource=typeof connectSource==='function'?connectSource:()=>null;
+  const _wireSource=typeof wireSource==='function'?wireSource:()=>{};
+
+  return (async()=>{
+    if(!_ownsAttach()) return _finishAttach(false);
+    let replayOnly=false;
+    if(reconnecting){
+      try{
+        const status=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(!_ownsAttach()) return _finishAttach(false);
+        const decision=_decide(status);
+        if(!decision||decision.shouldConnect===false) return _finishAttach(false);
+        replayOnly=!!decision.replayOnly;
+      }catch(_){
+        if(!_ownsAttach()) return _finishAttach(false);
+      }
+    }
+
+    let source;
+    try{
+      const replayParams=_replayParams(reconnecting||replayOnly);
+      if(!_ownsAttach()) return _finishAttach(false);
+      source=_makeSource(replayParams);
+      if(!_ownsAttach()){
+        try{source.close();}catch(_){}
+        return _finishAttach(false);
+      }
+      _wireSource(source);
+      return _finishAttach(true);
+    }catch(_){
+      if(source&&typeof source.close==='function'){
+        try{source.close();}catch(_){}
+      }
+      return _finishAttach(false);
+    }
+  })();
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
-  if(!activeSid||!streamId) return;
+  if(!activeSid||!streamId) return false;
+  const _pendingAttach=_claimPendingLiveAttach(activeSid,streamId,options);
+  if(_pendingAttach&&!_pendingAttach.shouldStart) return true;
+  const _attachClaim=_pendingAttach&&_pendingAttach.claim;
+  const _ownsAttach=()=>!_attachClaim||_ownsPendingLiveAttach(_attachClaim);
+  const _finishAttach=(attached)=>_finishPendingLiveAttach(_attachClaim,attached);
+  if(!_ownsAttach()) return _finishAttach(false);
+  try{
   const reconnecting=!!options.reconnecting;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
@@ -2062,13 +2168,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       existingLive.source.readyState===EventSource.OPEN||
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
+    if(!_ownsAttach()) return _finishAttach(false);
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
       const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
     }
-    return;
+    return _finishAttach(true);
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
@@ -6744,48 +6851,53 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _setActivePaneIdleIfOwner();
   }
 
-  (async()=>{
-    // Reattach path can carry stale stream ids after server restart; preflight
-    // status avoids opening a dead SSE URL that will 404 in the console.
-    let replayOnly=false;
-    if(reconnecting){
-      try{
-        const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(!st.active&&st.replay_available){
-          replayOnly=true;
-        }else if(!st.active){
-          _clearOwnerInflightState();
-          _clearApprovalForOwner();
-          _clearClarifyForOwner('terminal');
-          if(S.session&&S.session.session_id===activeSid){
-            // Follow-intent BEFORE removing live placeholders: a reader following
-            // the (now-dead) stream should stay pinned to the bottom as the
-            // thinking/tool placeholders are cleared, not be stranded mid-transcript
-            // by preserveScroll restoring a stale scrollTop after the height shrinks.
-            const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
-                ? _isMessagePaneNearBottom(1200)
-                : true)
-              && !((typeof _isMessageReaderUnpinned==='function')
-                ? _isMessageReaderUnpinned()
-                : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-            S.activeStreamId=null;
-            clearLiveToolCards();
-            removeThinking();
-            if(_isActiveSession()) _queueDrainSid=activeSid;
-            _setActivePaneIdleIfOwner();
-            renderMessages({preserveScroll:true});
-            if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
-            renderSessionList();
-          }
-          _scheduleAnchorRegistryCleanup(120000);
-          return;
-        }
-      }catch(_){}
-    }
-    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
-  })();
+  _attachLiveStreamWithOwnership({
+    activeSid,
+    streamId,
+    reconnecting,
+    ownsAttach: _ownsAttach,
+    finishAttach:_finishAttach,
+    statusDecision:(status)=>{
+      if(status&&status.active){
+        setComposerStatus('Reconnected');
+        return {shouldConnect:true,replayOnly:false};
+      }
+      if(status&&status.replay_available) return {shouldConnect:true,replayOnly:true};
+      _clearOwnerInflightState();
+      _clearApprovalForOwner();
+      _clearClarifyForOwner('terminal');
+      if(S.session&&S.session.session_id===activeSid){
+        const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
+            ? _isMessagePaneNearBottom(1200)
+            : true)
+          && !((typeof _isMessageReaderUnpinned==='function')
+            ? _isMessageReaderUnpinned()
+            : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
+        S.activeStreamId=null;
+        clearLiveToolCards();
+        removeThinking();
+        if(_isActiveSession()) _queueDrainSid=activeSid;
+        _setActivePaneIdleIfOwner();
+        renderMessages({preserveScroll:true});
+        if(_wasFollowingAtReconnectDead&&typeof scrollToBottom==='function') scrollToBottom();
+        renderSessionList();
+      }
+      _scheduleAnchorRegistryCleanup(120000);
+      return {shouldConnect:false,replayOnly:false};
+    },
+    replayParamsForAttach:(shouldReplay)=>shouldReplay?_runJournalReplayParams():'',
+    connectSource:(replayParams)=>new EventSource(
+      new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,
+      {withCredentials:true},
+    ),
+    wireSource:_wireSSE,
+  });
 
+    return _attachClaim?true:undefined;
+  }catch(error){
+    _finishAttach(false);
+    throw error;
+  }
 }
 
 function transcript(){
