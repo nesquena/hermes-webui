@@ -37,8 +37,7 @@ SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
 _LOCAL_ATTACHMENT_PLACEHOLDER = "[Local attachment omitted from public share]"
 
-_BRACKETED_MEDIA_TOKEN_RE = re.compile(r"\[MEDIA:([^\s\)\]]+)\]")
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_PREFIX = "MEDIA:"
 _MARKDOWN_FILE_URI_RE = re.compile(
     r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
     re.IGNORECASE,
@@ -306,6 +305,7 @@ def _is_public_media_url(raw_ref: str) -> bool:
     try:
         parsed = urlsplit(str(raw_ref or "").replace("\\", "/"))
         hostname = _browser_normalized_hostname(parsed.hostname or "")
+        _url_port(parsed)
     except ValueError:
         return False
     if parsed.scheme.lower() not in {"http", "https"} or not hostname:
@@ -336,6 +336,60 @@ def _is_public_media_reference(raw_ref: str) -> bool:
     return _is_safe_data_image_uri(raw_ref) or _is_public_media_url(raw_ref)
 
 
+def _scan_media_ref_end(text: str, start: int, *, bracket_wrapped: bool) -> tuple[int, bool]:
+    inner_brackets = 0
+    index = start
+    while index < len(text):
+        ch = text[index]
+        if inner_brackets == 0 and ch in " \t\r\n)`<":
+            return index, False
+        if ch == "[":
+            inner_brackets += 1
+        elif ch == "]":
+            if inner_brackets:
+                inner_brackets -= 1
+            elif bracket_wrapped:
+                return index, True
+            else:
+                return index, False
+        index += 1
+    return index, False
+
+
+def _replace_media_tokens(text: str, replace_token) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    while True:
+        media_start = text.find(_MEDIA_TOKEN_PREFIX, cursor)
+        if media_start < 0:
+            pieces.append(text[cursor:])
+            break
+
+        bracket_start = media_start - 1
+        has_wrapper = bracket_start >= cursor and text[bracket_start] == "["
+        raw_start = media_start + len(_MEDIA_TOKEN_PREFIX)
+        if has_wrapper:
+            raw_end, wrapper_closed = _scan_media_ref_end(
+                text,
+                raw_start,
+                bracket_wrapped=True,
+            )
+            if wrapper_closed:
+                pieces.append(text[cursor:bracket_start])
+                raw_ref = text[raw_start:raw_end]
+                pieces.append(replace_token(text[bracket_start : raw_end + 1], raw_ref))
+                cursor = raw_end + 1
+                continue
+
+        raw_end, _ = _scan_media_ref_end(text, raw_start, bracket_wrapped=False)
+        pieces.append(text[cursor:media_start])
+        raw_ref = text[raw_start:raw_end]
+        pieces.append(replace_token(text[media_start:raw_end], raw_ref))
+        cursor = raw_end
+
+    return "".join(pieces)
+
+
 def _stash_share_code_regions(text: str):
     stashed: list[str] = []
     stash_prefix = f"\x00SHARE_CODE_{secrets.token_hex(8)}_"
@@ -363,35 +417,27 @@ def _omit_local_media_references(text: str, *, protect_code_regions: bool = True
 
     public_media_tokens: list[str] = []
     stash_prefix = f"\x00SHARE_MEDIA_{secrets.token_hex(8)}_"
-    restore_code_regions = None
-    if protect_code_regions:
-        text, restore_code_regions = _stash_share_code_regions(text)
 
     def stash_public_token(token: str) -> str:
         public_media_tokens.append(token)
         return f"{stash_prefix}{len(public_media_tokens) - 1}\x00"
 
-    def replace_bracketed_media_token(match: re.Match) -> str:
-        raw_ref = match.group(1)
+    def replace_media_token(token: str, raw_ref: str) -> str:
         if _is_public_media_reference(raw_ref):
-            return stash_public_token(match.group(0))
+            return stash_public_token(token)
         return _LOCAL_ATTACHMENT_PLACEHOLDER
 
-    def replace_media_token(match: re.Match) -> str:
-        raw_ref = match.group(1)
-        if _is_public_media_reference(raw_ref):
-            return stash_public_token(match.group(0))
-        return _LOCAL_ATTACHMENT_PLACEHOLDER
-
-    sanitized = _BRACKETED_MEDIA_TOKEN_RE.sub(replace_bracketed_media_token, text)
-    sanitized = _MEDIA_TOKEN_RE.sub(replace_media_token, sanitized)
+    sanitized = _replace_media_tokens(text, replace_media_token)
+    restore_code_regions = None
+    if protect_code_regions:
+        sanitized, restore_code_regions = _stash_share_code_regions(sanitized)
     sanitized = _MARKDOWN_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
     sanitized = _ANGLE_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
     sanitized = _FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
-    for index, token in enumerate(public_media_tokens):
-        sanitized = sanitized.replace(f"{stash_prefix}{index}\x00", token)
     if restore_code_regions is not None:
         sanitized = restore_code_regions(sanitized)
+    for index, token in enumerate(public_media_tokens):
+        sanitized = sanitized.replace(f"{stash_prefix}{index}\x00", token)
     return sanitized
 
 
