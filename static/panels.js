@@ -4918,6 +4918,225 @@ async function toggleSkill(name, currentlyEnabled) {
   }
 }
 
+// ── Toolsets tab (Skills panel) ─────────────────────────────────────────────
+// Enable/disable toolsets + configure provider/model/API keys — the GUI
+// counterpart of `hermes tools`. Backed by api/toolset_config.py.
+
+function switchSkillsPanelTab(tab){
+  const target = tab === 'toolsets' ? 'toolsets' : 'skills';
+  const skillsTab=$('skillsPanelTabSkills'), toolsetsTab=$('skillsPanelTabToolsets');
+  const skillsContent=$('skillsPanelTabContentSkills'), toolsetsContent=$('skillsPanelTabContentToolsets');
+  if(skillsTab){skillsTab.classList.toggle('active',target==='skills');skillsTab.setAttribute('aria-selected',target==='skills'?'true':'false');}
+  if(toolsetsTab){toolsetsTab.classList.toggle('active',target==='toolsets');toolsetsTab.setAttribute('aria-selected',target==='toolsets'?'true':'false');}
+  if(skillsContent) skillsContent.hidden = target!=='skills';
+  if(toolsetsContent) toolsetsContent.hidden = target!=='toolsets';
+  const newSkillBtn=$('btnNewSkill');
+  if(newSkillBtn) newSkillBtn.style.display = target==='skills' ? '' : 'none';
+  if(target==='toolsets' && !_toolsetsData) loadToolsets();
+}
+
+let _toolsetsData=null; // {toolsets, allowed, write_gate_env}
+let _toolsetsExpanded=new Set();
+let _toolsetsConfigCache={};
+let _toolsetsModelsCache={};
+let _toolsetsSelectedProvider={}; // name -> provider chosen in the UI (may not be saved yet)
+
+async function loadToolsets(){
+  const box=$('toolsetsList');
+  const notice=$('toolsetsDisabledNotice');
+  if(!box) return;
+  try{
+    const r=await api('/api/tools/toolsets');
+    _toolsetsData=r;
+    if(notice){
+      notice.style.display=r.allowed?'none':'';
+      if(!r.allowed) notice.textContent=t('toolsets_disabled_notice',r.write_gate_env||'HERMES_WEBUI_ALLOW_TOOLSET_WRITE');
+    }
+    renderToolsetsList();
+  }catch(e){
+    box.innerHTML=`<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('toolsets_load_failed'))}</div>`;
+  }
+}
+
+function renderToolsetsList(){
+  const box=$('toolsetsList');
+  if(!box || !_toolsetsData) return;
+  const rows=_toolsetsData.toolsets||[];
+  if(!rows.length){ box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('toolsets_none'))}</div>`; return; }
+  const allowed=!!_toolsetsData.allowed;
+  box.innerHTML=rows.map(row=>_toolsetRowHtml(row,allowed)).join('');
+  for(const name of _toolsetsExpanded){
+    if(_toolsetsConfigCache[name]) _renderToolsetDetailInto(name);
+  }
+}
+
+function _toolsetRowHtml(row,allowed){
+  const expanded=_toolsetsExpanded.has(row.name);
+  const encodedName=encodeURIComponent(row.name).replace(/'/g,"\\'");
+  const chevron=`<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${expanded?'transform:rotate(90deg)':''}">${li('chevron-right',12)}</span>`;
+  const statusBadge=`<span class="mcp-status-badge ${row.enabled?'mcp-status-active':'mcp-status-disabled'}">${esc(row.enabled?t('mcp_enabled_yes'):t('mcp_enabled_no'))}</span>`;
+  const configuredBadge=row.configured?`<span class="mcp-status-badge mcp-status-configured">${esc(t('toolset_configured'))}</span>`:'';
+  const platformBadge=`<span class="mcp-transport-badge mcp-unknown">${esc(row.platform_label||row.platform)}</span>`;
+  const toggleDisabledAttrs=allowed?'':`disabled title="${esc(t('toolsets_write_disabled_title'))}"`;
+  const toggleBtn=`<button type="button" class="mcp-toggle-btn ${row.enabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" ${toggleDisabledAttrs} onclick="event.stopPropagation();toggleToolsetEnabledUI('${encodedName}',${!row.enabled})">${esc(row.enabled?t('mcp_enabled_yes'):t('mcp_enabled_no'))}</button>`;
+  return `<div class="mcp-server-row" data-toolset="${esc(row.name)}">
+    <div class="mcp-server-row-head" style="cursor:pointer" onclick="toggleToolsetExpand('${encodedName}')">
+      ${chevron}<span class="mcp-server-name">${esc(row.label)}</span>${statusBadge}${configuredBadge}${platformBadge}
+    </div>
+    <div class="mcp-server-detail">${esc(row.description||'')}</div>
+    <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',(row.tools||[]).length))}</span>${toggleBtn}</div>
+    <div id="toolsetDetail-${esc(row.name)}" style="display:${expanded?'block':'none'};margin-top:8px;padding-top:8px;border-top:1px solid var(--border)"></div>
+  </div>`;
+}
+
+async function toggleToolsetExpand(name){
+  name=decodeURIComponent(name);
+  if(_toolsetsExpanded.has(name)) _toolsetsExpanded.delete(name);
+  else _toolsetsExpanded.add(name);
+  renderToolsetsList();
+  if(_toolsetsExpanded.has(name) && !_toolsetsConfigCache[name]) await loadToolsetDetail(name);
+}
+
+async function loadToolsetDetail(name){
+  const detailEl=document.getElementById('toolsetDetail-'+name);
+  if(detailEl) detailEl.innerHTML=`<div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>`;
+  try{
+    const [cfg,models]=await Promise.all([
+      api('/api/tools/toolsets/'+encodeURIComponent(name)+'/config'),
+      api('/api/tools/toolsets/'+encodeURIComponent(name)+'/models'),
+    ]);
+    _toolsetsConfigCache[name]=cfg;
+    _toolsetsModelsCache[name]=models;
+    if(!(name in _toolsetsSelectedProvider)){
+      _toolsetsSelectedProvider[name]=cfg.active_provider||((cfg.providers&&cfg.providers[0])&&cfg.providers[0].name)||null;
+    }
+    _renderToolsetDetailInto(name);
+  }catch(e){
+    if(detailEl) detailEl.innerHTML=`<div style="color:var(--accent);font-size:12px">${esc(t('toolsets_load_failed'))}</div>`;
+  }
+}
+
+function _renderToolsetDetailInto(name){
+  const detailEl=document.getElementById('toolsetDetail-'+name);
+  if(!detailEl) return;
+  const cfg=_toolsetsConfigCache[name];
+  if(!cfg) return;
+  const allowed=!!(_toolsetsData&&_toolsetsData.allowed);
+  const disabledAttr=allowed?'':'disabled';
+  let html='';
+  let selectedRow=null;
+  if(!cfg.has_category){
+    html+=`<div style="color:var(--muted);font-size:11px">${esc(t('toolset_no_provider_config'))}</div>`;
+  } else {
+    const selected=_toolsetsSelectedProvider[name];
+    selectedRow=(cfg.providers||[]).find(p=>p.name===selected)||(cfg.providers&&cfg.providers[0])||null;
+    html+=`<div class="detail-form-row"><label>${esc(t('toolset_provider_label'))}</label>
+      <select ${disabledAttr} onchange="_onToolsetProviderChange('${encodeURIComponent(name)}',this.value)">
+        ${(cfg.providers||[]).map(p=>`<option value="${esc(p.name)}" ${selectedRow&&p.name===selectedRow.name?'selected':''}>${esc(p.name)}${p.badge?' — '+esc(p.badge):''}</option>`).join('')}
+      </select>
+    </div>`;
+    if(selectedRow && selectedRow.tag){
+      html+=`<div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(selectedRow.tag)}</div>`;
+    }
+    if(selectedRow && selectedRow.env_vars && selectedRow.env_vars.length){
+      html+=selectedRow.env_vars.map(ev=>`
+        <div class="detail-form-row" style="margin-top:8px">
+          <label>${esc(ev.prompt||ev.key)}${ev.is_set?' <span style="color:var(--success);font-size:10px">'+esc(t('toolset_key_set'))+'</span>':''}</label>
+          <input type="password" class="toolset-env-input" data-env-key="${esc(ev.key)}" placeholder="${ev.is_set?'••••••••':esc(t('toolset_key_not_set'))}" autocomplete="off" spellcheck="false" ${disabledAttr}>
+        </div>`).join('');
+    }
+    const providerUnchanged=!selectedRow||selectedRow.name===cfg.active_provider;
+    html+=`<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button type="button" class="sm-btn" ${(allowed&&!providerUnchanged)?'':'disabled'} onclick="saveToolsetProviderUI('${encodeURIComponent(name)}')">${esc(t('toolset_save_provider'))}</button>
+      ${selectedRow&&selectedRow.env_vars&&selectedRow.env_vars.length?`<button type="button" class="sm-btn" ${disabledAttr} onclick="saveToolsetEnvUI('${encodeURIComponent(name)}')">${esc(t('toolset_save_keys'))}</button>`:''}
+    </div>
+    <div class="settings-autosave-status" id="toolsetStatus-${esc(name)}" aria-live="polite"></div>`;
+  }
+  const models=_toolsetsModelsCache[name];
+  if(models && models.has_models){
+    html+=`<div class="detail-form-row" style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)">
+      <label>${esc(t('toolset_model_label'))}</label>
+      <select id="toolsetModelSelect-${esc(name)}" ${disabledAttr}>
+        ${models.models.map(m=>`<option value="${esc(m.id)}" ${m.id===models.current?'selected':''}>${esc(m.display)}${m.price?' — '+esc(m.price):''}</option>`).join('')}
+      </select>
+      <button type="button" class="sm-btn" style="margin-top:6px" ${disabledAttr} onclick="saveToolsetModelUI('${encodeURIComponent(name)}')">${esc(t('toolset_save_model'))}</button>
+    </div>`;
+  }
+  detailEl.innerHTML=html;
+}
+
+function _onToolsetProviderChange(name,value){
+  name=decodeURIComponent(name);
+  _toolsetsSelectedProvider[name]=value;
+  _renderToolsetDetailInto(name);
+}
+
+async function toggleToolsetEnabledUI(name,enabled){
+  name=decodeURIComponent(name);
+  try{
+    await api('/api/tools/toolsets/'+encodeURIComponent(name),{method:'PUT',body:JSON.stringify({enabled})});
+    if(_toolsetsData){
+      const row=(_toolsetsData.toolsets||[]).find(r=>r.name===name);
+      if(row) row.enabled=enabled;
+    }
+    renderToolsetsList();
+    showToast(enabled?t('toolset_enabled_toast',name):t('toolset_disabled_toast',name));
+  }catch(e){
+    showToast((e&&e.message)||t('toolset_toggle_failed'),5000,'error');
+  }
+}
+
+async function saveToolsetProviderUI(name){
+  name=decodeURIComponent(name);
+  const provider=_toolsetsSelectedProvider[name];
+  if(!provider) return;
+  const statusEl=document.getElementById('toolsetStatus-'+name);
+  try{
+    await api('/api/tools/toolsets/'+encodeURIComponent(name)+'/provider',{method:'PUT',body:JSON.stringify({provider})});
+    delete _toolsetsConfigCache[name];
+    delete _toolsetsModelsCache[name];
+    await loadToolsetDetail(name);
+    if(statusEl){statusEl.textContent=t('toolset_saved');statusEl.style.color='var(--success)';}
+    if(typeof showToast==='function') showToast(t('toolset_saved'));
+  }catch(e){
+    if(statusEl){statusEl.textContent=(e&&e.message)||t('toolset_save_failed');statusEl.style.color='var(--error)';}
+  }
+}
+
+async function saveToolsetEnvUI(name){
+  name=decodeURIComponent(name);
+  const detailEl=document.getElementById('toolsetDetail-'+name);
+  const inputs=detailEl?detailEl.querySelectorAll('.toolset-env-input'):[];
+  const env={};
+  inputs.forEach(inp=>{ env[inp.dataset.envKey]=inp.value; });
+  const statusEl=document.getElementById('toolsetStatus-'+name);
+  try{
+    await api('/api/tools/toolsets/'+encodeURIComponent(name)+'/env',{method:'PUT',body:JSON.stringify({env})});
+    delete _toolsetsConfigCache[name];
+    await loadToolsetDetail(name);
+    if(statusEl){statusEl.textContent=t('toolset_saved');statusEl.style.color='var(--success)';}
+    if(typeof showToast==='function') showToast(t('toolset_saved'));
+  }catch(e){
+    if(statusEl){statusEl.textContent=(e&&e.message)||t('toolset_save_failed');statusEl.style.color='var(--error)';}
+  }
+}
+
+async function saveToolsetModelUI(name){
+  name=decodeURIComponent(name);
+  const sel=document.getElementById('toolsetModelSelect-'+name);
+  if(!sel) return;
+  const statusEl=document.getElementById('toolsetStatus-'+name);
+  try{
+    await api('/api/tools/toolsets/'+encodeURIComponent(name)+'/model',{method:'PUT',body:JSON.stringify({model:sel.value})});
+    delete _toolsetsModelsCache[name];
+    await loadToolsetDetail(name);
+    if(statusEl){statusEl.textContent=t('toolset_saved');statusEl.style.color='var(--success)';}
+    if(typeof showToast==='function') showToast(t('toolset_saved'));
+  }catch(e){
+    if(statusEl){statusEl.textContent=(e&&e.message)||t('toolset_save_failed');statusEl.style.color='var(--error)';}
+  }
+}
+
 // Currently selected skill detail — kept across panel switches so re-entering
 // the Skills view shows the last-viewed skill.
 let _currentSkillDetail = null; // { name, category, content }
