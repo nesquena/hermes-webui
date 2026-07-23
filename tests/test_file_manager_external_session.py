@@ -509,6 +509,87 @@ def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     assert not sidecar.exists()
 
 
+def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
+    models_module, monkeypatch, tmp_path
+):
+    routes_module = pytest.importorskip("api.routes")
+    sid = "delete-busy-session"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{sid}.json"
+    sidecar.write_text(
+        json.dumps({"session_id": sid, "messages": [{"role": "user", "content": "keep"}]}),
+        encoding="utf-8",
+    )
+    cached_session = SimpleNamespace(session_id=sid, profile=None)
+    observed = {"acquire_timeouts": [], "released": 0, "mutations": []}
+
+    class ContendedLock:
+        def acquire(self, timeout=None):
+            observed["acquire_timeouts"].append(timeout)
+            return timeout is None
+
+        def release(self):
+            observed["released"] += 1
+
+        def __enter__(self):
+            assert self.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self.release()
+
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: cached_session})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes_module,
+        "get_session",
+        lambda *_args, **_kwargs: cached_session,
+    )
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(
+        routes_module, "_session_is_subagent_view_only", lambda _sid: False
+    )
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(
+        routes_module, "_get_session_agent_lock", lambda _sid: ContendedLock()
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "prune_session_from_index",
+        lambda _sid: observed["mutations"].append("index"),
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_record_webui_deleted_session_tombstone",
+        lambda _sid: observed["mutations"].append("tombstone"),
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_publish_session_list_changed",
+        lambda *_args, **_kwargs: observed["mutations"].append("publish"),
+    )
+    monkeypatch.setattr(
+        models_module,
+        "delete_cli_session",
+        lambda _sid: observed["mutations"].append("state-db"),
+    )
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    payload = json.loads(handler.wfile.getvalue())
+    assert handler.status == 503
+    assert payload == {"error": "Session busy, try again"}
+    assert observed == {"acquire_timeouts": [5], "released": 0, "mutations": []}
+    assert sidecar.exists()
+    assert routes_module.SESSIONS[sid] is cached_session
+
+
 def test_session_lock_registry_reuses_live_lock_and_reclaims_unused_entry():
     config_module = pytest.importorskip("api.config")
     sid = "weak-session-lock"

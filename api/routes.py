@@ -14898,10 +14898,12 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Serialize with workspace recovery so a late atomic replace cannot
-        # revive a sidecar after this delete wins.
+        # Serialize with recovery, but bound contention so a browser timeout
+        # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
-        with session_lock:
+        if not session_lock.acquire(timeout=5):
+            return bad(handler, "Session busy, try again", 503)
+        try:
             with LOCK:
                 SESSIONS.pop(sid, None)
             try:
@@ -14928,6 +14930,8 @@ def handle_post(handler, parsed) -> bool:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+        finally:
+            session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
