@@ -9951,6 +9951,28 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
+function _formatUpdateRestartMessage(restartDeferred){
+  return restartDeferred
+    ? 'Update applied — WebUI will restart once your chat finishes.'
+    : 'Update applied — restarting now…';
+}
+function _setUpdateApplyStatus(message,opts){
+  opts=opts||{};
+  const msg=$('updateMsg');
+  if(msg) msg.textContent=message;
+  const banner=$('updateBanner');
+  if(banner) banner.classList.add('visible');
+  const errEl=$('updateError');
+  if(errEl&&!opts.keepError){errEl.style.display='none';errEl.textContent='';}
+}
+function _updateRestartWaitOptions(baselineServerIdentity,restartDeferred){
+  const opts={baselineServerIdentity};
+  if(restartDeferred){
+    opts.maxMs=310000;
+    opts.message='⏳ Update applied — waiting for chat to finish before restart';
+  }
+  return opts;
+}
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
@@ -9983,6 +10005,7 @@ async function applyUpdates(){
   }
   try{
     const stashConflictMessages=[];
+    let restartDeferred=false;
     const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       // Send the channel the CHECK reported for this target (what was actually
@@ -9999,16 +10022,20 @@ async function applyUpdates(){
         resetApplyButton(0);
         return;
       }
+      restartDeferred=restartDeferred||res.restart_deferred===true;
       if(res.stash_conflict){
         stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
     }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
-    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
+    const restartMessage=_formatUpdateRestartMessage(restartDeferred);
+    const toastMessage=stashConflictMessage?(stashConflictMessage+'\n\n'+restartMessage):restartMessage;
+    _setUpdateApplyStatus(restartMessage,{keepError:stashConflictMessages.length>0});
+    showToast(toastMessage,stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload({baselineServerIdentity});
+    _waitForServerThenReload(_updateRestartWaitOptions(baselineServerIdentity,restartDeferred));
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -10201,10 +10228,13 @@ async function forceUpdate(btn){
       btn.disabled=false;btn.textContent='Force update';
       return;
     }
-    showToast('Force update applied — restarting…');
+    const restartDeferred=res.restart_deferred===true;
+    const restartMessage=_formatUpdateRestartMessage(restartDeferred);
+    _setUpdateApplyStatus(restartMessage);
+    showToast(restartMessage);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload({baselineServerIdentity});
+    _waitForServerThenReload(_updateRestartWaitOptions(baselineServerIdentity,restartDeferred));
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
@@ -10234,7 +10264,7 @@ async function _waitForServerThenReload(opts){
   window._restartingForUpdate=true;
   const msgEl=$('reconnectMsg');
   const banner=$('reconnectBanner');
-  if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
+  if(msgEl) msgEl.textContent=opts.message||'⏳ Restarting… please wait';
   if(banner) banner.classList.add('visible');
   const deadline=Date.now()+maxMs;
   // Track restart-outage evidence. An outage (failed or non-OK /health probes)
