@@ -83,11 +83,6 @@ function _isSessionCurrentPane(sid) {
 }
 
 function _streamDoneWouldOverwriteNewerPane(activeSid, streamId){
-  if(
-    activeSid &&
-    S&&S.session&&S.session.session_id===activeSid &&
-    typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid
-  ) return true;
   if(!_isSessionCurrentPane(activeSid)) return false;
   const expectedStreamId=String(streamId||'');
   const activeStreamId=String(S&&S.activeStreamId||'');
@@ -2193,7 +2188,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _completionOwnerStillCurrent(doneData=null){
     if(!_streamOwnerTokenStillCurrent()) return false;
     const currentSid=String(S&&S.session&&S.session.session_id||'');
-    if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid) return false;
     const inflight=INFLIGHT&&INFLIGHT[activeSid];
     const inflightStreamId=String(inflight&&inflight.streamId||'');
     if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return false;
@@ -2232,7 +2226,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _activePaneStreamOwnerStillCurrent(){
     if(!_completionOwnerStillCurrent()) return false;
     if(!_isActiveSession()) return false;
-    if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid) return false;
     if(S.activeStreamId&&S.activeStreamId!==streamId) return false;
     const inflight=INFLIGHT&&INFLIGHT[activeSid];
     const inflightStreamId=String(inflight&&inflight.streamId||'');

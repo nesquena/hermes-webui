@@ -1535,8 +1535,8 @@ def test_gateway_save_failure_producers_emit_bounded_recovery_rows(
         session.save()
         models.SESSIONS[session_id] = session
 
-        def _fail_save(*_args, **_kwargs):
-            raise OSError(f"forced gateway save failure for {event_name}")
+        def _fail_save(*_args, _event_name=event_name, **_kwargs):
+            raise OSError(f"forced gateway save failure for {_event_name}")
 
         session.save = _fail_save
         monkeypatch.setattr(gateway_chat, "get_session", lambda _sid, _session=session: _session)
