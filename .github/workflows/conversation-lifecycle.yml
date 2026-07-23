@@ -12,6 +12,7 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/browser_historical_transcript_hydration.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -22,6 +23,7 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/browser_historical_transcript_hydration.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -34,7 +36,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [normal, terminal-error]
+        include:
+          - name: normal
+            script: tests/browser_conversation_lifecycle.py
+            scenario: normal
+          - name: terminal-error
+            script: tests/browser_conversation_lifecycle.py
+            scenario: terminal-error
+          - name: historical-transcript-hydration
+            script: tests/browser_historical_transcript_hydration.py
     steps:
       - uses: actions/checkout@v4
 
@@ -57,13 +67,14 @@ jobs:
       - name: Run conversation lifecycle gate
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
-        run: python tests/browser_conversation_lifecycle.py
+        run: python ${{ matrix.script }}
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: conversation-lifecycle-failure-${{ matrix.scenario }}
+          name: conversation-lifecycle-failure-${{ matrix.name }}
           path: lifecycle-artifacts
           if-no-files-found: ignore
