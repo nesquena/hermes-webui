@@ -8,9 +8,13 @@ links do not leak local workspace paths, profile details, or raw tool payloads.
 
 from __future__ import annotations
 
+import base64
+import html
 import ipaddress
+import io
 import json
 import logging
+import mimetypes
 import os
 import posixpath
 import re
@@ -19,6 +23,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -35,36 +40,6 @@ logger = logging.getLogger(__name__)
 
 SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
-_LOCAL_ATTACHMENT_PLACEHOLDER = "[Local attachment omitted from public share]"
-
-_MEDIA_TOKEN_PREFIX = "MEDIA:"
-_MARKDOWN_FILE_URI_RE = re.compile(
-    r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
-    re.IGNORECASE,
-)
-_ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
-_FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
-_API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
-_RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
-_FENCED_CODE_REGION_RE = re.compile(
-    r"(^|\n)[ ]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n[\s\S]*?\n[ ]{0,3}(?P=fence)[ \t]*(?=\n|$)"
-)
-_INLINE_CODE_REGION_RE = re.compile(r"`[^`\n]*`")
-_DATA_IMAGE_RE = re.compile(
-    r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
-    re.IGNORECASE,
-)
-_DATA_IMAGE_SVG_RE = re.compile(r"^data:image/svg\+xml;base64,[a-z0-9+/=]+$", re.IGNORECASE)
-_DATA_IMAGE_MAX_LEN = 2 * 1024 * 1024
-_EMBEDDED_IPV4_RE = re.compile(
-    r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
-)
-_BROWSER_IPV4_PART = r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)"
-_BROWSER_IPV4_LITERAL_RE = re.compile(
-    rf"^{_BROWSER_IPV4_PART}(?:\.{_BROWSER_IPV4_PART}){{0,3}}\.?$"
-)
-_LOCAL_ONLY_HOSTNAMES = {"localhost", "host.docker.internal"}
-_LOCAL_ONLY_HOSTNAME_SUFFIXES = (".localhost", ".local", ".home.arpa")
 
 
 def _ensure_share_dir() -> None:
@@ -142,6 +117,82 @@ def _redact_share_paths(text: str, extra_paths) -> str:
         if len(p) >= 4 and p in text:
             text = text.replace(p, "[redacted-path]")
     return text
+
+
+_MEDIA_TOKEN_PREFIX = "MEDIA:"
+_MARKDOWN_FILE_URI_RE = re.compile(
+    r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
+    re.IGNORECASE,
+)
+_ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
+_FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
+_API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
+_RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
+_FENCED_CODE_REGION_RE = re.compile(
+    r"(^|\n)[ ]{0,3}(?P<fence>`{3,})([^\n`]*)\n"
+    r"(?:[\s\S]*?\n)?[ ]{0,3}(?P=fence)`*[ \t]*(?=\n|$)"
+)
+_INLINE_CODE_REGION_RE = re.compile(r"`[^`\n]+`")
+_DATA_IMAGE_RE = re.compile(
+    r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
+    re.IGNORECASE,
+)
+_DATA_IMAGE_SVG_RE = re.compile(r"^data:image/svg\+xml;base64,[a-z0-9+/=]+$", re.IGNORECASE)
+_DATA_IMAGE_MAX_LEN = 2 * 1024 * 1024
+_EMBEDDED_IPV4_RE = re.compile(
+    r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
+)
+_BROWSER_IPV4_PART = r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)"
+_BROWSER_IPV4_LITERAL_RE = re.compile(
+    rf"^{_BROWSER_IPV4_PART}(?:\.{_BROWSER_IPV4_PART}){{0,3}}\.?$"
+)
+_LOCAL_ONLY_HOSTNAMES = {"localhost", "host.docker.internal"}
+_LOCAL_ONLY_HOSTNAME_SUFFIXES = (".localhost", ".local", ".home.arpa")
+
+# Max size (in bytes) for files we'll embed as base64 in a share snapshot.
+_SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
+
+# Only these image MIME types may be embedded in public shares.
+# Non-image files and SVG are NEVER embedded — embedding arbitrary file
+# bytes circumvents the credential-redaction boundary that protects
+# message prose, and a public share is not a file-transfer service.
+# SVG is excluded because it is the only text-bearing type in this set;
+# agent-authored SVGs can carry credentials in their text content which
+# _redact_share_paths (which only touches message prose, not embedded
+# bytes) cannot reach.
+_SHARE_ALLOWED_MIME_TYPES: frozenset[str] = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+})
+
+# SVG namespace URI used during sanitisation.
+_SVG_NS = "http://www.w3.org/2000/svg"
+
+# Pattern matching on* event-handler attributes.
+_ON_ATTR_RE = re.compile(r"^on\w+$", re.IGNORECASE)
+
+# Dangerous href/xlink:href schemes.
+_DANGEROUS_HREF_RE = re.compile(r"^\s*javascript\s*:", re.IGNORECASE)
+
+# Static placeholder emitted when a media reference cannot be embedded.
+_PLACEHOLDER = "[*Local attachment omitted from public share*]"
+_LOCAL_ATTACHMENT_PLACEHOLDER = _PLACEHOLDER
+
+# Magic byte signatures for allowed image formats — content-based validation
+# that catches mismatched extensions (e.g. a .png that is actually a script).
+# SVG is excluded here because it is validated by XML parsing in
+# _sanitize_svg_bytes.
+_IMAGE_MAGIC: dict[str, bytes] = {
+    "image/png": b"\x89PNG\r\n\x1a\n",
+    "image/jpeg": b"\xff\xd8\xff",
+    "image/gif": b"GIF8",
+    "image/webp": b"RIFF",
+}
+# Offset for WebP magic: "RIFF" at 0, file size at 4, "WEBP" at 8.
+_WEBP_MAGIC_OFFSET = 8
+_WEBP_MAGIC = b"WEBP"
 
 
 def _hostname_has_non_global_embedded_ip(hostname: str) -> bool:
@@ -302,8 +353,11 @@ def _has_invalid_bracketed_authority(parsed) -> bool:
 
 
 def _is_public_media_url(raw_ref: str) -> bool:
+    ref = str(raw_ref or "")
+    if "[" in ref or "]" in ref:
+        return False
     try:
-        parsed = urlsplit(str(raw_ref or "").replace("\\", "/"))
+        parsed = urlsplit(ref.replace("\\", "/"))
         hostname = _browser_normalized_hostname(parsed.hostname or "")
         _url_port(parsed)
     except ValueError:
@@ -336,22 +390,42 @@ def _is_public_media_reference(raw_ref: str) -> bool:
     return _is_safe_data_image_uri(raw_ref) or _is_public_media_url(raw_ref)
 
 
+def _media_authority_brackets(text: str, start: int) -> tuple[int, int] | None:
+    scheme_match = re.match(r"https?://", text[start:], re.IGNORECASE)
+    if not scheme_match:
+        return None
+    authority_start = start + scheme_match.end()
+    authority_end = len(text)
+    for index in range(authority_start, len(text)):
+        if text[index] in "/?# \t\r\n)`<":
+            authority_end = index
+            break
+    userinfo_end = text.rfind("@", authority_start, authority_end)
+    host_start = userinfo_end + 1 if userinfo_end >= 0 else authority_start
+    if host_start >= authority_end or text[host_start] != "[":
+        return None
+    host_end = text.find("]", host_start + 1, authority_end)
+    if host_end < 0:
+        return (host_start, max(host_start, authority_end - 1))
+    return (host_start, host_end)
+
+
 def _scan_media_ref_end(text: str, start: int, *, bracket_wrapped: bool) -> tuple[int, bool]:
-    inner_brackets = 0
+    authority_brackets = _media_authority_brackets(text, start)
     index = start
     while index < len(text):
         ch = text[index]
-        if inner_brackets == 0 and ch in " \t\r\n)`<":
+        if ch in " \t\r\n)`<":
             return index, False
         if ch == "[":
-            inner_brackets += 1
-        elif ch == "]":
-            if inner_brackets:
-                inner_brackets -= 1
-            elif bracket_wrapped:
+            if authority_brackets is not None and index == authority_brackets[0]:
+                index = authority_brackets[1] + 1
+                continue
+            return index, False
+        if ch == "]":
+            if bracket_wrapped:
                 return index, True
-            else:
-                return index, False
+            return index, False
         index += 1
     return index, False
 
@@ -410,38 +484,204 @@ def _stash_share_code_regions(text: str):
     return protected, restore
 
 
-def _omit_local_media_references(text: str, *, protect_code_regions: bool = True) -> str:
-    """Replace refs that the public renderer would route through /api/media."""
+def _omit_file_uri_references(text: str, *, protect_code_regions: bool = True) -> str:
+    if not isinstance(text, str) or not text:
+        return text
+    restore_code_regions = None
+    if protect_code_regions:
+        text, restore_code_regions = _stash_share_code_regions(text)
+    text = _MARKDOWN_FILE_URI_RE.sub(_PLACEHOLDER, text)
+    text = _ANGLE_FILE_URI_RE.sub(_PLACEHOLDER, text)
+    text = _FILE_URI_RE.sub(_PLACEHOLDER, text)
+    if restore_code_regions is not None:
+        text = restore_code_regions(text)
+    return text
+
+
+def _check_image_magic(data: bytes, mime_type: str) -> bool:
+    """Verify *data* header bytes match the expected magic for *mime_type*.
+
+    Returns ``True`` if the content is consistent with the claimed type.
+    SVG is exempt because it is validated structurally by
+    :func:`_sanitize_svg_bytes`.
+    """
+    if mime_type == "image/svg+xml":
+        return True
+    magic = _IMAGE_MAGIC.get(mime_type)
+    if magic is None:
+        return False
+    if not data.startswith(magic):
+        return False
+    # Extra check for WebP: "WEBP" at offset 8.
+    if mime_type == "image/webp":
+        if len(data) < 12 or data[_WEBP_MAGIC_OFFSET:_WEBP_MAGIC_OFFSET + 4] != _WEBP_MAGIC:
+            return False
+    return True
+
+
+def _sanitize_svg_bytes(data: bytes) -> bytes:
+    """Strip script elements, on* handlers, and javascript: hrefs from SVG.
+
+    SVG images served via ``<img src="data:image/svg+xml;base64,…">`` are
+    sandboxed by modern browsers and script execution is blocked.  However,
+    a sufficiently determined adversary with an older or exotic client may
+    still extract credentials embedded in the SVG, so we strip the unsafe
+    content at the server before it ever reaches a share page.
+
+    Returns sanitised SVG bytes on success, or the original *data* unchanged
+    if the content cannot be parsed as XML (fail-closed).
+    """
+    try:
+        ET.register_namespace("", _SVG_NS)
+        root = ET.fromstring(data.decode("utf-8", errors="replace"))
+    except ET.ParseError:
+        # Not valid XML — cannot sanitise safely.  Return a minimal empty SVG
+        # so the <img> renders nothing rather than embedding un-sanitised bytes.
+        return b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+    # Walk the tree depth-first, stripping on* attrs, dangerous hrefs,
+    # and removing <script> children.
+    def _walk(elem: ET.Element) -> None:
+        for attr_name in list(elem.attrib):
+            if _ON_ATTR_RE.match(attr_name):
+                del elem.attrib[attr_name]
+            elif attr_name in ("href", "xlink:href", "{http://www.w3.org/1999/xlink}href"):
+                val = elem.attrib[attr_name]
+                if _DANGEROUS_HREF_RE.match(val):
+                    del elem.attrib[attr_name]
+
+        for child in list(elem):
+            tag = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
+            if tag == "script":
+                elem.remove(child)
+            else:
+                _walk(child)
+
+    _walk(root)
+
+    buf = io.BytesIO()
+    tree = ET.ElementTree(root)
+    tree.write(buf, encoding="utf-8", xml_declaration=False)
+    return buf.getvalue()
+
+
+def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> str:
+    """Find local MEDIA: references and replace them with inline <img> tags.
+
+    Only relative paths that resolve inside at least one of *allowed_roots*
+    are honoured.  Absolute paths, ``file://`` URIs, paths that traverse
+    outside the allowed directories via ``..`` or symlinks, non-image MIME
+    types, and files larger than ``_SHARE_EMBED_MAX_BYTES`` are all replaced
+    with a static placeholder — no file content leaves the server.
+
+    This runs BEFORE :func:`_redact_share_paths` so the concrete file path
+    is still available for the allowed-roots check.
+    """
     if not isinstance(text, str) or not text:
         return text
 
-    public_media_tokens: list[str] = []
-    stash_prefix = f"\x00SHARE_MEDIA_{secrets.token_hex(8)}_"
+    allowed = tuple(Path(r).resolve() for r in allowed_roots if r)
 
-    def stash_public_token(token: str) -> str:
-        public_media_tokens.append(token)
-        return f"{stash_prefix}{len(public_media_tokens) - 1}\x00"
+    def _resolve_against_roots(raw: str) -> Path | None:
+        """Resolve *raw* against each allowed root, returning the first valid
+        absolute Path that lives inside one of them, or ``None``.
 
-    def replace_media_token(token: str, raw_ref: str) -> str:
-        if _is_public_media_reference(raw_ref):
-            return stash_public_token(token)
-        return _LOCAL_ATTACHMENT_PLACEHOLDER
+        - ``file://`` is always rejected (absolute, un-scoped).
+        - Absolute paths (``/…``, ``~…``) are resolved as-is and checked
+          against the allowed-roots allow-list via ``is_relative_to()``.
+        - Relative paths are joined with each allowed root in turn so they
+          don't silently anchor to the server's process CWD.
+        """
+        if raw.startswith("file://"):
+            return None
 
-    sanitized = _replace_media_tokens(text, replace_media_token)
-    restore_code_regions = None
-    if protect_code_regions:
-        sanitized, restore_code_regions = _stash_share_code_regions(sanitized)
-    sanitized = _MARKDOWN_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
-    sanitized = _ANGLE_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
-    sanitized = _FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
-    if restore_code_regions is not None:
-        sanitized = restore_code_regions(sanitized)
-    for index, token in enumerate(public_media_tokens):
-        sanitized = sanitized.replace(f"{stash_prefix}{index}\x00", token)
-    return sanitized
+        # --- Absolute paths: resolve as-is, then allow-list check ------------
+        if raw.startswith("/") or raw.startswith("~"):
+            try:
+                p = Path(raw).expanduser().resolve(strict=False)
+            except (OSError, ValueError, RuntimeError):
+                return None
+            if not allowed or not any(p.is_relative_to(r) for r in allowed):
+                return None
+            return p if p.is_file() else None
+
+        # --- Relative paths: try each allowed root as the anchor -------------
+        for root in allowed:
+            try:
+                candidate = (root / raw).resolve(strict=False)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            # Path traversal guard: resolved path must still be under the root.
+            if not candidate.is_relative_to(root):
+                continue
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _replace_ref(token: str, raw_ref: str) -> str:
+        raw = (raw_ref or "").strip()
+        if not raw:
+            return token
+
+        if _is_public_media_reference(raw):
+            return token
+
+        if (
+            raw.startswith("[")
+            or raw.startswith("]")
+            or re.match(r"^(?:https?://|data:)", raw, re.IGNORECASE)
+        ):
+            return _PLACEHOLDER
+
+        # --- Resolve and validate against allowed roots -----------------------
+        p = _resolve_against_roots(raw)
+        if p is None:
+            return _PLACEHOLDER
+
+        # --- Size guard -------------------------------------------------------
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return _PLACEHOLDER
+
+        if size > _SHARE_EMBED_MAX_BYTES:
+            return _PLACEHOLDER
+
+        # --- MIME allow-list (images only) ------------------------------------
+        mime_type, _ = mimetypes.guess_type(str(p))
+        if not mime_type or mime_type not in _SHARE_ALLOWED_MIME_TYPES:
+            return _PLACEHOLDER
+
+        # --- Embed as base64 <img> -------------------------------------------
+        try:
+            data = p.read_bytes()
+            # Content-based MIME validation: verify the actual file header
+            # matches the claimed MIME type — catches extension-spoofed files
+            # (e.g. a script renamed to .png).
+            if not _check_image_magic(data, mime_type):
+                return _PLACEHOLDER
+            # Sanitise SVG content before embedding — SVG can carry
+            # <script> elements and on* event handlers that could leak
+            # credentials in the context of a public share page.
+            if mime_type == "image/svg+xml":
+                data = _sanitize_svg_bytes(data)
+            b64 = base64.b64encode(data).decode("ascii")
+            # HTML-escape the filename so a crafted name like
+            # '"><script>alert(1)</script>' cannot break out of the
+            # attribute and inject script into the share page.
+            safe_name = html.escape(p.name, quote=True)
+            return (
+                f'<img src="data:{mime_type};base64,{b64}"'
+                f' class="msg-media-img" alt="{safe_name}"'
+                f' loading="lazy">'
+            )
+        except (OSError, MemoryError):
+            return _PLACEHOLDER
+
+    return _replace_media_tokens(text, _replace_ref)
 
 
-def _sanitize_message(message: dict, *, redact_paths=()) -> dict | None:
+def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Path, ...] = ()) -> dict | None:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "").strip().lower()
@@ -451,11 +691,14 @@ def _sanitize_message(message: dict, *, redact_paths=()) -> dict | None:
     if not text:
         return None
     # ALWAYS-ON hardening for the public boundary, independent of any setting:
-    # (1) force credential redaction, (2) omit local media references that the
-    # public renderer would route through authenticated /api/media, (3) strip
-    # known local paths from the remaining prose.
+    # (1) force credential redaction, (2) embed allowed local media,
+    # (3) strip known local paths.
     text = _force_redact_credentials(text)
-    text = _omit_local_media_references(text)
+    # Embed local media BEFORE path redaction so the concrete path is still
+    # available for file reads.  MEDIA: references become self-contained data
+    # URIs — or a static placeholder if the path is outside the allowed roots.
+    text = _embed_share_media(text, allowed_roots=allowed_roots)
+    text = _omit_file_uri_references(text)
     text = _redact_share_paths(text, redact_paths)
     if not text.strip():
         return None
@@ -509,9 +752,25 @@ def build_share_snapshot(session) -> dict:
         redact_paths.append(str(Path.home()))
     except Exception:
         pass
+    # Collect allowed roots for _embed_share_media: only files inside the
+    # session workspace or the attachments root may be embedded.  This is
+    # the hard security boundary that prevents arbitrary file reads through
+    # crafted MEDIA: references in message text.
+    _allowed_roots: list[Path] = []
+    _ws = raw_dict.get("workspace")
+    if _ws and isinstance(_ws, str) and _ws.strip():
+        _allowed_roots.append(Path(_ws.strip()))
+    try:
+        from api.upload import _attachment_root
+        _allowed_roots.append(_attachment_root())
+    except Exception:
+        pass
+    _allowed_roots_tuple: tuple[Path, ...] = tuple(_allowed_roots)
     safe_messages = []
     for raw in safe_session.get("messages") or []:
-        sanitized = _sanitize_message(raw, redact_paths=redact_paths)
+        sanitized = _sanitize_message(
+            raw, redact_paths=redact_paths, allowed_roots=_allowed_roots_tuple,
+        )
         if sanitized:
             safe_messages.append(sanitized)
     if not safe_messages:
@@ -521,7 +780,8 @@ def build_share_snapshot(session) -> dict:
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
     title = _force_redact_credentials(_raw_title or "Untitled")
-    title = _omit_local_media_references(title, protect_code_regions=False)
+    title = _embed_share_media(title, allowed_roots=())
+    title = _omit_file_uri_references(title, protect_code_regions=False)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {
         "title": title,

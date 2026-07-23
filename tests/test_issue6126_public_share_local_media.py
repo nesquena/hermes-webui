@@ -1,6 +1,7 @@
 """Regression coverage for public-share local media isolation (#6126)."""
 
 from io import BytesIO
+from pathlib import Path
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 
-OMITTED_ATTACHMENT = "[Local attachment omitted from public share]"
+OMITTED_ATTACHMENT = "[*Local attachment omitted from public share*]"
 PNG_DATA_URI = "data:image/png;base64,iVBORw0KGgo="
 
 
@@ -155,7 +156,7 @@ def test_public_share_snapshot_preserves_inert_file_uri_code_regions():
     assert "`file:///fixture-not-redacted/example.txt`" in content
     assert "```text\nfile:///fixture-not-redacted/fenced.txt\n```" in content
     assert "<pre>file:///fixture-not-redacted/raw-pre.txt</pre>" in content
-    assert "Bare [Local attachment omitted from public share]" in content
+    assert f"Bare {OMITTED_ATTACHMENT}" in content
     assert content.count(OMITTED_ATTACHMENT) == 1
 
 
@@ -201,9 +202,9 @@ def test_public_share_snapshot_omits_media_file_tokens_before_code_protection():
 
     content = shares.build_share_snapshot(session)["messages"][0]["content"]
 
-    assert "`[Local attachment omitted from public share]`" in content
-    assert "```text\n[Local attachment omitted from public share]\n```" in content
-    assert "<pre>[Local attachment omitted from public share]</pre>" in content
+    assert f"`{OMITTED_ATTACHMENT}`" in content
+    assert f"```text\n{OMITTED_ATTACHMENT}\n```" in content
+    assert f"<pre>{OMITTED_ATTACHMENT}</pre>" in content
     assert "MEDIA:file://" not in content
     assert "private-not-known" not in content
     assert content.count(OMITTED_ATTACHMENT) == 3
@@ -286,7 +287,7 @@ def test_public_share_snapshot_bracketed_local_media_has_clean_placeholder():
     assert content.count(OMITTED_ATTACHMENT) == 2
 
 
-def test_public_share_snapshot_handles_bracket_wrapped_ipv6_media():
+def test_public_share_snapshot_fails_closed_on_bracket_wrapped_ipv6_media():
     import api.shares as shares
 
     session = SimpleNamespace(
@@ -306,12 +307,95 @@ def test_public_share_snapshot_handles_bracket_wrapped_ipv6_media():
     content = shares.build_share_snapshot(session)["messages"][0]["content"]
     lines = content.splitlines()
 
-    assert lines[0] == "Public [MEDIA:https://[2001:4860:4860::8888]/x.png]"
+    assert lines[0] == f"Public {OMITTED_ATTACHMENT}"
     assert lines[1] == f"Private {OMITTED_ATTACHMENT}"
     assert lines[2] == f"Mapped private {OMITTED_ATTACHMENT}"
+    assert "2001:4860:4860::8888" not in content
+    assert "/x.png]" not in content
     assert "/private.png]" not in content
     assert "/mapped.png]" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 3
+
+
+def test_public_share_snapshot_does_not_absorb_nested_local_media_inside_public_url():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Nested media share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "Outer MEDIA:https://cdn.example.test/x"
+                    "[MEDIA:file:///private-not-known/secret.png]"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert "MEDIA:https://cdn.example.test/x" in content
+    assert "file://" not in content
+    assert "private-not-known" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 1
+
+
+def test_public_share_snapshot_matches_renderer_code_fence_grammar():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Fence parity share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "~~~text\n"
+                    "file:///private-not-known/tilde.png\n"
+                    "~~~\n"
+                    "```bad`info\n"
+                    "file:///private-not-known/info.png\n"
+                    "```"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert f"~~~text\n{OMITTED_ATTACHMENT}\n~~~" in content
+    assert f"```bad`info\n{OMITTED_ATTACHMENT}\n```" in content
+    assert "private-not-known" not in content
     assert content.count(OMITTED_ATTACHMENT) == 2
+
+
+def test_public_share_snapshot_fails_closed_before_renderer_sees_bracketed_ipv6_media():
+    import api.shares as shares
+
+    share_js = (Path(__file__).resolve().parents[1] / "static" / "share.js").read_text(
+        encoding="utf-8"
+    )
+    ui_js = (Path(__file__).resolve().parents[1] / "static" / "ui.js").read_text(
+        encoding="utf-8"
+    )
+    assert "renderMd(String(msg.content||''))" in share_js
+    assert r"MEDIA:([^\s\)\]]+)" in ui_js
+
+    session = SimpleNamespace(
+        title="Renderer parity share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Public [MEDIA:https://[2001:4860:4860::8888]/x.png]",
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert content == f"Public {OMITTED_ATTACHMENT}"
+    assert "MEDIA:https://[" not in content
+    assert "2001:4860:4860::8888" not in content
 
 
 def test_public_share_snapshot_malformed_port_fails_closed():
