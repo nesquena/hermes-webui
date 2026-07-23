@@ -2,6 +2,7 @@
 
 import base64
 from io import BytesIO
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,127 @@ import pytest
 
 OMITTED_ATTACHMENT = "[*Local attachment omitted from public share*]"
 PNG_DATA_URI = "data:image/png;base64,iVBORw0KGgo="
+
+
+def _render_md_with_node(raw: str) -> str:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for renderMd parity coverage")
+
+    ui_path = Path(__file__).resolve().parents[1] / "static" / "ui.js"
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const uiPath = process.argv[1];
+const raw = JSON.parse(fs.readFileSync(0, 'utf8'));
+const noop = () => {};
+const classList = () => ({add: noop, remove: noop, toggle: noop, contains: () => false});
+const element = (tag = 'div') => ({
+  tagName: String(tag).toUpperCase(),
+  style: {setProperty: noop, removeProperty: noop},
+  classList: classList(),
+  dataset: {},
+  children: [],
+  appendChild: noop,
+  remove: noop,
+  setAttribute: noop,
+  removeAttribute: noop,
+  addEventListener: noop,
+  removeEventListener: noop,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  innerHTML: '',
+  textContent: '',
+  value: '',
+  disabled: false,
+  hidden: false,
+});
+const storage = {getItem: () => null, setItem: noop, removeItem: noop, clear: noop};
+const document = {
+  baseURI: 'http://localhost/',
+  body: element('body'),
+  documentElement: element('html'),
+  createElement: element,
+  getElementById: () => null,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  addEventListener: noop,
+  removeEventListener: noop,
+};
+const window = {
+  __HERMES_CONFIG__: {},
+  document,
+  navigator: {onLine: true},
+  location: {href: 'http://localhost/'},
+  localStorage: storage,
+  sessionStorage: storage,
+  addEventListener: noop,
+  removeEventListener: noop,
+  matchMedia: () => ({matches: false, addEventListener: noop, removeEventListener: noop}),
+  fetch: () => Promise.reject(new Error('unused')),
+  requestAnimationFrame: cb => setTimeout(cb, 0),
+  cancelAnimationFrame: clearTimeout,
+  _botName: 'Hermes',
+};
+const matchMedia = window.matchMedia;
+const context = {
+  console,
+  window,
+  document,
+  navigator: window.navigator,
+  location: window.location,
+  localStorage: storage,
+  sessionStorage: storage,
+  URL,
+  URLSearchParams,
+  setTimeout,
+  clearTimeout,
+  setInterval,
+  clearInterval,
+  requestAnimationFrame: window.requestAnimationFrame,
+  cancelAnimationFrame: window.cancelAnimationFrame,
+  matchMedia,
+  MutationObserver: class { observe() {} disconnect() {} },
+  ResizeObserver: class { observe() {} disconnect() {} },
+  IntersectionObserver: class { observe() {} disconnect() {} },
+  Math,
+  Date,
+  JSON,
+  RegExp,
+  String,
+  Number,
+  Boolean,
+  Array,
+  Object,
+  Promise,
+  Error,
+  encodeURIComponent,
+  decodeURIComponent,
+  encodeURI,
+  decodeURI,
+  __raw: raw,
+};
+context.globalThis = context;
+window.window = window;
+window.globalThis = context;
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(uiPath, 'utf8'), context, {filename: uiPath});
+vm.runInContext(
+  "_inlineMediaHtmlForRef = ref => `__MEDIA_REF__${ref}__`; __rendered = renderMd(__raw);",
+  context
+);
+process.stdout.write(String(context.__rendered));
+"""
+    result = subprocess.run(
+        [node, "-e", script, str(ui_path)],
+        input=json.dumps(raw),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        pytest.fail(result.stderr or result.stdout)
+    return result.stdout
 
 
 def test_public_share_snapshot_omits_local_media_references(monkeypatch):
@@ -250,12 +372,40 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
         ">> file:///private-not-known/closer-mismatch.png\n"
         "> ```"
     )
+    deeper_closer = (
+        "> ```text\n"
+        "> file:///private-not-known/deeper-close-leak.png\n"
+        ">> ```"
+    )
+    unmatched_outer = (
+        "```text\n"
+        "> ```text\n"
+        "> file:///private-not-known/shadowed-by-outer.png\n"
+        "> ```"
+    )
+    mixed_crlf_deeper_closer = (
+        "&gt; ```text\r\n"
+        "&gt; file:///private-not-known/mixed-crlf.png\r\n"
+        ">&gt; ```"
+    )
+    lone_cr_deeper_closer = (
+        "> ```text\r"
+        "> file:///private-not-known/lone-cr.png\r"
+        ">> ```"
+    )
     session = SimpleNamespace(
         title="Title >> ```text\n> file:///private-not-known/title-depth.png\n>> ```",
         messages=[
             {
                 "role": "assistant",
-                "content": f"{shallower_payload}\n{shallower_closer}",
+                "content": (
+                    f"{shallower_payload}\n"
+                    f"{shallower_closer}\n"
+                    f"{deeper_closer}\n"
+                    f"{unmatched_outer}\n"
+                    f"{mixed_crlf_deeper_closer}\n"
+                    f"{lone_cr_deeper_closer}"
+                ),
             }
         ],
     )
@@ -268,13 +418,56 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
     assert "private-not-known" not in content
     assert "depth-mismatch" not in content
     assert "closer-mismatch" not in content
+    assert "deeper-close-leak" not in content
+    assert "shadowed-by-outer" not in content
+    assert "mixed-crlf" not in content
+    assert "lone-cr" not in content
     assert f"> {OMITTED_ATTACHMENT}" in content
     assert f">> {OMITTED_ATTACHMENT}" in content
-    assert content.count(OMITTED_ATTACHMENT) == 2
+    assert content.count(OMITTED_ATTACHMENT) == 6
     assert "file://" not in title
     assert "private-not-known" not in title
     assert "title-depth" not in title
     assert title.count(OMITTED_ATTACHMENT) == 1
+
+
+def test_public_share_blockquote_stashing_matches_render_md_file_activation():
+    active_shapes = [
+        (
+            "> ```text\n"
+            "> file:///private-not-known/deeper-close-oracle.png\n"
+            ">> ```"
+        ),
+        (
+            "```text\n"
+            "> ```text\n"
+            "> file:///private-not-known/shadowed-oracle.png\n"
+            "> ```"
+        ),
+        (
+            "&gt; ```text\r\n"
+            "&gt; file:///private-not-known/entity-crlf-oracle.png\r\n"
+            ">&gt; ```"
+        ),
+        (
+            "> ```text\r"
+            "> file:///private-not-known/lone-cr-oracle.png\r"
+            ">> ```"
+        ),
+    ]
+    inert_shape = (
+        ">&gt; ```text\n"
+        ">&gt; file:///fixture-not-redacted/mixed-inert-oracle.txt\n"
+        ">&gt; ```"
+    )
+
+    for raw in active_shapes:
+        rendered = _render_md_with_node(raw)
+        assert "__MEDIA_REF__file:///private-not-known/" in rendered
+
+    rendered = _render_md_with_node(inert_shape)
+    assert "__MEDIA_REF__" not in rendered
+    assert "file:///fixture-not-redacted/mixed-inert-oracle.txt" in rendered
 
 
 def test_public_share_snapshot_omits_parser_divergent_active_file_uri_shapes():

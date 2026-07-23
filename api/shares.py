@@ -510,42 +510,38 @@ def _stash_blockquote_fenced_code_regions(text: str, stash) -> str:
     if not lines:
         return text
 
+    regions: list[tuple[int, int]] = []
+    active_fences: dict[int, tuple[int, int]] = {}
+    for line_start, line in lines:
+        depth, remainder = _blockquote_depth_and_remainder(line)
+        for active_depth in [active_depth for active_depth in active_fences if active_depth > depth]:
+            del active_fences[active_depth]
+
+        active = active_fences.get(depth)
+        if active is not None:
+            region_start, fence_len = active
+            if _is_fence_close_line(remainder, fence_len):
+                if depth > 0:
+                    regions.append((region_start, line_start + len(line)))
+                del active_fences[depth]
+            continue
+
+        if any(active_depth < depth for active_depth in active_fences):
+            continue
+
+        opener = _BLOCKQUOTE_FENCE_OPEN_RE.fullmatch(remainder)
+        if opener:
+            active_fences[depth] = (line_start, len(opener.group(1)))
+
+    if not regions:
+        return text
+
     pieces: list[str] = []
     cursor = 0
-    index = 0
-    while index < len(lines):
-        line_start, line = lines[index]
-        depth, remainder = _blockquote_depth_and_remainder(line)
-        opener = _BLOCKQUOTE_FENCE_OPEN_RE.fullmatch(remainder)
-        if depth <= 0 or not opener:
-            index += 1
-            continue
-
-        fence_len = len(opener.group(1))
-        close_index = None
-        probe = index + 1
-        while probe < len(lines):
-            probe_depth, probe_remainder = _blockquote_depth_and_remainder(lines[probe][1])
-            if probe_depth < depth:
-                break
-            if _is_fence_close_line(probe_remainder, fence_len):
-                close_index = probe
-                break
-            probe += 1
-
-        if close_index is None:
-            index += 1
-            continue
-
-        close_start, close_line = lines[close_index]
-        region_end = close_start + len(close_line)
-        pieces.append(text[cursor:line_start])
-        pieces.append(stash(text[line_start:region_end]))
+    for region_start, region_end in regions:
+        pieces.append(text[cursor:region_start])
+        pieces.append(stash(text[region_start:region_end]))
         cursor = region_end
-        index = close_index + 1
-
-    if not pieces:
-        return text
     pieces.append(text[cursor:])
     return "".join(pieces)
 
