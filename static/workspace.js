@@ -433,6 +433,22 @@ function _normalizeArtifactPath(path){
   // preview stale (#3262 / pre-release regression-gate finding).
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
+  // Strip workspace prefix from absolute paths so they compare equal to relative
+  // preview paths. Tools like write_file/patch pass absolute paths
+  // ("/Users/x/ws/foo/bar.py") while the preview uses "foo/bar.py" — without
+  // this they never match and the preview stays stale (#5747).
+  // Also handle Windows-style absolute paths (C:\Users\...) — normalize
+  // backslashes to forward slashes first so both platforms match (#5747).
+  const normAbsPath = path.replace(/\\/g,'/');
+  const isAbsPath = normAbsPath.startsWith('/') || /^[A-Za-z]:\//.test(normAbsPath);
+  if(isAbsPath && typeof S!=='undefined' && S.session && S.session.workspace){
+    const normWs = String(S.session.workspace).replace(/\\/g,'/').replace(/\/+$/,'') + '/';
+    if(normAbsPath.startsWith(normWs)) path = normAbsPath.slice(normWs.length);
+  }
+  // An absolute path that was not under the workspace (or no workspace is set)
+  // can never match a relative preview path — bail out to avoid false candidates.
+  if(path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)) return '';
+  if(!path) return '';
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
   if(!/[./]/.test(path)) return '';
   return path;
@@ -765,6 +781,13 @@ async function loadDir(path, opts={}){
       }
     }else if(preservePreview){
       await refreshOpenPreviewIfMutated();
+      // #5747: renderFileTree() (ui.js) unconditionally restores box.style.display=''
+      // which makes fileTree visible alongside an open previewArea — both are flex:1
+      // in a flex-direction:column right panel, so they split the panel 50/50 (half-screen).
+      // When preserving a preview, re-hide the fileTree so only the preview shows.
+      if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
+        const ft=$('fileTree'); if(ft) ft.style.display='none';
+      }
     }
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
