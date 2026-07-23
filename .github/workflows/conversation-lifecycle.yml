@@ -60,6 +60,14 @@ jobs:
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
         run: python tests/browser_conversation_lifecycle.py
 
+      - name: Run settlement frame proof
+        if: matrix.scenario == 'normal'
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          LIFECYCLE_SCENARIO: normal
+          LIFECYCLE_TEST_BITE: settle-worklog-frame-proof
+        run: python tests/browser_conversation_lifecycle.py
+
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4

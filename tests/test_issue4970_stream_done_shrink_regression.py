@@ -162,7 +162,7 @@ def test_forced_open_dom_is_not_cached_while_token_armed():
     )
 
 
-def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
+def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
     # Round 9 (#5260 gate-cert, RED x2): disarming the token alone leaves the
     # forced-open worklog on screen. The first re-push collapse-rendered only the
     # NON-following path and let a pinned follower fall through to scrollToBottom()
@@ -184,28 +184,42 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
         "to snapshot the live (not expanded-worklog) DOM positions."
     )
     disarm_idx = MESSAGES_JS.index("_disarmKeepSettledWorklogOpen()")
-    after = MESSAGES_JS[disarm_idx : disarm_idx + 700]
-    # The collapse pass must run after disarm for BOTH pin states, and it must
-    # carry the pre-captured live snapshot.
-    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after, (
-        "after _disarmKeepSettledWorklogOpen() the STREAM_DONE handler must run a "
-        "scroll-preserving collapse pass (_renderMessagesWithScrollSnapshot) with the "
-        "pre-captured live snapshot so the forced-open worklog collapses back to "
-        "the user/live state without the jump."
+    after = MESSAGES_JS[disarm_idx : disarm_idx + 1100]
+    # #6414: the preferred collapse is now in-place. The old second full
+    # transcript render remains only as a fail-closed fallback when the exact
+    # settled Worklog cannot be identified or collapsed.
+    assert "_collapseJustSettledWorklogInPlace" in after
+    assert "&& _collapseJustSettledWorklogInPlace(_settledStreamId)" in after, (
+        "after _disarmKeepSettledWorklogOpen() the STREAM_DONE handler must first "
+        "collapse the just-settled Worklog in place, avoiding a second transcript "
+        "rebuild that removes the freshly-settled DOM."
     )
-    # The follower re-settle (scrollToBottom) must come AFTER the collapse render —
-    # otherwise a pinned follower keeps the forced-open DOM (scrollToBottom does not
-    # re-render). This is the exact pinned-path bug the second RED gate-cert caught.
-    collapse_pos = after.index("_renderMessagesWithScrollSnapshot")
+    assert "_restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot)" in after, (
+        "the in-place collapse path must still restore the pre-captured live scroll "
+        "snapshot so pinned and unpinned readers keep their viewport."
+    )
+    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after, (
+        "if in-place collapse cannot prove it owns the exact settled Worklog, the "
+        "STREAM_DONE handler must fall back to the old scroll-preserving render pass."
+    )
+    # The follower re-settle (scrollToBottom) must come AFTER the collapse/fallback
+    # handling; otherwise a pinned follower can keep the forced-open DOM
+    # (scrollToBottom does not re-render).
+    collapse_pos = after.index("_collapseJustSettledWorklogInPlace")
+    fallback_pos = after.index("_renderMessagesWithScrollSnapshot")
     follow_pos = after.index("shouldFollowOnDone")
     assert collapse_pos < follow_pos, (
-        "the collapse render must run BEFORE the shouldFollowOnDone scrollToBottom() "
+        "the in-place collapse must run BEFORE the shouldFollowOnDone scrollToBottom() "
         "so BOTH pinned and unpinned readers get the worklog collapsed; scrollToBottom() "
         "alone does not re-render and would leave a pinned follower forced-open."
     )
+    assert fallback_pos < follow_pos, (
+        "the fallback render pass must also stay before shouldFollowOnDone so the "
+        "fail-closed path preserves the prior #5260 invariant."
+    )
     assert "scrollToBottom()" in after, (
         "a pinned/near-bottom follower must scrollToBottom() after the collapse "
-        "render to re-settle exactly at the tail."
+        "handling to re-settle exactly at the tail."
     )
     # And the wrapper must exist and be scroll-preserving (capture → render →
     # restore same-frame), so the collapse height change is absorbed by the JS
@@ -213,6 +227,142 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
     wrapper = _function_body(UI_JS, "_renderMessagesWithScrollSnapshot")
     assert "_captureMessageScrollSnapshot()" in wrapper
     assert "_restoreMessageScrollSnapshotSameFrame" in wrapper
+
+
+def test_in_place_settled_worklog_collapse_defers_rows_without_full_rebuild():
+    body = _function_body(UI_JS, "_collapseJustSettledWorklogInPlace")
+    assert "[data-anchor-settled-scene-owner=\"1\"]" in body
+    assert "data-anchor-stream-id" in body
+    assert "_deferredWorklogRowsFromGroup(group)" in body
+    assert "_captureWorklogDetailDisclosureState(group)" in body
+    assert "group._deferredWorklogRows=rows" in body
+    assert "group._deferredWorklogDisclosure=detailDisclosure&&detailDisclosure.size" in body
+    assert "data-worklog-rows-deferred" in body
+    assert "tool-call-group-collapsed" in body
+    assert "_syncToolCallGroupSummary(group)" in body
+    assert "requestAnimationFrame" in body
+    assert "list.replaceChildren()" in body
+    assert "renderMessages(" not in body
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize():
+    """A just-settled in-place collapse must preserve nested detail open state.
+
+    The old full render path captured Worklog detail disclosure before rebuilding
+    and stashed that map on deferred groups. The new in-place path must do the
+    same before its rAF removes the rendered rows; otherwise a live-open tool
+    detail is lost when the user expands the collapsed settled Worklog.
+    """
+    collapse = _extract("_collapseJustSettledWorklogInPlace")
+    materialize = _extract("_materializeDeferredWorklogRows")
+    harness = textwrap.dedent(f"""
+        const assert = require('assert');
+        const rows = [{{id: 'row-1'}}];
+        let activeGroup = null;
+        let capturedGroup = null;
+        let renderedRows = null;
+        let restoredState = null;
+        let removedRows = false;
+        let syncCount = 0;
+        const S = {{
+          session: {{session_id: 'session-1'}},
+          messages: [{{_anchor_activity_scene: {{terminal_state: 'completed'}}}}],
+        }};
+        const summary = {{
+          attrs: {{}},
+          setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+        }};
+        const list = {{
+          replaceChildren() {{ removedRows = true; }},
+        }};
+        const inner = {{
+          querySelectorAll(selector) {{
+            if (selector === '[data-anchor-settled-scene-owner="1"]') return [activeGroup];
+            return [];
+          }},
+        }};
+        function makeGroup() {{
+          return {{
+            attrs: {{
+              'data-anchor-stream-id': 'stream-1',
+              'data-activity-disclosure-key': 'anchor-scene:0',
+            }},
+            isConnected: true,
+            _deferredWorklogRows: null,
+            _deferredWorklogDisclosure: 'stale',
+            getAttribute(name) {{ return this.attrs[name] || ''; }},
+            setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+            removeAttribute(name) {{ delete this.attrs[name]; }},
+            querySelector(selector) {{
+              if (selector.includes('tool-worklog-summary') || selector.includes('tool-call-group-summary')) return summary;
+              return null;
+            }},
+            querySelectorAll() {{ return []; }},
+            classList: {{
+              values: new Set(['open']),
+              add(name) {{ this.values.add(name); }},
+              remove(name) {{ this.values.delete(name); }},
+              contains(name) {{ return this.values.has(name); }},
+            }},
+          }};
+        }}
+        function $(id) {{ return id === 'msgInner' ? inner : null; }}
+        function _readActivityDisclosureState() {{ return null; }}
+        function _deferredWorklogRowsFromGroup(group) {{ assert.strictEqual(group, activeGroup); return rows; }}
+        function _anchorSceneHasErroredTerminalState() {{ return false; }}
+        function _syncToolCallGroupSummary(group) {{ assert.strictEqual(group, activeGroup); syncCount += 1; }}
+        function _toolWorklogListEl(group) {{ assert.strictEqual(group, activeGroup); return list; }}
+        function _renderAnchorSceneRowsIntoWorklog(group, materializedRows) {{
+          assert.strictEqual(group, activeGroup);
+          renderedRows = materializedRows;
+          return true;
+        }}
+        function _postProcessWithAnchorSuppression() {{}}
+        function _restoreWorklogDetailDisclosureState(group, state) {{
+          assert.strictEqual(group, activeGroup);
+          restoredState = state;
+        }}
+        function requestAnimationFrame(callback) {{ callback(); }}
+        let detailState = null;
+        function _captureWorklogDetailDisclosureState(group) {{
+          capturedGroup = group;
+          return detailState;
+        }}
+        {collapse}
+        {materialize}
+
+        activeGroup = makeGroup();
+        detailState = new Map([['tool:read_file#0', {{open: true, scrollTop: 18}}]]);
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(capturedGroup, activeGroup);
+        assert.strictEqual(activeGroup._deferredWorklogDisclosure, detailState);
+        assert.strictEqual(activeGroup._deferredWorklogRows, rows);
+        assert.strictEqual(activeGroup.attrs['data-worklog-rows-deferred'], '1');
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), true);
+        assert.strictEqual(removedRows, true);
+        assert.strictEqual(_materializeDeferredWorklogRows(activeGroup), true);
+        assert.strictEqual(restoredState, detailState);
+        assert.strictEqual(renderedRows, rows);
+
+        capturedGroup = null;
+        renderedRows = null;
+        restoredState = null;
+        removedRows = false;
+        activeGroup = makeGroup();
+        detailState = new Map();
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(capturedGroup, activeGroup);
+        assert.strictEqual(activeGroup._deferredWorklogDisclosure, null);
+        assert.strictEqual(_materializeDeferredWorklogRows(activeGroup), true);
+        assert.strictEqual(restoredState, null);
+        assert.strictEqual(renderedRows, rows);
+        assert.strictEqual(syncCount, 2);
+        console.log(JSON.stringify({{ok: true}}));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout.strip()) == {"ok": True}
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
@@ -296,4 +446,3 @@ def test_prescroll_snapshot_bypasses_capture_no_option_fallback_still_captures()
     assert out["test3_usedCapture"] is True, (
         "empty-options call's captured snapshot must reach _restoreMessageScrollSnapshotSameFrame"
     )
-

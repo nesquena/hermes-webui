@@ -716,10 +716,16 @@ def main() -> int:
             f"Unsupported LIFECYCLE_SCENARIO {scenario!r}; "
             "expected 'normal' or 'terminal-error'"
         )
-    if TEST_BITE not in {"", "drop-anchor-persistence", "drop-terminal-anchor-row"}:
+    if TEST_BITE not in {
+        "",
+        "drop-anchor-persistence",
+        "drop-terminal-anchor-row",
+        "settle-worklog-frame-proof",
+    }:
         raise ValueError(
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
-            "expected one of '', 'drop-anchor-persistence', 'drop-terminal-anchor-row'"
+            "expected one of '', 'drop-anchor-persistence', "
+            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof'"
         )
     if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
         raise ValueError(
@@ -851,6 +857,65 @@ def main() -> int:
             print("OK  live activity: one Anchor worklog with reasoning + completed tool")
         _wait_for_live_anchor_projection(page)
 
+        # #6414 proof: the terminal handoff may rebuild DOM, but a browser paint
+        # must never expose an expanded empty Worklog shell or an activity-less
+        # gap.  Sample after rAF callbacks for a frame have drained; DOM mutations
+        # within one task or earlier rAF callbacks are not user-visible frames.
+        if TEST_BITE == "settle-worklog-frame-proof":
+            page.evaluate(
+                """() => {
+                  const samples = [];
+                  const settledWorklogRemovals = [];
+                  let active = true;
+                  const transcript = document.querySelector('#msgInner');
+                  const observer = new MutationObserver(records => {
+                    for (const record of records) {
+                      if (record.target !== transcript) continue;
+                      for (const node of record.removedNodes) {
+                        if (!(node instanceof Element)) continue;
+                        if (node.querySelector('[data-anchor-settled-scene-owner="1"]')) {
+                          settledWorklogRemovals.push(node.outerHTML.slice(0, 500));
+                        }
+                      }
+                    }
+                  });
+                  observer.observe(transcript, {childList: true});
+                  const scheduleSample = () => {
+                    requestAnimationFrame(() => {
+                      setTimeout(sample, 0);
+                    });
+                  };
+                  const sample = () => {
+                    const liveTurn = document.querySelector('#liveAssistantTurn');
+                    const groups = Array.from(document.querySelectorAll(
+                      '.assistant-turn [data-anchor-scene-owner="1"]'
+                    )).map(group => {
+                      const summary = group.querySelector(
+                        '.tool-worklog-summary,.tool-call-group-summary'
+                      );
+                      return {
+                        collapsed: group.classList.contains('tool-call-group-collapsed'),
+                        rows: group.querySelectorAll('[data-anchor-scene-row="1"]').length,
+                        summary: (summary && summary.innerText || '').trim(),
+                      };
+                    });
+                    const liveRows = liveTurn ? liveTurn.querySelectorAll(
+                      '[data-anchor-scene-row="1"],.tool-card-row,.wl-reason'
+                    ).length : 0;
+                    samples.push({live: Boolean(liveTurn), liveRows, groups});
+                    if (active) scheduleSample();
+                  };
+                  window.__lifecycleSettleFrameProof = {
+                    stop: () => {
+                      active = false;
+                      observer.disconnect();
+                      return {samples: samples.slice(), settledWorklogRemovals};
+                    },
+                  };
+                  scheduleSample();
+                }"""
+            )
+
         gateway.release_settle.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
@@ -881,6 +946,44 @@ def main() -> int:
             )
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
+        if TEST_BITE == "settle-worklog-frame-proof":
+            page.wait_for_timeout(100)
+            settle_proof = page.evaluate(
+                "window.__lifecycleSettleFrameProof && window.__lifecycleSettleFrameProof.stop()"
+            )
+            assert isinstance(settle_proof, dict), settle_proof
+            settle_frames = settle_proof.get("samples")
+            assert isinstance(settle_frames, list) and settle_frames, settle_frames
+            assert not settle_proof.get("settledWorklogRemovals"), {
+                "message": "#6414: settlement rebuilt and removed the just-settled Worklog",
+                "settled_worklog_removals": settle_proof.get("settledWorklogRemovals"),
+            }
+            for frame in settle_frames:
+                groups = frame["groups"]
+                valid_settled_surface = any(
+                    (group["collapsed"] and group["summary"])
+                    or (not group["collapsed"] and group["rows"] > 0)
+                    for group in groups
+                )
+                valid_live_surface = frame["live"] and frame["liveRows"] > 0
+                assert valid_live_surface or valid_settled_surface, {
+                    "message": "#6414: a painted settle frame exposed an empty Worklog shell "
+                    "or no activity surface",
+                    "frame": frame,
+                    "frames": settle_frames,
+                }
+            page.screenshot(
+                path=str(artifact_dir / "settle-worklog-frame-proof.png"),
+                full_page=True,
+            )
+            (artifact_dir / "settle-worklog-frame-proof.json").write_text(
+                json.dumps(settle_proof, indent=2),
+                encoding="utf-8",
+            )
+            print(
+                "OK  settle-frame proof: every painted frame kept live activity "
+                "or a non-empty settled Worklog surface"
+            )
         if TEST_BITE == "drop-terminal-anchor-row":
             scene = _wait_for_persisted_scene(
                 base_url,
