@@ -124,6 +124,37 @@ jobs:
             echo "$name failed as expected with marker: $expected_marker"
           }
 
+          run_unexpected_failure_without_marker() {
+            local name="$1"
+            local required_marker="$2"
+            local forbidden_marker="$3"
+            shift 3
+            local log="$LIFECYCLE_ARTIFACT_DIR/${name}.log"
+
+            echo "::group::$name"
+            set +e
+            "$@" 2>&1 | tee "$log"
+            local status="${PIPESTATUS[0]}"
+            set -e
+            echo "::endgroup::"
+
+            if [ "$status" -eq 0 ]; then
+              echo "::error title=Negative canary survived::$name unexpectedly passed"
+              return 1
+            fi
+            if ! grep -Fq -- "$required_marker" "$log"; then
+              echo "::error title=Wrong negative failure::$name failed without required marker: $required_marker"
+              tail -200 "$log"
+              return 1
+            fi
+            if grep -Fq -- "$forbidden_marker" "$log"; then
+              echo "::error title=Over-broad mutation marker::$name emitted forbidden marker: $forbidden_marker"
+              tail -200 "$log"
+              return 1
+            fi
+            echo "$name failed without the mutation marker as expected"
+          }
+
           run_expected_failure normal-anchor-persistence \
             'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
             env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
@@ -132,6 +163,18 @@ jobs:
             'MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed the terminal row from the hard-reloaded Anchor scene' \
             env LIFECYCLE_SCENARIO=terminal-error \
             LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
+            python tests/browser_conversation_lifecycle.py
+          run_unexpected_failure_without_marker anchor-final-text-prerequisite \
+            'NEGATIVE CANARY EXPECTED UNMARKED FAILURE: hard-reload final-text prerequisite failed before Anchor-scene classification' \
+            'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
+            env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+            LIFECYCLE_NEGATIVE_BITE=fail-reload-final-text \
+            python tests/browser_conversation_lifecycle.py
+          run_unexpected_failure_without_marker anchor-worklog-expand-prerequisite \
+            'NEGATIVE CANARY EXPECTED UNMARKED FAILURE: Worklog expansion failed after the reloaded Anchor group was present' \
+            'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
+            env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+            LIFECYCLE_NEGATIVE_BITE=throw-reloaded-worklog-expand \
             python tests/browser_conversation_lifecycle.py
 
       - name: Upload mutation artifacts

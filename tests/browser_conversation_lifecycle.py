@@ -37,6 +37,7 @@ SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+NEGATIVE_BITE = os.environ.get("LIFECYCLE_NEGATIVE_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
@@ -48,6 +49,16 @@ EXPECTED_MUTATION_FAILURE_MARKERS = {
     "drop-terminal-anchor-row": (
         "MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed "
         "the terminal row from the hard-reloaded Anchor scene"
+    ),
+}
+NEGATIVE_MUTATION_FAILURE_MARKERS = {
+    "fail-reload-final-text": (
+        "NEGATIVE CANARY EXPECTED UNMARKED FAILURE: hard-reload final-text "
+        "prerequisite failed before Anchor-scene classification"
+    ),
+    "throw-reloaded-worklog-expand": (
+        "NEGATIVE CANARY EXPECTED UNMARKED FAILURE: Worklog expansion failed "
+        "after the reloaded Anchor group was present"
     ),
 }
 
@@ -549,13 +560,16 @@ def _activity_snapshot(page) -> dict:
     )
 
 
-def _expand_settled_worklog(page) -> None:
+def _expand_settled_worklog(page, *, force_failure: bool = False) -> None:
     page.wait_for_function(
-        """() => {
+        """({forceFailure}) => {
           const group = Array.from(document.querySelectorAll(
             '.assistant-turn [data-anchor-settled-scene-owner="1"]'
           )).pop();
           if (!group) return false;
+          if (forceFailure) {
+            throw new Error('forced Worklog expansion failure after group present');
+          }
           const summary = group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
           if (group.classList.contains('tool-call-group-collapsed') && summary) {
             if (typeof _toggleActivityGroup === 'function') _toggleActivityGroup(summary);
@@ -569,6 +583,7 @@ def _expand_settled_worklog(page) -> None:
           }
           return Boolean(group.querySelector('[data-anchor-scene-row="1"]'));
         }""",
+        arg={"forceFailure": force_failure},
         timeout=10000,
     )
 
@@ -751,6 +766,21 @@ def main() -> int:
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
             "expected one of '', 'drop-anchor-persistence', 'drop-terminal-anchor-row'"
         )
+    if NEGATIVE_BITE not in {
+        "",
+        "fail-reload-final-text",
+        "throw-reloaded-worklog-expand",
+    }:
+        raise ValueError(
+            f"Unsupported LIFECYCLE_NEGATIVE_BITE {NEGATIVE_BITE!r}; "
+            "expected one of '', 'fail-reload-final-text', "
+            "'throw-reloaded-worklog-expand'"
+        )
+    if NEGATIVE_BITE and TEST_BITE != "drop-anchor-persistence":
+        raise ValueError(
+            "LIFECYCLE_NEGATIVE_BITE is only valid with "
+            "LIFECYCLE_TEST_BITE=drop-anchor-persistence"
+        )
     if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
         raise ValueError(
             "drop-terminal-anchor-row is only valid for "
@@ -815,7 +845,10 @@ def main() -> int:
         anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE:
             def _route_anchor_scene(route):
-                if TEST_BITE == "drop-anchor-persistence":
+                if (
+                    TEST_BITE == "drop-anchor-persistence"
+                    and NEGATIVE_BITE != "throw-reloaded-worklog-expand"
+                ):
                     route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -1018,39 +1051,31 @@ def main() -> int:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
+        reload_text = TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT
+        if NEGATIVE_BITE == "fail-reload-final-text":
+            reload_text = "missing lifecycle final-text negative canary"
         try:
             page.wait_for_function(
                 "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-                arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
+                arg=reload_text,
                 timeout=15000,
             )
         except Exception as exc:
-            if TEST_BITE == "drop-anchor-persistence":
-                _raise_expected_mutation_failure(
-                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
-                    errors=errors,
-                    proc=proc,
-                    cause=exc,
-                )
+            if NEGATIVE_BITE == "fail-reload-final-text":
+                raise AssertionError(
+                    NEGATIVE_MUTATION_FAILURE_MARKERS["fail-reload-final-text"]
+                ) from exc
             raise
-        try:
-            _expand_settled_worklog(page)
-        except Exception as exc:
-            if TEST_BITE == "drop-anchor-persistence":
-                _raise_expected_mutation_failure(
-                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
-                    errors=errors,
-                    proc=proc,
-                    cause=exc,
-                )
-            raise
+        settled_anchor_group_selector = (
+            '.assistant-turn [data-anchor-settled-scene-owner="1"]'
+        )
         settled_anchor_selector = (
             '.assistant-turn [data-anchor-settled-scene-owner="1"] '
             '[data-anchor-scene-row="1"]'
         )
         if TEST_BITE == "drop-anchor-persistence":
             try:
-                page.wait_for_selector(settled_anchor_selector, timeout=2000)
+                page.wait_for_selector(settled_anchor_group_selector, timeout=2000)
             except Exception as exc:
                 _raise_expected_mutation_failure(
                     EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
@@ -1058,10 +1083,24 @@ def main() -> int:
                     proc=proc,
                     cause=exc,
                 )
+            try:
+                _expand_settled_worklog(
+                    page,
+                    force_failure=NEGATIVE_BITE == "throw-reloaded-worklog-expand",
+                )
+            except Exception as exc:
+                if NEGATIVE_BITE == "throw-reloaded-worklog-expand":
+                    raise AssertionError(
+                        NEGATIVE_MUTATION_FAILURE_MARKERS[
+                            "throw-reloaded-worklog-expand"
+                        ]
+                    ) from exc
+                raise
             raise AssertionError(
                 "Mutation survived: drop-anchor-persistence still rendered a "
                 "transcript-backed Anchor scene after hard reload"
             )
+        _expand_settled_worklog(page)
         page.wait_for_selector(
             settled_anchor_selector,
             timeout=2000 if TEST_BITE else 10000,
@@ -1134,6 +1173,7 @@ def main() -> int:
                     json.dumps({
                         "scenario": scenario,
                         "test_bite": TEST_BITE or None,
+                        "negative_bite": NEGATIVE_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
                         "anchor_projection": _anchor_projection_snapshot(page),

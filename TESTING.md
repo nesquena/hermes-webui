@@ -126,15 +126,28 @@ LIFECYCLE_TEST_BITE=drop-anchor-persistence \
 LIFECYCLE_SCENARIO=terminal-error \
 LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
   python tests/browser_conversation_lifecycle.py
+
+# Negative classification check: a hard-reload final-text prerequisite failure
+# must not emit the drop-anchor-persistence expected-failure marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=fail-reload-final-text \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative classification check: a Worklog expansion failure after the reloaded
+# Anchor group exists must not emit the drop-anchor-persistence marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=throw-reloaded-worklog-expand \
+  python tests/browser_conversation_lifecycle.py
 ```
 
 The dedicated `Conversation lifecycle (informational)` workflow runs both current
 proof rows (`normal` and `terminal-error`) and automatically verifies the two
 mutation commands above still fail with their scenario-specific expected-failure
-marker. Its `Lifecycle proof summary` result aggregates those checks, so a broken
-proof row, a mutation that unexpectedly survives, or an unrelated browser/server
-failure is visible as a failed workflow result. The workflow can also be started
-manually from the Actions page.
+marker. It also runs the two negative classification checks above and rejects them
+if they emit the positive mutation marker. Its `Lifecycle proof summary` result
+aggregates those checks, so a broken proof row, a mutation that unexpectedly
+survives, or an unrelated browser/server failure is visible as a failed workflow
+result. The workflow can also be started manually from the Actions page.
 
 It remains informational: this change does not make it a required merge check.
 The maintainer's private QA harness remains broader; later public slices will add
