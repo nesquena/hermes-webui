@@ -6123,16 +6123,30 @@ def _model_aliases_from_config() -> dict[str, str]:
     return {}
 
 
-def _load_stale_models_cache_from_disk() -> dict | None:
+def _load_stale_models_cache_from_disk(enforce_fingerprint: bool = False) -> dict | None:
     """Load a shape-valid stale /api/models disk cache for timeout fallback only.
 
-    The main cache loader enforces metadata stamps for a full cold-path cache hit.
-    This helper intentionally does not apply that stricter policy, so we can still
-    recover a useful fallback payload when the strict loader rejected cache because
-    metadata or fingerprint fields are stale. It DOES still enforce the schema
-    version: a cross-schema cache can have an incompatible groups/badge shape, so
-    serving it to the picker could surface a broken catalog — schema mismatch is a
-    hard reject even on the fallback path.
+    The main cache loader (`_is_loadable_disk_cache`) rejects on any of three
+    axes: schema version, WebUI release version, and profile source-fingerprint.
+    This helper always relaxes the release version so a cache written by a
+    previous release is still a usable fallback while the live rebuild runs, and
+    always enforces the schema version (a cross-schema cache can have an
+    incompatible groups/badge shape that would surface a broken picker).
+
+    The source-fingerprint axis is the CALLER'S policy, via ``enforce_fingerprint``:
+
+    - ``False`` (default) — the #3928 over-budget timeout fallback. The caller is
+      actively rebuilding the *current* profile and just needs any shape-valid
+      catalog to serve for the ~seconds until that rebuild publishes; a
+      fingerprint mismatch (config edit, catalog drift) is acceptable and by
+      design, because the in-flight rebuild corrects it. Serving a slightly-stale
+      catalog beats the bare minimal-static one.
+    - ``True`` — latency-sensitive session-open paths (``prefer_cache`` tier-3,
+      ``get_available_models_for_session_visit``) where NO same-request rebuild
+      will correct a wrong serve (Greptile P1). The fingerprint is profile/config
+      identity: serving a mismatched cache would hand one profile the *other*
+      profile's providers + default model (or a pre-edit config's catalog). A
+      mismatch must fall through to the profile-aware minimal-static catalog.
     """
     try:
         import json as _j
@@ -6145,6 +6159,10 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
+            return None
+        if enforce_fingerprint and cache.get("_source_fingerprint") != _models_cache_source_fingerprint():
+            # Profile/config identity mismatch — never serve another profile's
+            # (or a superseded config's) catalog on a session-open hot path.
             return None
         aliases = cache.get("aliases")
         if not isinstance(aliases, dict):
@@ -8002,6 +8020,47 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     elif force_refresh:
         stale_disk_groups = _load_stale_models_cache_from_disk()
 
+    # ── prefer_cache: resolve WITHOUT ever blocking ──────────────────────────
+    # The docstring promises prefer_cache "resolves WITHOUT ever triggering a
+    # live provider probe ... so a cold catalog can never block." The pre-fix
+    # code broke that promise: a prefer_cache caller still fell through to the
+    # ``should_wait`` condition-variable wait (up to 60s) AND the blocking
+    # ``_available_models_cache_lock`` acquire below — and the cold path holds
+    # that lock across its up-to-_LIVE_REBUILD_BUDGET_SECONDS ``build_done``
+    # wait. A latency-sensitive caller (session-open model resolution, Option-Z
+    # wakeup) therefore blocked multiple seconds on a catalog already cached on
+    # disk. Resolve here, before the lock, and NEVER wait:
+    #   1. warm in-memory cache — read under a NON-BLOCKING lock acquire
+    #      (skipped entirely if a rebuild currently holds the lock);
+    #   2. the on-disk cache (loaded above; lock-free file I/O);
+    #   3. a shape-valid stale on-disk cache;
+    #   4. a network-free minimal static catalog (last resort, as before).
+    # This never sets or clears _cache_build_in_progress (Greptile P1): a
+    # concurrent cold-path rebuild keeps its serialization intact.
+    if prefer_cache:
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                _pc_cached = _get_fresh_memory_models_cache(time.monotonic())
+            finally:
+                _available_models_cache_lock.release()
+            if _pc_cached is not None:
+                return _pc_cached
+        _pc_disk = disk_groups if disk_groups is not None else _load_models_cache_from_disk()
+        if _pc_disk is not None:
+            return copy.deepcopy(_pc_disk)
+        # Tier 3 does its OWN fingerprint-enforced stale load rather than reusing
+        # the ``stale_disk_groups`` pre-load: that pre-load is fingerprint-BLIND
+        # (it feeds the #3928 over-budget fallback below, which is rebuilding the
+        # current profile and tolerates a mismatch). On this session-open hot
+        # path no same-request rebuild corrects a wrong serve, so a mismatched
+        # cache must be rejected (Greptile P1) — reusing the blind pre-load would
+        # silently bypass that. The extra ~0.1ms disk read only hits the stalest
+        # tier (memory + fresh disk both missed).
+        _pc_stale = _load_stale_models_cache_from_disk(enforce_fingerprint=True)
+        if _pc_stale is not None:
+            return copy.deepcopy(_pc_stale)
+        return copy.deepcopy(_minimal_static_models_catalog())
+
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
@@ -8411,6 +8470,98 @@ def warm_models_catalog_provenance_if_cold() -> None:
         _available_models_cache_lock.release()
 
 
+_session_visit_refresh_lock = threading.Lock()
+# Profiles with a session-visit refresh currently in flight, keyed by profile
+# name. A process-global flag (Greptile P1) cross-suppresses profiles: each
+# refresh is bound to ONE profile and writes that profile's own cache, so a slow
+# refresh for profile A must not stop profile B from revalidating. Per-profile
+# keying coalesces same-profile bursts while letting different profiles refresh
+# in parallel.
+_session_visit_refresh_in_flight: set[str] = set()
+
+
+def _spawn_session_visit_background_refresh() -> bool:
+    """Kick a live catalog refresh onto a detached daemon; never block the caller.
+
+    Stale-while-revalidate helper for ``get_available_models_for_session_visit``:
+    a user-facing session-open serves the (possibly stale) disk cache instantly
+    and calls this to freshen the catalog out-of-band. The refresh reuses the one
+    source of truth — ``get_available_models(force_refresh=True)`` — so all of the
+    thundering-herd coalescing, bounded-rebuild, and single-publisher machinery is
+    shared, not reimplemented.
+
+    Returns True if THIS call started the worker, False if a refresh for the same
+    profile was already in flight (coalesced) — the per-profile
+    ``_session_visit_refresh_in_flight`` guard keeps a burst of same-profile
+    session-opens from spawning N redundant rebuild daemons while still letting a
+    different profile refresh concurrently.
+
+    Profile isolation (#3957): the detached worker inherits neither the request
+    profile TLS nor os.environ, so the active profile name is captured HERE (on
+    the request thread) — it is both the coalescing key and the scope re-bound
+    inside the worker via ``profile_scope_for_detached_worker``.
+    """
+    from contextlib import nullcontext as _nullcontext
+
+    # Capture the active profile on the REQUEST thread — needed before the guard
+    # claim because the guard is now keyed by profile.
+    _active_profile_name = ""
+    _prof_scope_worker = None
+    try:
+        from api.profiles import (
+            get_active_profile_name as _gapn,
+            profile_scope_for_detached_worker as _prof_scope_worker,
+        )
+        _active_profile_name = (_gapn() or "").strip()
+    except Exception:
+        # profiles module unavailable (pathological): the worker rebuilds under
+        # nullcontext() with no profile rebind, and _active_profile_name stays ""
+        # — so every such spawn coalesces under the empty key rather than per
+        # profile. Re-assigned explicitly here (not just left at the init default)
+        # so the degradation is visible at the failure site instead of implied by
+        # omission. Self-correcting: the enforce-fingerprint read side rejects a
+        # mismatched publish on the next visit.
+        _prof_scope_worker = None
+        _active_profile_name = ""
+
+    # Claim the per-profile spawn right under the lock: exactly one caller per
+    # profile wins and starts the worker; the rest coalesce onto it.
+    with _session_visit_refresh_lock:
+        if _active_profile_name in _session_visit_refresh_in_flight:
+            return False
+        _session_visit_refresh_in_flight.add(_active_profile_name)
+
+    def _worker() -> None:
+        _scope = (
+            _prof_scope_worker(_active_profile_name, "session-visit refresh (worker)")
+            if _prof_scope_worker is not None
+            else _nullcontext()
+        )
+        try:
+            with _scope:
+                get_available_models(force_refresh=True)
+        except Exception:
+            logger.debug("session-visit background refresh failed", exc_info=True)
+        finally:
+            with _session_visit_refresh_lock:
+                _session_visit_refresh_in_flight.discard(_active_profile_name)
+
+    try:
+        threading.Thread(
+            target=_worker,
+            name="models-session-visit-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        # Never leave the guard latched if the thread failed to even start,
+        # or that profile's catalog would never refresh again for the process
+        # lifetime.
+        with _session_visit_refresh_lock:
+            _session_visit_refresh_in_flight.discard(_active_profile_name)
+        raise
+    return True
+
+
 def get_available_models_for_session_visit() -> dict:
     """Return /api/models with a short session-visit freshness horizon.
 
@@ -8448,48 +8599,72 @@ def get_available_models_for_session_visit() -> dict:
     if cache_age is not None and cache_age < _SESSION_VISIT_MODELS_FRESHNESS_SECONDS:
         _mark("cache_age_within_ttl")
         now_mono = time.monotonic()
-        with _available_models_cache_lock:
-            cached = _get_fresh_memory_models_cache(now_mono)
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                cached = _get_fresh_memory_models_cache(now_mono)
+            finally:
+                _available_models_cache_lock.release()
             if cached is not None:
                 _mark("memory_cache_hit")
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
+        else:
+            _mark("memory_cache_lock_busy")
         _mark("memory_cache_miss_loading_disk")
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
-            with _available_models_cache_lock:
-                cached = _get_fresh_memory_models_cache(time.monotonic())
-                if cached is not None:
-                    _mark("disk_then_memory_cache_hit")
-                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                    return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
+            if _available_models_cache_lock.acquire(blocking=False):
+                try:
+                    cached = _get_fresh_memory_models_cache(time.monotonic())
+                    if cached is not None:
+                        _mark("disk_then_memory_cache_hit")
+                        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                        return cached
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+                finally:
+                    _available_models_cache_lock.release()
+            else:
+                # The disk payload is already validated for this profile and
+                # release. Publishing it to memory is optional; never wait on a
+                # concurrent rebuild before returning it to session-open.
+                _mark("disk_cache_publish_lock_busy")
             _mark("disk_cache_returned")
             _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
-    stale_cached = disk_cached or _load_stale_models_cache_from_disk()
+    stale_cached = disk_cached or _load_stale_models_cache_from_disk(enforce_fingerprint=True)
     _mark(f"stale_cached_loaded:{bool(stale_cached)}")
-    try:
-        _mark("force_refresh_start")
-        result = get_available_models(force_refresh=True)
-        _mark("force_refresh_done")
+
+    # ── Stale-while-revalidate ──────────────────────────────────────────────
+    # A user-facing session-open must NEVER block on a live provider probe.
+    # Before this fix, a cache older than the freshness horizon fell through to
+    # get_available_models(force_refresh=True), which blocks the request thread
+    # up to _LIVE_REBUILD_BUDGET_SECONDS on per-provider network calls (the
+    # anthropic /models fetch et al.) — the proven source of the multi-second
+    # /api/session and /api/models?freshness=session_visit latency on session
+    # open. Instead: if ANY shape-valid cache exists, serve it immediately and
+    # freshen the catalog on a detached daemon. The next session-open gets the
+    # warm result; this one pays ~0ms.
+    if stale_cached is not None:
+        _spawn_session_visit_background_refresh()
+        _mark("stale_served_background_refresh")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-        return result
-    except Exception:
-        _mark("force_refresh_failed")
-        logger.debug("session-visit models refresh failed", exc_info=True)
-        if stale_cached is not None:
-            _mark("stale_fallback_return")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(stale_cached)
-        _mark("prefer_cache_fallback")
-        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-        return get_available_models(prefer_cache=True)
+        return copy.deepcopy(stale_cached)
+
+    # True cold boot: no cache on disk at all (first run, or cache cleared).
+    # Return the network-free static catalog now and populate the durable cache
+    # on the existing detached refresh worker. Session-open never owns live
+    # provider work, even on the first request after installation.
+    _spawn_session_visit_background_refresh()
+    _mark("cold_boot_background_refresh_spawned")
+    result = get_available_models(prefer_cache=True)
+    _mark("cold_boot_static_returned")
+    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+    return result
 
 
 def _maybe_log_slow_stages(
