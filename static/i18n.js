@@ -26118,8 +26118,10 @@ function setLocale(lang) {
  */
 function loadLocale() {
   let stored = null;
+  let browserLang = null;
   try { stored = localStorage.getItem('hermes-lang'); } catch (_) {}
-  setLocale(resolvePreferredLocale(null, stored));
+  try { browserLang = navigator.language || navigator.userLanguage || null; } catch (_) {}
+  setLocale(resolvePreferredLocale(stored, browserLang));
 }
 
 /**
