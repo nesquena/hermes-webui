@@ -887,6 +887,20 @@ def test_done_sets_turn_duration_before_persisting_anchor_scene():
     assert duration_idx < attach_idx
 
 
+def test_done_settlement_persists_anchor_before_owner_cleanup():
+    done = _event_listener_body(MESSAGES_JS, "done")
+
+    attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    cleanup_idx = done.index("_clearOwnerInflightState();", attach_idx)
+    clear_stream_idx = done.index("S.activeStreamId=null;", cleanup_idx)
+    fallback_msgs_idx = done.index("const _doneMsgsForAnchor=(d.session.messages||[]).filter(m=>m&&m.role);")
+    fallback_attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(_doneMsgsForAnchor);")
+    fallback_cleanup_idx = done.index("_clearOwnerInflightState();", fallback_attach_idx)
+
+    assert attach_idx < cleanup_idx < clear_stream_idx
+    assert fallback_msgs_idx < fallback_attach_idx < fallback_cleanup_idx
+
+
 def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")

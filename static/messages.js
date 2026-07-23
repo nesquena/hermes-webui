@@ -5816,7 +5816,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
-        _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -5826,9 +5825,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
         const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
-        if(isActiveSession){
-          S.activeStreamId=null;
-        }
         let lastAsst=null;
         if(isActiveSession){
           // Capture previous session totals BEFORE overwriting S.session with the new
@@ -5925,6 +5921,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
           _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          _clearOwnerInflightState();
+          S.activeStreamId=null;
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -6002,6 +6000,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
           if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+        }else{
+          if(d.session&&Array.isArray(d.session.messages)){
+            const _doneMsgsForAnchor=(d.session.messages||[]).filter(m=>m&&m.role);
+            _attachProjectedAnchorSceneToLastAssistant(_doneMsgsForAnchor);
+          }
+          _clearOwnerInflightState();
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
