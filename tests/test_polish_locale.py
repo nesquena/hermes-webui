@@ -2,6 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.test_provider_quota_locale_helpers import RESET_FALLBACK_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -131,7 +132,7 @@ def test_polish_locale_matches_english_key_coverage():
     src = read(REPO / "static" / "i18n.js")
     en_keys = set(locale_keys(src, "en"))
     pl_keys = set(locale_keys(src, "pl"))
-    assert sorted((en_keys - pl_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
+    assert sorted((en_keys - pl_keys) - PROFILE_CONCEPT_FALLBACK_KEYS - RESET_FALLBACK_KEYS) == []
     assert sorted(pl_keys - en_keys) == []
 
 

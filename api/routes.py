@@ -9678,6 +9678,7 @@ from api.providers import (
     get_provider_quota,
     get_provider_cost_history,
     provider_has_process_wakeup_recovery_credential,
+    redeem_codex_reset_credit_status,
     set_provider_key,
     remove_provider_key,
 )
@@ -14508,6 +14509,28 @@ def handle_post(handler, parsed) -> bool:
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
+
+    if parsed.path == "/api/provider/openai-codex/reset":
+        if not isinstance(body, dict):
+            bad(handler, "request body must be a JSON object", 400)
+            return True
+        if set(body.keys()) - {"force", "redeem_request_id"}:
+            bad(handler, "only force and redeem_request_id are allowed in the request body", 400)
+            return True
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            bad(handler, "force must be a boolean", 400)
+            return True
+        if "redeem_request_id" not in body:
+            bad(handler, "redeem_request_id is required", 400)
+            return True
+        redeem_request_id = str(body.get("redeem_request_id"))
+        from api.profiles import profile_env_for_active_request
+
+        with profile_env_for_active_request("/api/provider/openai-codex/reset", logger_override=logger):
+            result = redeem_codex_reset_credit_status(force=force, redeem_request_id=redeem_request_id)
+        j(handler, result, status=int(result.get("http_status") or 200))
+        return True
 
     if parsed.path == "/api/providers/self-hosted":
         try:
