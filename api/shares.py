@@ -125,19 +125,24 @@ _MARKDOWN_FILE_URI_RE = re.compile(
     re.IGNORECASE,
 )
 _ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
-_FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
+_FILE_URI_RE = re.compile(r"(^|\s)(file://[^\s<>'\"\)\]]+)", re.IGNORECASE)
 _API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
 _RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
+_ENTITY_PRE_REGION_RE = re.compile(r"&lt;pre\b[\s\S]*?&lt;/pre&gt;", re.IGNORECASE)
+_BLOCKQUOTE_FENCED_CODE_REGION_RE = re.compile(
+    r"(^|\r?\n)> ?[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)\r?\n"
+    r"(?:> ?.*(?:\r?\n))*?"
+    r"> ?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r?\n|$)"
+)
 _FENCED_CODE_REGION_RE = re.compile(
-    r"(^|\n)[ ]{0,3}(?P<fence>`{3,})([^\n`]*)\n"
-    r"(?:[\s\S]*?\n)?[ ]{0,3}(?P=fence)`*[ \t]*(?=\n|$)"
+    r"(^|\r?\n)[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)\r?\n"
+    r"(?:[\s\S]*?\r?\n)?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r?\n|$)"
 )
 _INLINE_CODE_REGION_RE = re.compile(r"`[^`\n]+`")
 _DATA_IMAGE_RE = re.compile(
     r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
     re.IGNORECASE,
 )
-_DATA_IMAGE_SVG_RE = re.compile(r"^data:image/svg\+xml;base64,[a-z0-9+/=]+$", re.IGNORECASE)
 _DATA_IMAGE_MAX_LEN = 2 * 1024 * 1024
 _EMBEDDED_IPV4_RE = re.compile(
     r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
@@ -236,13 +241,6 @@ def _parse_browser_ipv4_literal(hostname: str):
     return ipaddress.IPv4Address(value)
 
 
-def _hostname_looks_like_browser_ipv4_literal(hostname: str) -> bool:
-    try:
-        return _parse_browser_ipv4_literal(hostname) is not None
-    except ValueError:
-        return _BROWSER_IPV4_LITERAL_RE.fullmatch(str(hostname or "").rstrip(".")) is not None
-
-
 def _browser_normalized_hostname(hostname: str) -> str:
     try:
         decoded = unquote(str(hostname or ""), errors="strict")
@@ -254,10 +252,7 @@ def _browser_normalized_hostname(hostname: str) -> str:
 
 def _is_safe_data_image_uri(raw_ref: str) -> bool:
     value = str(raw_ref or "")
-    return len(value) <= _DATA_IMAGE_MAX_LEN and (
-        _DATA_IMAGE_RE.fullmatch(value) is not None
-        or _DATA_IMAGE_SVG_RE.fullmatch(value) is not None
-    )
+    return len(value) <= _DATA_IMAGE_MAX_LEN and _DATA_IMAGE_RE.fullmatch(value) is not None
 
 
 def _media_url_path_for_boundary_check(path: str) -> str:
@@ -373,11 +368,17 @@ def _is_public_media_url(raw_ref: str) -> bool:
         if not ip.is_global:
             return False
     except ValueError:
-        if (
+        try:
+            browser_ipv4 = _parse_browser_ipv4_literal(hostname)
+        except ValueError:
+            return False
+        if browser_ipv4 is not None:
+            if not browser_ipv4.is_global:
+                return False
+        elif (
             hostname in _LOCAL_ONLY_HOSTNAMES
             or hostname.endswith(_LOCAL_ONLY_HOSTNAME_SUFFIXES)
             or "." not in hostname
-            or _hostname_looks_like_browser_ipv4_literal(hostname)
             or _hostname_has_non_global_embedded_ip(hostname)
         ):
             return False
@@ -475,8 +476,30 @@ def _stash_share_code_regions(text: str):
         return f"{stash_prefix}{len(stashed) - 1}\x00"
 
     protected = _RAW_PRE_REGION_RE.sub(stash, text)
+    protected = _ENTITY_PRE_REGION_RE.sub(stash, protected)
+    protected = _BLOCKQUOTE_FENCED_CODE_REGION_RE.sub(stash, protected)
     protected = _FENCED_CODE_REGION_RE.sub(stash, protected)
     protected = _INLINE_CODE_REGION_RE.sub(stash, protected)
+
+    def restore(value: str) -> str:
+        for index, original in enumerate(stashed):
+            value = value.replace(f"{stash_prefix}{index}\x00", original)
+        return value
+
+    return protected, restore
+
+
+def _stash_public_media_tokens(text: str):
+    stashed: list[str] = []
+    stash_prefix = f"\x00SHARE_MEDIA_{secrets.token_hex(8)}_"
+
+    def maybe_stash(token: str, raw_ref: str) -> str:
+        if _is_public_media_reference((raw_ref or "").strip()):
+            stashed.append(token)
+            return f"{stash_prefix}{len(stashed) - 1}\x00"
+        return token
+
+    protected = _replace_media_tokens(text, maybe_stash)
 
     def restore(value: str) -> str:
         for index, original in enumerate(stashed):
@@ -492,9 +515,11 @@ def _omit_file_uri_references(text: str, *, protect_code_regions: bool = True) -
     restore_code_regions = None
     if protect_code_regions:
         text, restore_code_regions = _stash_share_code_regions(text)
+    text, restore_media_tokens = _stash_public_media_tokens(text)
     text = _MARKDOWN_FILE_URI_RE.sub(_PLACEHOLDER, text)
     text = _ANGLE_FILE_URI_RE.sub(_PLACEHOLDER, text)
-    text = _FILE_URI_RE.sub(_PLACEHOLDER, text)
+    text = _FILE_URI_RE.sub(lambda match: f"{match.group(1)}{_PLACEHOLDER}", text)
+    text = restore_media_tokens(text)
     if restore_code_regions is not None:
         text = restore_code_regions(text)
     return text

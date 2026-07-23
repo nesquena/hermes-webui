@@ -1,5 +1,6 @@
 """Regression coverage for public-share local media isolation (#6126)."""
 
+import base64
 from io import BytesIO
 from pathlib import Path
 import shutil
@@ -160,6 +161,34 @@ def test_public_share_snapshot_preserves_inert_file_uri_code_regions():
     assert content.count(OMITTED_ATTACHMENT) == 1
 
 
+def test_public_share_snapshot_preserves_renderer_inert_file_uri_parser_differentials():
+    import api.shares as shares
+
+    crlf_fence = "```text\r\nfile:///fixture-not-redacted/crlf.txt\r\n```\r\nAfter"
+    entity_pre = "&lt;pre&gt;file:///fixture-not-redacted/entity.txt&lt;/pre&gt;"
+    blockquote_fence = (
+        "> ```text\n"
+        "> file:///fixture-not-redacted/quoted.txt\n"
+        "> ```"
+    )
+    session = SimpleNamespace(
+        title="Parser differential code share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": f"{blockquote_fence}\n{crlf_fence}\n{entity_pre}",
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert blockquote_fence in content
+    assert crlf_fence in content
+    assert entity_pre in content
+    assert content.count(OMITTED_ATTACHMENT) == 0
+
+
 def test_public_share_snapshot_redacts_known_paths_inside_code_regions():
     import api.shares as shares
 
@@ -233,6 +262,39 @@ def test_public_share_snapshot_preserves_safe_data_images_only():
     assert content.count(OMITTED_ATTACHMENT) == 1
 
 
+def test_public_share_snapshot_omits_text_bearing_svg_data_images():
+    import api.shares as shares
+
+    sentinel = "private-note-7391"
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        f"<text>{sentinel}</text>"
+        "</svg>"
+    )
+    svg_data_uri = "data:image/svg+xml;base64," + base64.b64encode(
+        svg.encode("utf-8")
+    ).decode("ascii")
+    session = SimpleNamespace(
+        title="SVG data share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": f"SVG MEDIA:{svg_data_uri}",
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    if "data:image/svg+xml;base64," in content:
+        encoded = content.split("data:image/svg+xml;base64,", 1)[1].split()[0]
+        decoded = base64.b64decode(encoded).decode("utf-8", errors="replace")
+        assert sentinel not in decoded
+    assert sentinel not in content
+    assert svg_data_uri not in content
+    assert content == f"SVG {OMITTED_ATTACHMENT}"
+
+
 def test_public_share_snapshot_scopes_api_media_path_to_trusted_same_origin(monkeypatch):
     import api.shares as shares
 
@@ -258,6 +320,27 @@ def test_public_share_snapshot_scopes_api_media_path_to_trusted_same_origin(monk
     assert "hermes.example.test/api/media" not in content
     assert "MEDIA:/api/media" not in content
     assert content.count(OMITTED_ATTACHMENT) == 2
+
+
+def test_public_share_snapshot_preserves_unrelated_scheme_and_public_media_file_query():
+    import api.shares as shares
+
+    public_media = "MEDIA:https://cdn.example.test/image.png?source=file:///label"
+    session = SimpleNamespace(
+        title="Approved public media share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": f"profile://alice/settings\n{public_media}",
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert "profile://alice/settings" in content
+    assert public_media in content
+    assert content.count(OMITTED_ATTACHMENT) == 0
 
 
 def test_public_share_snapshot_bracketed_local_media_has_clean_placeholder():
@@ -456,6 +539,33 @@ def test_public_share_snapshot_malformed_port_fails_closed():
     content = shares.build_share_snapshot(session)["messages"][0]["content"]
 
     assert content == f"Bad {OMITTED_ATTACHMENT}"
+
+
+def test_public_media_url_preserves_global_browser_ipv4_literals():
+    import api.shares as shares
+
+    assert str(shares._parse_browser_ipv4_literal("8.8")) == "8.0.0.8"
+    assert shares._is_public_media_url("http://8.8/x.png") is True
+    assert shares._is_public_media_url("http://10.1/private.png") is False
+
+    session = SimpleNamespace(
+        title="Legacy IPv4 share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "Global MEDIA:http://8.8/x.png\n"
+                    "Private MEDIA:http://10.1/private.png"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert "MEDIA:http://8.8/x.png" in content
+    assert "10.1/private.png" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 1
 
 
 def test_public_media_url_rejects_browser_invalid_bracketed_hosts_like_node():
