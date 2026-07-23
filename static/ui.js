@@ -12392,7 +12392,9 @@ function _anchorSceneNodeForRow(row, opts){
     // renderMd path below, which stays the source of truth for the final DOM.
     const proseKey=row.local_id||row.row_id||'';
     if(!settled && proseKey && typeof window.__anchorProseIncrementalNode==='function'){
-      const inc=window.__anchorProseIncrementalNode(proseKey,text);
+      const inc=window.__anchorProseIncrementalNode(proseKey,text,{
+        finalize:String(row.status||'').toLowerCase()==='completed',
+      });
       // Route the incremental node through the shared row-decoration block below
       // (data-anchor-scene-row / -row-id / -row-role / -source-event-type) instead
       // of returning early — otherwise live incremental prose rows lose the
