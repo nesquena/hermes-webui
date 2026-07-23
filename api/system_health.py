@@ -166,8 +166,7 @@ def _zero_webui_runtime_payload() -> dict[str, Any]:
     try:
         from api import config as _config
 
-        value = int(getattr(_config, "DEFAULT_SESSIONS_CACHE_MAX", 0))
-        default_sessions_cap = max(0, value)
+        default_sessions_cap = int(_config.get_sessions_cache_max({}))
     except Exception:
         default_sessions_cap = 0
     return {
@@ -210,32 +209,33 @@ def _release_lock(lock: Any) -> None:
 def _cached_profile_sessions_cache_cap(_config) -> tuple[int, bool]:
     try:
         from api import profiles as _profiles
+
         name = _profiles.get_active_profile_name()
         if not name:
             name = "default"
         if name == "default":
             home = _profiles._DEFAULT_HERMES_HOME
         elif _profiles._PROFILE_ID_RE.fullmatch(name):
-            home = _profiles._DEFAULT_HERMES_HOME / "profiles" / name
+            home = _profiles.get_cached_profile_home_for_diagnostics(name)
+            if home is None:
+                return _config.get_sessions_cache_max({}), False
         else:
             return _config.get_sessions_cache_max({}), False
         process_authority = None
         cfg_path = getattr(_config, "_cfg_path", None)
         if cfg_path is not None:
             try:
-                if _config._sessions_cap_home_key(home) == _config._sessions_cap_home_key(Path(cfg_path).parent):
-                    process_authority = _config._sessions_cap_home_key(Path(cfg_path).parent)
+                if _config._sessions_cap_home_key(
+                    home
+                ) == _config._sessions_cap_home_key(Path(cfg_path).parent):
+                    process_authority = _config._sessions_cap_home_key(
+                        Path(cfg_path).parent
+                    )
             except Exception:
                 pass
-        result = _config.try_get_sessions_cap_snapshot(home, process_authority=process_authority)
-        if not result[1] and name != "default":
-            try:
-                candidate = Path(_config._get_config_path()).parent
-                if candidate != home:
-                    return _config.try_get_sessions_cap_snapshot(candidate, process_authority=None)
-            except Exception:
-                pass
-        return result
+        return _config.try_get_sessions_cap_snapshot(
+            home, process_authority=process_authority
+        )
     except Exception:
         return _config.get_sessions_cache_max({}), False
 

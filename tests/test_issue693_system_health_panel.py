@@ -1093,3 +1093,22 @@ def test_missing_yaml_observation_invalidates_snapshot(monkeypatch, tmp_path):
     path.unlink()
     config._load_yaml_config_file_raw(path)
     assert config.try_get_sessions_cap_snapshot(home)[1] is False
+
+
+def test_health_profile_home_lookup_does_not_spawn_on_cold_root_alias(monkeypatch):
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", False)
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: (_ for _ in ()).throw(AssertionError()))
+    home = profiles.get_cached_profile_home_for_diagnostics("renamed-root")
+    assert home == profiles._DEFAULT_HERMES_HOME / "profiles" / "renamed-root"
+
+
+def test_sessions_cap_generation_bound_applies_to_invalidation(monkeypatch, tmp_path):
+    from api import config
+
+    monkeypatch.setattr(config, "_sessions_cap_snapshots", __import__("collections").OrderedDict())
+    monkeypatch.setattr(config, "_sessions_cap_generations", {})
+    for index in range(65):
+        config.invalidate_sessions_cap_snapshot(tmp_path / f"profile-{index}")
+    assert len(config._sessions_cap_generations) == 64

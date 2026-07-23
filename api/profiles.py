@@ -519,8 +519,14 @@ def _resolve_profile_home_for_name(name: str) -> Path:
                 name, isolated_name,
             )
         return isolated_home
-    if not name or _is_root_profile(name):
+    if not name or name == 'default':
         return _DEFAULT_HERMES_HOME
+    if name != 'default':
+        with _root_profile_name_cache_lock:
+            root_cache_loaded = _root_profile_name_cache_loaded
+            is_cached_root = name in _root_profile_name_cache
+        if root_cache_loaded and is_cached_root:
+            return _DEFAULT_HERMES_HOME
     if not _PROFILE_ID_RE.fullmatch(name):
         return _DEFAULT_HERMES_HOME
     return _resolve_named_profile_home(name)

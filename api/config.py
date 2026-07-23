@@ -659,6 +659,12 @@ def observe_sessions_cap_sources(profile_home: Path | str, config_signature: Any
             generation += 1
             _sessions_cap_generations[key] = (config_signature, env_signature, generation)
             _sessions_cap_snapshots.pop(key, None)
+            while len(_sessions_cap_generations) > _SESSIONS_CAP_SNAPSHOT_MAX:
+                evicted = next(iter(_sessions_cap_generations))
+                if evicted == key:
+                    break
+                _sessions_cap_generations.pop(evicted, None)
+                _sessions_cap_snapshots.pop(evicted, None)
         return generation
 
 
@@ -692,6 +698,12 @@ def invalidate_sessions_cap_snapshot(profile_home: Path | str) -> None:
         signatures = previous[:2] if previous else (None, None)
         _sessions_cap_generations[key] = (*signatures, generation)
         _sessions_cap_snapshots.pop(key, None)
+        while len(_sessions_cap_generations) > _SESSIONS_CAP_SNAPSHOT_MAX:
+            evicted = next(iter(_sessions_cap_generations))
+            if evicted == key:
+                break
+            _sessions_cap_generations.pop(evicted, None)
+            _sessions_cap_snapshots.pop(evicted, None)
 
 
 def try_get_sessions_cap_snapshot(profile_home: Path | str, *, process_authority: str | None = None) -> tuple[int, bool]:
