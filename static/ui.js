@@ -1670,9 +1670,12 @@ let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps t
 let _dashboardSettingsLoadSeq=0;
 let _dashboardSettingsWriteSeq=0;
 
-function _dashboardIsBrowserLoopback(){
-  const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
+function _dashboardIsLoopbackHost(host){
+  host=(host||'').replace(/^\[|\]$/g,'').toLowerCase();
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
+}
+function _dashboardIsBrowserLoopback(){
+  return _dashboardIsLoopbackHost(window.location.hostname);
 }
 
 function _normalizeDashboardEnabledMode(mode){
@@ -1774,7 +1777,9 @@ else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  let dashboardLoopback=false;
+  try{dashboardLoopback=_dashboardIsLoopbackHost(new URL(url).hostname);}catch(_){ }
+  const warning=running&&!_dashboardIsBrowserLoopback()&&dashboardLoopback?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
     btn.classList.toggle('nav-action-visible',running);
