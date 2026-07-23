@@ -2823,7 +2823,9 @@ from api.config import (
     set_reasoning_display,
     set_reasoning_effort,
     create_stream_channel,
+    get_config,
     get_webui_session_save_mode,
+    get_config_snapshot,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
@@ -4565,7 +4567,17 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     values = [row.get("row_id"), row.get("local_id"), row.get("event_id")]
     identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
     values.extend([identity.get("local_id"), identity.get("event_id")])
-    return any(str(value or "").startswith("live-") for value in values)
+    if any(str(value or "").startswith("live-") for value in values):
+        return True
+    group = row.get("group") if isinstance(row.get("group"), dict) else {}
+    has_stream_owner = bool(
+        row.get("stream_id")
+        or row.get("run_id")
+        or identity.get("stream_id")
+        or identity.get("run_id")
+    )
+    has_assistant_message_index = group.get("assistant_msg_idx") is not None
+    return has_stream_owner and not has_assistant_message_index
 
 
 def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
@@ -4582,6 +4594,14 @@ def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
         return None
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
+    payload = next_row.get("payload")
+    if isinstance(payload, dict):
+        payload["status"] = "completed"
+        if role == "tool":
+            payload["done"] = True
+    tool = next_row.get("tool")
+    if role == "tool" and isinstance(tool, dict):
+        tool["done"] = True
     return next_row
 
 
@@ -5545,6 +5565,7 @@ def _extension_sidecar_proxy_request_headers(handler) -> dict[str, str]:
             lower in blocked_headers
             or lower in {"authorization", "cookie", "content-length", "host", "origin", "referer"}
             or lower.startswith("x-csrf")
+            or lower.startswith("x-hermes-")
         ):
             continue
         headers[str(name)] = str(value)
@@ -5558,7 +5579,11 @@ def _send_extension_sidecar_proxy_response(handler, status: int, body: bytes, he
     if headers and hasattr(headers, "items"):
         for name, value in headers.items():
             lower = str(name).lower()
-            if lower in blocked_headers or lower in {"content-length", "set-cookie"}:
+            if (
+                lower in blocked_headers
+                or lower in {"content-length", "set-cookie"}
+                or lower.startswith("x-hermes-")
+            ):
                 continue
             if lower == "content-type":
                 sent_content_type = True
@@ -5655,10 +5680,17 @@ def _handle_extension_sidecar_proxy(
             proxy_path,
             query=parsed.query,
         )
+        proxied_headers = _extension_sidecar_proxy_request_headers(handler)
+        # token-v1: inject the per-extension shared secret core minted. The
+        # inbound x-hermes-* strip above guarantees the client cannot have
+        # forged this header.
+        _auth_token = target.get("auth_token")
+        if _auth_token:
+            proxied_headers["X-Hermes-Sidecar-Token"] = _auth_token
         request = Request(
             target["upstream_url"],
             data=request_body,
-            headers=_extension_sidecar_proxy_request_headers(handler),
+            headers=proxied_headers,
             method=method,
         )
         opener = _extension_sidecar_proxy_same_origin_opener(target["origin"])
@@ -9683,8 +9715,15 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_MIRROR_FLAG,
-    _gateway_mirrored_pending_run_id,
+    _GATEWAY_MIRROR_TOKEN,
+    _gateway_mirror_entry_token,
+    claim_gateway_approval_relay_owner,
+    gateway_pending_mirror,
+    release_gateway_approval_relay_owner,
+    retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
+    resolve_gateway_pending_local,
+    resolve_gateway_pending_local_no_run_mirror,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -13335,6 +13374,39 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        gateway_stop_blocked = False
+        try:
+            from api.gateway_chat import (
+                GATEWAY_RUN_ID_WAIT_TIMEOUT,
+                stop_gateway_run,
+                wait_for_gateway_run_id,
+            )
+
+            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+            if not run_id and structured_gateway:
+                gateway_stop_blocked = True
+            if run_id:
+                if stop_gateway_run(run_id):
+                    owner_sid = stream_owner_session_id(stream_id)
+                    if owner_sid:
+                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+                else:
+                    gateway_stop_blocked = True
+        except Exception:
+            logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
+            gateway_stop_blocked = True
+        if gateway_stop_blocked:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "cancelled": False,
+                    "stream_id": stream_id,
+                    "error": "Gateway stop failed",
+                },
+                status=502,
+            )
+
         from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
         if runtime_adapter_enabled():
@@ -21175,13 +21247,27 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if backend_is_gateway:
+        from api.gateway_chat import _mark_gateway_run_starting
+        _mark_gateway_run_starting(stream_id)
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs=worker_kwargs,
         daemon=True,
     )
-    thr.start()
+    try:
+        thr.start()
+    except Exception:
+        if backend_is_gateway:
+            try:
+                from api.gateway_chat import _finish_gateway_run_starting
+                _finish_gateway_run_starting(stream_id)
+                from api.gateway_chat import _clear_gateway_run_starting
+                _clear_gateway_run_starting(stream_id)
+            except Exception:
+                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        raise
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -21261,6 +21347,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    gateway_chat_enabled: bool | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21301,6 +21388,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                external_runtime_owned=gateway_chat_enabled,
             )
 
         def _legacy_adapter_factory():
@@ -21341,7 +21429,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
-        external_runtime_owned=webui_gateway_chat_enabled(get_config()),
+        external_runtime_owned=gateway_chat_enabled,
     )
 
 
@@ -22067,7 +22155,8 @@ def _handle_chat_start(handler, body, diag=None):
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
-        gateway_chat_enabled = webui_gateway_chat_enabled(get_config())
+        config_snapshot = get_config_snapshot()
+        gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
         if body.get("moa_config"):
             if gateway_chat_enabled:
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
@@ -22114,9 +22203,25 @@ def _handle_chat_start(handler, body, diag=None):
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
         )
-        if model_provider == "moa" and moa_config is None:
-            if webui_gateway_chat_enabled(get_config()):
+        if model_provider == "moa" and gateway_chat_enabled:
+            from api.config import get_effective_default_model
+
+            model_config = config_snapshot.get("model") if isinstance(config_snapshot, dict) else None
+            configured_default, configured_default_provider, configured_default_is_moa = (
+                _moa_fast_path_model_state(get_effective_default_model(config_snapshot))
+            )
+            configured_provider = _clean_session_model_provider(
+                model_config.get("provider") if isinstance(model_config, dict) else None
+            )
+            if configured_provider is None and configured_default_is_moa:
+                configured_provider = configured_default_provider
+            if (
+                configured_provider != "moa"
+                or model != configured_default
+                or explicit_model_pick
+            ):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
+        elif model_provider == "moa" and moa_config is None:
             from api.commands import resolve_moa_config
 
             try:
@@ -22137,6 +22242,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "gateway_chat_enabled": gateway_chat_enabled,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -22331,6 +22437,7 @@ def _handle_chat_sync(handler, body):
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
+                _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
             )
@@ -22408,6 +22515,7 @@ def _handle_chat_sync(handler, body):
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
         )
+        _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
             s.title = title_from(s.messages, s.title)
@@ -23695,7 +23803,7 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
-def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
+def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
     Slice 3b keeps the RuntimeAdapter as a protocol translator: it delegates to
@@ -23706,17 +23814,31 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    local_gateway_approval_id = ""
+    gateway_head_matches_target = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
         if isinstance(queue, list):
             if approval_id:
-                # Find and remove the specific entry by approval_id.
+                # Prefer a local exact-id match over a mirrored one, so a
+                # preceding remote mirror cannot consume the user's local choice.
+                preferred_index = None
+                fallback_index = None
                 for i, entry in enumerate(queue):
-                    if entry.get("approval_id") == approval_id:
-                        pending = queue.pop(i)
-                        found_target = True
+                    if entry.get("approval_id") != approval_id:
+                        continue
+                    if run_id and str(entry.get("run_id") or "").strip() != run_id:
+                        continue
+                    if not entry.get(_GATEWAY_MIRROR_FLAG) or not str(entry.get("run_id") or "").strip():
+                        preferred_index = i
                         break
+                    if fallback_index is None:
+                        fallback_index = i
+                match_index = preferred_index if preferred_index is not None else fallback_index
+                if match_index is not None:
+                    pending = queue.pop(match_index)
+                    found_target = True
                 else:
                     # A stale explicit id must not accidentally approve the
                     # oldest queued command; duplicate/stale responses are
@@ -23729,7 +23851,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 _pending.pop(sid, None)
         elif queue:
             # Legacy single-dict value.
-            if not approval_id or queue.get("approval_id") == approval_id:
+            if (
+                not approval_id
+                or (
+                    queue.get("approval_id") == approval_id
+                    and (not run_id or str(queue.get("run_id") or "").strip() == run_id)
+                )
+            ):
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
         # When no _pending entry found AND no explicit approval_id was
@@ -23752,16 +23880,35 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 # idempotent over the session key set so the outcome is
                 # the same regardless of which entry wins the race.
                 found_target = True
+        elif approval_id:
+            gw_queue = _gateway_queues.get(sid)
+            if gw_queue and len(gw_queue) > 0:
+                gw_entry = gw_queue[0]
+                gw_data = getattr(gw_entry, "data", None) or {}
+                gw_approval_id = str(gw_data.get("approval_id") or "").strip()
+                gw_run_id = str(gw_data.get("run_id") or "").strip()
+                gateway_head_matches_target = bool(
+                    run_id and gw_approval_id == approval_id and gw_run_id == run_id
+                )
+                if gw_approval_id == approval_id and (not run_id or gw_run_id == run_id):
+                    local_gateway_approval_id = approval_id
+                elif not run_id and found_target and pending:
+                    pending_token = str(pending.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+                    gateway_token = str(gw_data.get("_webui_mirror_token") or "").strip()
+                    if pending_token and pending_token == gateway_token:
+                        gw_data["approval_id"] = approval_id
+                        local_gateway_approval_id = approval_id
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
         # tool-call scenario (#527) would leave the second approval invisible
         # in the SSE path until the next event ever fired (the agent thread
         # would be parked indefinitely from the user's perspective).
-        if isinstance(_pending.get(sid), list) and _pending[sid]:
-            _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
-        else:
-            _approval_sse_notify_locked(sid, None, 0)
+        if not local_gateway_approval_id:
+            if isinstance(_pending.get(sid), list) and _pending[sid]:
+                _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+            else:
+                _approval_sse_notify_locked(sid, None, 0)
 
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
@@ -23783,11 +23930,18 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
     gateway_resolved = 0
-    if found_target or not approval_id:
+    local_gateway_resolved = 0
+    if approval_id and found_target and not run_id and local_gateway_approval_id:
+        local_gateway_resolved, _head, _total = resolve_gateway_pending_local(
+            sid, local_gateway_approval_id, choice
+        )
+    elif approval_id and found_target and run_id and gateway_head_matches_target:
+        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
-    resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+    resolved = bool(pending) or bool(gateway_resolved) or bool(local_gateway_resolved) or not bool(approval_id)
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved
@@ -23796,6 +23950,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
 _GATEWAY_APPROVAL_RELAY_UNAVAILABLE = (
     "Gateway approval could not be relayed because the active run is unavailable. "
     "Reopen the session or retry after it reconnects."
+)
+_GATEWAY_APPROVAL_RELAY_IN_PROGRESS = (
+    "Another approval response for this Gateway run is already in progress. "
+    "Wait for it to finish, then retry if the card is still visible."
 )
 
 
@@ -23812,11 +23970,11 @@ def _gateway_pending_approval_without_run_id(sid: str, approval_id: str) -> bool
         if approval_id:
             for entry in entries:
                 if isinstance(entry, dict) and entry.get("approval_id") == approval_id:
-                    return bool(entry.get(_GATEWAY_MIRROR_FLAG))
+                    return bool(entry.get(_GATEWAY_MIRROR_FLAG)) and not str(entry.get("run_id") or "").strip()
             return False
         if not entries or not isinstance(entries[0], dict):
             return False
-        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG))
+        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG)) and not str(entries[0].get("run_id") or "").strip()
 
 
 def _session_has_pending_approval(sid: str) -> bool:
@@ -23859,36 +24017,76 @@ def _handle_approval_respond(handler, body):
             _gateway_api_key,
             webui_gateway_chat_enabled,
         )
-        from api.config import get_config as _get_config
+        from api.config import get_config as _get_config, gateway_supports_approval_identity_v1
+        from api.route_approvals import _GATEWAY_AGENT_IDENTITY_V1
         s = get_session(sid)
-        _run_id = None
+        _candidate_run_id = None
         if s is not None:
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
-                _run_id = _STREAM_RUN_IDS.get(active_sid)
-            if not _run_id and approval_id:
-                _run_id = _gateway_mirrored_pending_run_id(sid, approval_id)
-        if _run_id:
-            if not approval_id:
-                return bad(handler, "approval_id is required for gateway approvals")
-            from api.runner_client import HttpRunnerClient, RunnerClientError
-            _cfg = _get_config()
-            _base = _gateway_base_url(_cfg)
-            _key = _gateway_api_key()
-            try:
-                HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(_run_id, approval_id, choice)
-            except (RunnerClientError, ValueError) as exc:
-                return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
-            # The outbound relay only resumes the remote run; the local mirror
-            # still needs the same cleanup path so the parked entry, mirrored
-            # card, and agent signal all settle here too.
-            _resolve_approval_legacy(sid, approval_id, choice)
-            return j(handler, {"ok": True, "choice": choice, "relayed": True})
-        # Only a still-mirrored gateway approval with a missing run should 409;
-        # stale or empty gateway clicks fall through to local resolution.
-        if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
-            sid, approval_id
-        ):
+                _candidate_run_id = _STREAM_RUN_IDS.get(active_sid)
+        local_match = False
+        run_backed_gateway_matches = 0
+        same_run_stale_without_token = False
+        with _lock:
+            queue = _pending.get(sid)
+            entries = queue if isinstance(queue, list) else [queue] if queue else []
+            if approval_id:
+                local_match = any(
+                    isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
+                    for entry in entries
+                )
+                run_backed_gateway_matches = sum(
+                    1
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and entry.get(_GATEWAY_MIRROR_FLAG)
+                    and str(entry.get("run_id") or "").strip()
+                )
+                gateway_queue = _gateway_queues.get(sid) or []
+                live_head_data = getattr(gateway_queue[0], "data", None) or {} if gateway_queue else {}
+                live_head_run_id = str(live_head_data.get("run_id") or "").strip()
+                live_head_token = (
+                    _gateway_mirror_entry_token(gateway_queue[0])
+                    if gateway_queue and live_head_data
+                    else None
+                )
+                live_head_approval_id = str(live_head_data.get("approval_id") or "").strip()
+                if not live_head_approval_id and live_head_token and live_head_run_id:
+                    live_head_approval_id = f"gwrun:{live_head_run_id}:{live_head_token}"
+                stale_same_run_id = _candidate_run_id or live_head_run_id
+                if (
+                    stale_same_run_id
+                    and live_head_run_id == stale_same_run_id
+                    and live_head_approval_id
+                    and live_head_approval_id != approval_id
+                ):
+                    same_run_stale_without_token = any(
+                        isinstance(entry, dict)
+                        and entry.get("approval_id") == approval_id
+                        and entry.get(_GATEWAY_MIRROR_FLAG)
+                        and str(entry.get("run_id") or "").strip() == stale_same_run_id
+                        and not str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+                        for entry in entries
+                    )
+            else:
+                local_match = any(
+                    isinstance(entry, dict)
+                    and (
+                        not entry.get(_GATEWAY_MIRROR_FLAG)
+                        or not str(entry.get("run_id") or "").strip()
+                    )
+                    for entry in entries
+                )
+        if local_match:
+            _candidate_run_id = None
+        if approval_id and not local_match and same_run_stale_without_token:
             return j(
                 handler,
                 {
@@ -23900,6 +24098,111 @@ def _handle_approval_respond(handler, body):
                 },
                 status=409,
             )
+        matched_mirror = (
+            gateway_pending_mirror(sid, approval_id=approval_id, run_id=_candidate_run_id)
+            if approval_id and not local_match
+            else None
+        )
+        _run_id = matched_mirror["run_id"] if matched_mirror else None
+        if not matched_mirror and approval_id:
+            if local_match:
+                _candidate_run_id = None
+            elif run_backed_gateway_matches > 1 and not _candidate_run_id:
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_run_unavailable",
+                        "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                    },
+                    status=409,
+                )
+        if _run_id:
+            from api.runner_client import HttpRunnerClient, RunnerClientError
+            _cfg = _get_config()
+            _base = _gateway_base_url(_cfg)
+            _key = _gateway_api_key()
+            claimed_approval_id = str(matched_mirror.get("approval_id") or "").strip()
+            if not claim_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id):
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "choice": choice,
+                        "relayed": False,
+                        "code": "gateway_approval_in_progress",
+                        "error": _GATEWAY_APPROVAL_RELAY_IN_PROGRESS,
+                    },
+                    status=409,
+                )
+            try:
+                current_mirror = gateway_pending_mirror(
+                    sid,
+                    approval_id=claimed_approval_id,
+                    run_id=_run_id,
+                )
+                if not current_mirror:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "choice": choice,
+                            "relayed": False,
+                            "code": "gateway_run_unavailable",
+                            "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                        },
+                        status=409,
+                    )
+                identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and gateway_supports_approval_identity_v1(_base, _key)
+                if not identity_v1:
+                    run_head = gateway_pending_mirror(sid, run_id=_run_id)
+                    if not run_head or str(run_head.get("approval_id") or "").strip() != claimed_approval_id:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "choice": choice,
+                                "relayed": False,
+                                "code": "gateway_run_unavailable",
+                                "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                            },
+                            status=409,
+                        )
+                matched_mirror = current_mirror
+                try:
+                    HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
+                        _run_id, matched_mirror["approval_id"] if identity_v1 else "", choice
+                    )
+                except (RunnerClientError, ValueError) as exc:
+                    return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
+                # The outbound relay only resumes the remote run; the local mirror
+                # still needs the same cleanup path so the parked entry, mirrored
+                # card, and agent signal all settle here too.
+                cleanup_approval_id = matched_mirror["approval_id"]
+                _resolve_approval_legacy(sid, cleanup_approval_id, choice, run_id=_run_id)
+                retire_gateway_pending_mirror(sid, approval_id=cleanup_approval_id, run_id=_run_id)
+                return j(handler, {"ok": True, "choice": choice, "relayed": True})
+            finally:
+                release_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id)
+        if _candidate_run_id:
+            return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                               "code": "gateway_run_unavailable",
+                               "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
+        # A no-run mirror is local visibility state only. Resolve it only while
+        # the exact parked producer still exists; otherwise keep the card live
+        # and fail closed instead of claiming success.
+        if webui_gateway_chat_enabled(_get_config()):
+            handled_no_run_mirror, resolved_count, _, _ = resolve_gateway_pending_local_no_run_mirror(
+                sid, approval_id, choice
+            )
+            if handled_no_run_mirror and resolved_count == 1:
+                return j(handler, {"ok": True, "choice": choice, "local_retired": True})
+            if handled_no_run_mirror:
+                return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                                   "code": "gateway_run_unavailable",
+                                   "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
     except Exception:
         pass  # fall through to local approval path
 
@@ -25744,9 +26047,6 @@ def _handle_session_import(handler, body):
     publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 
-
-# ── MCP Server helpers ──
-from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
 
 def _mask_secrets(obj):
     """Mask sensitive values in env vars and headers."""
