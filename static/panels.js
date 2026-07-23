@@ -7984,6 +7984,16 @@ function _extractSettingsValueText(field) {
   return chunks.join(' ');
 }
 
+function _settingsSearchIdentityBase(entry) {
+  return JSON.stringify([
+    entry.sectionKey || '',
+    entry.i18nKey || '',
+    entry.cardName || '',
+    entry.fieldLabel || '',
+    entry.label || '',
+  ]);
+}
+
 function _buildSettingsIndex() {
   // Share one lazy-pane build across concurrent searches.
   if (_settingsIndexPromise) return _settingsIndexPromise;
@@ -8154,7 +8164,6 @@ async function filterSettings(query) {
       resultsEl.style.display = '';
       return;
     }
-    resultsEl.innerHTML = '';
     matches.sort((left, right) => {
       if (left.score.bucketIndex !== right.score.bucketIndex) {
         return left.score.bucketIndex - right.score.bucketIndex;
@@ -8164,10 +8173,35 @@ async function filterSettings(query) {
       }
       return left.index - right.index;
     });
-    for (const { entry: m } of matches.slice(0, 12)) {
+    const visibleMatches = matches.slice(0, 12);
+    const identityCounts = new Map();
+    const nextIdentities = visibleMatches.map(({ entry }) => {
+      const identityBase = _settingsSearchIdentityBase(entry);
+      const identityIndex = identityCounts.get(identityBase) || 0;
+      identityCounts.set(identityBase, identityIndex + 1);
+      return `${identityBase}:${identityIndex}`;
+    });
+    const currentItems = [...resultsEl.querySelectorAll('.settings-search-result')];
+    const identitiesUnchanged = currentItems.length === nextIdentities.length &&
+      currentItems.every((item, index) => item.dataset.settingsSearchIdentity === nextIdentities[index]);
+    if (identitiesUnchanged) {
+      resultsEl.style.display = '';
+      return;
+    }
+    const activeResult = document.activeElement && typeof document.activeElement.closest === 'function'
+      ? document.activeElement.closest('.settings-search-result')
+      : null;
+    const focusedIdentity = activeResult && resultsEl.contains(activeResult)
+      ? activeResult.dataset.settingsSearchIdentity
+      : null;
+    resultsEl.innerHTML = '';
+    let focusTarget = null;
+    for (const [matchIndex, { entry: m }] of visibleMatches.entries()) {
+      const identity = nextIdentities[matchIndex];
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'settings-search-result';
+      item.dataset.settingsSearchIdentity = identity;
       item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
         `<span class="settings-search-arrow">›</span>` +
         `<span class="settings-search-label">${esc(m.label)}</span>`;
@@ -8180,8 +8214,12 @@ async function filterSettings(query) {
         if (input) input.value = '';
       });
       resultsEl.appendChild(item);
+      if (focusedIdentity === identity) focusTarget = item;
     }
     resultsEl.style.display = '';
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      focusTarget.focus({ preventScroll: true });
+    }
   };
   renderResults(!!buildPromise);
   if (!buildPromise) return;

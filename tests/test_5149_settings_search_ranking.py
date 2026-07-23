@@ -132,6 +132,9 @@ class FakeElement {
   set innerHTML(value) {
     this._innerHTML = String(value || '');
     if (!this._innerHTML) {
+      if (globalThis.document && this.contains(globalThis.document.activeElement)) {
+        globalThis.document.activeElement = globalThis.document.body;
+      }
       for (const child of this.children) {
         child.parentElement = null;
         child.parentNode = null;
@@ -200,6 +203,10 @@ class FakeElement {
     const eventType = String(type || '');
     if (!this._listeners.has(eventType)) this._listeners.set(eventType, []);
     this._listeners.get(eventType).push(listener);
+  }
+
+  focus() {
+    if (globalThis.document) globalThis.document.activeElement = this;
   }
 
   click() {
@@ -472,7 +479,12 @@ function setupDom(mode) {
     providerCard.appendChild(makeProviderField('provider', 'API Key', 'sk-test'));
     providers.appendChild(providerCard);
     plugins.appendChild(makePluginCard('Plugin Sample'));
-  } else if (mode === 'live-before-dynamic' || mode === 'click-before-dynamic') {
+  } else if (
+    mode === 'live-before-dynamic' ||
+    mode === 'click-before-dynamic' ||
+    mode === 'focus-before-dynamic' ||
+    mode === 'focus-with-dynamic-change'
+  ) {
     conversation.appendChild(makeSettingsField({
       labelText: 'Theme',
       descriptionText: 'Choose the interface color theme',
@@ -493,7 +505,10 @@ function runScenario(command) {
       const block = extractSearchFunctions(src);
       eval(block);
       globalThis.$ = $;
+      const body = createElement('body');
       globalThis.document = {
+        activeElement: body,
+        body,
         createElement: createElement,
       };
       globalThis.t = (key) => {
@@ -524,7 +539,12 @@ function runScenario(command) {
       globalThis._settingsSearchSeq = 0;
       globalThis._navigateToSettingsField = () => undefined;
 
-      if (command === 'live-before-dynamic' || command === 'click-before-dynamic') {
+      if (
+        command === 'live-before-dynamic' ||
+        command === 'click-before-dynamic' ||
+        command === 'focus-before-dynamic' ||
+        command === 'focus-with-dynamic-change'
+      ) {
         let releaseProviderLoad;
         globalThis.loadProvidersPanel = () => new Promise((resolveLoad) => {
           releaseProviderLoad = resolveLoad;
@@ -548,6 +568,23 @@ function runScenario(command) {
             inputValue: $('settingsSearch').value,
             afterDisplay: results.style.display,
             afterResultCount: results.children.length,
+          });
+          return;
+        }
+        if (command === 'focus-before-dynamic' || command === 'focus-with-dynamic-change') {
+          const provisionalResult = results.children[0];
+          provisionalResult.focus();
+          const focusedBefore = document.activeElement === provisionalResult;
+          if (command === 'focus-with-dynamic-change') {
+            $('settingsPaneProviders').appendChild(makeProviderCard('Theme Provider'));
+          }
+          releaseProviderLoad();
+          await searchPromise;
+          const finalResult = results.children[0];
+          resolve({
+            focusedBefore,
+            focusedAfter: document.activeElement === finalResult,
+            replacementSameNode: finalResult === provisionalResult,
           });
           return;
         }
@@ -685,6 +722,7 @@ def test_provider_and_plugin_cards_remain_searchable(driver_file):
 def test_static_results_render_while_dynamic_panes_are_loading(driver_file):
     payload = _run_driver(driver_file, "live-before-dynamic")
     assert payload["liveLabels"] == ["Theme"]
+    assert payload["liveDisplay"] != "none"
 
 
 def test_clicking_static_result_does_not_reopen_after_dynamic_load(driver_file):
@@ -692,3 +730,17 @@ def test_clicking_static_result_does_not_reopen_after_dynamic_load(driver_file):
     assert payload["inputValue"] == ""
     assert payload["afterDisplay"] == "none"
     assert payload["afterResultCount"] == 0
+
+
+def test_unchanged_dynamic_results_retain_focused_result_node(driver_file):
+    payload = _run_driver(driver_file, "focus-before-dynamic")
+    assert payload["focusedBefore"] is True
+    assert payload["focusedAfter"] is True
+    assert payload["replacementSameNode"] is True
+
+
+def test_changed_dynamic_results_restore_focus_by_identity(driver_file):
+    payload = _run_driver(driver_file, "focus-with-dynamic-change")
+    assert payload["focusedBefore"] is True
+    assert payload["focusedAfter"] is True
+    assert payload["replacementSameNode"] is False
