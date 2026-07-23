@@ -2499,6 +2499,7 @@ const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 const _CSV_EXTS=/\.csv$/i;
+const _MD_EXTS=/\.(md|mkd|mkdn)$/i;
 const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 // ── Media playback speed controls ─────────────────────────────────────────
 const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
@@ -2660,6 +2661,9 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   }
   if(_HTML_EXTS.test(ref)){
     return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
+  }
+  if(_MD_EXTS.test(ref)){
+    return `<div class="md-inline-load" data-path="${esc(ref)}"><span class="md-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('md_loading'):'Loading')}...</div>`;
   }
   const fname=esc(ref.split('/').pop()||ref);
   if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
@@ -18492,6 +18496,7 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  loadMarkdownInline(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
@@ -19055,6 +19060,34 @@ function loadHtmlInline(container){
       .catch(()=>{
         const dlUrl=publicMediaUrl+'&download=1';
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
+      });
+  });
+}
+
+const MD_MAX_SIZE = 256 * 1024;
+
+function loadMarkdownInline(container){
+  const root = container || document;
+  root.querySelectorAll('.md-inline-load:not([data-loaded])').forEach(el => {
+    el.setAttribute('data-loaded', '1');
+    const path = el.dataset.path;
+    const fname = path.split('/').pop() || path;
+    const mediaSessionId = (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+    const publicMediaUrl = 'api/media?path=' + encodeURIComponent(path);
+    const mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '');
+    const downloadUrl = mediaUrl + '&download=1';
+    fetch(mediaUrl)
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(text => {
+        if (text.length > MD_MAX_SIZE) {
+          el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('md_too_large') : 'File too large for preview')}</span></div>`;
+          return;
+        }
+        const rendered = renderMd(text);
+        el.outerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a></div><div class="md-inline-content">${rendered}</div></div>`;
+      })
+      .catch(() => {
+        el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('md_error') : 'Error loading markdown')}</span></div>`;
       });
   });
 }
