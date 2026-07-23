@@ -42,6 +42,37 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ---
 
+## 1.1 Agent-delegated TTS
+
+Text-to-speech has two runtime engines: local Browser speech and Hermes Agent.
+`static/tts.js` is the sole browser lifecycle owner for Listen, auto-read, and
+voice mode. It owns generations, cancellation, timeouts, chunk sequencing,
+`Audio`/object-URL cleanup, browser watchdogs, capability caching, effective
+session fallback, and stale profile/settings rejection. `static/workspace.js`
+provides the shared credentialed, subpath-safe binary `api()` transport.
+
+Agent operations follow this boundary:
+
+```text
+browser -> authenticated /api/tts* route -> api/agent_tts.py supervisor
+        -> short-lived api.agent_tts_worker child -> installed Hermes Agent
+        -> request-owned audio file -> descriptor/signature validation -> bytes
+```
+
+The active profile environment is captured before spawn and is never applied to
+the long-lived server process. `api/agent_tts_worker.py` imports Agent TTS and
+configuration functions only inside the child. Capability, provider writes, and
+synthesis therefore mirror CLI/Desktop provider metadata and configuration
+without adding a daemon or importing Agent TTS runtime into the WebUI process.
+The supervisor bounds global/per-owner concurrency, protocol sizes, time, output
+size, paths, MIME/signatures, and cleanup. Provider migration combines Agent
+config fingerprint compare-and-set with revisioned exact-sparse WebUI speech
+settings and idempotent compensation.
+
+Direct Edge/OpenAI/ElevenLabs WebUI transports and the extension TTS registry are
+retired. Legacy IDs remain reserved/inert migration data. The sole old extension
+surface is a non-throwing `registerHermesTtsEngine` tombstone returning `false`.
+
 ## 2. File Inventory
 
     <repo>/

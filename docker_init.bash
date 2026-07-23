@@ -471,17 +471,15 @@ else
     rm -rf "$_stage_src"
   else
     echo ""
-    echo "!! WARNING: hermes-agent source not found."
-    echo "!!   Looked in: ${_agent_paths[0]}"
-    echo "!!              ${_agent_paths[1]}"
-    echo "!! The WebUI will start with reduced functionality (no model auto-detection,"
-    echo "!! no personality routing, no CLI session imports)."
-    echo "!! To fix: mount the agent source volume into the container:"
-    echo "!!   -v /path/to/hermes-agent:/home/hermeswebui/.hermes/hermes-agent"
-    echo "!! Or see the two-container compose example:"
-    echo "!!   https://github.com/nesquena/hermes-webui/blob/master/docker-compose.two-container.yml"
-    echo ""
+    _agent_package_requirement="hermes-agent==0.19.0"
+    echo "== Hermes Agent source not mounted; installing ${_agent_package_requirement}"
+    uv pip install "$_agent_package_requirement" \
+      --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+      || error_exit "Failed to install the packaged Hermes Agent runtime"
   fi
+  /app/venv/bin/python -c \
+    'from tools import tts_tool; from hermes_cli import config, tools_config' \
+    || error_exit "Hermes Agent TTS imports are unavailable"
   touch /app/venv/.deps_installed
 fi
 

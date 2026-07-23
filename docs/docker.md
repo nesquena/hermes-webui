@@ -386,20 +386,25 @@ Both are documented in `api/startup.py::fix_credential_permissions()`.
 
 **Fix**: Same as #1 — match host UID/GID via `.env`.
 
-### 4. "Two-container setup: WebUI can't find agent source" (#858)
+### 4. "Two-container setup: WebUI uses the packaged Agent fallback" (#858)
 
-**Symptom**: WebUI logs at startup:
+**Symptom**: WebUI logs at first startup:
 ```
-!! WARNING: hermes-agent source not found.
-!!   Looked in: /home/hermeswebui/.hermes/hermes-agent
-!!              /opt/hermes
+== Hermes Agent source not mounted; installing hermes-agent==0.19.0
 ```
 
-**Cause**: The agent's source (`/opt/hermes` inside the agent container) needs to be exposed to the WebUI container via a shared volume. The two-container compose file does this via `hermes-agent-src` named volume, but if you're using bind mounts incorrectly the path won't resolve.
+**Cause**: The agent source volume was not visible at either
+`/home/hermeswebui/.hermes/hermes-agent` or `/opt/hermes`. The WebUI installs the
+pinned packaged Agent runtime so Agent-delegated TTS and the common callable
+boundary remain available, but the two-container layout should normally use the
+same source revision as the Agent service.
 
-**Fix**: Use the named volumes that ship with `docker-compose.two-container.yml` — don't replace them with bind mounts unless you know what you're doing. The agent container writes its source to `/opt/hermes`, and the WebUI mounts that volume at `/home/hermeswebui/.hermes/hermes-agent`.
-
-If you must use a bind mount: pick a host path, then mount it to `/opt/hermes` in the agent container AND `/home/hermeswebui/.hermes/hermes-agent` in the WebUI container.
+**Fix**: Use the named volumes that ship with
+`docker-compose.two-container.yml`. The agent container writes its source to
+`/opt/hermes`, and the WebUI mounts that volume at
+`/home/hermeswebui/.hermes/hermes-agent`. If you use a bind mount, mount the
+same host Agent source at both paths. On the next clean dependency setup, WebUI
+will install that mounted source rather than the packaged fallback.
 
 ### 5. "Tools (git, node, etc.) missing in two-container setup" (#681)
 
