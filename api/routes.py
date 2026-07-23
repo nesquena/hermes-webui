@@ -21262,7 +21262,6 @@ def _chat_start_response_from_run_start(result):
     ):
         if key in payload:
             response[key] = payload[key]
-    response.setdefault("_status", 200)
     response.setdefault("stream_id", result.stream_id)
     response.setdefault("session_id", result.session_id)
     return response
