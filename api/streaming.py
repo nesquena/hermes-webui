@@ -2936,6 +2936,36 @@ def _workspace_context_prefix(path: str) -> str:
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
+def _build_agent_prompt_inputs(session, user_text: str) -> tuple[str, str]:
+    """Build workspace + optional active Capy Space prompt inputs for AIAgent."""
+    workspace = getattr(session, 'workspace', '')
+    workspace_ctx = _workspace_context_prefix(str(workspace))
+    workspace_system_msg = (
+        f"Active workspace at session start: {workspace}\n"
+        "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
+        "workspace the user has selected in the web UI at the time they sent that message. "
+        "This tag is the single authoritative source of the active workspace and updates "
+        "with every message. It overrides any prior workspace mentioned in this system "
+        "prompt, memory, or conversation history. Always use the value from the most recent "
+        "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+        "write_file, read_file, search_files, terminal workdir, and patch. "
+        "Never fall back to a hardcoded path when this tag is present."
+    )
+
+    active_space_id = str(getattr(session, 'active_space_id', '') or '').strip()
+    if active_space_id:
+        try:
+            from api import spaces as capy_spaces
+            space_context = capy_spaces.build_agent_context(active_space_id)
+        except (ValueError, FileNotFoundError, RuntimeError):
+            space_context = ""
+        if space_context:
+            workspace_ctx += f"[Capy Space: {active_space_id}]\n"
+            workspace_system_msg += "\n\n" + space_context
+
+    return workspace_ctx + str(user_text or ""), workspace_system_msg
+
+
 def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     """Remove WebUI-injected workspace tags without eating user-typed text."""
     value = str(text or '')
@@ -8897,20 +8927,9 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
-            # Prepend workspace context so the agent always knows which directory
-            # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+            # Prepend workspace and active-space context so the agent always knows
+            # which directory/space to use, regardless of session age or defaults.
+            workspace_ctx, workspace_system_msg = _build_agent_prompt_inputs(s, "")
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
