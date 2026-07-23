@@ -294,12 +294,16 @@ def test_session_new_uses_project_default_workspace(project_env, monkeypatch, tm
     )
 
 
-def test_session_new_uses_request_profile_for_project_default(project_env, monkeypatch, tmp_path):
-    """Direct API callers with a request profile get that profile's project default."""
+def test_session_new_rejects_foreign_body_profile_project(project_env, monkeypatch, tmp_path):
+    """SECURITY (#5510 Codex re-gate): a body-supplied profile that differs from the
+    request-scoped active profile must NOT be trusted. A profile-`default` request
+    that POSTs {"profile":"alice","project_id":"proj1"} must have project_id dropped
+    and must NEVER receive alice's project default_workspace (profile-isolation)."""
     import api.routes as routes
 
     ws_path = str(tmp_path / "alice-project")
     _seed_project(project_env, dw=ws_path, profile="alice")
+    # Authenticated/active profile is `default`; the attacker asks for alice's project.
     monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda p: Path(str(p)))
 
@@ -313,8 +317,40 @@ def test_session_new_uses_request_profile_for_project_default(project_env, monke
 
     h = _post("/api/session/new", {"project_id": "proj1", "profile": "alice"})
     assert h.status == 200, h.json_body()
+    assert len(captured) == 1, "new_session must be called once"
+    # The foreign project_id is dropped, and alice's workspace is never exposed.
+    assert captured[0].get("project_id") in (None, ""), (
+        f"foreign project_id must be dropped, got {captured[0].get('project_id')!r}"
+    )
+    assert captured[0]["workspace"] != ws_path, (
+        f"alice's default_workspace {ws_path!r} must NOT leak to a default-profile request; "
+        f"got {captured[0]['workspace']!r}"
+    )
+
+
+def test_session_new_uses_active_profile_project_default(project_env, monkeypatch, tmp_path):
+    """A project owned by the ACTIVE profile still supplies its default workspace.
+    (The legitimate path: the client switches the active profile first, so by the
+    time /api/session/new runs the active profile is the project's owner.)"""
+    import api.routes as routes
+
+    ws_path = str(tmp_path / "alice-project")
+    _seed_project(project_env, dw=ws_path, profile="alice")
+    # Active profile IS alice (client already switched); body profile agrees.
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "alice")
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda p: Path(str(p)))
+
+    captured = []
+
+    def fake_new_session(**kwargs):
+        captured.append(kwargs)
+        return _FakeSession(workspace=kwargs.get("workspace"))
+
+    monkeypatch.setattr(routes, "new_session", fake_new_session)
+
+    h = _post("/api/session/new", {"project_id": "proj1", "profile": "alice"})
+    assert h.status == 200, h.json_body()
     assert captured[0]["workspace"] == ws_path
-    assert captured[0]["profile"] == "alice"
 
 
 def test_session_new_explicit_workspace_overrides_project_default(project_env, monkeypatch, tmp_path):

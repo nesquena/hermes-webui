@@ -14261,7 +14261,19 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/new":
         _body_project_id = body.get("project_id") or None
-        _request_profile = body.get("profile") or get_active_profile_name()
+        # SECURITY (profile isolation): the project owner and default-workspace
+        # lookup MUST be resolved against the request-scoped ACTIVE profile, never
+        # a body-supplied ``profile``. Trusting the body would let a profile-A
+        # request retain profile B's project_id and receive B's default_workspace
+        # by POSTing {"profile":"B","project_id":"B-id"} (Codex #5510 re-gate). A
+        # legitimate cross-profile project-new switches the active profile on the
+        # client FIRST, so by the time this route runs the active profile already
+        # is the destination; a body profile that disagrees is dropped fail-closed.
+        _active_profile = get_active_profile_name()
+        _body_profile = body.get("profile") or None
+        if _body_profile is not None and not _profiles_match(_body_profile, _active_profile):
+            _body_project_id = None
+        _request_profile = _active_profile
         _visible_project = _get_visible_project_for_session(_body_project_id, _request_profile)
         if not _visible_project:
             _body_project_id = None
