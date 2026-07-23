@@ -2382,19 +2382,39 @@ function _openMermaidLightbox(svgEl) {
 function _attachImgZoom(lb, img) {
   const st = { scale: 1, tx: 0, ty: 0, minScale: 1, maxScale: 6 };
   lb._imgZoom = st;
+  // Gesture state — declared up front so st.reset() can clear it too (a bare
+  // scale/translate reset would otherwise leave an in-flight drag/pinch/tap
+  // pointed at the previous image after prev/next navigation).
+  let pinchStartDist = 0, pinchStartScale = 1, pinchCx = 0, pinchCy = 0;
+  let panStartX = 0, panStartY = 0, panTx = 0, panTy = 0, panning = false;
+  let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
+  let mDown = false, mStartX = 0, mStartY = 0, mTx = 0, mTy = 0;
+  const _clearGestures = () => {
+    pinchStartDist = 0; panning = false; mDown = false; lastTapTime = 0;
+    img.style.cursor = st.scale > 1.01 ? 'grab' : 'default';
+  };
   const apply = () => {
     img.style.transform = 'translate(' + st.tx + 'px,' + st.ty + 'px) scale(' + st.scale + ')';
     img.style.cursor = st.scale > 1.01 ? 'grab' : 'default';
     lb.classList.toggle('img-lightbox--zoomed', st.scale > 1.01);
   };
-  // Reset on nav/src change — exposed so _navigateLightbox can call it.
-  st.reset = () => { st.scale = 1; st.tx = 0; st.ty = 0; apply(); };
-  const clampPan = () => {
+  // Reset on nav/src change — exposed so _navigateLightbox can call it. Clears
+  // both the transform AND any in-flight gesture so the next image starts clean.
+  st.reset = () => { st.scale = 1; st.tx = 0; st.ty = 0; _clearGestures(); apply(); };
+  const clampPan = (projectedScale) => {
     // Keep the image roughly within the viewport so it can't be flung away.
+    // getBoundingClientRect() reflects the CURRENTLY rendered scale, but the
+    // caller may be clamping a translation computed for a scale that apply()
+    // hasn't painted yet. Project the rendered size to the target scale so the
+    // bounds match the image the user will actually see — otherwise the first
+    // zoom step from 1x clamps against the un-scaled size and discards most of
+    // the cursor-anchoring offset (zooming around the center instead).
     const r = img.getBoundingClientRect();
+    const factor = (projectedScale && st.scale) ? (projectedScale / st.scale) : 1;
+    const projW = r.width * factor, projH = r.height * factor;
     const vw = window.innerWidth, vh = window.innerHeight;
-    const maxX = Math.max(0, (r.width - vw) / 2 + 40);
-    const maxY = Math.max(0, (r.height - vh) / 2 + 40);
+    const maxX = Math.max(0, (projW - vw) / 2 + 40);
+    const maxY = Math.max(0, (projH - vh) / 2 + 40);
     st.tx = Math.max(-maxX, Math.min(maxX, st.tx));
     st.ty = Math.max(-maxY, Math.min(maxY, st.ty));
   };
@@ -2407,15 +2427,13 @@ function _attachImgZoom(lb, img) {
     const ratio = nextScale / st.scale;
     st.tx = st.tx - ox * (ratio - 1);
     st.ty = st.ty - oy * (ratio - 1);
-    st.scale = nextScale;
-    if(st.scale <= 1.01){ st.scale = 1; st.tx = 0; st.ty = 0; }
-    else clampPan();
+    // Clamp against the size the image will have at nextScale (rect is still at
+    // the old scale here — apply() runs after), so the cursor anchor survives.
+    if(nextScale <= 1.01){ st.scale = 1; st.tx = 0; st.ty = 0; }
+    else { clampPan(nextScale); st.scale = nextScale; }
     apply();
   };
   // ── Touch gestures ──
-  let pinchStartDist = 0, pinchStartScale = 1, pinchCx = 0, pinchCy = 0;
-  let panStartX = 0, panStartY = 0, panTx = 0, panTy = 0, panning = false;
-  let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
   const dist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
   img.addEventListener('touchstart', e => {
     if(e.touches.length === 2){
@@ -2467,7 +2485,6 @@ function _attachImgZoom(lb, img) {
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
     zoomAt(e.clientX, e.clientY, st.scale * factor);
   }, { passive: false });
-  let mDown = false, mStartX = 0, mStartY = 0, mTx = 0, mTy = 0;
   img.addEventListener('mousedown', e => {
     if(st.scale <= 1.01) return;
     e.preventDefault(); e.stopPropagation();
