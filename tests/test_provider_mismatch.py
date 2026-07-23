@@ -1027,6 +1027,14 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
 
     session = DummySession()
     monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    # This regression targets provider repair, not stale-workspace recovery.
+    # Keep the dummy session's intentionally sidecar-free workspace out of the
+    # independent recovery persistence contract.
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda current, _requested: current.workspace,
+    )
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)

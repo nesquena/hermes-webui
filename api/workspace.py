@@ -19,6 +19,7 @@ import subprocess
 import concurrent.futures
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
@@ -877,6 +878,47 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         f"list, and not under the default workspace: {candidate}. "
         f"Add it via Settings → Workspaces first."
     )
+
+
+def resolve_implicit_workspace_with_recovery(
+    candidate: str | Path | None,
+    fallback: str | Path | None | Callable[[], str | Path | None],
+) -> tuple[Path, bool]:
+    """Resolve an implicit workspace, recovering only a genuinely missing path.
+
+    The fallback still passes through :func:`resolve_trusted_workspace`. Existing
+    but untrusted, inaccessible, or non-directory candidates are not recovery
+    cases: their original validation error is preserved so fallback cannot widen
+    the workspace trust boundary.
+    """
+    try:
+        return resolve_trusted_workspace(candidate), False
+    except ValueError as original_error:
+        if candidate in (None, ""):
+            raise original_error from None
+        # Remote terminal workspaces live on the target host. Classify the
+        # backend independently of terminal.cwd: remote backends may omit cwd,
+        # set it to an empty string, or use ".". A failed host-local stat can
+        # never prove target-side deletion. Config-read uncertainty also fails
+        # closed by preserving the original validation error.
+        try:
+            from api.config import get_config
+
+            terminal_cfg = get_config().get("terminal", {})
+        except Exception:
+            logger.debug("Failed to classify terminal backend for workspace recovery", exc_info=True)
+            raise original_error from None
+        if _is_remote_terminal_backend(terminal_cfg):
+            raise original_error from None
+        try:
+            local_candidate = _resolve_path(candidate)
+            local_candidate.stat()
+        except FileNotFoundError:
+            fallback_value = fallback() if callable(fallback) else fallback
+            return resolve_trusted_workspace(fallback_value), True
+        except (OSError, RuntimeError, ValueError):
+            raise original_error from None
+        raise original_error from None
 
 
 
