@@ -2945,6 +2945,18 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     return stripped.strip()
 
 
+_TITLE_ATTACHED_FILES_SUFFIX_RE = re.compile(
+    r'(?:\r?\n){2}\[Attached files(?: for this steer)?: [^\]]+\]\s*$',
+    re.IGNORECASE,
+)
+
+
+def _strip_title_internal_metadata(text: str, *, include_legacy: bool = False) -> str:
+    """Remove WebUI-only workspace/attachment metadata from title input."""
+    value = _strip_workspace_prefix(str(text or ''), include_legacy=include_legacy)
+    return _TITLE_ATTACHED_FILES_SUFFIX_RE.sub('', value).strip()
+
+
 def _looks_like_current_user_turn(msg, msg_text) -> bool:
     """Match the current human turn even if an internal workspace tag leaked mid-text.
 
@@ -2979,7 +2991,10 @@ def _first_exchange_snippets(messages):
             continue
         role = m.get('role')
         if role == 'user':
-            candidate = _message_text(m.get('content'))
+            candidate = _strip_title_internal_metadata(
+                _message_text(m.get('content')),
+                include_legacy=True,
+            )
             if not user_text and candidate:
                 user_text = candidate
                 continue
@@ -3021,7 +3036,10 @@ def _latest_exchange_snippets(messages):
             if candidate:
                 asst_text = candidate
         elif role == 'user' and not user_text:
-            candidate = _message_text(m.get('content'))
+            candidate = _strip_title_internal_metadata(
+                _message_text(m.get('content')),
+                include_legacy=True,
+            )
             if candidate:
                 user_text = candidate
         if user_text and asst_text:
@@ -3164,8 +3182,10 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     if not candidate:
         return False
 
-    # (1) Cross-script mismatch — language-agnostic.
-    user_script = _dominant_script(user_text)
+    # (1) Cross-script mismatch — language-agnostic. Internal WebUI metadata
+    # (workspace and attachment paths) must not influence script detection.
+    clean_user_text = _strip_title_internal_metadata(user_text)
+    user_script = _dominant_script(clean_user_text)
     if user_script:
         title_counts = _script_counts(candidate)
         title_total = sum(title_counts.values())
@@ -3175,7 +3195,7 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
                     return True
 
     # (2) Legacy same-script German→English heuristic.
-    if _detect_title_language(user_text) != 'de':
+    if _detect_title_language(clean_user_text) != 'de':
         return False
     candidate_lower = candidate.lower()
     if _detect_title_language(candidate_lower) == 'de':
@@ -3190,6 +3210,7 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+    user_text = _strip_title_internal_metadata(user_text)
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
     language_rule = _title_prompt_language_rule(user_text)
     prompts = [
@@ -3692,17 +3713,27 @@ def _put_title_status(put_event, session_id: str, status: str, reason: str = '',
 
 def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Optional[str]:
     """Generate a readable local fallback title when LLM title generation fails."""
-    user_text = (user_text or '').strip()
+    user_text = _strip_title_internal_metadata(user_text)
     assistant_text = _strip_thinking_markup(assistant_text or '').strip()
     if not user_text:
         return None
-    user_text = _strip_workspace_prefix(user_text)
     user_text = re.sub(r'\s+', ' ', user_text).strip()
     assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
     combined = f"{user_text} {assistant_text}".strip().lower()
     combined_raw = f"{user_text} {assistant_text}".strip()
     def _contains_latin(text: str) -> bool:
         return bool(re.search(r'[A-Za-z]', text or ''))
+
+    def _contains_latin_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+        """Match Latin keywords as tokens, never as substrings of gmail/email."""
+        return any(
+            re.search(
+                rf'(?<![A-Za-z0-9_]){re.escape(keyword)}(?![A-Za-z0-9_])',
+                text or '',
+                re.IGNORECASE,
+            )
+            for keyword in keywords
+        )
 
     def _extract_named_topic(text: str) -> str:
         m = re.search(r'"([^"\n]{2,24})"', text)
@@ -3718,12 +3749,12 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
         if not _contains_latin(topic_name):
             if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
                 return 'Time management discussion'
-            if any(k in combined for k in ('hermes', 'codex', 'ai')):
+            if _contains_latin_keyword(combined, ('hermes', 'codex', 'ai')):
                 return 'AI productivity discussion'
             return 'Conversation topic'
         if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
             return f'{topic_name} time management'
-        if any(k in combined for k in ('hermes', 'codex', 'ai')):
+        if _contains_latin_keyword(combined, ('hermes', 'codex', 'ai')):
             return f'{topic_name} AI productivity'
         return f'{topic_name} discussion'
 
@@ -3810,7 +3841,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_language_mismatch_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             source = llm_status
             if not next_title:
@@ -3899,7 +3930,7 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_language_mismatch_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
