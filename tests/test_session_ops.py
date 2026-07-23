@@ -237,7 +237,19 @@ def test_status_returns_summary(cleanup_test_sessions):
 
 
 def test_status_returns_profile_specific_hermes_home(cleanup_test_sessions):
-    data = _post(TEST_BASE, '/api/session/new', {'profile': 'research'})
+    # Create the session with the hermes_profile=research cookie so the
+    # request-scoped ACTIVE profile is 'research' at creation time — the same way
+    # a real client behaves (it switches profile before opening a new chat). The
+    # server anchors the new session to the active profile, not a body-supplied
+    # one (profile-isolation; #5510 security re-gate), so the cookie is required.
+    import urllib.request as _urlreq
+    _req = _urlreq.Request(
+        TEST_BASE + '/api/session/new',
+        data=json.dumps({'profile': 'research'}).encode(),
+        headers={'Content-Type': 'application/json', 'Cookie': 'hermes_profile=research'},
+    )
+    with _urlreq.urlopen(_req, timeout=10) as _r:
+        data = json.loads(_r.read())
     sid = data['session']['session_id']
     cleanup_test_sessions.append(sid)
 
