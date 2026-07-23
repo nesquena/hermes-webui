@@ -112,6 +112,7 @@ def test_done_owner_gate_rejects_same_pane_newer_stream():
     [
         "same_session_new_stream",
         "origin_continuation_new_stream",
+        "loading_only_session_switch",
         "session_switch",
         "completed_session_switch",
     ],
@@ -380,7 +381,28 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           usage:{duration_seconds:1},
         });
         assert.ok(timeoutQueue.length > 0, 'fade-enabled done should remain pending behind a timeout');
-        if(scenario === 'session_switch' || scenario === 'completed_session_switch'){
+        if(scenario === 'loading_only_session_switch'){
+          global._loadingSessionId = 'sid-2';
+          resetMutationCalls();
+          drainQueuedWork();
+          assert.strictEqual(calls.highlight, 0, 'loading-only old done must not highlight the transitioning pane');
+          assert.strictEqual(calls.copy, 0, 'loading-only old done must not add copy buttons to the transitioning pane');
+          assert.strictEqual(calls.katex, 0, 'loading-only old done must not render KaTeX in the transitioning pane');
+          assert.deepStrictEqual(calls.setBusy, [], 'loading-only old done must not clear busy state');
+          assert.deepStrictEqual(calls.composerStatus, [], 'loading-only old done must not clear composer status');
+          assert.deepStrictEqual(calls.status, [], 'loading-only old done must not clear status');
+          assert.strictEqual(calls.clearInflight, 0, 'loading-only old done must not clear active-pane inflight state');
+          assert.deepStrictEqual(calls.clearInflightState, [], 'loading-only old done must not clear persisted inflight state');
+          assert.strictEqual(calls.finalizeThinking, 0, 'loading-only old done must not finalize Thinking UI');
+          assert.strictEqual(calls.hideApproval, 0, 'loading-only old done must not hide approval UI');
+          assert.strictEqual(calls.hideClarify, 0, 'loading-only old done must not hide clarify UI');
+          assert.strictEqual(renderCount, 0, 'loading-only old done must not render the transitioning pane');
+          assert.deepStrictEqual(window._removeIdleLiveAssistantTurnCalls, [], 'loading-only old done must not remove live turns');
+          S.session = {session_id:'sid-2', message_count:1, pending_started_at:1};
+          S.messages = [{role:'user', content:'next question'}];
+          S.activeStreamId = 'stream-new';
+          attachLiveStream('sid-2', 'stream-new');
+        }else if(scenario === 'session_switch' || scenario === 'completed_session_switch'){
           if(scenario === 'session_switch') global._loadingSessionId = 'sid-2';
           S.session = {
             session_id: scenario === 'session_switch' ? 'sid-1' : 'sid-2',

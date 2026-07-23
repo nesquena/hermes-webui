@@ -2225,7 +2225,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _activePaneStreamOwnerStillCurrent(){
     if(!_completionOwnerStillCurrent()) return false;
-    if(!_isActiveSession()) return false;
+    if(!_isSessionCurrentPane(activeSid)) return false;
     if(S.activeStreamId&&S.activeStreamId!==streamId) return false;
     const inflight=INFLIGHT&&INFLIGHT[activeSid];
     const inflightStreamId=String(inflight&&inflight.streamId||'');
@@ -2330,7 +2330,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _setActivePaneIdleIfOwner(){
-    const activePaneCanIdle=!S.session||!INFLIGHT[S.session.session_id];
+    const activePaneLoadingElsewhere=typeof _loadingSessionId!=='undefined'&&
+      _loadingSessionId&&
+      (!S.session||_loadingSessionId!==S.session.session_id);
+    const activePaneCanIdle=!activePaneLoadingElsewhere&&(!S.session||!INFLIGHT[S.session.session_id]);
     if(!_activePaneStreamOwnerStillCurrent()&&!activePaneCanIdle) return;
     setBusy(false);
     setComposerStatus('');
@@ -5993,37 +5996,41 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _teardownStaleDoneOwner();
           return;
         }
-        // Bug A fix: cancel any pending rAF and mark stream finalized before
-        // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
-        // can reintroduce a stale thinking card or duplicate content.
-        _streamFinalized=true;
-        _cancelAnimationFramePendingStreamRender();
-        _streamFadeCleanupReduceMotionListener();
-        if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-        // Finalize smd parser — flushes any remaining buffered markdown state
-        // and runs Prism + copy buttons on the live segment before the DOM is replaced
-        if(assistantBody){
-          const _finBody=assistantBody;
-          _smdEndParser();
-          requestAnimationFrame(()=>{
-            if(!_activePaneStreamOwnerStillCurrent()) return;
-            if(typeof highlightCode==='function') highlightCode(_finBody);
-            if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
-            if(typeof renderKatexBlocks==='function') renderKatexBlocks();
-          });
-        } else {
-          _smdEndParser();
-        }
         const d=_doneData;
-        _flushReasoningToAnchor();
-        _applyToAnchor('done',{
-          status:d.status||'completed',
-          usage:d.usage||null,
-          created_at:d.created_at||null,
-        },_doneEvent);
-        _scheduleAnchorRegistryCleanup();
-        _clearAnchorProseIncrementalNode();
         const isActiveSession=_isSessionCurrentPane(activeSid);
+        if(isActiveSession){
+          // Bug A fix: cancel any pending rAF and mark stream finalized before
+          // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
+          // can reintroduce a stale thinking card or duplicate content.
+          _streamFinalized=true;
+          _cancelAnimationFramePendingStreamRender();
+          _streamFadeCleanupReduceMotionListener();
+          if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+          // Finalize smd parser — flushes any remaining buffered markdown state
+          // and runs Prism + copy buttons on the live segment before the DOM is replaced
+          if(assistantBody){
+            const _finBody=assistantBody;
+            _smdEndParser();
+            requestAnimationFrame(()=>{
+              if(!_activePaneStreamOwnerStillCurrent()) return;
+              if(typeof highlightCode==='function') highlightCode(_finBody);
+              if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
+              if(typeof renderKatexBlocks==='function') renderKatexBlocks();
+            });
+          } else {
+            _smdEndParser();
+          }
+          _flushReasoningToAnchor();
+          _applyToAnchor('done',{
+            status:d.status||'completed',
+            usage:d.usage||null,
+            created_at:d.created_at||null,
+          },_doneEvent);
+          _scheduleAnchorRegistryCleanup();
+          _clearAnchorProseIncrementalNode();
+        } else {
+          _teardownStaleDoneOwner();
+        }
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
@@ -6042,12 +6049,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
-        _clearOwnerInflightState();
+        if(isActiveSession) _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
-        _clearApprovalForOwner();
-        _clearClarifyForOwner('terminal');
+        if(isActiveSession){
+          _clearApprovalForOwner();
+          _clearClarifyForOwner('terminal');
+        }
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
@@ -6299,8 +6308,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
         _drainStreamFadeBeforeDone(_finishDone,{
-          ownerStillCurrent:()=>_completionOwnerStillCurrent(_doneData),
-          onStale:_teardownStaleDoneOwner,
+          ownerStillCurrent:()=>_activePaneStreamOwnerStillCurrent(),
+          onStale:_finishDone,
         });
         return;
       }
