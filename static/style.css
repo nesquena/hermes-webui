@@ -6619,6 +6619,17 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .html-preview-fallback{padding:8px;font-size:13px;}
 .html-preview-spinner{animation:pulse 1.5s ease-in-out infinite;}
 
+/* ── Markdown inline preview ──────────────────────────────────────────────── */
+.md-inline-load{color:var(--muted);font-size:13px;padding:8px 12px;border:1px dashed var(--border);border-radius:8px;margin:6px 0;}
+.md-preview-spinner{animation:pulse 1.5s ease-in-out infinite;}
+.md-inline-wrap{border:1px solid var(--border);border-radius:6px;overflow:hidden;margin:4px 0;background:var(--surface);}
+.md-inline-header{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--surface-2);font-size:12px;font-weight:600;border-bottom:1px solid var(--border);}
+.md-preview-title{color:var(--text);}
+.md-inline-fallback{padding:8px;font-size:13px;}
+.md-inline-content{padding:12px 16px;overflow-x:auto;}
+.md-inline-content > :first-child{margin-top:0;}
+.md-inline-content > :last-child{margin-bottom:0;}
+
 /* ── Insights panel (#464) ────────────────────────────────────────────────── */
 main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px;}
