@@ -306,6 +306,44 @@ function _stripWorkspaceDisplayPrefix(text){
   if(stripped !== value) return stripped.trim();
   return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
 }
+function _condenseSkillMessage(text){
+  // Truncate the display of a skill invocation message.
+  // Shows the activation note + "(+N more lines)" + the user instruction.
+  // The full message stays in S.messages for context survival across turns;
+  // only the rendered bubble is shortened.
+  //
+  // Activation patterns mirror Hermes Agent constants:
+  //   agent/skill_commands.py:_SKILL_INVOCATION_PREFIX
+  //   agent/skill_commands.py:_SINGLE_SKILL_INSTRUCTION
+  //   agent/skill_commands.py:_BUNDLE_USER_INSTRUCTION
+  const _SKILL_PREFIX='[IMPORTANT: The user has invoked the';
+  const _SINGLE_INSTRUCTION='The user has provided the following instruction alongside the skill invocation:';
+  const _BUNDLE_INSTRUCTION='User instruction:';
+  if(!text || !text.startsWith(_SKILL_PREFIX)){
+    return text;
+  }
+  const lines=text.split('\n');
+  if(lines.length<=3) return text;
+  const activationNote=lines[0];
+  let instructionLine='';
+  for(let i=lines.length-1;i>=0;i--){
+    const ln=lines[i].trim();
+    if(ln.startsWith(_SINGLE_INSTRUCTION) || ln.startsWith(_BUNDLE_INSTRUCTION)){
+      instructionLine=ln;
+      break;
+    }
+  }
+  const hidden=lines.length -
+    (activationNote?1:0) -
+    (instructionLine?1:0);
+  const parts=[activationNote];
+  if(hidden>0){
+    const noun=hidden===1?'line':'lines';
+    parts.push('... (+'+hidden+' more '+noun+')');
+  }
+  if(instructionLine) parts.push(instructionLine);
+  return parts.join('\n');
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
   const contextStash=[];
@@ -16102,7 +16140,9 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const displayContent=isUser
+      ? _condenseSkillMessage(_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)))
+      : content;
     const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
