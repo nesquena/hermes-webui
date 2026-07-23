@@ -3430,6 +3430,85 @@ function _persistSessionModelCorrection(model, provider, opts){
 }
 let _modelDropdownRequestSeq=0;
 let _modelCatalogFallbackRetried=false;
+let _modelCatalogContextEpoch=0;
+
+function _modelCatalogContextProfile(){
+  return String((typeof S!=='undefined'&&S&&S.activeProfile)||'default').trim()||'default';
+}
+
+function _modelCatalogContextGeneration(){
+  return typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:null;
+}
+
+function _modelCatalogContextSnapshot(){
+  if(typeof _modelCatalogContextEpoch!=='number') _modelCatalogContextEpoch=0;
+  return {
+    epoch:_modelCatalogContextEpoch,
+    profile:_modelCatalogContextProfile(),
+    profile_switch_generation:_modelCatalogContextGeneration(),
+  };
+}
+
+function _modelCatalogContextStillCurrent(context){
+  if(!context) return false;
+  if(typeof _modelCatalogContextEpoch!=='number') _modelCatalogContextEpoch=0;
+  return context.epoch===_modelCatalogContextEpoch
+    && String(context.profile||'default')===_modelCatalogContextProfile()
+    && String(context.profile_switch_generation)===String(_modelCatalogContextGeneration());
+}
+
+function _modelCatalogRequestStillCurrent(requestSeq,context){
+  if(requestSeq!==_modelDropdownRequestSeq) return false;
+  return _modelCatalogContextStillCurrent(context);
+}
+
+function _invalidateModelCatalogContext(){
+  if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
+  if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
+  if(typeof _modelCatalogContextEpoch!=='number') _modelCatalogContextEpoch=0;
+  _modelDropdownRequestSeq++;
+  _modelCatalogContextEpoch++;
+  _modelCatalogFallbackRetried=false;
+}
+
+function _resetModelCatalogSurfacesForProfileSwitch(data,gen){
+  _invalidateModelCatalogContext();
+  window._modelDropdownReady=null;
+  window._configuredModelBadges={};
+  window._modelEndpointErrors={};
+  _dynamicModelLabels={};
+  const model=String(data&&data.default_model||'').trim();
+  const provider=data&&data.default_model_provider?String(data.default_model_provider):null;
+  window._defaultModel=model||null;
+  window._activeProvider=model?(provider||null):null;
+  window._defaultModelHasExplicitSource=!!model;
+  window._defaultModelEligibleForFreshBoot=!!model;
+  if(model&&provider){
+    window._configuredModelBadges[model]={role:'primary',label:'Primary',provider};
+  }
+  const sel=typeof $==='function' ? $('modelSelect') : null;
+  let applied='';
+  if(sel){
+    sel.innerHTML='';
+    if(model){
+      const opt=document.createElement('option');
+      opt.value=model;
+      opt.textContent=typeof getModelLabel==='function'?getModelLabel(model):model;
+      opt.dataset.custom='1';
+      if(provider) opt.dataset.provider=provider;
+      sel.appendChild(opt);
+      applied=typeof _applyModelToDropdown==='function'
+        ? (_applyModelToDropdown(model,sel,provider)||model)
+        : model;
+      if(!sel.value) sel.value=applied;
+    }else{
+      sel.value='';
+    }
+    if(typeof syncModelChip==='function') syncModelChip();
+    if(typeof _refreshOpenModelDropdown==='function') _refreshOpenModelDropdown();
+  }
+  return {model,model_provider:provider||null,applied_model:applied||model||'',profile_switch_generation:gen};
+}
 
 function _applySessionModelFallback(sel){
   if(!sel) return null;
@@ -3457,20 +3536,25 @@ async function populateModelDropdown(opts={}){
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
   if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
   const requestSeq=++_modelDropdownRequestSeq;
+  const requestContext=typeof _modelCatalogContextSnapshot==='function'?_modelCatalogContextSnapshot():null;
+  const requestStillCurrent=()=>typeof _modelCatalogRequestStillCurrent==='function'
+    ? _modelCatalogRequestStillCurrent(requestSeq,requestContext)
+    : requestSeq===_modelDropdownRequestSeq;
   try{
     const modelsUrl=new URL('api/models',document.baseURI||location.href);
     const requestedFreshness=opts&&opts.freshness?String(opts.freshness):'';
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
-    if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
       if(customRedirectIfUnauth(_modelsRes)) return;
     }else if(_redirectIfUnauth(_modelsRes)) return;
     // `_activeProvider` is populated from the /api/models payload below.
     let data=await _modelsRes.json();
+    if(!requestStillCurrent()) return;
     data=_applyBootSettingsDefaultOverrideToModelPayload(data,opts);
-    if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     if(opts&&opts.preferProfileDefaultOnFreshBoot) window._bootSettingsDefaultModelState=null;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
@@ -3523,12 +3607,14 @@ async function populateModelDropdown(opts={}){
     const willRetry=usedConfiguredFallback && requestedFreshness!=='session_visit' && !_modelCatalogFallbackRetried;
 
     if(!groups.length){
+      if(!requestStillCurrent()) return;
       if(willRetry){
         _modelCatalogFallbackRetried=true;
         populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
       }
       return; // no server groups and no configured fallback
     }
+    if(!requestStillCurrent()) return;
     let previousSelection=_captureModelDropdownSelection(sel);
     const rawProvisionalBootSelection=window._provisionalBootModelSelection||null;
     const provisionalBootSelection=typeof rawProvisionalBootSelection==='string'
@@ -3591,13 +3677,14 @@ async function populateModelDropdown(opts={}){
     }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
-    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(requestStillCurrent() && data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq, requestContext);
     if(willRetry){
+      if(!requestStillCurrent()) return;
       _modelCatalogFallbackRetried=true;
       populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
     }
   }catch(e){
-    if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
     if(typeof syncModelChip==='function') syncModelChip();
@@ -3710,12 +3797,22 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, requestContext=null){
   if(!provider||!sel) return;
-  if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  const requestStillCurrent=()=>{
+    if(requestSeq===null){
+      return !requestContext
+        || typeof _modelCatalogContextStillCurrent!=='function'
+        || _modelCatalogContextStillCurrent(requestContext);
+    }
+    return typeof _modelCatalogRequestStillCurrent==='function'
+      ? _modelCatalogRequestStillCurrent(requestSeq,requestContext)
+      : requestSeq===_modelDropdownRequestSeq;
+  };
+  if(!requestStillCurrent()) return;
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
@@ -3725,13 +3822,13 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();

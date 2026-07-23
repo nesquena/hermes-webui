@@ -164,6 +164,7 @@ const window = {_defaultModel: null, _activeProvider: null, _configuredModelBadg
 let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
+let _modelCatalogContextEpoch = 0;
 var _profileSwitchGeneration = args.profileSwitch && args.profileSwitch.generation ? args.profileSwitch.generation : 0;
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 window._provisionalBootModelSelection = null;
@@ -242,7 +243,11 @@ for (const name of [
   '_readPersistedModelState', '_writePersistedModelState', '_clearPersistedModelState',
   '_findModelInDropdown', '_refreshOpenModelDropdown',
   '_applyModelToDropdown', '_ensureModelOptionInDropdown',
-  '_reconcileModelDropdownSelection', 'populateModelDropdown'
+  '_reconcileModelDropdownSelection',
+  '_modelCatalogContextProfile', '_modelCatalogContextGeneration',
+  '_modelCatalogContextSnapshot', '_modelCatalogContextStillCurrent',
+  '_modelCatalogRequestStillCurrent', '_invalidateModelCatalogContext',
+  '_resetModelCatalogSurfacesForProfileSwitch', 'populateModelDropdown'
 ]) {
   eval(extractFunc(name));
 }
@@ -333,10 +338,368 @@ populateModelDropdown(args.opts || {}).then(() => {
 """
 
 
+_PROFILE_SWITCH_RACE_DRIVER_SRC = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[2], 'utf8');
+const panels = fs.readFileSync(process.argv[3], 'utf8');
+const args = JSON.parse(process.argv[4]);
+
+function extractFuncFrom(src, name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let openParen = src.indexOf('(', start);
+  let i = openParen + 1;
+  let parenDepth = 1;
+  while (parenDepth > 0 && i < src.length) {
+    if (src[i] === '(') parenDepth++;
+    else if (src[i] === ')') parenDepth--;
+    i++;
+  }
+  i = src.indexOf('{', i);
+  let depth = 1;
+  i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return {promise, resolve, reject};
+}
+
+async function tick(count = 5) {
+  for (let i = 0; i < count; i++) await Promise.resolve();
+}
+
+async function waitFor(label, predicate) {
+  for (let i = 0; i < 80; i++) {
+    if (predicate()) return;
+    await tick();
+  }
+  throw new Error('timed out waiting for ' + label + ' with state ' + JSON.stringify({
+    profile: typeof S === 'undefined' ? null : S.activeProfile,
+    generation: typeof _profileSwitchGeneration === 'undefined' ? null : _profileSwitchGeneration,
+    modelRequests: typeof modelRequests === 'undefined' ? null : modelRequests.length,
+    renderWaits: typeof renderWaits === 'undefined' ? null : renderWaits.length,
+    calls: typeof calls === 'undefined' ? null : calls,
+  }));
+}
+
+function makeSelect(options, initialValue) {
+  const sel = {id: 'modelSelect', options: [], selectedIndex: -1, selectedOptions: []};
+  Object.defineProperty(sel, 'value', {
+    get() { return this._value || ''; },
+    set(v) {
+      const idx = this.options.findIndex(o => o.value === v);
+      this.selectedIndex = idx;
+      if (idx >= 0) {
+        this._value = v;
+        this.selectedOptions = [this.options[idx]];
+      } else {
+        this._value = '';
+        this.selectedOptions = [];
+      }
+    }
+  });
+  Object.defineProperty(sel, 'innerHTML', {
+    get() { return ''; },
+    set(_v) {
+      this.options = [];
+      this._value = '';
+      this.selectedIndex = -1;
+      this.selectedOptions = [];
+    }
+  });
+  sel.querySelector = function(_selector) { return this.options[0] || null; };
+  sel.querySelectorAll = function(selector) {
+    if (selector === 'option[data-custom]') {
+      return this.options.filter(o => o.dataset && o.dataset.custom);
+    }
+    if (selector === 'optgroup') {
+      const groups = [];
+      for (const opt of this.options) {
+        const group = opt.parentElement;
+        if (group && group.tagName === 'OPTGROUP' && !groups.includes(group)) groups.push(group);
+      }
+      return groups;
+    }
+    return [];
+  };
+  sel.appendChild = function(node) {
+    const incoming = node && node.tagName === 'OPTGROUP' ? node.children : [node];
+    for (const opt of incoming || []) {
+      opt.parentElement = opt.parentElement || node;
+      opt.remove = opt.remove || (() => {
+        const optIndex = this.options.indexOf(opt);
+        if (optIndex >= 0) this.options.splice(optIndex, 1);
+        const children = opt.parentElement && opt.parentElement.children;
+        if (Array.isArray(children)) {
+          const childIndex = children.indexOf(opt);
+          if (childIndex >= 0) children.splice(childIndex, 1);
+        }
+        if (this.selectedOptions[0] === opt) this.value = this.options[0] ? this.options[0].value : '';
+      });
+      this.options.push(opt);
+      if (this.selectedIndex < 0) this.value = opt.value;
+      else if (this._value === opt.value) this.value = opt.value;
+    }
+  };
+  for (const item of options || []) {
+    const group = {tagName: 'OPTGROUP', label: item.provider || '', dataset: {provider: item.provider || ''}, children: []};
+    const opt = {tagName: 'OPTION', value: item.value, textContent: item.label || item.value, title: '', dataset: {}, parentElement: group};
+    if (item.custom) opt.dataset.custom = '1';
+    if (item.provider) opt.dataset.provider = item.provider;
+    group.children.push(opt);
+    sel.appendChild(group);
+  }
+  if (initialValue !== null && initialValue !== undefined) sel.value = initialValue;
+  return sel;
+}
+
+const calls = {syncModelChip: 0, refreshes: 0, renderSessionList: 0, toasts: []};
+let modelSelect = makeSelect(
+  args.initialOptions || [{provider: 'alpha-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+  args.initialValue || 'custom/profile-a-model',
+);
+const localStorageData = {};
+const localStorage = {
+  getItem(key) { return Object.prototype.hasOwnProperty.call(localStorageData, key) ? localStorageData[key] : null; },
+  setItem(key, value) { localStorageData[key] = String(value); },
+  removeItem(key) { delete localStorageData[key]; },
+};
+const window = {
+  _defaultModel: args.initialDefault || 'custom/profile-a-model',
+  _activeProvider: args.initialProvider || 'alpha-provider',
+  _configuredModelBadges: {},
+  _modelEndpointErrors: {},
+  _provisionalBootModelSelection: null,
+  _bootSettingsDefaultModelState: {
+    model: args.initialDefault || 'custom/profile-a-model',
+    model_provider: args.initialProvider || 'alpha-provider',
+    default_model_has_explicit_source: true,
+    profile: 'alpha',
+    profile_switch_generation: 0,
+  },
+};
+let _dynamicModelLabels = {};
+let _liveModelFetchPending = new Set();
+let _liveModelCache = {};
+let _modelCatalogContextEpoch = 0;
+var _profileSwitchGeneration = 0;
+var _modelDropdownRequestSeq = 0;
+var _modelCatalogFallbackRetried = false;
+const MODEL_STATE_KEY = 'hermes-webui-model-state';
+const document = {
+  baseURI: 'http://127.0.0.1/hermes/',
+  createElement(tag) {
+    const upper = tag.toUpperCase();
+    if (upper === 'OPTGROUP') {
+      return {
+        tagName: 'OPTGROUP',
+        label: '',
+        dataset: {},
+        children: [],
+        appendChild(opt) { opt.parentElement = this; this.children.push(opt); },
+      };
+    }
+    return {tagName: upper, value: '', textContent: '', title: '', dataset: {}, parentElement: null};
+  },
+};
+var S = {activeProfile: 'alpha', activeProfileIsDefault: false, session: null, messages: []};
+var _currentPanel = '';
+var _workspacePanelMode = 'closed';
+var _skillsData = null;
+var _workspaceList = null;
+
+function $(id) {
+  if (id === 'modelSelect') return modelSelect;
+  if (id === 'composerModelDropdown') return {classList: {contains(){ return false; }}};
+  if (id === 'profileChip') return {classList: {add(){}, remove(){}}, disabled: false};
+  if (id === 'titlebarProfileBtn') return {classList: {add(){}, remove(){}}, disabled: false};
+  if (id === 'profileChipLabel' || id === 'titlebarProfileLabel') return {textContent: ''};
+  return null;
+}
+function t(key) { return key; }
+function getModelLabel(v) { return v; }
+function syncModelChip() { calls.syncModelChip++; }
+function renderModelDropdown() {}
+function _positionModelDropdown() {}
+function _redirectIfUnauth() { return false; }
+function _refreshOpenModelDropdown() {}
+function _fetchLiveModels() {}
+function startGatewaySSE() {}
+function applyBotName() {}
+function animateNextSessionListRefresh() {}
+function _openProfileSwitchSessionBrowser() {}
+function showToast(msg) { calls.toasts.push(msg); }
+function loadWorkspaceList() { return Promise.resolve([]); }
+function syncTopbar() {}
+function _clearCronDetail() {}
+
+const renderWaits = [];
+let renderCount = 0;
+async function renderSessionList() {
+  calls.renderSessionList++;
+  const plan = (args.renderPlan || [])[renderCount++] || 'resolve';
+  if (plan === 'defer') {
+    const d = deferred();
+    renderWaits.push(d);
+    return d.promise;
+  }
+}
+
+const modelRequests = [];
+fetch = function(url) {
+  const href = String(url);
+  if (href.includes('api/models/live')) {
+    return Promise.resolve({json: async () => ({models: []})});
+  }
+  if (href.includes('api/models')) {
+    const d = deferred();
+    modelRequests.push({href, resolve: d.resolve, reject: d.reject});
+    return d.promise;
+  }
+  throw new Error('unexpected fetch ' + href);
+};
+
+const profilePayloads = {
+  beta: {active: 'beta', is_default: false, default_model: 'custom/profile-b-model', default_model_provider: 'beta-provider'},
+  gamma: {active: 'gamma', is_default: false, default_model: 'custom/profile-c-model', default_model_provider: 'gamma-provider'},
+};
+api = async function(url, opts = {}) {
+  if (url === '/api/profile/switch') {
+    const body = JSON.parse(opts.body || '{}');
+    return profilePayloads[body.name];
+  }
+  if (url === '/api/settings') return {};
+  if (url === '/api/session/update') return {};
+  throw new Error('unexpected api ' + url);
+};
+
+for (const name of [
+  '_modelCatalogHasRealProviderModels', '_shouldApplyModelPayloadDefault',
+  '_currentBootSettingsDefaultOverride', '_applyBootSettingsDefaultOverrideToModelPayload',
+  '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
+  '_captureModelDropdownSelection', '_modelStateMatches',
+  '_readPersistedModelState', '_writePersistedModelState', '_clearPersistedModelState',
+  '_findModelInDropdown', '_applyModelToDropdown', '_ensureModelOptionInDropdown',
+  '_reconcileModelDropdownSelection',
+]) {
+  eval(extractFuncFrom(ui, name));
+}
+for (const name of [
+  '_modelCatalogContextProfile', '_modelCatalogContextGeneration',
+  '_modelCatalogContextSnapshot', '_modelCatalogContextStillCurrent',
+  '_modelCatalogRequestStillCurrent', '_invalidateModelCatalogContext',
+  '_resetModelCatalogSurfacesForProfileSwitch',
+]) {
+  try { eval(extractFuncFrom(ui, name)); } catch (_e) {}
+}
+eval(extractFuncFrom(ui, 'populateModelDropdown'));
+eval(extractFuncFrom(panels, '_refreshProfileSwitchBackground'));
+eval(extractFuncFrom(panels, '_advanceBootSettingsDefaultModelStateForProfileSwitch'));
+eval(extractFuncFrom(panels, '_profileSwitchPanelLoad'));
+eval(extractFuncFrom(panels, 'switchToProfile'));
+window._ensureModelDropdownReady = () => {
+  calls.refreshes++;
+  return populateModelDropdown({preferProfileDefaultOnFreshBoot: true});
+};
+
+function modelPayload(model, provider) {
+  return {
+    active_provider: provider,
+    default_model: model,
+    default_model_has_explicit_source: true,
+    configured_model_badges: {[model]: {role: 'primary', label: 'Primary', provider}},
+    groups: [{provider, provider_id: provider, models: [{id: model, label: model}]}],
+  };
+}
+
+function responseFor(payload) {
+  return {json: async () => payload};
+}
+
+function snapshot() {
+  const selectedOpt = modelSelect.selectedOptions[0] || null;
+  const selectedState = modelSelect.value ? _modelStateForSelect(modelSelect, modelSelect.value) : null;
+  return {
+    profile: S.activeProfile,
+    generation: _profileSwitchGeneration,
+    defaultModel: window._defaultModel || null,
+    activeProvider: window._activeProvider || null,
+    selectValue: modelSelect.value || '',
+    selectedProvider: selectedOpt ? _getOptionProviderId(selectedOpt) : null,
+    selectedState,
+    optionValues: modelSelect.options.map(o => o.value),
+    badgeKeys: Object.keys(window._configuredModelBadges || {}),
+    bootSettingsDefaultModelState: window._bootSettingsDefaultModelState || null,
+    calls: Object.assign({}, calls),
+  };
+}
+
+async function staleAlphaThenFailedBeta() {
+  const alphaPopulate = populateModelDropdown({preferProfileDefaultOnFreshBoot: true});
+  await waitFor('initial alpha model request', () => modelRequests.length === 1);
+  const betaSwitch = switchToProfile('beta');
+  await waitFor('beta active and paused', () => S.activeProfile === 'beta' && renderWaits.length === 1);
+  modelRequests[0].resolve(responseFor(modelPayload('custom/profile-a-model', 'alpha-provider')));
+  await tick(12);
+  const afterStaleAlpha = snapshot();
+  renderWaits[0].resolve();
+  await waitFor('beta background model request', () => modelRequests.length === 2);
+  modelRequests[1].reject(new Error('beta catalog unavailable'));
+  await Promise.allSettled([alphaPopulate, betaSwitch]);
+  await tick(12);
+  return {afterStaleAlpha, final: snapshot()};
+}
+
+async function rapidBetaThenGamma() {
+  const betaSwitch = switchToProfile('beta');
+  await waitFor('beta background model request', () => modelRequests.length === 1);
+  await betaSwitch;
+  const gammaSwitch = switchToProfile('gamma');
+  await waitFor('gamma active and paused', () => S.activeProfile === 'gamma' && renderWaits.length === 1);
+  modelRequests[0].resolve(responseFor(modelPayload('custom/profile-b-model', 'beta-provider')));
+  await tick(12);
+  const afterStaleBeta = snapshot();
+  renderWaits[0].resolve();
+  await waitFor('gamma background model request', () => modelRequests.length === 2);
+  modelRequests[1].reject(new Error('gamma catalog unavailable'));
+  await Promise.allSettled([gammaSwitch]);
+  await tick(12);
+  return {afterStaleBeta, final: snapshot()};
+}
+
+(async () => {
+  const result = args.scenario === 'rapid-beta-gamma'
+    ? await rapidBetaThenGamma()
+    : await staleAlphaThenFailedBeta();
+  process.stdout.write(JSON.stringify(result));
+})().catch(err => {
+  console.error(err && err.stack || err);
+  process.exit(1);
+});
+"""
+
+
 @pytest.fixture(scope="module")
 def populate_driver_path(tmp_path_factory):
     p = tmp_path_factory.mktemp("model_default_driver") / "driver.js"
     p.write_text(_DRIVER_SRC, encoding="utf-8")
+    return str(p)
+
+
+@pytest.fixture(scope="module")
+def profile_switch_race_driver_path(tmp_path_factory):
+    p = tmp_path_factory.mktemp("model_default_profile_switch_driver") / "driver.js"
+    p.write_text(_PROFILE_SWITCH_RACE_DRIVER_SRC, encoding="utf-8")
     return str(p)
 
 
@@ -642,10 +1005,15 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
 def test_profile_switch_advances_boot_settings_default_before_background_refresh():
     switch_start = PANELS_JS.index("async function switchToProfile(name) {")
     switch_body = PANELS_JS[switch_start : PANELS_JS.index("function openProfileCreate", switch_start)]
+    accepted_switch_idx = switch_body.index("if (_switchGen !== _profileSwitchGeneration) return false;")
+    invalidate_idx = switch_body.index("if (typeof _invalidateModelCatalogContext === 'function') _invalidateModelCatalogContext();")
+    active_profile_idx = switch_body.index("S.activeProfile = data.active || name;")
+    reset_idx = switch_body.index("_resetModelCatalogSurfacesForProfileSwitch(data,_switchGen)")
     advance_idx = switch_body.index("_advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);")
+    panel_load_idx = switch_body.index("await _profileSwitchPanelLoad();")
     refresh_idx = switch_body.index("_refreshProfileSwitchBackground(_switchGen);")
 
-    assert advance_idx < refresh_idx
+    assert accepted_switch_idx < invalidate_idx < active_profile_idx < reset_idx < advance_idx < panel_load_idx < refresh_idx
     helper = PANELS_JS[
         PANELS_JS.index("function _advanceBootSettingsDefaultModelStateForProfileSwitch")
         : switch_start
@@ -848,6 +1216,54 @@ def test_profile_switch_model_refresh_keeps_switched_profile_default_over_boot_s
     assert boot_model not in got["badgeKeys"]
     assert got["badgeMap"].get(boot_model) is None
     assert got["bootSettingsDefaultModelState"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_profile_switch_rejects_deferred_previous_profile_model_catalog(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="stale-alpha-failed-beta",
+        render_plan=["defer"],
+    )
+
+    for snapshot_name in ("afterStaleAlpha", "final"):
+        snapshot = got[snapshot_name]
+        assert snapshot["profile"] == "beta"
+        assert snapshot["defaultModel"] == "custom/profile-b-model"
+        assert snapshot["activeProvider"] == "beta-provider"
+        assert snapshot["selectedState"] == {
+            "model": "custom/profile-b-model",
+            "model_provider": "beta-provider",
+        }
+        assert snapshot["selectValue"] == "custom/profile-b-model"
+        assert "custom/profile-a-model" not in snapshot["optionValues"]
+        assert "custom/profile-a-model" not in snapshot["badgeKeys"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_rapid_profile_switch_rejects_superseded_model_catalog_response(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="rapid-beta-gamma",
+        render_plan=["resolve", "defer"],
+    )
+
+    for snapshot_name in ("afterStaleBeta", "final"):
+        snapshot = got[snapshot_name]
+        assert snapshot["profile"] == "gamma"
+        assert snapshot["defaultModel"] == "custom/profile-c-model"
+        assert snapshot["activeProvider"] == "gamma-provider"
+        assert snapshot["selectedState"] == {
+            "model": "custom/profile-c-model",
+            "model_provider": "gamma-provider",
+        }
+        assert snapshot["selectValue"] == "custom/profile-c-model"
+        assert "custom/profile-b-model" not in snapshot["optionValues"]
+        assert "custom/profile-b-model" not in snapshot["badgeKeys"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -1138,6 +1554,30 @@ def _run_populate_driver(
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+    return json.loads(result.stdout)
+
+
+def _run_profile_switch_race_driver(
+    driver_path: str,
+    *,
+    scenario: str,
+    render_plan: list[str],
+):
+    assert NODE is not None
+    payload = {
+        "scenario": scenario,
+        "renderPlan": render_plan,
+    }
+    result = subprocess.run(
+        [NODE, driver_path, str(REPO / "static" / "ui.js"), str(REPO / "static" / "panels.js"), json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"profile switch race driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}"
+        )
     return json.loads(result.stdout)
 
 

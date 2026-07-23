@@ -7023,8 +7023,15 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    if (typeof _invalidateModelCatalogContext === 'function') _invalidateModelCatalogContext();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    const _profileSwitchModelAuthority = typeof _resetModelCatalogSurfacesForProfileSwitch === 'function'
+      ? _resetModelCatalogSurfacesForProfileSwitch(data,_switchGen)
+      : null;
+    if (typeof _advanceBootSettingsDefaultModelStateForProfileSwitch === 'function') {
+      _advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);
+    }
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7061,28 +7068,34 @@ async function switchToProfile(name) {
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    if (!_profileSwitchModelAuthority) {
+      if (data.default_model) window._defaultModel = data.default_model;
+      if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    }
 
     // ── Apply model ────────────────────────────────────────────────────────
-    if (data.default_model) {
+    const _switchDefaultModel = (_profileSwitchModelAuthority&&_profileSwitchModelAuthority.model)||String(data.default_model||'').trim();
+    if (_switchDefaultModel) {
       const sel = $('modelSelect');
-      const providerId = data.default_model_provider || window._activeProvider || null;
-      const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === data.default_model) : null;
-      if (existingDefaultOpt && providerId && !existingDefaultOpt.dataset.provider) {
-        existingDefaultOpt.dataset.provider = providerId;
+      const providerId = (_profileSwitchModelAuthority&&_profileSwitchModelAuthority.model_provider)||data.default_model_provider || window._activeProvider || null;
+      let modelToUse = (_profileSwitchModelAuthority&&_profileSwitchModelAuthority.applied_model)||'';
+      if (!modelToUse) {
+        const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === _switchDefaultModel) : null;
+        if (existingDefaultOpt && providerId && !existingDefaultOpt.dataset.provider) {
+          existingDefaultOpt.dataset.provider = providerId;
+        }
+        if (sel && !existingDefaultOpt) {
+          const opt = document.createElement('option');
+          opt.value = _switchDefaultModel;
+          opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(_switchDefaultModel) : _switchDefaultModel;
+          opt.dataset.custom = '1';
+          if (providerId) opt.dataset.provider = providerId;
+          sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+          sel.appendChild(opt);
+        }
+        const resolved = _applyModelToDropdown(_switchDefaultModel, sel, providerId);
+        modelToUse = resolved || _switchDefaultModel;
       }
-      if (sel && !existingDefaultOpt) {
-        const opt = document.createElement('option');
-        opt.value = data.default_model;
-        opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(data.default_model) : data.default_model;
-        opt.dataset.custom = '1';
-        if (providerId) opt.dataset.provider = providerId;
-        sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
-        sel.appendChild(opt);
-      }
-      const resolved = _applyModelToDropdown(data.default_model, sel, providerId);
-      const modelToUse = resolved || data.default_model;
       const modelState = (typeof _modelStateForSelect==='function')
         ? _modelStateForSelect(sel, modelToUse)
         : {model:modelToUse,model_provider:providerId};
@@ -7204,7 +7217,6 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
-    _advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
