@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 import shutil
 import subprocess
 import textwrap
@@ -103,6 +104,257 @@ def test_done_owner_gate_rejects_same_pane_newer_stream():
         """
     )
     result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "same_session_new_stream",
+        "origin_continuation_new_stream",
+        "session_switch",
+    ],
+)
+def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+
+    script = textwrap.dedent(
+        r"""
+        const assert = require('assert');
+        const fs = require('fs');
+        const messagesSrc = fs.readFileSync('static/messages.js', 'utf8');
+        const scenario = '__SCENARIO__';
+
+        class FakeClassList {
+          constructor(el){ this.el = el; this.set = new Set(); }
+          add(...names){ for(const name of names) this.set.add(name); this.el.className = Array.from(this.set).join(' '); }
+          remove(...names){ for(const name of names) this.set.delete(name); this.el.className = Array.from(this.set).join(' '); }
+          contains(name){ return this.set.has(name); }
+        }
+        class FakeElement {
+          constructor(tag){
+            this.tagName = tag;
+            this.children = [];
+            this.attributes = {};
+            this.dataset = {};
+            this.style = {};
+            this.parentElement = null;
+            this.isConnected = true;
+            this.textContent = '';
+            this.innerHTML = '';
+            this.className = '';
+            this.classList = new FakeClassList(this);
+          }
+          setAttribute(name, value){
+            this.attributes[name] = String(value);
+            if(name === 'id') this.id = String(value);
+            if(name === 'class') this.className = String(value);
+            if(name.startsWith('data-')){
+              const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+              this.dataset[key] = String(value);
+            }
+          }
+          getAttribute(name){ return this.attributes[name] ?? null; }
+          appendChild(child){ child.parentElement = this; this.children.push(child); return child; }
+          remove(){ this.isConnected = false; if(this.parentElement){ this.parentElement.children = this.parentElement.children.filter(c => c !== this); } }
+          querySelector(){ return null; }
+          querySelectorAll(){ return []; }
+        }
+
+        const rafQueue = [];
+        const timeoutQueue = [];
+        global.window = {
+          _removeIdleLiveAssistantTurnCalls: [],
+          _removeIdleLiveAssistantTurn(sid, streamId){ this._removeIdleLiveAssistantTurnCalls.push([sid, streamId]); },
+          _streamJustFinished: false,
+          addEventListener(){},
+          removeEventListener(){},
+        };
+        global.document = {
+          baseURI: 'http://test.local/',
+          hidden: false,
+          visibilityState: 'visible',
+          hasFocus: () => true,
+          wasDiscarded: false,
+          createElement: tag => new FakeElement(tag),
+          createTextNode: text => { const n = new FakeElement('#text'); n.textContent = String(text); return n; },
+          querySelector: () => null,
+          addEventListener(){},
+          removeEventListener(){},
+        };
+        global.location = {href:'http://test.local/'};
+        global.performance = {now: () => 1000};
+        global.requestAnimationFrame = cb => { rafQueue.push(cb); return rafQueue.length; };
+        global.cancelAnimationFrame = () => {};
+        global.setTimeout = (cb, _ms) => { timeoutQueue.push(cb); return timeoutQueue.length; };
+        global.clearTimeout = () => {};
+
+        const emptyState = new FakeElement('div');
+        const turn = new FakeElement('div');
+        turn.id = 'liveAssistantTurn';
+        turn.dataset.sessionId = 'sid-1';
+        const blocks = new FakeElement('div');
+        turn.appendChild(blocks);
+        const byId = {emptyState, liveAssistantTurn: turn, msgInner: new FakeElement('div')};
+        global.$ = id => byId[id] || null;
+        global._assistantTurnBlocks = () => blocks;
+        global.appendThinking = () => {};
+        global.closeOtherLiveStreams = () => {};
+        global.closeLiveStream = () => {};
+        global.resetTurnWorkspaceMutations = () => {};
+        global._resetStreamScrollFollow = () => {};
+        global._suspendSessionStreamForLiveChat = () => {};
+        global._bindStreamHiddenTracker = () => {};
+        global._shouldUseLiveProseFade = () => false;
+        global._isSessionCurrentPane = sid => S.session && S.session.session_id === sid;
+        global._isDocumentVisibleAndFocused = () => true;
+        global._isSessionActivelyViewed = sid => S.session && S.session.session_id === sid;
+        global._streamDoneWouldOverwriteNewerPane = function(activeSid, streamId){
+          if(!_isSessionCurrentPane(activeSid)) return false;
+          const expectedStreamId = String(streamId || '');
+          const activeStreamId = String(S && S.activeStreamId || '');
+          if(activeStreamId && activeStreamId !== expectedStreamId) return true;
+          const inflight = INFLIGHT && INFLIGHT[activeSid];
+          const inflightStreamId = String(inflight && inflight.streamId || '');
+          return !!(inflightStreamId && inflightStreamId !== expectedStreamId);
+        };
+        global._stripXmlToolCalls = value => String(value || '');
+        global._extractInlineThinkingFromContent = (content, reasoning) => {
+          const visible = String(content || '');
+          const thinking = String(reasoning || '');
+          return {content:visible, reasoning:thinking, thinkingText:thinking, displayText:visible, inThinking:false};
+        };
+        global._splitThinkFromContent = (content, reasoning) => ({content:String(content || ''), reasoning:String(reasoning || '')});
+        global._captureMessageScrollSnapshot = () => ({});
+        global._renderMessagesWithScrollSnapshot = () => { renderCount += 1; };
+        global.renderMessages = () => { renderCount += 1; };
+        global.syncTopbar = () => {};
+        global.renderSessionList = () => {};
+        global.setBusy = value => { S.busy = !!value; };
+        global.setComposerStatus = () => {};
+        global.setStatus = () => {};
+        global.clearInflightState = () => {};
+        global.clearInflight = () => {};
+        global._resumeSessionStreamAfterLiveChat = () => {};
+        global.clearLiveToolCards = () => {};
+        global.removeThinking = () => {};
+        global.finalizeThinkingCard = () => {};
+        global._clearApprovalPendingForSession = () => {};
+        global._clearClarifyPendingForSession = () => {};
+        global.stopApprovalPolling = () => {};
+        global.stopClarifyPolling = () => {};
+        global.hideApprovalCard = () => {};
+        global.hideClarifyCard = () => {};
+        global._markSessionViewed = () => {};
+        global._markSessionCompletionUnread = () => {};
+        global._markSessionCompletedInList = () => {};
+        global.playNotificationSound = () => {};
+        global.sendBrowserNotification = () => {};
+        global._shouldForceCompletionNotification = () => false;
+        global._completionNotificationPreviewText = () => '';
+        global.scrollIfPinned = () => {};
+        global.scrollToBottom = () => {};
+        global._shouldFollowMessagesOnDomReplace = () => false;
+        global._armKeepSettledWorklogOpen = () => {};
+        global._disarmKeepSettledWorklogOpen = () => {};
+        global.noteWorkspaceMutationsFromToolCalls = () => {};
+        global.loadDir = () => {};
+        global.renderSessionArtifacts = () => {};
+        global._hydrateTodosFromSession = () => {};
+        global.clearVisibleMessageRowCache = () => {};
+        global.saveInflightState = () => {};
+        global.snapshotLiveTurnHtmlForSession = () => {};
+        global._syncCtxIndicator = () => {};
+        global._mergeUsageForCtxIndicator = (a, b) => ({...(b || {}), ...(a || {})});
+        global.updateQueueBadge = () => {};
+        global._setActiveSessionUrl = () => {};
+        global.localStorage = {setItem(){}, getItem(){ return null; }};
+        global.renderMd = text => String(text || '');
+        global.esc = text => String(text || '');
+        global.enhanceMarkdownTables = () => {};
+        global.addCopyButtons = () => { calls.copy += 1; };
+        global.highlightCode = () => { calls.highlight += 1; };
+        global.renderKatexBlocks = () => { calls.katex += 1; };
+
+        const calls = {highlight:0, copy:0, katex:0};
+        let renderCount = 0;
+        const S = global.S = {
+          session: {session_id:'sid-1', message_count:1, pending_started_at:1},
+          messages: [{role:'user', content:'question'}],
+          toolCalls: [],
+          activeStreamId: 'stream-old',
+          busy: true,
+        };
+        const INFLIGHT = global.INFLIGHT = {};
+        const LIVE_STREAMS = global.LIVE_STREAMS = {};
+        global._STREAM_WAS_HIDDEN = {};
+        global._STREAM_NOTIFICATION_BACKGROUND = {};
+        global._desktopBackgroundedForNotifications = false;
+        global._approvalSessionId = null;
+        global._clarifySessionId = null;
+
+        class FakeEventSource {
+          static instances = [];
+          static OPEN = 1;
+          static CONNECTING = 0;
+          constructor(){ this.listeners = {}; this.readyState = 1; FakeEventSource.instances.push(this); }
+          addEventListener(name, fn){ (this.listeners[name] ||= []).push(fn); }
+          emit(name, data){ for(const fn of this.listeners[name] || []) fn({data:JSON.stringify(data), lastEventId:`stream-old:2`}); }
+          close(){ this.readyState = 2; }
+        }
+        global.EventSource = FakeEventSource;
+
+        const attachStart = messagesSrc.indexOf('function attachLiveStream(');
+        const attachEnd = messagesSrc.indexOf('\nfunction transcript(){', attachStart);
+        if(attachStart < 0 || attachEnd < 0) throw new Error('attachLiveStream source boundary not found');
+        eval(messagesSrc.slice(attachStart, attachEnd));
+
+        attachLiveStream('sid-1', 'stream-old');
+        const source = FakeEventSource.instances[0];
+        source.emit('token', {text:'partial'});
+        while(rafQueue.length) rafQueue.shift()();
+        assert.strictEqual(blocks.children.length, 1, 'token should create a live assistant segment');
+        rafQueue.length = 0;
+        const doneSessionId = scenario === 'origin_continuation_new_stream' ? 'sid-cont' : 'sid-1';
+        const doneSession = {
+          session_id: doneSessionId,
+          message_count:2,
+          messages:[
+            {role:'user', content:'question'},
+            {role:'assistant', content:'final answer', timestamp: 2},
+          ],
+        };
+        if(scenario === 'origin_continuation_new_stream') doneSession.parent_session_id = 'sid-1';
+        source.emit('done', {
+          session: {
+            ...doneSession,
+          },
+          usage:{duration_seconds:1},
+        });
+        assert.ok(rafQueue.length > 0, 'done should schedule postprocess RAF for the live assistant body');
+        if(scenario === 'session_switch'){
+          S.session = {session_id:'sid-2', message_count:1};
+          S.messages = [{role:'user', content:'next question'}];
+          S.activeStreamId = 'stream-new';
+          INFLIGHT['sid-2'] = {streamId:'stream-new'};
+        }else{
+          S.activeStreamId = 'stream-new';
+          INFLIGHT[S.session.session_id] = {streamId:'stream-new'};
+        }
+        INFLIGHT['sid-1'] = {streamId:'stream-new'};
+        while(rafQueue.length) rafQueue.shift()();
+
+        assert.strictEqual(calls.highlight, 0, 'old done RAF must not highlight after owner rotation');
+        assert.strictEqual(calls.copy, 0, 'old done RAF must not add copy buttons after owner rotation');
+        assert.strictEqual(calls.katex, 0, 'old done RAF must not render KaTeX after owner rotation');
+        assert.strictEqual(S.activeStreamId, 'stream-new');
+        process.stdout.write(JSON.stringify({calls, renderCount, activeStreamId:S.activeStreamId}));
+        """
+    ).replace("__SCENARIO__", scenario)
+    result = subprocess.run([node, "-e", script], cwd=REPO, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr + result.stdout
 
 

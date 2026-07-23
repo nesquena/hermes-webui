@@ -630,30 +630,46 @@ def _terminal_recovery_control(
     session_id: str,
     run_id: str,
     terminal_state: str | None,
+    *,
+    target_session_id: str | None = None,
 ) -> dict:
-    return {
+    origin_session_id = str(session_id or "")
+    target_session_id = str(target_session_id or origin_session_id or "")
+    control = {
         "version": _TERMINAL_RECOVERY_CONTROL_VERSION,
         "reason": "terminal_session_save_failed_payload_too_large",
-        "session_id": str(session_id or ""),
+        "session_id": origin_session_id,
         "run_id": str(run_id or ""),
         "stream_id": str(run_id or ""),
         "terminal_state": str(terminal_state or ""),
     }
+    if target_session_id and target_session_id != origin_session_id:
+        control["target_session_id"] = target_session_id
+        control["continuation_session_id"] = target_session_id
+    return control
 
 
 def _terminal_non_materializable_disposition(
     session_id: str,
     run_id: str,
     reason: str,
+    *,
+    target_session_id: str | None = None,
 ) -> dict:
-    return {
+    origin_session_id = str(session_id or "")
+    target_session_id = str(target_session_id or origin_session_id or "")
+    disposition = {
         "version": "terminal_disposition_v1",
         "kind": "consumed_non_materializable",
         "reason": str(reason or "non_materializable_terminal").strip(),
-        "session_id": str(session_id or ""),
+        "session_id": origin_session_id,
         "run_id": str(run_id or ""),
         "stream_id": str(run_id or ""),
     }
+    if target_session_id and target_session_id != origin_session_id:
+        disposition["target_session_id"] = target_session_id
+        disposition["continuation_session_id"] = target_session_id
+    return disposition
 
 
 def _compact_unpersisted_terminal_session_payload(
@@ -724,11 +740,17 @@ def _compact_unpersisted_terminal_session_payload(
         message_count=int(message_count),
         messages_offset=base_offset + len(messages),
     )
-    control = _terminal_recovery_control(target_session_id or session_id, run_id, terminal_state)
+    control = _terminal_recovery_control(
+        session_id,
+        run_id,
+        terminal_state,
+        target_session_id=target_session_id or session_id,
+    )
     disposition = _terminal_non_materializable_disposition(
-        target_session_id or session_id,
+        session_id,
         run_id,
         "terminal_session_save_failed_payload_too_large",
+        target_session_id=target_session_id or session_id,
     )
     return compact, control, disposition
 

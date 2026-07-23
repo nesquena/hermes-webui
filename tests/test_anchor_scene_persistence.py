@@ -3336,6 +3336,102 @@ def test_terminal_journal_records_non_materializable_disposition_once(monkeypatc
     assert session.save_calls == 1
 
 
+def test_terminal_journal_records_overcap_unpersisted_continuation_disposition(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.run_journal import RunJournalWriter, _RUN_EVENTS_MAX_BYTES, find_run_summary, read_run_events
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    origin_session_id = "session-overcap-save-failed-origin"
+    continuation_session_id = "session-overcap-save-failed-continuation"
+    stream_id = "stream-overcap-save-failed-continuation"
+    writer = RunJournalWriter(origin_session_id, stream_id, session_dir=session_dir)
+    writer.append_sse_event("token", {"text": "partial"})
+    writer.append_sse_event(
+        "apperror",
+        {
+            "terminal_session_persisted": False,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "session": {
+                "session_id": continuation_session_id,
+                "parent_session_id": origin_session_id,
+                "messages": [
+                    {"role": "user", "content": "do work", "timestamp": 1.0},
+                    {
+                        "role": "assistant",
+                        "content": "x" * (_RUN_EVENTS_MAX_BYTES + 10_000),
+                        "_ts": 2.0,
+                    },
+                ],
+                "message_count": 2,
+            },
+        },
+    )
+    summary = find_run_summary(stream_id, session_dir=session_dir)
+    assert summary is not None
+
+    monkeypatch.setattr(
+        routes,
+        "terminal_run_summary_page_for_session",
+        lambda sid, **kwargs: {
+            "summaries": [summary] if sid == origin_session_id else [],
+            "index_size": 0,
+            "index_generation": None,
+            "next_index_end_offset": None,
+            "exhausted": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda run_id: find_run_summary(run_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: read_run_events(session_id, run_id, session_dir=session_dir),
+    )
+    session = SessionStub(
+        session_id=origin_session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+    messages = [
+        {"role": "user", "content": "prior work"},
+        {"role": "assistant", "content": "prior answer", "_ts": 1.0},
+    ]
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert session.save_calls == 1
+    assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
+    assert session.anchor_activity_scenes == {}
+    progress = session.terminal_anchor_reconciliation
+    assert progress["last_non_materializable"]["session_id"] == origin_session_id
+    assert progress["last_non_materializable"]["stream_id"] == stream_id
+    assert (
+        progress["last_non_materializable"]["reason"]
+        == "terminal_session_save_failed_payload_too_large"
+    )
+    assert stream_id in progress["recent_stream_ids"]
+
+
 def test_terminal_journal_materializer_durably_skips_invalid_batch_and_reaches_older_valid(
     monkeypatch,
 ):

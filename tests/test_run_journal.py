@@ -251,6 +251,71 @@ def test_run_journal_emits_recovery_control_when_unpersisted_terminal_payload_ca
     }
 
 
+def test_run_journal_recovery_control_keeps_origin_authority_for_unpersisted_continuation(
+    tmp_path,
+):
+    origin_session_id = "compression_origin_save_failed"
+    continuation_session_id = "compression_continuation_save_failed"
+    run_id = "run_save_failed_huge_continuation"
+    payload = {
+        "terminal_session_persisted": False,
+        "session_id": continuation_session_id,
+        "old_session_id": origin_session_id,
+        "new_session_id": continuation_session_id,
+        "continuation_session_id": continuation_session_id,
+        "session": {
+            "session_id": continuation_session_id,
+            "parent_session_id": origin_session_id,
+            "messages": [
+                {"role": "user", "content": "please answer", "timestamp": 4.0},
+                {
+                    "role": "assistant",
+                    "content": "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000),
+                    "_ts": 5.0,
+                },
+            ],
+            "message_count": 2,
+        },
+    }
+
+    append_run_event(origin_session_id, run_id, "done", payload, session_dir=tmp_path)
+
+    journal = read_run_events(origin_session_id, run_id, session_dir=tmp_path)
+    assert journal["complete"] is True
+    event = journal["events"][0]
+    event_payload = event["payload"]
+    assert event["session_id"] == origin_session_id
+    assert event_payload["session_id"] == continuation_session_id
+    assert event_payload["old_session_id"] == origin_session_id
+    assert event_payload["new_session_id"] == continuation_session_id
+    assert event_payload["continuation_session_id"] == continuation_session_id
+    compact_session = event_payload["session"]
+    assert compact_session["session_id"] == continuation_session_id
+    assert compact_session["parent_session_id"] == origin_session_id
+    assert "messages" not in compact_session
+    assert compact_session["messages_omitted"]["reason"] == "terminal_session_save_failed_payload_too_large"
+    assert event_payload["terminal_recovery_control"] == {
+        "version": "terminal_recovery_control_v1",
+        "reason": "terminal_session_save_failed_payload_too_large",
+        "session_id": origin_session_id,
+        "target_session_id": continuation_session_id,
+        "continuation_session_id": continuation_session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "terminal_state": "completed",
+    }
+    assert event_payload["terminal_disposition"] == {
+        "version": "terminal_disposition_v1",
+        "kind": "consumed_non_materializable",
+        "reason": "terminal_session_save_failed_payload_too_large",
+        "session_id": origin_session_id,
+        "target_session_id": continuation_session_id,
+        "continuation_session_id": continuation_session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+    }
+
+
 def test_run_journal_fails_closed_on_physical_seq_reorder(tmp_path):
     append_run_event("session_1", "run_reorder", "token", {"text": "one"}, session_dir=tmp_path, seq=1)
     append_run_event("session_1", "run_reorder", "token", {"text": "three"}, session_dir=tmp_path, seq=3)

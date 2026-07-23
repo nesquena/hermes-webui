@@ -1089,6 +1089,99 @@ def test_replay_run_journal_keeps_unpersisted_terminal_payload_after_save_failur
     assert data["session"]["messages"][1] == assistant
 
 
+def test_replay_run_journal_emits_overcap_unpersisted_continuation_recovery_control(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "save_failure_origin_replay"
+    continuation_session_id = "save_failure_continuation_replay"
+    run_id = "run_save_failure_huge_replay"
+    huge_answer = "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "token",
+        {"text": "partial answer"},
+        session_dir=session_dir,
+    )
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "apperror",
+        {
+            "terminal_session_persisted": False,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "session": {
+                "session_id": continuation_session_id,
+                "parent_session_id": origin_session_id,
+                "messages": [
+                    {"role": "user", "content": "please recover", "timestamp": 7.0},
+                    {"role": "assistant", "content": huge_answer, "_ts": 8.0},
+                ],
+                "message_count": 2,
+            },
+        },
+        session_dir=session_dir,
+    )
+    compact = run_journal.read_run_events(origin_session_id, run_id, session_dir=session_dir)
+    terminal_payload = compact["events"][-1]["payload"]
+    assert "messages" not in terminal_payload["session"]
+    assert terminal_payload["session"]["session_id"] == continuation_session_id
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is True
+
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in handler.wfile.getvalue().decode("utf-8").splitlines()
+        if line.startswith("data: ")
+    ]
+    data = frames[-1]
+    assert data["session"]["session_id"] == continuation_session_id
+    assert data["session"]["parent_session_id"] == origin_session_id
+    assert "messages" not in data["session"]
+    assert data["terminal_recovery_control"]["session_id"] == origin_session_id
+    assert data["terminal_recovery_control"]["target_session_id"] == continuation_session_id
+    assert data["terminal_recovery_control"]["continuation_session_id"] == continuation_session_id
+    assert data["terminal_recovery_control"]["run_id"] == run_id
+    assert data["terminal_recovery_control"]["stream_id"] == run_id
+    assert data["terminal_disposition"]["session_id"] == origin_session_id
+    assert data["terminal_disposition"]["target_session_id"] == continuation_session_id
+    assert data["terminal_disposition"]["continuation_session_id"] == continuation_session_id
+
+
 def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):
     import api.run_journal as run_journal
     import api.routes as routes

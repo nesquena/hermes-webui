@@ -2080,6 +2080,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return;
   }
+  const _streamOwnerToken=(()=>{
+    const sessionId=String(activeSid||'');
+    const tokenStreamId=String(streamId||'');
+    const nextGeneration=Number((typeof window!=='undefined'&&window._liveStreamOwnerGeneration)||0)+1;
+    const token={sessionId,streamId:tokenStreamId,generation:nextGeneration};
+    if(typeof window!=='undefined'){
+      window._liveStreamOwnerGeneration=nextGeneration;
+      if(!window._liveStreamOwnerTokens||typeof window._liveStreamOwnerTokens!=='object'){
+        window._liveStreamOwnerTokens={};
+      }
+      window._liveStreamOwnerTokens[sessionId]=token;
+    }
+    return token;
+  })();
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
@@ -2162,6 +2176,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _smdReconnect=reconnecting;
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
+  }
+  function _streamOwnerTokenStillCurrent(){
+    if(!_streamOwnerToken||!_streamOwnerToken.sessionId||!_streamOwnerToken.streamId) return false;
+    if(typeof window==='undefined') return true;
+    const tokenStore=window._liveStreamOwnerTokens;
+    const current=tokenStore&&tokenStore[_streamOwnerToken.sessionId];
+    if(!current) return true;
+    return current.streamId===_streamOwnerToken.streamId&&current.generation===_streamOwnerToken.generation;
+  }
+  function _activePaneStreamOwnerStillCurrent(){
+    if(!_streamOwnerTokenStillCurrent()) return false;
+    if(!_isActiveSession()) return false;
+    if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid) return false;
+    if(S.activeStreamId&&S.activeStreamId!==streamId) return false;
+    const inflight=INFLIGHT&&INFLIGHT[activeSid];
+    const inflightStreamId=String(inflight&&inflight.streamId||'');
+    if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return false;
+    return true;
   }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
@@ -5008,8 +5040,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _drainStreamFadeBeforeDone(onDone){
     const drainStartedAt=performance.now();
     let forcedDone=false;
+    let finishInvoked=false;
+    const finish=()=>{
+      if(finishInvoked) return;
+      finishInvoked=true;
+      onDone();
+    };
     const step=()=>{
-      if(!assistantBody){onDone();return;}
+      if(!assistantBody){finish();return;}
+      if(!_activePaneStreamOwnerStillCurrent()){finish();return;}
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
       const anchorProcessText=_streamFadeDomText||target;
@@ -5022,7 +5061,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Let the last released words visibly finish their stagger + fade before
         // the final renderMessages() DOM replacement removes the live spans.
         const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
+        setTimeout(finish, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
         return;
       }
       // Final SSE `done` means the canonical completed session is available.
@@ -5031,10 +5070,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
         forcedDone=true;
         if(_smdParser) _smdEndParser();
-        onDone();
+        finish();
         return;
       }
-      setTimeout(()=>requestAnimationFrame(step), 33);
+      setTimeout(()=>{
+        if(!_activePaneStreamOwnerStillCurrent()){finish();return;}
+        requestAnimationFrame(()=>{
+          if(!_activePaneStreamOwnerStillCurrent()){finish();return;}
+          step();
+        });
+      }, 33);
     };
     step();
   }
@@ -5898,6 +5943,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _finBody=assistantBody;
           _smdEndParser();
           requestAnimationFrame(()=>{
+            if(!_activePaneStreamOwnerStillCurrent()) return;
             if(typeof highlightCode==='function') highlightCode(_finBody);
             if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
             if(typeof renderKatexBlocks==='function') renderKatexBlocks();
@@ -6143,7 +6189,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
-          if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          if(typeof autoReadLastAssistant==='function') setTimeout(()=>{
+            if(_activePaneStreamOwnerStillCurrent()) autoReadLastAssistant();
+          }, 300);
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;

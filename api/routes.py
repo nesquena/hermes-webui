@@ -3287,6 +3287,51 @@ def _terminal_anchor_scene_target_from_payload(
     }
 
 
+def _terminal_payload_target_session_id_from_authority(
+    raw: dict,
+    authority_session_id: str,
+) -> str | None:
+    authority_session_id = str(authority_session_id or "").strip()
+    if not authority_session_id:
+        return None
+    raw_target_session_id = str(raw.get("target_session_id") or "").strip()
+    raw_continuation_session_id = str(raw.get("continuation_session_id") or "").strip()
+    if raw_target_session_id and raw_continuation_session_id and raw_target_session_id != raw_continuation_session_id:
+        return None
+    return raw_target_session_id or raw_continuation_session_id or authority_session_id
+
+
+def _terminal_payload_authorized_target_session_id(
+    terminal_payload: dict,
+    terminal_session: dict,
+    authority_session_id: str,
+    raw_target_session_id: str,
+) -> str | None:
+    authority_session_id = str(authority_session_id or "").strip()
+    raw_target_session_id = str(raw_target_session_id or "").strip()
+    if not authority_session_id or not raw_target_session_id:
+        return None
+    payload_session_id = str(
+        terminal_session.get("session_id")
+        or terminal_payload.get("session_id")
+        or raw_target_session_id
+    ).strip()
+    if raw_target_session_id == authority_session_id:
+        if payload_session_id and payload_session_id != authority_session_id:
+            return None
+        return authority_session_id
+    if payload_session_id != raw_target_session_id:
+        return None
+    if not _terminal_payload_lineage_valid(
+        authority_session_id,
+        raw_target_session_id,
+        terminal_payload,
+        terminal_session,
+    ):
+        return None
+    return raw_target_session_id
+
+
 def _terminal_anchor_scene_disposition_from_payload(
     session_id: str,
     stream_id: str,
@@ -3303,23 +3348,46 @@ def _terminal_anchor_scene_disposition_from_payload(
     kind = str(raw.get("kind") or "").strip()
     if kind != "consumed_non_materializable":
         return None
-    target_session_id = str(raw.get("session_id") or "").strip()
+    authority_session_id = str(raw.get("session_id") or "").strip()
     target_run_id = str(raw.get("run_id") or "").strip()
     target_stream_id = str(raw.get("stream_id") or "").strip()
     if (
-        target_session_id != session_id
+        authority_session_id != session_id
         or target_run_id != run_id
         or target_stream_id != stream_id
     ):
         return None
-    return {
+    raw_target_session_id = _terminal_payload_target_session_id_from_authority(
+        raw,
+        authority_session_id,
+    )
+    if raw_target_session_id is None:
+        return None
+    terminal_session = (
+        terminal_payload.get("session")
+        if isinstance(terminal_payload.get("session"), dict)
+        else {}
+    )
+    target_session_id = _terminal_payload_authorized_target_session_id(
+        terminal_payload,
+        terminal_session,
+        authority_session_id,
+        raw_target_session_id,
+    )
+    if target_session_id is None:
+        return None
+    disposition = {
         "version": "terminal_disposition_v1",
         "kind": kind,
         "reason": str(raw.get("reason") or "").strip(),
-        "session_id": target_session_id,
+        "session_id": authority_session_id,
         "run_id": target_run_id,
         "stream_id": target_stream_id,
     }
+    if target_session_id != authority_session_id:
+        disposition["target_session_id"] = target_session_id
+        disposition["continuation_session_id"] = target_session_id
+    return disposition
 
 
 _RUN_JOURNAL_COMPLETE_READ_MAX_PAGES = 128
@@ -18464,6 +18532,57 @@ def _terminal_replay_binding_matches_session(
     )
 
 
+def _terminal_recovery_control_from_payload(
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+    payload: dict,
+    session_payload: dict,
+) -> dict | None:
+    if not isinstance(payload, dict) or not isinstance(session_payload, dict):
+        return None
+    raw = payload.get("terminal_recovery_control")
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("version") != "terminal_recovery_control_v1":
+        return None
+    authority_session_id = str(raw.get("session_id") or "").strip()
+    target_run_id = str(raw.get("run_id") or "").strip()
+    target_stream_id = str(raw.get("stream_id") or "").strip()
+    if (
+        authority_session_id != str(session_id or "").strip()
+        or target_run_id != str(run_id or "").strip()
+        or target_stream_id != str(stream_id or "").strip()
+    ):
+        return None
+    raw_target_session_id = _terminal_payload_target_session_id_from_authority(
+        raw,
+        authority_session_id,
+    )
+    if raw_target_session_id is None:
+        return None
+    target_session_id = _terminal_payload_authorized_target_session_id(
+        payload,
+        session_payload,
+        authority_session_id,
+        raw_target_session_id,
+    )
+    if target_session_id is None:
+        return None
+    control = {
+        "version": "terminal_recovery_control_v1",
+        "reason": str(raw.get("reason") or "").strip(),
+        "session_id": authority_session_id,
+        "run_id": target_run_id,
+        "stream_id": target_stream_id,
+        "terminal_state": str(raw.get("terminal_state") or "").strip(),
+    }
+    if target_session_id != authority_session_id:
+        control["target_session_id"] = target_session_id
+        control["continuation_session_id"] = target_session_id
+    return control
+
+
 def _hydrate_replayed_terminal_payload(session_id: str, run_id: str, payload):
     if not isinstance(payload, dict):
         return payload
@@ -18477,6 +18596,25 @@ def _hydrate_replayed_terminal_payload(session_id: str, run_id: str, payload):
     if not payload_session_id:
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     if not _terminal_payload_session_persisted(payload, session_payload):
+        if hydration_required:
+            recovery_control = _terminal_recovery_control_from_payload(
+                session_id,
+                run_id,
+                run_id,
+                payload,
+                session_payload,
+            )
+            terminal_disposition = _terminal_anchor_scene_disposition_from_payload(
+                session_id,
+                run_id,
+                run_id,
+                payload,
+            )
+            if recovery_control is not None and terminal_disposition is not None:
+                recovered = dict(payload)
+                recovered["terminal_recovery_control"] = recovery_control
+                recovered["terminal_disposition"] = terminal_disposition
+                return recovered
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     target = _terminal_replay_target_from_payload(payload, payload_session_id, run_id, run_id)
     if target is None:
