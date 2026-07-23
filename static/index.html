@@ -1783,6 +1783,7 @@
     <h3 id="kanbanBoardModalTitle" data-i18n="kanban_new_board">New board</h3>
     <input type="hidden" id="kanbanBoardModalMode" value="create">
     <input type="hidden" id="kanbanBoardModalSlug" value="">
+    <input type="hidden" id="kanbanBoardModalOriginalDefaultWorkdir" value="">
     <div class="kanban-modal-row">
       <label for="kanbanBoardModalName" data-i18n="kanban_board_name">Name</label>
       <input type="text" id="kanbanBoardModalName" maxlength="64" placeholder="e.g. Experiments" autocomplete="off">
@@ -1794,6 +1795,11 @@
     <div class="kanban-modal-row">
       <label for="kanbanBoardModalDesc" data-i18n="kanban_board_description">Description (optional)</label>
       <textarea id="kanbanBoardModalDesc" maxlength="200"></textarea>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalDefaultWorkdir" data-i18n="kanban_board_default_workdir">Default workspace path</label>
+      <input type="text" id="kanbanBoardModalDefaultWorkdir" list="kanbanBoardModalWorkdirs" data-i18n-placeholder="kanban_board_default_workdir_placeholder" placeholder="Workspace path (optional)" autocomplete="off">
+      <datalist id="kanbanBoardModalWorkdirs"></datalist>
     </div>
     <div class="kanban-modal-row-inline">
       <div class="kanban-modal-row">
