@@ -393,6 +393,49 @@ def test_run_journal_writer_bounds_unpersisted_utf8_terminal_events_with_origin_
         }
 
 
+def test_run_journal_bounds_repeated_oversized_unpersisted_terminal_rows(tmp_path):
+    session_id = "session_repeated_oversized_terminal"
+    run_id = "run_repeated_oversized_terminal"
+    huge_tail = "终" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    for seq in range(2):
+        writer.append_sse_event(
+            "apperror",
+            {
+                "terminal_session_persisted": False,
+                "type": "session_save_failed",
+                "session": {
+                    "session_id": session_id,
+                    "messages": [
+                        {"role": "user", "content": f"prompt {seq}", "timestamp": seq * 10 + 1},
+                        {"role": "assistant", "content": huge_tail, "_ts": seq * 10 + 2},
+                        {"role": "assistant", "content": huge_tail, "_ts": seq * 10 + 3},
+                    ],
+                    "message_count": 3,
+                },
+            },
+        )
+
+    path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+    assert path.stat().st_size < run_journal._RUN_EVENTS_MAX_BYTES
+    journal = read_run_events(session_id, run_id, session_dir=tmp_path)
+    assert journal["complete"] is True
+    assert [event["seq"] for event in journal["events"]] == [1, 2]
+    for event in journal["events"]:
+        payload = event["payload"]
+        assert "messages" not in payload["session"]
+        assert payload["session"]["messages_omitted"]["reason"] == "terminal_session_save_failed_payload_too_large"
+        assert payload["session"]["terminal_recovery_delta"] == {
+            "version": "terminal_recovery_delta_v1",
+            "reason": "terminal_session_save_failed_payload_too_large",
+            "message_count": 3,
+            "messages_offset": 3,
+        }
+        assert payload["terminal_recovery_control"]["terminal_state"] == "errored"
+        assert payload["terminal_disposition"]["kind"] == "consumed_non_materializable"
+
+
 def test_run_journal_fails_closed_on_physical_seq_reorder(tmp_path):
     append_run_event("session_1", "run_reorder", "token", {"text": "one"}, session_dir=tmp_path, seq=1)
     append_run_event("session_1", "run_reorder", "token", {"text": "three"}, session_dir=tmp_path, seq=3)

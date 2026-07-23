@@ -919,8 +919,10 @@ def _settle_gateway_terminal_payload_locked(
     session.workspace = str(workspace)
     session.model = model
     session.model_provider = model_provider
+    terminal_session_persisted = False
     try:
         session.save()
+        terminal_session_persisted = True
     except Exception:
         logger.debug("Failed to persist gateway terminal payload settlement", exc_info=True)
     session_payload = redact_session_data(
@@ -928,6 +930,9 @@ def _settle_gateway_terminal_payload_locked(
     )
     payload["session"] = session_payload
     payload["session_id"] = session.session_id
+    payload["terminal_session_persisted"] = terminal_session_persisted
+    if terminal_session_persisted:
+        payload["terminal_session_persisted_session_id"] = session.session_id
     terminal_target = _gateway_terminal_message_target_from_session_payload(
         session_id,
         stream_id,

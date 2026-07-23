@@ -83,6 +83,11 @@ function _isSessionCurrentPane(sid) {
 }
 
 function _streamDoneWouldOverwriteNewerPane(activeSid, streamId){
+  if(
+    activeSid &&
+    S&&S.session&&S.session.session_id===activeSid &&
+    typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid
+  ) return true;
   if(!_isSessionCurrentPane(activeSid)) return false;
   const expectedStreamId=String(streamId||'');
   const activeStreamId=String(S&&S.activeStreamId||'');
@@ -2182,11 +2187,50 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof window==='undefined') return true;
     const tokenStore=window._liveStreamOwnerTokens;
     const current=tokenStore&&tokenStore[_streamOwnerToken.sessionId];
-    if(!current) return true;
+    if(!current) return false;
     return current.streamId===_streamOwnerToken.streamId&&current.generation===_streamOwnerToken.generation;
   }
-  function _activePaneStreamOwnerStillCurrent(){
+  function _completionOwnerStillCurrent(doneData=null){
     if(!_streamOwnerTokenStillCurrent()) return false;
+    const currentSid=String(S&&S.session&&S.session.session_id||'');
+    if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid) return false;
+    const inflight=INFLIGHT&&INFLIGHT[activeSid];
+    const inflightStreamId=String(inflight&&inflight.streamId||'');
+    if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return false;
+    if(currentSid===activeSid){
+      const activeStreamId=String(S&&S.activeStreamId||'');
+      if(activeStreamId&&activeStreamId!==String(streamId||'')) return false;
+      return true;
+    }
+    const payload=doneData&&typeof doneData==='object'?doneData:{};
+    const completedSession=payload.session&&typeof payload.session==='object'?payload.session:{};
+    const continuationSid=String(
+      payload.new_session_id||
+      payload.continuation_session_id||
+      completedSession.session_id||
+      ''
+    );
+    const originSid=String(
+      payload.old_session_id||
+      completedSession.parent_session_id||
+      activeSid||
+      ''
+    );
+    if(currentSid&&currentSid!==activeSid){
+      if(continuationSid===currentSid&&originSid===activeSid){
+        const activeStreamId=String(S&&S.activeStreamId||'');
+        if(activeStreamId&&activeStreamId!==String(streamId||'')) return false;
+        const currentInflight=INFLIGHT&&INFLIGHT[currentSid];
+        const currentInflightStreamId=String(currentInflight&&currentInflight.streamId||'');
+        if(currentInflightStreamId&&currentInflightStreamId!==String(streamId||'')) return false;
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+  function _activePaneStreamOwnerStillCurrent(){
+    if(!_completionOwnerStillCurrent()) return false;
     if(!_isActiveSession()) return false;
     if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==activeSid) return false;
     if(S.activeStreamId&&S.activeStreamId!==streamId) return false;
@@ -2208,13 +2252,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
   function _clearActivePaneInflightIfOwner(){
-    if(_isActiveSession()) clearInflight();
+    if(_activePaneStreamOwnerStillCurrent()) clearInflight();
   }
   function _approvalBelongsToOwner(){
-    return _approvalSessionId===activeSid||(!_approvalSessionId&&_isActiveSession());
+    return _activePaneStreamOwnerStillCurrent()&&(_approvalSessionId===activeSid||(!_approvalSessionId&&_isActiveSession()));
   }
   function _clarifyBelongsToOwner(){
-    return _clarifySessionId===activeSid||(!_clarifySessionId&&_isActiveSession());
+    return _activePaneStreamOwnerStillCurrent()&&(_clarifySessionId===activeSid||(!_clarifySessionId&&_isActiveSession()));
   }
   function _clearApprovalForOwner(){
     _clearApprovalPendingForSession(activeSid);
@@ -2229,6 +2273,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     hideClarifyCard(true, reason||'terminal');
   }
   function _clearOwnerInflightState(){
+    if(!_streamOwnerTokenStillCurrent()) return;
+    const inflight=INFLIGHT&&INFLIGHT[activeSid];
+    const inflightStreamId=String(inflight&&inflight.streamId||'');
+    if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return;
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
@@ -2289,11 +2337,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _setActivePaneIdleIfOwner(){
-    if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
-      setBusy(false);
-      setComposerStatus('');
-      if(typeof setStatus==='function') setStatus('');
-    }
+    if(!_activePaneStreamOwnerStillCurrent()) return;
+    setBusy(false);
+    setComposerStatus('');
+    if(typeof setStatus==='function') setStatus('');
   }
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
@@ -5037,7 +5084,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ? parsed.displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
   }
-  function _drainStreamFadeBeforeDone(onDone){
+  function _drainStreamFadeBeforeDone(onDone, options={}){
+    const ownerStillCurrent=typeof options.ownerStillCurrent==='function'
+      ? options.ownerStillCurrent
+      : _activePaneStreamOwnerStillCurrent;
+    const onStale=typeof options.onStale==='function'?options.onStale:null;
     const drainStartedAt=performance.now();
     let forcedDone=false;
     let finishInvoked=false;
@@ -5046,9 +5097,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       finishInvoked=true;
       onDone();
     };
+    const stale=()=>{
+      if(finishInvoked) return;
+      finishInvoked=true;
+      if(onStale) onStale();
+    };
     const step=()=>{
+      if(!ownerStillCurrent()){stale();return;}
       if(!assistantBody){finish();return;}
-      if(!_activePaneStreamOwnerStillCurrent()){finish();return;}
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
       const anchorProcessText=_streamFadeDomText||target;
@@ -5061,7 +5117,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Let the last released words visibly finish their stagger + fade before
         // the final renderMessages() DOM replacement removes the live spans.
         const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(finish, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
+        setTimeout(()=>{
+          if(!ownerStillCurrent()){stale();return;}
+          finish();
+        }, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
         return;
       }
       // Final SSE `done` means the canonical completed session is available.
@@ -5074,9 +5133,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       setTimeout(()=>{
-        if(!_activePaneStreamOwnerStillCurrent()){finish();return;}
+        if(!ownerStillCurrent()){stale();return;}
         requestAnimationFrame(()=>{
-          if(!_activePaneStreamOwnerStillCurrent()){finish();return;}
+          if(!ownerStillCurrent()){stale();return;}
           step();
         });
       }, 33);
@@ -5928,8 +5987,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
+      const _teardownStaleDoneOwner=()=>{
+        _cancelAnimationFramePendingStreamRender();
+        _streamFadeCleanupReduceMotionListener();
+        _scheduleAnchorRegistryCleanup(120000);
+        _closeSource(source);
+      };
       const _finishDone=()=>{
-        if(_streamDoneWouldOverwriteNewerPane(activeSid,streamId)){_closeSource(source);return;}
+        if(!_completionOwnerStillCurrent(_doneData)||_streamDoneWouldOverwriteNewerPane(activeSid,streamId)){
+          _teardownStaleDoneOwner();
+          return;
+        }
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
         // can reintroduce a stale thinking card or duplicate content.
@@ -6149,8 +6217,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
           // force-reloading immediately after "done" — the event already
           // delivered the final messages and tool calls.
-          if(typeof window!=='undefined') window._streamJustFinished=true;
-          setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
+          if(typeof window!=='undefined'&&_activePaneStreamOwnerStillCurrent()){
+            const _finishedGeneration=_streamOwnerToken&&_streamOwnerToken.generation;
+            window._streamJustFinished=true;
+            setTimeout(()=>{
+              if(
+                typeof window!=='undefined'&&
+                _streamOwnerTokenStillCurrent()&&
+                _streamOwnerToken&&_streamOwnerToken.generation===_finishedGeneration
+              ) window._streamJustFinished=false;
+            }, 5000);
+          }
           // Expand render window to cover all messages so the done render
           // doesn't hide Activity behind a tiny window (winSize=50).
           if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
@@ -6226,7 +6303,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
-        _drainStreamFadeBeforeDone(_finishDone);
+        _drainStreamFadeBeforeDone(_finishDone,{
+          ownerStillCurrent:()=>_completionOwnerStillCurrent(_doneData),
+          onStale:_teardownStaleDoneOwner,
+        });
         return;
       }
       _finishDone();

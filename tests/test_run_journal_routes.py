@@ -5,7 +5,9 @@ from urllib.parse import urlparse
 import io
 import json
 import queue
+import sys
 import threading
+import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1271,6 +1273,309 @@ def test_replay_run_journal_completes_writer_overcap_unpersisted_terminal_events
         assert data["terminal_recovery_control"]["terminal_state"] == expected_terminal_state
         assert data["terminal_disposition"]["session_id"] == origin_session_id
         assert data["terminal_disposition"]["target_session_id"] == continuation_session_id
+
+
+def test_standard_streaming_save_failure_producers_emit_bounded_recovery_rows(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+    import api.routes as routes
+    import api.run_journal as run_journal
+    import api.streaming as streaming
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(streaming, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("gpt-4o", "openai", None))
+    monkeypatch.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+
+    huge_answer = "终" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    cases = [
+        ("done_save_failure", "apperror", "errored"),
+        ("apperror_save_failure", "apperror", "tool_limit_reached"),
+        ("cancel_save_failure", "cancel", "interrupted-by-user"),
+    ]
+    original_session_save = models.Session.save
+    save_failure_plans = {}
+
+    def _controlled_session_save(self, *args, **kwargs):
+        plan = save_failure_plans.get(getattr(self, "session_id", None))
+        if plan is not None:
+            plan["count"] += 1
+            if plan["count"] > plan["allowed_successes"]:
+                raise OSError(f"forced terminal save failure for {plan['case_name']}")
+        return original_session_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", _controlled_session_save)
+
+    def _make_fake_agent(bound_case_name, bound_session_id, bound_stream_id):
+        class FakeAgent:
+            def __init__(
+                self,
+                *args,
+                stream_delta_callback=None,
+                **kwargs,
+            ):
+                self.session_id = bound_session_id
+                self.stream_delta_callback = stream_delta_callback
+                self.context_compressor = None
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+                self.session_estimated_cost_usd = None
+                self.session_cache_read_tokens = 0
+                self.session_cache_write_tokens = 0
+                self.reasoning_config = None
+                self.ephemeral_system_prompt = None
+                self._last_error = (
+                    "maximum number of tool-calling iterations reached"
+                    if bound_case_name == "apperror_save_failure"
+                    else None
+                )
+
+            def run_conversation(self, **kwargs):
+                if self.stream_delta_callback:
+                    self.stream_delta_callback("终")
+                if bound_case_name == "cancel_save_failure":
+                    streaming.CANCEL_FLAGS[bound_stream_id].set()
+                messages = [
+                    {"role": "user", "content": kwargs.get("persist_user_message", ""), "timestamp": 1.0},
+                    {"role": "assistant", "content": huge_answer, "timestamp": 2.0},
+                ]
+                if bound_case_name == "apperror_save_failure":
+                    return {
+                        "failed": True,
+                        "error": "maximum number of tool-calling iterations reached",
+                        "messages": messages,
+                    }
+                return {"messages": messages}
+
+            def interrupt(self, _message):
+                return None
+
+        return FakeAgent
+
+    for case_name, expected_event, expected_terminal_state in cases:
+        session_id = f"standard_origin_{case_name}"
+        stream_id = f"standard_stream_{case_name}"
+        session = models.Session(
+            session_id=session_id,
+            workspace=str(tmp_path),
+            model="gpt-4o",
+            model_provider="openai",
+            messages=[],
+            context_messages=[],
+        )
+        session.active_stream_id = stream_id
+        session.pending_user_message = "Do the long task."
+        session.pending_started_at = 1.0
+        session.save()
+        models.SESSIONS[session_id] = session
+
+        save_failure_plans[session_id] = {
+            "allowed_successes": 1,
+            "case_name": case_name,
+            "count": 0,
+        }
+        event_queue = queue.Queue()
+        streaming.STREAMS[stream_id] = event_queue
+
+        FakeAgent = _make_fake_agent(case_name, session_id, stream_id)
+        monkeypatch.setattr(streaming, "get_session", lambda _sid, _session=session: _session)
+        monkeypatch.setattr(streaming, "_get_ai_agent", lambda _FakeAgent=FakeAgent: _FakeAgent)
+
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text="Do the long task.",
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+            model_provider="openai",
+        )
+
+        queued = list(event_queue.queue)
+        assert any(item[0] == expected_event for item in queued), queued
+        path = session_dir / "_run_journal" / session_id / f"{stream_id}.jsonl"
+        assert path.stat().st_size < run_journal._RUN_EVENTS_MAX_BYTES
+        journal = run_journal.read_run_events(session_id, stream_id, session_dir=session_dir)
+        assert journal["complete"] is True
+        terminal_event = journal["events"][-1]
+        assert terminal_event["event"] == expected_event
+        assert terminal_event["terminal_state"] == expected_terminal_state
+        payload = terminal_event["payload"]
+        assert payload["terminal_session_persisted"] is False
+        assert payload["session"]["session_id"] == session_id
+        if "messages" in payload["session"]:
+            assert payload["session"]["terminal_recovery_delta"]["reason"] == "terminal_session_save_failed"
+            assert payload["session"]["terminal_recovery_delta"]["message_count"] >= 1
+        else:
+            assert (
+                payload["session"]["messages_omitted"]["reason"]
+                == "terminal_session_save_failed_payload_too_large"
+            )
+            assert payload["terminal_recovery_control"] == {
+                "version": "terminal_recovery_control_v1",
+                "reason": "terminal_session_save_failed_payload_too_large",
+                "session_id": session_id,
+                "run_id": stream_id,
+                "stream_id": stream_id,
+                "terminal_state": expected_terminal_state,
+            }
+            assert payload["terminal_disposition"] == {
+                "version": "terminal_disposition_v1",
+                "kind": "consumed_non_materializable",
+                "reason": "terminal_session_save_failed_payload_too_large",
+                "session_id": session_id,
+                "run_id": stream_id,
+                "stream_id": stream_id,
+            }
+
+        handler = SimpleNamespace(wfile=io.BytesIO())
+        assert routes._replay_run_journal(handler, stream_id, 0, include_stale=False) is True
+        body = handler.wfile.getvalue().decode("utf-8")
+        assert f"event: {expected_event}\n" in body
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in body.splitlines()
+            if line.startswith("data: ")
+        ]
+        replay_payload = frames[-1]
+        if "terminal_recovery_control" in replay_payload:
+            assert replay_payload["terminal_recovery_control"]["terminal_state"] == expected_terminal_state
+        else:
+            assert (
+                replay_payload["session"]["terminal_recovery_delta"]["reason"]
+                == "terminal_session_save_failed"
+            )
+
+        streaming.STREAMS.pop(stream_id, None)
+        streaming.CANCEL_FLAGS.pop(stream_id, None)
+        streaming.AGENT_INSTANCES.pop(stream_id, None)
+
+
+def test_gateway_save_failure_producers_emit_bounded_recovery_rows(
+    tmp_path,
+    monkeypatch,
+):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.routes as routes
+    import api.run_journal as run_journal
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+
+    huge_answer = "终" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    cases = [
+        ("apperror", {"type": "tool_limit_reached", "message": "tool limit"}, "tool_limit_reached"),
+        ("cancel", {"message": "Cancelled by user"}, "interrupted-by-user"),
+    ]
+    for event_name, event_payload, expected_terminal_state in cases:
+        session_id = f"gateway_origin_{event_name}_save_failed"
+        stream_id = f"gateway_stream_{event_name}_save_failed"
+        session = models.Session(
+            session_id=session_id,
+            workspace=str(tmp_path),
+            model="gpt-4o",
+            model_provider="openai",
+            messages=[
+                {"role": "user", "content": "Do the long task.", "timestamp": 1.0},
+                {"role": "assistant", "content": huge_answer, "timestamp": 2.0},
+            ],
+            context_messages=[],
+        )
+        session.active_stream_id = stream_id
+        session.save()
+        models.SESSIONS[session_id] = session
+
+        def _fail_save(*_args, **_kwargs):
+            raise OSError(f"forced gateway save failure for {event_name}")
+
+        session.save = _fail_save
+        monkeypatch.setattr(gateway_chat, "get_session", lambda _sid, _session=session: _session)
+        payload = gateway_chat._settle_gateway_terminal_event_payload(
+            session_id,
+            stream_id,
+            str(tmp_path),
+            "gpt-4o",
+            "openai",
+            event_name,
+            event_payload,
+        )
+        writer = run_journal.RunJournalWriter(session_id, stream_id, session_dir=session_dir)
+        writer.append_sse_event(event_name, payload)
+
+        path = session_dir / "_run_journal" / session_id / f"{stream_id}.jsonl"
+        assert path.stat().st_size < run_journal._RUN_EVENTS_MAX_BYTES
+        journal = run_journal.read_run_events(session_id, stream_id, session_dir=session_dir)
+        assert journal["complete"] is True
+        payload = journal["events"][-1]["payload"]
+        assert payload["terminal_session_persisted"] is False
+        assert payload["session"]["session_id"] == session_id
+        assert journal["events"][-1]["terminal_state"] == expected_terminal_state
+        if "messages" in payload["session"]:
+            assert payload["session"]["terminal_recovery_delta"]["reason"] == "terminal_session_save_failed"
+            assert payload["session"]["terminal_recovery_delta"]["message_count"] >= 1
+        else:
+            assert (
+                payload["session"]["messages_omitted"]["reason"]
+                == "terminal_session_save_failed_payload_too_large"
+            )
+            assert payload["terminal_recovery_control"]["session_id"] == session_id
+            assert payload["terminal_recovery_control"]["terminal_state"] == expected_terminal_state
+            assert payload["terminal_disposition"]["session_id"] == session_id
+
+        handler = SimpleNamespace(wfile=io.BytesIO())
+        assert routes._replay_run_journal(handler, stream_id, 0, include_stale=False) is True
+        body = handler.wfile.getvalue().decode("utf-8")
+        assert f"event: {event_name}\n" in body
 
 
 def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):

@@ -113,6 +113,7 @@ def test_done_owner_gate_rejects_same_pane_newer_stream():
         "same_session_new_stream",
         "origin_continuation_new_stream",
         "session_switch",
+        "completed_session_switch",
     ],
 )
 def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
@@ -125,6 +126,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         r"""
         const assert = require('assert');
         const fs = require('fs');
+        const vm = require('vm');
         const messagesSrc = fs.readFileSync('static/messages.js', 'utf8');
         const scenario = '__SCENARIO__';
 
@@ -140,7 +142,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
             this.children = [];
             this.attributes = {};
             this.dataset = {};
-            this.style = {};
+            this.style = {setProperty(){}};
             this.parentElement = null;
             this.isConnected = true;
             this.textContent = '';
@@ -170,6 +172,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           _removeIdleLiveAssistantTurnCalls: [],
           _removeIdleLiveAssistantTurn(sid, streamId){ this._removeIdleLiveAssistantTurnCalls.push([sid, streamId]); },
           _streamJustFinished: false,
+          matchMedia(){ return {matches:false, addEventListener(){}, removeEventListener(){}, addListener(){}, removeListener(){}}; },
           addEventListener(){},
           removeEventListener(){},
         };
@@ -181,6 +184,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           wasDiscarded: false,
           createElement: tag => new FakeElement(tag),
           createTextNode: text => { const n = new FakeElement('#text'); n.textContent = String(text); return n; },
+          createDocumentFragment: () => new FakeElement('#fragment'),
+          getElementById: id => byId[id] || null,
           querySelector: () => null,
           addEventListener(){},
           removeEventListener(){},
@@ -208,19 +213,10 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._resetStreamScrollFollow = () => {};
         global._suspendSessionStreamForLiveChat = () => {};
         global._bindStreamHiddenTracker = () => {};
-        global._shouldUseLiveProseFade = () => false;
-        global._isSessionCurrentPane = sid => S.session && S.session.session_id === sid;
+        global._shouldUseLiveProseFade = () => true;
+        global._shouldUseTransparentStreamFade = () => false;
         global._isDocumentVisibleAndFocused = () => true;
         global._isSessionActivelyViewed = sid => S.session && S.session.session_id === sid;
-        global._streamDoneWouldOverwriteNewerPane = function(activeSid, streamId){
-          if(!_isSessionCurrentPane(activeSid)) return false;
-          const expectedStreamId = String(streamId || '');
-          const activeStreamId = String(S && S.activeStreamId || '');
-          if(activeStreamId && activeStreamId !== expectedStreamId) return true;
-          const inflight = INFLIGHT && INFLIGHT[activeSid];
-          const inflightStreamId = String(inflight && inflight.streamId || '');
-          return !!(inflightStreamId && inflightStreamId !== expectedStreamId);
-        };
         global._stripXmlToolCalls = value => String(value || '');
         global._extractInlineThinkingFromContent = (content, reasoning) => {
           const visible = String(content || '');
@@ -232,27 +228,27 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._renderMessagesWithScrollSnapshot = () => { renderCount += 1; };
         global.renderMessages = () => { renderCount += 1; };
         global.syncTopbar = () => {};
-        global.renderSessionList = () => {};
-        global.setBusy = value => { S.busy = !!value; };
-        global.setComposerStatus = () => {};
-        global.setStatus = () => {};
-        global.clearInflightState = () => {};
-        global.clearInflight = () => {};
+        global.renderSessionList = () => { calls.renderSessionList += 1; };
+        global.setBusy = value => { calls.setBusy.push(value); S.busy = !!value; };
+        global.setComposerStatus = value => { calls.composerStatus.push(value); };
+        global.setStatus = value => { calls.status.push(value); };
+        global.clearInflightState = sid => { calls.clearInflightState.push(sid); };
+        global.clearInflight = () => { calls.clearInflight += 1; };
         global._resumeSessionStreamAfterLiveChat = () => {};
         global.clearLiveToolCards = () => {};
         global.removeThinking = () => {};
-        global.finalizeThinkingCard = () => {};
+        global.finalizeThinkingCard = () => { calls.finalizeThinking += 1; };
         global._clearApprovalPendingForSession = () => {};
         global._clearClarifyPendingForSession = () => {};
-        global.stopApprovalPolling = () => {};
-        global.stopClarifyPolling = () => {};
-        global.hideApprovalCard = () => {};
-        global.hideClarifyCard = () => {};
+        global.stopApprovalPolling = () => { calls.stopApproval += 1; };
+        global.stopClarifyPolling = () => { calls.stopClarify += 1; };
+        global.hideApprovalCard = () => { calls.hideApproval += 1; };
+        global.hideClarifyCard = () => { calls.hideClarify += 1; };
         global._markSessionViewed = () => {};
         global._markSessionCompletionUnread = () => {};
         global._markSessionCompletedInList = () => {};
-        global.playNotificationSound = () => {};
-        global.sendBrowserNotification = () => {};
+        global.playNotificationSound = () => { calls.playNotification += 1; };
+        global.sendBrowserNotification = () => { calls.browserNotification += 1; };
         global._shouldForceCompletionNotification = () => false;
         global._completionNotificationPreviewText = () => '';
         global.scrollIfPinned = () => {};
@@ -278,8 +274,26 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global.addCopyButtons = () => { calls.copy += 1; };
         global.highlightCode = () => { calls.highlight += 1; };
         global.renderKatexBlocks = () => { calls.katex += 1; };
+        global._loadingSessionId = null;
 
-        const calls = {highlight:0, copy:0, katex:0};
+        const calls = {
+          highlight:0,
+          copy:0,
+          katex:0,
+          setBusy:[],
+          composerStatus:[],
+          status:[],
+          clearInflight:0,
+          clearInflightState:[],
+          finalizeThinking:0,
+          stopApproval:0,
+          stopClarify:0,
+          hideApproval:0,
+          hideClarify:0,
+          renderSessionList:0,
+          playNotification:0,
+          browserNotification:0,
+        };
         let renderCount = 0;
         const S = global.S = {
           session: {session_id:'sid-1', message_count:1, pending_started_at:1},
@@ -307,10 +321,41 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         }
         global.EventSource = FakeEventSource;
 
-        const attachStart = messagesSrc.indexOf('function attachLiveStream(');
+        const attachStart = messagesSrc.indexOf('function _isSessionCurrentPane(');
         const attachEnd = messagesSrc.indexOf('\nfunction transcript(){', attachStart);
         if(attachStart < 0 || attachEnd < 0) throw new Error('attachLiveStream source boundary not found');
-        eval(messagesSrc.slice(attachStart, attachEnd));
+        const context = vm.createContext(global);
+        vm.runInContext(messagesSrc.slice(attachStart, attachEnd), context, {filename:'static/messages.js'});
+        const attachLiveStream = context.attachLiveStream;
+
+        function drainQueuedWork(){
+          let guard = 0;
+          while((timeoutQueue.length || rafQueue.length) && guard++ < 100){
+            while(timeoutQueue.length) timeoutQueue.shift()();
+            while(rafQueue.length) rafQueue.shift()();
+          }
+          assert.ok(guard < 100, 'queued callbacks should drain');
+        }
+        function resetMutationCalls(){
+          calls.highlight = 0;
+          calls.copy = 0;
+          calls.katex = 0;
+          calls.setBusy = [];
+          calls.composerStatus = [];
+          calls.status = [];
+          calls.clearInflight = 0;
+          calls.clearInflightState = [];
+          calls.finalizeThinking = 0;
+          calls.stopApproval = 0;
+          calls.stopClarify = 0;
+          calls.hideApproval = 0;
+          calls.hideClarify = 0;
+          calls.renderSessionList = 0;
+          calls.playNotification = 0;
+          calls.browserNotification = 0;
+          renderCount = 0;
+          window._removeIdleLiveAssistantTurnCalls = [];
+        }
 
         attachLiveStream('sid-1', 'stream-old');
         const source = FakeEventSource.instances[0];
@@ -334,22 +379,42 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           },
           usage:{duration_seconds:1},
         });
-        assert.ok(rafQueue.length > 0, 'done should schedule postprocess RAF for the live assistant body');
-        if(scenario === 'session_switch'){
-          S.session = {session_id:'sid-2', message_count:1};
+        assert.ok(timeoutQueue.length > 0, 'fade-enabled done should remain pending behind a timeout');
+        if(scenario === 'session_switch' || scenario === 'completed_session_switch'){
+          if(scenario === 'session_switch') global._loadingSessionId = 'sid-2';
+          S.session = {
+            session_id: scenario === 'session_switch' ? 'sid-1' : 'sid-2',
+            message_count:1,
+            pending_started_at:1,
+          };
           S.messages = [{role:'user', content:'next question'}];
           S.activeStreamId = 'stream-new';
-          INFLIGHT['sid-2'] = {streamId:'stream-new'};
+          attachLiveStream('sid-2', 'stream-new');
+        }else if(scenario === 'origin_continuation_new_stream'){
+          S.session = {session_id:'sid-cont', parent_session_id:'sid-1', message_count:1, pending_started_at:1};
+          S.messages = [{role:'user', content:'continuation question'}];
+          S.activeStreamId = 'stream-new';
+          attachLiveStream('sid-cont', 'stream-new');
         }else{
           S.activeStreamId = 'stream-new';
-          INFLIGHT[S.session.session_id] = {streamId:'stream-new'};
+          attachLiveStream('sid-1', 'stream-new');
         }
-        INFLIGHT['sid-1'] = {streamId:'stream-new'};
-        while(rafQueue.length) rafQueue.shift()();
+        resetMutationCalls();
+        drainQueuedWork();
 
         assert.strictEqual(calls.highlight, 0, 'old done RAF must not highlight after owner rotation');
         assert.strictEqual(calls.copy, 0, 'old done RAF must not add copy buttons after owner rotation');
         assert.strictEqual(calls.katex, 0, 'old done RAF must not render KaTeX after owner rotation');
+        assert.deepStrictEqual(calls.setBusy, [], 'stale done must not clear busy state for the newer owner');
+        assert.deepStrictEqual(calls.composerStatus, [], 'stale done must not clear composer status for the newer owner');
+        assert.deepStrictEqual(calls.status, [], 'stale done must not clear status for the newer owner');
+        assert.strictEqual(calls.clearInflight, 0, 'stale done must not clear active-pane inflight state');
+        assert.strictEqual(calls.finalizeThinking, 0, 'stale done must not finalize newer-owner thinking UI');
+        assert.strictEqual(calls.hideApproval, 0, 'stale done must not hide newer-owner approval UI');
+        assert.strictEqual(calls.hideClarify, 0, 'stale done must not hide newer-owner clarify UI');
+        assert.strictEqual(renderCount, 0, 'stale done must not render the newer pane');
+        assert.deepStrictEqual(window._removeIdleLiveAssistantTurnCalls, [], 'stale done must not remove newer live turns');
+        assert.strictEqual(source.readyState, 2, 'old EventSource should still be closed as stale-owner teardown');
         assert.strictEqual(S.activeStreamId, 'stream-new');
         process.stdout.write(JSON.stringify({calls, renderCount, activeStreamId:S.activeStreamId}));
         """
