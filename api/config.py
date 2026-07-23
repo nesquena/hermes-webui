@@ -3203,6 +3203,15 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
+_OPENAI_MAX_REASONING_MODELS = frozenset({
+    "gpt-5.6-sol",
+    "gpt-5.6-sol-pro",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra-pro",
+    "gpt-5.6-luna",
+    "gpt-5.6-luna-pro",
+})
+
 
 def parse_reasoning_effort(effort):
     """Parse an effort level into the dict the agent expects.
@@ -3514,12 +3523,14 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
-    # and o-series at high — 'max' is a WebUI-only level none of them accept.
+    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap older GPT-5
+    # at xhigh and o-series at high. Only the six explicitly known GPT-5.6
+    # Sol/Terra/Luna ids accept max; keep this exact-match allowlist fail-closed
+    # so an unknown future gpt-5.6-* id does not inherit the capability.
     if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
+        if bare.startswith("gpt-5") and bare not in _OPENAI_MAX_REASONING_MODELS:
             return [eff for eff in normalized if eff != "max"]
     # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
     # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
@@ -3869,8 +3880,9 @@ def resolve_model_reasoning_efforts(
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
     Always passes the sourced list through _filter_reasoning_efforts_for_provider
-    so the hard provider ceilings (openai-codex/openai/azure GPT-5 cap at xhigh,
-    Gemini + pre-adaptive/cloud-hosted Claude cap at xhigh) are applied uniformly
+    so the hard provider ceilings (OpenAI-family GPT-5 except the six known
+    GPT-5.6 Sol/Terra/Luna ids, Gemini, and pre-adaptive/cloud-hosted Claude)
+    are applied uniformly
     — the UI dropdown (which gates options on this list) and coercion therefore
     agree: 'max' is offered ONLY for models whose native ladder genuinely includes
     it, and is stripped everywhere it would be rejected/mishandled.
