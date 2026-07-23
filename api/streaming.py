@@ -8728,6 +8728,19 @@ def _run_agent_streaming(
                     # field the cached agent silently retains the previous
                     # profile's SOUL.md (and any other profile-scoped context).
                     _profile_home or '',
+                    # Terminal backend identity: sessions switching between
+                    # remote (SSH), container (Docker/Singularity/Modal/Daytona),
+                    # or local backends must not reuse a cached agent that
+                    # carries stale terminal env vars (#5937/#6175).
+                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_PORT', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_KEY', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_DOCKER_IMAGE', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SINGULARITY_IMAGE', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_MODAL_IMAGE', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_DAYTONA_IMAGE', '') or '',
                 ], sort_keys=True)
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
@@ -8825,6 +8838,28 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    # When the terminal backend identity changed (cache miss),
+                    # the process-global _active_environments["default"] in
+                    # the agent's terminal_tool module may still hold a stale
+                    # environment (e.g. a previous SSHEnvironment when the
+                    # current profile uses Docker). Evict it so the fresh agent
+                    # constructs the correct backend on first tool use (#6175).
+                    _current_term_env = _safe_profile_runtime_env.get('TERMINAL_ENV', '') or ''
+                    if _current_term_env:
+                        try:
+                            from hermes_cli.tools import terminal_tool as _tt
+                            _stale = _tt._active_environments.get('default')
+                            if _stale is not None:
+                                _stale_cls = type(_stale).__name__.lower()
+                                if _current_term_env.lower() not in _stale_cls:
+                                    _tt._active_environments.pop('default', None)
+                                    logger.debug(
+                                        '[webui] Evicted stale terminal backend %s from '
+                                        '_active_environments for TERMINAL_ENV=%s',
+                                        type(_stale).__name__, _current_term_env,
+                                    )
+                        except Exception:
+                            pass
                     # Register the new agent with the memory lifecycle so
                     # its commit_memory_session() can be found later.
                     try:
