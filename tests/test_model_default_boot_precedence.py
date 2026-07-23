@@ -467,7 +467,16 @@ function makeSelect(options, initialValue) {
   return sel;
 }
 
-const calls = {syncModelChip: 0, refreshes: 0, renderSessionList: 0, toasts: []};
+const calls = {
+  syncModelChip: 0,
+  refreshes: 0,
+  renderSessionList: 0,
+  renderSessionListFromCache: 0,
+  renderCacheProfiles: [],
+  embargoes: [],
+  skeletons: [],
+  toasts: [],
+};
 let modelSelect = makeSelect(
   args.initialOptions || [{provider: 'alpha-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
   args.initialValue || 'custom/profile-a-model',
@@ -500,6 +509,8 @@ let _modelCatalogContextEpoch = 0;
 var _profileSwitchGeneration = 0;
 var _modelDropdownRequestSeq = 0;
 var _modelCatalogFallbackRetried = false;
+var _sessionListSkeletonActive = false;
+let sessionListEmbargo = false;
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 const document = {
   baseURI: 'http://127.0.0.1/hermes/',
@@ -552,6 +563,18 @@ function _openProfileSwitchSessionBrowser() {}
 function showToast(msg) { calls.toasts.push(msg); }
 function loadWorkspaceList() { return Promise.resolve([]); }
 function _clearCronDetail() {}
+function _setProfileSwitchListEmbargo(on) {
+  sessionListEmbargo = !!on;
+  calls.embargoes.push(sessionListEmbargo);
+}
+function showSessionListSkeleton(targetProfile) {
+  _sessionListSkeletonActive = true;
+  calls.skeletons.push(String(targetProfile || ''));
+}
+function renderSessionListFromCache() {
+  calls.renderSessionListFromCache++;
+  calls.renderCacheProfiles.push(S.activeProfile || 'default');
+}
 
 const renderWaits = [];
 let renderCount = 0;
@@ -560,9 +583,22 @@ async function renderSessionList() {
   const plan = (args.renderPlan || [])[renderCount++] || 'resolve';
   if (plan === 'defer') {
     const d = deferred();
-    renderWaits.push(d);
+    renderWaits.push({
+      promise: d.promise,
+      resolve(value) {
+        _sessionListSkeletonActive = false;
+        d.resolve(value);
+      },
+      reject(error) {
+        d.reject(error);
+      },
+    });
     return d.promise;
   }
+  if (plan === 'reject') {
+    throw new Error('session list render failed');
+  }
+  _sessionListSkeletonActive = false;
 }
 
 const modelRequests = [];
@@ -590,7 +626,11 @@ const profileSwitchRequests = [];
 api = async function(url, opts = {}) {
   if (url === '/api/profile/switch') {
     const body = JSON.parse(opts.body || '{}');
-    if (args.scenario === 'session-mismatch-rapid-beta-gamma') {
+    if ([
+      'session-mismatch-rapid-beta-gamma',
+      'session-mismatch-rejected-beta-after-gamma',
+      'session-mismatch-render-reject-beta-after-gamma',
+    ].includes(args.scenario)) {
       const d = deferred();
       profileSwitchRequests.push({name: body.name, resolve: d.resolve, reject: d.reject});
       return d.promise;
@@ -675,6 +715,9 @@ function snapshot() {
       .filter(Boolean),
     livePendingKeys: Array.from(_liveModelFetchPending),
     profileSwitchRequestCount: profileSwitchRequests.length,
+    sessionListEmbargo,
+    sessionListSkeletonActive: _sessionListSkeletonActive,
+    renderCacheProfiles: calls.renderCacheProfiles.slice(),
   };
 }
 
@@ -829,12 +872,118 @@ async function sessionMismatchRapidBetaGamma() {
   return {final: snapshot()};
 }
 
+async function sessionMismatchRejectedBetaAfterGamma() {
+  profilePayloads.beta = {
+    active: 'beta',
+    is_default: false,
+    default_model: 'custom/profile-b-model',
+    default_model_provider: 'shared-provider',
+  };
+  profilePayloads.gamma = {
+    active: 'gamma',
+    is_default: false,
+    default_model: 'custom/profile-c-model',
+    default_model_provider: 'shared-provider',
+  };
+  modelSelect = makeSelect(
+    [{provider: 'alpha-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+    'custom/profile-a-model',
+  );
+  S.activeProfile = 'alpha';
+  S.session = {
+    session_id: 'alpha-session',
+    title: 'Alpha session',
+    model: 'custom/profile-a-model',
+    model_provider: 'alpha-provider',
+    message_count: 1,
+  };
+  S.messages = [{role: 'user'}];
+  _profileSwitchGeneration = 0;
+  _modelDropdownRequestSeq = 0;
+  _modelCatalogContextEpoch = 0;
+  _sessionListSkeletonActive = false;
+  sessionListEmbargo = false;
+  window._defaultModel = 'custom/profile-a-model';
+  window._activeProvider = 'alpha-provider';
+
+  const betaSwitch = _switchProfileForSessionLoad('beta');
+  await waitFor('beta switch POST', () => profileSwitchRequests.length === 1);
+  const gammaSwitch = _switchProfileForSessionLoad('gamma');
+  await waitFor('gamma switch POST', () => profileSwitchRequests.length === 2);
+  profileSwitchRequests[1].resolve(profilePayloads.gamma);
+  await waitFor('gamma render waiting', () => renderWaits.length === 1);
+  const beforeReject = snapshot();
+  profileSwitchRequests[0].reject(new Error('beta switch failed after gamma'));
+  await Promise.allSettled([betaSwitch]);
+  await tick(12);
+  const afterReject = snapshot();
+  renderWaits[0].resolve();
+  await gammaSwitch;
+  await tick(12);
+  return {beforeReject, afterReject, final: snapshot()};
+}
+
+async function sessionMismatchRenderRejectBetaAfterGamma() {
+  profilePayloads.beta = {
+    active: 'beta',
+    is_default: false,
+    default_model: 'custom/profile-b-model',
+    default_model_provider: 'shared-provider',
+  };
+  profilePayloads.gamma = {
+    active: 'gamma',
+    is_default: false,
+    default_model: 'custom/profile-c-model',
+    default_model_provider: 'shared-provider',
+  };
+  modelSelect = makeSelect(
+    [{provider: 'alpha-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+    'custom/profile-a-model',
+  );
+  S.activeProfile = 'alpha';
+  S.session = {
+    session_id: 'alpha-session',
+    title: 'Alpha session',
+    model: 'custom/profile-a-model',
+    model_provider: 'alpha-provider',
+    message_count: 1,
+  };
+  S.messages = [{role: 'user'}];
+  _profileSwitchGeneration = 0;
+  _modelDropdownRequestSeq = 0;
+  _modelCatalogContextEpoch = 0;
+  _sessionListSkeletonActive = false;
+  sessionListEmbargo = false;
+  window._defaultModel = 'custom/profile-a-model';
+  window._activeProvider = 'alpha-provider';
+
+  const betaSwitch = _switchProfileForSessionLoad('beta');
+  await waitFor('beta switch POST', () => profileSwitchRequests.length === 1);
+  profileSwitchRequests[0].resolve(profilePayloads.beta);
+  await waitFor('beta render waiting', () => renderWaits.length === 1);
+  const gammaSwitch = _switchProfileForSessionLoad('gamma');
+  await waitFor('gamma switch POST', () => profileSwitchRequests.length === 2);
+  profileSwitchRequests[1].resolve(profilePayloads.gamma);
+  await waitFor('gamma render waiting', () => renderWaits.length === 2);
+  const beforeReject = snapshot();
+  renderWaits[0].reject(new Error('beta render failed after gamma'));
+  await Promise.allSettled([betaSwitch]);
+  await tick(12);
+  const afterReject = snapshot();
+  renderWaits[1].resolve();
+  await gammaSwitch;
+  await tick(12);
+  return {beforeReject, afterReject, final: snapshot()};
+}
+
 (async () => {
   let result;
   if (args.scenario === 'rapid-beta-gamma') result = await rapidBetaThenGamma();
   else if (args.scenario === 'ownerless-live-same-provider') result = await ownerlessLiveSameProviderCacheLeak();
   else if (args.scenario === 'session-mismatch-failed-refresh') result = await sessionMismatchSwitchFailedRefresh();
   else if (args.scenario === 'session-mismatch-rapid-beta-gamma') result = await sessionMismatchRapidBetaGamma();
+  else if (args.scenario === 'session-mismatch-rejected-beta-after-gamma') result = await sessionMismatchRejectedBetaAfterGamma();
+  else if (args.scenario === 'session-mismatch-render-reject-beta-after-gamma') result = await sessionMismatchRenderRejectBetaAfterGamma();
   else result = await staleAlphaThenFailedBeta();
   process.stdout.write(JSON.stringify(result));
 })().catch(err => {
@@ -1514,6 +1663,60 @@ def test_session_profile_mismatch_switch_rejects_superseded_post_response(
         "profile": "gamma",
         "profile_switch_generation": 2,
     }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_profile_mismatch_switch_rejects_superseded_post_error_cleanup(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="session-mismatch-rejected-beta-after-gamma",
+        render_plan=["defer"],
+    )
+
+    before_reject = got["beforeReject"]
+    after_reject = got["afterReject"]
+    final = got["final"]
+    assert before_reject["profile"] == "gamma"
+    assert before_reject["generation"] == 2
+    assert before_reject["sessionListSkeletonActive"] is True
+    assert before_reject["renderCacheProfiles"] == []
+    assert after_reject["profile"] == "gamma"
+    assert after_reject["generation"] == 2
+    assert after_reject["sessionListSkeletonActive"] is True
+    assert after_reject["renderCacheProfiles"] == []
+    assert final["profile"] == "gamma"
+    assert final["generation"] == 2
+    assert final["defaultModel"] == "custom/profile-c-model"
+    assert final["activeProvider"] == "shared-provider"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_profile_mismatch_switch_rejects_superseded_render_error_cleanup(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="session-mismatch-render-reject-beta-after-gamma",
+        render_plan=["defer", "defer"],
+    )
+
+    before_reject = got["beforeReject"]
+    after_reject = got["afterReject"]
+    final = got["final"]
+    assert before_reject["profile"] == "gamma"
+    assert before_reject["generation"] == 2
+    assert before_reject["sessionListSkeletonActive"] is True
+    assert before_reject["renderCacheProfiles"] == []
+    assert after_reject["profile"] == "gamma"
+    assert after_reject["generation"] == 2
+    assert after_reject["sessionListSkeletonActive"] is True
+    assert after_reject["renderCacheProfiles"] == []
+    assert final["profile"] == "gamma"
+    assert final["generation"] == 2
+    assert final["defaultModel"] == "custom/profile-c-model"
+    assert final["activeProvider"] == "shared-provider"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

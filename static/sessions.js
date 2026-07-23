@@ -1701,6 +1701,7 @@ async function _switchProfileForSessionLoad(profile){
       if(!profileSwitchStillCurrent()) return;
     }
   }catch(switchErr){
+    if(!profileSwitchStillCurrent()) return;
     // The switch POST failed, so we're still on the previous profile and its
     // caches are intact. Clear the up-front skeleton and re-render the real
     // list so the sidebar doesn't strand on the skeleton (the #4671 strand bug
