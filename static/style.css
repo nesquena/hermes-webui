@@ -1723,6 +1723,17 @@
   .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
   .session-action-menu.open-animated{animation:session-menu-in .45s cubic-bezier(.2,.8,.2,1);}
   .session-action-menu.open{display:block;}
+  /* Project default-workspace picker (#5510). Class-based so it inherits skin
+     variables instead of hardcoding colors inline. */
+  .project-ws-picker{position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:200px;max-width:min(340px,calc(100vw - 16px));max-height:300px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.35);}
+  .project-ws-picker .pw-row{display:flex;align-items:center;gap:8px;padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);}
+  .project-ws-picker .pw-row:hover{background:var(--hover-bg);}
+  .project-ws-picker .pw-row .pw-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .project-ws-picker .pw-row .pw-check{flex:0 0 auto;color:var(--accent,var(--text));}
+  .project-ws-picker .pw-row.pw-clear{color:var(--muted);}
+  .project-ws-picker .pw-sep{border:none;border-top:1px solid var(--border);margin:4px 0;}
+  .project-ws-picker .pw-empty{padding:7px 14px;font-size:13px;color:var(--muted);}
+
   .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);flex-direction:row!important;gap:0!important;padding:0!important;}
   .session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;padding:8px 14px;}
   .session-action-opt .ws-opt-icon{color:var(--muted);transition:color .12s,opacity .12s;flex-shrink:0;display:flex;align-items:center;width:16px;}

@@ -9293,20 +9293,28 @@ function _showProjectDefaultWorkspacePicker(proj, wsList, anchorEvent){
   document.querySelectorAll('.project-ws-picker').forEach(el=>el.remove());
   const pick=document.createElement('div');
   pick.className='project-ws-picker';
-  pick.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.35);';
   const vw=window.innerWidth||document.documentElement.clientWidth||0;
   const vh=window.innerHeight||document.documentElement.clientHeight||0;
   const x=Math.max(8,Math.min(anchorEvent.clientX||8,(vw||348)-348));
   const y=Math.max(8,Math.min(anchorEvent.clientY||8,(vh||316)-316));
   pick.style.left=x+'px';
   pick.style.top=y+'px';
-  const makeRow=(label,ws,danger)=>{
+  // label = display name (falls back to path); ws = the stored path value.
+  const makeRow=(label,ws,title,isClear)=>{
     const row=document.createElement('div');
-    const isCurrent=_projectWorkspaceDisplayKey(ws)===_projectWorkspaceDisplayKey(proj.default_workspace);
-    row.textContent=label+(isCurrent?' ✓':'');
-    row.style.cssText='padding:7px 14px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'+(danger?'color:var(--error,#e94560);':'color:var(--text);');
-    row.onmouseenter=()=>row.style.background='var(--hover-bg)';
-    row.onmouseleave=()=>row.style.background='';
+    row.className='pw-row'+(isClear?' pw-clear':'');
+    const name=document.createElement('span');
+    name.className='pw-label';
+    name.textContent=label;
+    if(title) name.title=title;
+    row.appendChild(name);
+    const isCurrent=!isClear&&_projectWorkspaceDisplayKey(ws)===_projectWorkspaceDisplayKey(proj.default_workspace);
+    if(isCurrent){
+      const check=document.createElement('span');
+      check.className='pw-check';
+      check.textContent='✓';
+      row.appendChild(check);
+    }
     row.onclick=async()=>{
       pick.remove();
       document.removeEventListener('click',dismiss);
@@ -9321,26 +9329,28 @@ function _showProjectDefaultWorkspacePicker(proj, wsList, anchorEvent){
     return row;
   };
   if(proj.default_workspace){
-    pick.appendChild(makeRow('Clear default',null,true));
+    pick.appendChild(makeRow('Clear default',null,null,true));
     const sep=document.createElement('hr');
-    sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+    sep.className='pw-sep';
     pick.appendChild(sep);
   }
   if(!wsList||!wsList.length){
     const none=document.createElement('div');
+    none.className='pw-empty';
     none.textContent='No saved workspaces';
-    none.style.cssText='padding:7px 14px;font-size:12px;color:var(--text);';
     pick.appendChild(none);
   }else{
     wsList.forEach(ws=>{
-      const label=typeof ws==='string'?ws:(ws.path||ws.name||String(ws));
-      pick.appendChild(makeRow(label,label,false));
+      const path=typeof ws==='string'?ws:(ws.path||ws.name||String(ws));
+      const name=(ws&&typeof ws==='object'&&ws.name)?ws.name:path;
+      pick.appendChild(makeRow(name,path,path,false));
     });
   }
   document.body.appendChild(pick);
   const dismiss=()=>{pick.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
+
 
 function _showProjectContextMenu(e, proj, chip){
   document.querySelectorAll('.project-ctx-menu').forEach(el=>el.remove());
@@ -9387,6 +9397,7 @@ function _showProjectContextMenu(e, proj, chip){
   // Default workspace
   const wsItem=document.createElement('div');
   wsItem.textContent='Default workspace'+(proj.default_workspace?' ✓':'');
+  if(proj.default_workspace) wsItem.title=proj.default_workspace;
   wsItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
   wsItem.onmouseenter=()=>wsItem.style.background='var(--hover-bg)';
   wsItem.onmouseleave=()=>wsItem.style.background='';
