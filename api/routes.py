@@ -1389,8 +1389,9 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
 
 def _read_text_bounded(
     path, *, max_bytes: int = _FILE_READ_MAX_BYTES, tail: bool = False
-) -> tuple[str, bool]:
-    """Read up to ``max_bytes`` of a text file, returning ``(text, truncated)``.
+) -> tuple[str, bool, bool]:
+    """Read up to ``max_bytes`` of a text file, returning
+    ``(text, truncated, ok)``.
 
     Guards against loading a huge operator-authored file (cron run output, skill
     linked file) wholesale into memory. Files at or under the cap are read in
@@ -1399,13 +1400,20 @@ def _read_text_bounded(
     ``truncated`` flag is set so the caller can surface it to the client. The
     cap mirrors the git-diff DIFF_SIZE_LIMIT bound.
 
-    Memory-safety contract (#6141 gate blocker 1): the file is opened ONCE in
-    binary mode and ``os.fstat`` is taken on that descriptor, so there is no
-    stat→open check-use gap. A replace/growth race between a separate stat and
-    open previously let an oversized file be read unbounded; fstat on the open
-    descriptor closes that window. There is NO unbounded fallback: on any
-    OSError (missing/unreadable file, or stat failure on the descriptor) the
-    function returns ``("", False)`` rather than reading the whole file.
+    Memory-safety contract (#6141 gate round 2):
+
+    - The file is opened ONCE in binary mode and ``os.fstat`` is taken on that
+      descriptor, so there is no stat→open check-use gap.
+    - EVERY read is capped — including the small-file branch. The pinned size
+      from fstat guards the seek, but the read itself asks for at most
+      ``max_bytes + 1`` bytes so a same-inode growth between fstat and read
+      cannot read past the cap; if more than ``max_bytes`` comes back, the file
+      grew under us and we report it truncated rather than returning the whole
+      grown content.
+    - On any OSError (missing/unreadable file, fstat failure, read failure) the
+      function returns ``("", False, False)`` — the ``ok=False`` third element
+      distinguishes a real read failure from a legitimate empty file so callers
+      (the cron batch) do not charge budget for failed reads.
 
     ``tail=True`` reads the TRAILING ``max_bytes`` (seek-to-end) instead of the
     leading bytes — used by cron output reads where the ``## Response`` section
@@ -1416,25 +1424,34 @@ def _read_text_bounded(
     try:
         fh = open(path, "rb")
     except OSError:
-        # Missing/unreadable file — caller's error handling covers this. Return
-        # empty (NOT an unbounded read) so the bound is never bypassed.
-        return "", False
+        # Missing/unreadable file. ok=False distinguishes this from a real empty
+        # file so the cron batch does not charge budget for failed reads.
+        return "", False, False
     try:
-        # fstat on the open descriptor — no stat→open check-use gap. A separate
-        # stat() before open() could observe a small size, then the file grows
-        # (or is replaced) before the read, yielding an unbounded materialization.
         try:
             st = os.fstat(fh.fileno())
         except OSError:
-            return "", False
+            return "", False, False
         size = st.st_size
         if size <= max_bytes:
-            raw = fh.read()
-            return raw.decode("utf-8", errors="replace"), False
+            # Cap the read at max_bytes + 1: if the file grew between fstat and
+            # read (same inode), we get > max_bytes and report truncated rather
+            # than returning the whole grown content unbounded. (#6141 r2 #1)
+            try:
+                raw = fh.read(max_bytes + 1)
+            except OSError:
+                return "", False, False
+            if len(raw) > max_bytes:
+                # File grew under us — return only the cap, flagged truncated.
+                return raw[:max_bytes].decode("utf-8", errors="replace"), True, True
+            return raw.decode("utf-8", errors="replace"), False, True
         # Over cap: read only max_bytes. Head or tail per ``tail``.
-        if tail:
-            fh.seek(max(0, size - max_bytes))
-        raw = fh.read(max_bytes)
+        try:
+            if tail:
+                fh.seek(max(0, size - max_bytes))
+            raw = fh.read(max_bytes)
+        except OSError:
+            return "", False, False
     finally:
         fh.close()
     text = raw.decode("utf-8", errors="replace")
@@ -1447,53 +1464,82 @@ def _read_text_bounded(
         nl = text.find("\n")
         if nl >= 0 and nl + 1 < len(text):
             text = text[nl + 1:]
-    return text, True
+    return text, True, True
 
 
-def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) -> tuple[str, bool]:
+def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) -> tuple[str, bool, bool]:
     """Read a cron output .md file preserving BOTH the frontmatter/usage block
-    AND the response body, under a byte bound.
+    AND the response body, under a byte bound, with one pinned file identity.
 
     Cron output layout is front-matter (model/timestamp/usage), then ``## Prompt``
     (potentially huge), then ``## Response`` (the reply the UI most wants) as the
     LAST section. A head cap can drop or split the ``## Response`` marker/body;
-    a tail cap drops the frontmatter. So:
+    a tail cap drops the frontmatter.
 
-      - File under cap: return whole text, not truncated.
-      - Over cap, marker fully in head: the head already carries the frontmatter
-        AND the marker + the leading body. Return it (if the body extends past
-        the cap, the snippet still shows the reply's start, which is the useful
-        preview).
-      - Over cap, marker NOT fully in head (the prompt pushed it past the cap,
-        OR the seek split the marker line): composite a bounded head (frontmatter)
-        with a bounded tail (the response body at EOF), re-injecting the marker
-        if the seek split it. This keeps ``_cron_output_usage_metadata`` (reads
-        the pre-``## Response`` head) and ``_cron_output_snippet`` (keys on the
-        marker) both working.
-    Returns ``(text, truncated)``.
+    Memory-safety + identity contract (#6141 gate round 2):
+
+    - The file is opened ONCE and ``os.fstat`` pins the size on that descriptor.
+      Head and tail are read from the SAME descriptor against the SAME pinned
+      size, so a replacement between two separate opens cannot combine
+      frontmatter from inode A with a response body from inode B.
+    - Head and tail byte ranges are DISJOINT: head = ``[0, cap)``, tail starts
+      at ``max(cap, size - cap)``. When ``size <= 2*cap`` the tail begins right
+      where the head ended (no overlap, no body duplication); when
+      ``size > 2*cap`` the middle (the truncated prompt section) is omitted.
+      The returned body therefore never contains more bytes than the source.
+    - Every read is capped (no unbounded ``fh.read()``).
+
+    Returns ``(text, truncated)``. On open/fstat/read failure returns
+    ``("", False)`` — the caller's error handling covers missing/unreadable
+    files, and the cron batch does not charge budget for this (it treats an
+    empty string from a failed read as a skip).
     """
-    text, truncated = _read_text_bounded(path, max_bytes=max_bytes)
-    if not truncated:
-        return text, False
-    # Over cap: ALWAYS tail-splice so the response body at EOF survives. A
-    # previous head-only early return (when the ## Response marker plus a byte
-    # or two of body sat in the head) silently reduced the reply to its prefix.
-    # Splicing the tail on every truncation keeps the body intact regardless of
-    # where the marker lands. (#6141 gate blocker 2)
-    marker_idx = _cron_response_marker_index(text)
-    # NOTE: _read_text_bounded(tail=True) already drops the partial first line at
-    # the seek boundary, so tail_text is clean complete lines — do NOT re-drop here.
-    tail_text, _ = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return "", False, False
+    try:
+        try:
+            st = os.fstat(fh.fileno())
+        except OSError:
+            return "", False, False
+        size = st.st_size
+        cap = max_bytes
+        if size <= cap:
+            # Under cap: read at most cap+1 so same-inode growth is detected,
+            # not read unbounded. (#6141 r2 #1)
+            try:
+                raw = fh.read(cap + 1)
+            except OSError:
+                return "", False, False
+            if len(raw) > cap:
+                return raw[:cap].decode("utf-8", errors="replace"), True, True
+            return raw.decode("utf-8", errors="replace"), False, True
+        # Over cap: read DISJOINT head + tail from this one descriptor.
+        # Head = [0, cap). Tail starts at max(cap, size-cap) so the two ranges
+        # never overlap (when size <= 2*cap, tail begins right after head; when
+        # size > 2*cap, the middle prompt section is omitted). (#6141 r2 #2)
+        try:
+            fh.seek(0)
+            head_raw = fh.read(cap)
+            tail_start = max(cap, size - cap)
+            fh.seek(tail_start)
+            tail_raw = fh.read(cap)
+        except OSError:
+            return "", False, False
+    finally:
+        fh.close()
+    head_text = head_raw.decode("utf-8", errors="replace")
+    tail_text = tail_raw.decode("utf-8", errors="replace")
+    # Drop a partial first line at the tail seek boundary (a line split across
+    # the head/tail divide is incomplete) — but only if it leaves content.
+    tnl = tail_text.find("\n")
+    if tnl >= 0 and tnl + 1 < len(tail_text):
+        tail_text = tail_text[tnl + 1:]
+    marker_idx = _cron_response_marker_index(head_text)
     marker_in_tail = _cron_response_marker_index(tail_text) >= 0
     if marker_in_tail:
-        # The tail contains the marker (and therefore the complete body at EOF).
-        # If the head ALSO has the marker, the head's post-marker body is a
-        # truncated PREFIX of the tail's body — splicing both would duplicate
-        # the body. Drop the head's partial body (keep head only for frontmatter
-        # up to the marker) and let the tail carry the full marker + body.
-        # (#6141 gate blocker 2: de-duplicate overlapping marker/body bytes)
-        if marker_idx >= 0:
-            text = text[:marker_idx].rstrip()
+        # Tail carries the marker (and therefore the complete body at EOF).
         tm = _cron_response_marker_index(tail_text)
         tail_text = tail_text[tm:]  # keep marker + body from the tail
     elif tail_text.strip() and marker_idx < 0:
@@ -1501,9 +1547,10 @@ def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) ->
         # Safe: a body at EOF implies a marker preceded it.
         tail_text = "## Response\n" + tail_text
     return (
-        text.rstrip()
+        head_text.rstrip()
         + "\n\n--- [output truncated: large section omitted] ---\n\n"
         + tail_text,
+        True,
         True,
     )
 
@@ -13759,8 +13806,11 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "File not found", 404)
             # Bound the read so a huge linked file isn't loaded whole / serialized
             # wholesale into the response. Over-cap files return the head and a
-            # truncated flag.
-            content, truncated = _read_text_bounded(target)
+            # truncated flag. _read_text_bounded returns (text, truncated, ok);
+            # a failed read (ok=False) is treated as a missing file.
+            content, truncated, ok = _read_text_bounded(target)
+            if not ok and not content:
+                return bad(handler, "File not found", 404)
             return j(
                 handler,
                 {"content": content, "path": file_path, "truncated": truncated},
@@ -20315,7 +20365,9 @@ def _handle_cron_run_detail(handler, parsed):
         # read when the response marker isn't in the head — otherwise a large
         # prompt section would push the reply past the cap and the snippet would
         # serve prompt bytes instead of the response.
-        content, truncated = _read_cron_output_bounded(fpath)
+        content, truncated, ok = _read_cron_output_bounded(fpath)
+        if not ok:
+            return j(handler, {"error": "run output unreadable"}, status=500)
         snippet = _cron_output_snippet(content)
         usage = _cron_output_usage_metadata(content)
         return j(handler, {"job_id": job_id, "filename": filename,
@@ -20457,17 +20509,21 @@ def _handle_cron_output(handler, parsed):
                 # same _read_cron_output_bounded as the detail endpoint and
                 # surface per-file truncation on the output entry so a client
                 # can tell that file's content was clipped.
-                txt, file_truncated = _read_cron_output_bounded(f)
+                txt, file_truncated, read_ok = _read_cron_output_bounded(f)
+                if not read_ok:
+                    # Real read failure (open/fstat/read OSError) — NOT a
+                    # legitimate empty file. Skip entirely: do not append an
+                    # entry and do not charge budget. Charging a failed read
+                    # previously let unreadable large newest files consume the
+                    # budget and suppress a valid older output. (#6141 r2 #3)
+                    logger.debug("Failed to read cron output file %s", f)
+                    continue
                 entry = {"filename": f.name, "content": _cron_output_content_window(txt)}
                 if file_truncated:
                     entry["truncated"] = True
                 outputs.append(entry)
                 # Charge the budget ONLY after a successful read that appended
-                # an entry. Charging before the read (the previous shape) let two
-                # unreadable large files consume the budget via `spent += charge`
-                # in their except branches, so a later valid older file hit the
-                # cap and broke — returning outputs: [] with valid output on
-                # disk. (#6141 gate blocker 3)
+                # an entry. (#6141 gate blocker 3)
                 spent += charge
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
