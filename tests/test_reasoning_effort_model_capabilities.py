@@ -19,6 +19,7 @@ def test_openai_codex_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
@@ -30,11 +31,20 @@ def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_max_effort_is_clamped_before_streaming():
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
+        "gpt-5.5",
+        provider_id="openai-codex",
+    ) == "xhigh"
+
+
+def test_openai_codex_ultra_effort_is_clamped_before_streaming():
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra",
         "gpt-5.5",
         provider_id="openai-codex",
     ) == "xhigh"
@@ -65,15 +75,33 @@ def test_coerce_never_escalates_above_configured_effort():
     ) == "low"
 
 
+def test_coerce_minimal_to_none_for_gpt56_named_custom_provider():
+    # The raw provider-hint parser must run with the effective provider to strip
+    # both ``@custom:`` and the named custom slug before checking the GPT-5.6
+    # minimal→none contract.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "minimal",
+        "@custom:agg:gpt-5.6-sol",
+        provider_id="custom:agg",
+    ) == "none"
+
+
+def test_coerce_minimal_to_none_for_gpt56_named_custom_provider_without_explicit_provider():
+    # Validate the resolver path when provider_id is omitted (common with raw
+    # persisted session values). This path must still parse the ``@custom:`` model
+    # hint and apply the GPT-5.6 minimal→none contract.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "minimal",
+        "@custom:agg:gpt-5.6-sol",
+    ) == "none"
+
+
 def test_coerce_preserves_effort_for_unrecognized_model():
     # #3505 review: resolve_model_reasoning_efforts() returns [] for BOTH
     # known-unsupported AND simply-unrecognized models (custom providers,
-    # aggregator-rewritten ids, brand-new releases). Coercion must NOT silently
-    # drop a configured effort just because we don't recognize the model — that
-    # would be a behavior change vs sending it verbatim (master). Preserve the
-    # configured level for an empty/unknown capability set; the provider stays
-    # the final authority. The known-bad CLAMP paths return a NON-empty set, so
-    # they are unaffected (covered by the openai-codex tests above).
+    # aggregator-rewritten ids, brand-new releases). Coercion must preserve most
+    # configured efforts when we can't determine support, while still keeping
+    # ``max`` and ``ultra`` safe by lowering them to ``xhigh``.
     assert cfg.coerce_reasoning_effort_for_model(
         "high",
         "some-unknown-model-xyz",
@@ -85,6 +113,11 @@ def test_coerce_preserves_effort_for_unrecognized_model():
     # preserve verbatim below.
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
+        "brand-new-model-2099",
+        provider_id="some-custom-provider",
+    ) == "xhigh"
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
     ) == "xhigh"
@@ -166,6 +199,33 @@ def test_provider_config_all_invalid_falls_through(monkeypatch):
         assert result != []
         assert "bogus" not in result
         assert "typo" not in result
+    finally:
+        if original is None:
+            cfg.cfg.pop("providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "providers", original)
+
+
+def test_codex_configured_reasoning_efforts_still_apply_model_filter(monkeypatch):
+    original = cfg.cfg.get("providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "providers",
+        {
+            "openai-codex": {
+                "reasoning_efforts": ["none", "xhigh", "max", "ultra"]
+            }
+        },
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "gpt-5.6-sol",
+            provider_id="openai-codex",
+        ) == ["none", "xhigh", "max", "ultra"]
+        assert cfg.resolve_model_reasoning_efforts(
+            "gpt-5.6-luna",
+            provider_id="openai-codex",
+        ) == ["none", "xhigh", "max"]
     finally:
         if original is None:
             cfg.cfg.pop("providers", None)
@@ -383,8 +443,8 @@ def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
 
 
 def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
-    """A previously-saved `agent.reasoning_effort: max` (no longer a valid effort)
-    must be reported as the coerced `xhigh`, not the raw stale `max`, so the
+    """A saved `max` unsupported by the active GPT-5.5 Codex model must be
+    reported as the coerced `xhigh`, not the raw `max`, so the
     boot/status/chip read paths agree with what streaming actually sends."""
     monkeypatch.setattr(
         cfg,

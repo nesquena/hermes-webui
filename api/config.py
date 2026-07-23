@@ -1114,10 +1114,43 @@ CLI_TOOLSETS = _resolve_cli_toolsets()
 
 # ── Model / provider discovery ───────────────────────────────────────────────
 
+# GPT-5.6 models exposed by Hermes Agent. The -pro variants select OpenAI's
+# Pro reasoning mode through the agent's model catalog.
+_GPT56_MODELS = (
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-sol-pro", "GPT-5.6 Sol Pro"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-terra-pro", "GPT-5.6 Terra Pro"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ("gpt-5.6-luna-pro", "GPT-5.6 Luna Pro"),
+)
+_GPT56_MODEL_IDS = frozenset(model_id for model_id, _label in _GPT56_MODELS)
+_GPT56_ULTRA_MODEL_IDS = frozenset(
+    {
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-pro",
+        "gpt-5.6-terra",
+        "gpt-5.6-terra-pro",
+    }
+)
+_OPENROUTER_GPT56_MODEL_IDS = frozenset(
+    f"openai/{model_id}" for model_id in _GPT56_MODEL_IDS
+)
+# Keep only two GPT-5.6 variants in the mixed-vendor Nous featured budget. The
+# complete GPT-5.6 set remains in the full catalog and is returned via extras.
+_NOUS_FEATURED_GPT56_MODEL_IDS = frozenset({
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-terra",
+})
+
 # Hardcoded fallback models (used when no config.yaml or agent is available)
 # Also used as the OpenRouter model list — keep this curated to current, widely-used models.
 _FALLBACK_MODELS = [
     # OpenAI
+    *[
+        {"provider": "OpenRouter", "id": f"openai/{model_id}", "label": label}
+        for model_id, label in _GPT56_MODELS
+    ],
     {"provider": "OpenAI",    "id": "openai/gpt-5.4-mini",                "label": "GPT-5.4 Mini"},
     {"provider": "OpenAI",    "id": "openai/gpt-5.4",                     "label": "GPT-5.4"},
     # Anthropic — 4.6 flagship + 4.5 generation
@@ -1698,12 +1731,24 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-api": [
+        {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-sol-pro", "label": "GPT-5.6 Sol Pro"},
+        {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-terra-pro", "label": "GPT-5.6 Terra Pro"},
+        {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.6-luna-pro", "label": "GPT-5.6 Luna Pro"},
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
+        {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-sol-pro", "label": "GPT-5.6 Sol Pro"},
+        {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-terra-pro", "label": "GPT-5.6 Terra Pro"},
+        {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.6-luna-pro", "label": "GPT-5.6 Luna Pro"},
         {"id": "gpt-5.5", "label": "GPT-5.5"},
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
@@ -1728,6 +1773,12 @@ _PROVIDER_MODELS = {
         {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner (legacy)"},
     ],
     "nous": [
+        {"id": "@nous:openai/gpt-5.6-sol", "label": "GPT-5.6 Sol (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-sol-pro", "label": "GPT-5.6 Sol Pro (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-terra", "label": "GPT-5.6 Terra (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-terra-pro", "label": "GPT-5.6 Terra Pro (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-luna", "label": "GPT-5.6 Luna (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-luna-pro", "label": "GPT-5.6 Luna Pro (via Nous)"},
         {"id": "@nous:anthropic/claude-opus-4.6",     "label": "Claude Opus 4.6 (via Nous)"},
         {"id": "@nous:anthropic/claude-sonnet-4.6",   "label": "Claude Sonnet 4.6 (via Nous)"},
         {"id": "@nous:openai/gpt-5.4-mini",           "label": "GPT-5.4 Mini (via Nous)"},
@@ -2133,8 +2184,9 @@ def _build_nous_featured_set(
        catalog (preserves selection stickiness — no orphan IDs in the
        dropdown after a refresh).
     2. Always include every entry from the curated static
-       ``_PROVIDER_MODELS["nous"]`` list whose id maps onto a live id —
-       those four are explicitly maintained as flagship picks.
+       ``_PROVIDER_MODELS["nous"]`` list whose id maps onto a live id, except
+       GPT-5.6 variants outside the small featured subset; those stay in
+       ``extras`` so one family cannot consume the mixed-vendor budget.
     3. Top up to ``target`` by walking ``_NOUS_VENDOR_PRIORITY`` round-robin
        (one model per vendor each pass) so no vendor monopolises the slot
        budget. Within a vendor, the original ``live_ids`` order is preserved
@@ -2174,6 +2226,8 @@ def _build_nous_featured_set(
         sid = static.get("id", "")
         if sid.startswith("@nous:"):
             sid = sid[len("@nous:"):]
+        if sid in _OPENROUTER_GPT56_MODEL_IDS and sid not in _NOUS_FEATURED_GPT56_MODEL_IDS:
+            continue
         if sid in live_ids:
             _add(sid)
 
@@ -2181,6 +2235,8 @@ def _build_nous_featured_set(
     by_vendor: dict[str, list[str]] = {}
     for mid in live_ids:
         if mid in chosen_set:
+            continue
+        if mid in _OPENROUTER_GPT56_MODEL_IDS and mid not in _NOUS_FEATURED_GPT56_MODEL_IDS:
             continue
         vendor = mid.split("/", 1)[0] if "/" in mid else ""
         by_vendor.setdefault(vendor, []).append(mid)
@@ -2579,24 +2635,44 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
 def _get_provider_base_url(provider_id):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
-    Checks two locations, in order:
-      1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
+    Checks three locations, in order:
+      1. Named ``custom_providers`` entries for ``custom:<slug>`` IDs.
+      2. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
          per-provider override.
-      2. ``cfg["model"]["base_url"]`` — falls back here when
+      3. ``cfg["model"]["base_url"]`` — falls back here when
          ``cfg["model"]["provider"] == provider_id``. This is the historical
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
+    provider_id = str(provider_id or "").strip()
+    if not provider_id:
+        return None
+
+    provider_id_lower = provider_id.lower()
+    if provider_id_lower.startswith("custom:"):
+        for entry in cfg.get("custom_providers", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            slug = _custom_provider_slug_from_name(entry.get("name"))
+            if slug != provider_id_lower:
+                continue
+            custom_base = str(entry.get("base_url") or "").strip().rstrip("/")
+            if custom_base:
+                return custom_base
+            break
+
     prov_cfg = _get_provider_cfg(provider_id)
+    if not prov_cfg and provider_id_lower != provider_id:
+        prov_cfg = _get_provider_cfg(provider_id_lower)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
-        model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider == str(provider_id).strip().lower():
+        model_provider = str(model_cfg.get("provider") or "").strip()
+        if model_provider and model_provider.lower() == provider_id_lower:
             model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
             if model_base:
                 return model_base
@@ -3198,10 +3274,21 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
 # Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
-# importing from the agent tree (which may not be installed).  Any drift here
-# will show up in the shared test suite since both sides accept the same set.
-# Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# importing from the agent tree (which may not be installed), plus Codex's
+# catalog-advertised ``ultra`` level. The Responses transport forwards effort
+# strings verbatim, while the model-aware capability filter below prevents
+# unsupported models from receiving ``max`` or ``ultra``.
+VALID_REASONING_EFFORTS = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+_DEFAULT_REASONING_EFFORTS = VALID_REASONING_EFFORTS[:-1]
+GPT56_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
 def parse_reasoning_effort(effort):
@@ -3509,25 +3596,32 @@ def _filter_reasoning_efforts_for_provider(
     normalized = [
         str(eff).strip().lower()
         for eff in efforts
-        if str(eff).strip().lower() in VALID_REASONING_EFFORTS
+        if str(eff).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}
     ]
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
-    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
-    # and o-series at high — 'max' is a WebUI-only level none of them accept.
+    model_lower = _strip_provider_hint_for_reasoning(model_id).lower()
+    bare = model_lower.rsplit("/", 1)[-1]
+
+    # Exact GPT-5.6 IDs own the stronger levels. Luna supports max but not ultra;
+    # Sol/Terra support both max and ultra. Never infer this for arbitrary GPT-5 IDs.
+    if bare in _GPT56_MODEL_IDS and bare not in _GPT56_ULTRA_MODEL_IDS:
+        normalized = [eff for eff in normalized if eff != "ultra"]
+
+    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap pre-5.6 GPT-5
+    # at xhigh and o-series at high. Exact GPT-5.6 IDs are handled above.
     if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
-            return [eff for eff in normalized if eff != "max"]
-    # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
-    # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
-    # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
-    # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
-    # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
+        if bare.startswith("gpt-5") and bare not in _GPT56_MODEL_IDS:
+            return [eff for eff in normalized if eff not in {"max", "ultra"}]
+
+    # 'max'/'ultra' are WebUI-level ceilings; providers whose native ladder tops
+    # out lower must not advertise either, otherwise stored high-end values can
+    # degrade worse than the intended max/ultra -> xhigh fallback.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
+
     # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
     # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
     _anthropic_lanes = {
@@ -3536,7 +3630,7 @@ def _filter_reasoning_efforts_for_provider(
         "vertex", "google-vertex",
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
     # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
@@ -3546,6 +3640,19 @@ def _filter_reasoning_efforts_for_provider(
     if zai_supports is False:
         return []
     return normalized
+
+
+def _gpt56_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
+    """Return OpenAI's first-party GPT-5.6 effort contract when applicable."""
+    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if bare in _GPT56_MODEL_IDS:
+        efforts = list(GPT56_REASONING_EFFORTS)
+        if bare in _GPT56_ULTRA_MODEL_IDS:
+            efforts.append("ultra")
+        return _filter_reasoning_efforts_for_provider(
+            efforts, model_id, provider_id
+        )
+    return None
 
 
 _KNOWN_REASONING_PROVIDERS = frozenset({
@@ -3618,13 +3725,13 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         if bare.startswith(("o1", "o3", "o4")):
             return ["low", "medium", "high"]
         return _filter_reasoning_efforts_for_provider(
-            list(VALID_REASONING_EFFORTS), model, provider
+            list(_DEFAULT_REASONING_EFFORTS), model, provider
         )
     if provider in {"copilot", "github-copilot"}:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):
                 return ["low", "medium", "high"]
-            return list(VALID_REASONING_EFFORTS)
+            return list(_DEFAULT_REASONING_EFFORTS)
     prefixes = (
         "deepseek/",
         "anthropic/",
@@ -3637,15 +3744,19 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "xiaomi/",
     )
     if any(model.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(_DEFAULT_REASONING_EFFORTS), model, provider
+        )
     if _nested_gateway_route_reasoning(model):
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(_DEFAULT_REASONING_EFFORTS), model, provider
+        )
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
     # "vendor.deepseek.v3.2" are treated consistently.
     if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
-        return list(VALID_REASONING_EFFORTS)
+        return list(_DEFAULT_REASONING_EFFORTS)
     return []
 
 
@@ -3676,7 +3787,7 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
     if supports_reasoning is True:
         return _filter_reasoning_efforts_for_provider(
-            list(VALID_REASONING_EFFORTS), model, provider
+            list(_DEFAULT_REASONING_EFFORTS), model, provider
         )
     if supports_reasoning is False:
         return []
@@ -3942,6 +4053,8 @@ def _resolve_model_reasoning_efforts_impl(
             provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
+    if not resolved_base_url and provider:
+        resolved_base_url = _get_provider_base_url(provider)
 
     # IDE-copilot providers never expose reasoning effort options.
     # Guard early so a stray config entry can't override this.
@@ -3977,9 +4090,9 @@ def _resolve_model_reasoning_efforts_impl(
                 )
         for _re_list in _re_lists:
             if isinstance(_re_list, list) and _re_list:
-                _filtered = [str(x).strip().lower() for x in _re_list
-                             if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
-                _filtered = list(dict.fromkeys(_filtered))
+                _filtered = _filter_reasoning_efforts_for_provider(
+                    _re_list, hinted_model, provider
+                )
                 if _filtered:
                     return _filtered
     except Exception:
@@ -4027,6 +4140,10 @@ def _resolve_model_reasoning_efforts_impl(
             return []
         return []
 
+    gpt56_efforts = _gpt56_reasoning_efforts(hinted_model, provider)
+    if gpt56_efforts is not None:
+        return gpt56_efforts
+
     # _models_dev_reasoning_efforts already applies the provider/model filter
     # internally, so it is returned as-is here (filtering again would be
     # redundant — the filter is idempotent but the double pass obscures flow).
@@ -4047,12 +4164,24 @@ def coerce_reasoning_effort_for_model(
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
+
+    resolved_provider = str(provider_id or "").strip() or None
+    resolved_base_url = base_url
+    if not resolved_provider:
+        try:
+            _, resolved_provider, resolved_base_url = resolve_model_provider(
+                str(model_id or "")
+            )
+        except Exception:
+            resolved_provider = None
+            resolved_base_url = base_url
+
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled at all — a stored 'none' must coerce to '' (provider default =
     # thinking on) so streaming does not build disabled reasoning for a model
     # that forces thinking on regardless. Checked BEFORE the generic 'none'
     # early-return below so the forced-tier contract wins. (#6219 round-3)
-    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
+    if raw == "none" and _zai_glm_classification(model_id, resolved_provider) == "forced":
         return ""
     if raw == "none":
         return "none"
@@ -4060,8 +4189,8 @@ def coerce_reasoning_effort_for_model(
         return ""
     supported = resolve_model_reasoning_efforts(
         model_id,
-        provider_id=provider_id,
-        base_url=base_url,
+        provider_id=resolved_provider,
+        base_url=resolved_base_url,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -4077,7 +4206,9 @@ def coerce_reasoning_effort_for_model(
     # ceiling rule the filter returns the full list unchanged, so genuinely
     # unknown models still preserve the configured effort (#3505 behavior).
     ceiling = _filter_reasoning_efforts_for_provider(
-        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
+        list(VALID_REASONING_EFFORTS),
+        str(model_id or ""),
+        str(resolved_provider or ""),
     )
     if ceiling and raw not in ceiling:
         ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
@@ -4096,37 +4227,27 @@ def coerce_reasoning_effort_for_model(
     # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') -
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
-    # "unknown", so preserve the user's configured effort verbatim where it is
-    # still valid. (#3505 review)
+    # "unknown", so preserve ordinary configured effort values where safe.
+    # Never forward unknown ``ultra``; preserve unknown ``max`` only for
+    # providers we recognize as reasoning-capable.
     #
-    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
-    # 2026-07-11): 'max' is a WebUI-only level ABOVE the universally-safe ceiling
-    # 'xhigh'. A genuinely unknown/custom provider will 400 on it. So when the
-    # capability list is empty AND the provider is not one we recognize as
-    # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
-    # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
-    # whose specific model id we simply couldn't resolve (e.g. claude-opus-latest,
-    # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
-    # filter above already stripped it for any KNOWN-capped model. All other
-    # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
-    #
-    # EXCEPTION for the ZAI native-endpoint gate: a pre-5.2 GLM model (incl. the
-    # forced-thinking GLM-4.7) is KNOWN not to accept reasoning_effort at all, so
-    # any stored level must coerce to "" (send no field) — NOT be preserved
-    # verbatim, which Z.AI would silently ignore. This keeps the value actually
-    # sent in agreement with the UI (which offers no options for these models).
+    # A pre-5.2 Z.AI GLM model (including forced-thinking GLM-4.7) is known not
+    # to accept reasoning_effort at all, so omit the field rather than preserving
+    # a stale value that Z.AI would silently ignore.
     if not supported:
-        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
+        if _zai_glm_reasoning_efforts_supported(model_id, resolved_provider) is False:
             return ""
-        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
+        if raw == "ultra":
+            return "xhigh"
+        if raw == "max" and not _provider_known_reasoning_capable(resolved_provider):
             return "xhigh"
         return raw
     if raw in supported:
         return raw
     # Degrade to the closest *lower* supported level instead of silently
-    # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
+    # disabling reasoning. e.g. ultra -> max -> xhigh, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..ultra
     try:
         raw_idx = ladder.index(raw)
     except ValueError:
@@ -4134,9 +4255,14 @@ def coerce_reasoning_effort_for_model(
     for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
         if level in supported:
             return level
-    # raw is below every supported level (shouldn't happen for a non-empty set
-    # that excludes raw, but be safe): preserve the configured effort rather
-    # than blank it.
+    # Only GPT-5.6 has the explicit minimal → none contract. For other
+    # partially-known capability sets, keep the requested effort rather than
+    # disabling reasoning merely because `none` is present.
+    bare_model = _strip_provider_hint_for_reasoning(
+        model_id, resolved_provider
+    ).lower().rsplit("/", 1)[-1]
+    if raw == "minimal" and bare_model in _GPT56_MODEL_IDS and "none" in supported:
+        return "none"
     return raw
 
 
@@ -4190,8 +4316,8 @@ def get_reasoning_status(
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
-        # Report the COERCED effort so boot/status/chip read paths agree with
-        # what streaming actually sends. (Codex review of the drop-max alignment.)
+        # Report the COERCED effort (not the raw config value) so boot/status/chip
+        # read paths agree with what streaming actually sends.
         "reasoning_effort": coerce_reasoning_effort_for_model(
             str(effort_raw or "").strip().lower(),
             resolve_model,
@@ -4314,7 +4440,8 @@ def set_reasoning_effort(
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
+    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` |
+    ``max`` | ``ultra``).
 
     An empty string is accepted as "clear the override" — it removes the
     ``agent.reasoning_effort`` key so the provider default takes effect. This is
@@ -7568,15 +7695,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except Exception:
                         logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
 
+                    fallback_models = [
+                        {"id": m["id"], "label": m["label"]}
+                        for m in _FALLBACK_MODELS
+                        if m.get("provider") == "OpenRouter"
+                    ]
                     if not raw_models:
                         # Both live fetches failed — fall back to the curated static list.
-                        # Deepcopy so dedup/prefix mutation downstream does not bleed
+                        # Copy entries so dedup/prefix mutation downstream does not bleed
                         # into the module-level catalog.
-                        raw_models = [
-                            {"id": m["id"], "label": m["label"]}
-                            for m in _FALLBACK_MODELS
-                            if m.get("provider") == "OpenRouter"
-                        ]
+                        raw_models = fallback_models
+                    else:
+                        # Live provider catalogs can lag newly released model IDs. Keep
+                        # the verified GPT-5.6 entries available without replacing the
+                        # rest of the live catalog.
+                        for _entry in fallback_models:
+                            if (
+                                _entry["id"] in _OPENROUTER_GPT56_MODEL_IDS
+                                and _entry["id"] not in seen_ids
+                            ):
+                                seen_ids.add(_entry["id"])
+                                raw_models.append(_entry)
 
                     _append_picker_group("OpenRouter", "openrouter", raw_models)
                 elif pid == "ollama-cloud":
@@ -7764,11 +7903,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
                     _uses_models_as_settings_map = pid == "copilot"
-                    if (
+                    _has_explicit_model_allowlist = (
                         not _uses_models_as_settings_map
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
-                    ):
+                    )
+                    if _has_explicit_model_allowlist:
                         raw_models = _configured_model_options(provider_cfg["models"])
 
                     if not raw_models:
@@ -7788,6 +7928,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+
+                    if pid == "openai-api" and not _has_explicit_model_allowlist:
+                        existing_ids = {str(model.get("id") or "") for model in raw_models}
+                        gpt56_models = [
+                            copy.deepcopy(model)
+                            for model in _PROVIDER_MODELS.get(pid, [])
+                            if model.get("id") in _GPT56_MODEL_IDS
+                            and model.get("id") not in existing_ids
+                        ]
+                        raw_models = gpt56_models + raw_models
 
                     detected_models = auto_detected_models_by_provider.get(pid, [])
                     if detected_models and not raw_models:

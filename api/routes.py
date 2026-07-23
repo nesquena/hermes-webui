@@ -14530,7 +14530,7 @@ def handle_post(handler, parsed) -> bool:
         # preference set via WebUI is honoured in the terminal REPL and vice
         # versa.  Body is one of:
         #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
-        #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
+        #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra"}
         #                                            → agent.reasoning_effort
         try:
             display = body.get("display")
