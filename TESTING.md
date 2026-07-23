@@ -134,6 +134,14 @@ matrix expands to additional behavior rows. The maintainer's private QA harness
 remains broader; later public slices will add session switching, reconnect/replay,
 cancellation, compression, and recovery.
 
+### Streaming reader intent
+
+While a response is still streaming, scroll upward with a trackpad or wheel to
+read earlier content, including a small scroll gesture immediately after a live
+render. Subsequent streamed content must not pull the reader back to the bottom.
+Use the jump-to-latest control to resume following the live tail; after that,
+new streamed content should remain visible at the bottom.
+
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
 and **skips gracefully** (clear message) when it isn't — so environments without the
