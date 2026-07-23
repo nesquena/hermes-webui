@@ -12,7 +12,19 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 
 def _function_body(src: str, name: str) -> str:
     start = src.index(f"function {name}")
-    brace = src.index("{", start)
+    paren = src.index("(", start)
+    depth = 0
+    signature_end = -1
+    for i in range(paren, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                signature_end = i
+                break
+    assert signature_end >= 0, f"function {name} signature not found"
+    brace = src.index("{", signature_end)
     depth = 0
     for i in range(brace, len(src)):
         if src[i] == "{":
@@ -107,6 +119,18 @@ def test_done_owner_gate_rejects_same_pane_newer_stream():
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_done_owner_pane_false_pending_cleanup_is_delete_only():
+    approval_owner = _function_body(MESSAGES_JS, "_clearApprovalForOwner")
+    clarify_owner = _function_body(MESSAGES_JS, "_clearClarifyForOwner")
+    approval_clear = _function_body(MESSAGES_JS, "_clearApprovalPendingForSession")
+    clarify_clear = _function_body(MESSAGES_JS, "_clearClarifyPendingForSession")
+
+    assert "_clearApprovalPendingForSession(activeSid,{sync:false})" in approval_owner
+    assert "_clearClarifyPendingForSession(activeSid,{sync:false})" in clarify_owner
+    assert "options&&options.sync===false" in approval_clear
+    assert "options&&options.sync===false" in clarify_clear
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
@@ -196,7 +220,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global.performance = {now: () => 1000};
         global.requestAnimationFrame = cb => { rafQueue.push(cb); return rafQueue.length; };
         global.cancelAnimationFrame = () => {};
-        global.setTimeout = (cb, _ms) => { timeoutQueue.push(cb); return timeoutQueue.length; };
+        global.setTimeout = (cb, ms) => { timeoutQueue.push({cb, ms}); return timeoutQueue.length; };
         global.clearTimeout = () => {};
 
         const emptyState = new FakeElement('div');
@@ -229,7 +253,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._captureMessageScrollSnapshot = () => ({});
         global._renderMessagesWithScrollSnapshot = () => { renderCount += 1; };
         global.renderMessages = () => { renderCount += 1; };
-        global.syncTopbar = () => {};
+        global.syncTopbar = () => { calls.syncTopbar += 1; };
         global.api = (_url, opts) => {
           if(opts && opts.body){
             try{ calls.anchorPersist.push(JSON.parse(opts.body)); }catch(_){}
@@ -246,8 +270,6 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global.clearLiveToolCards = () => {};
         global.removeThinking = () => {};
         global.finalizeThinkingCard = () => { calls.finalizeThinking += 1; };
-        global._clearApprovalPendingForSession = sid => { calls.clearApprovalPending.push(sid); };
-        global._clearClarifyPendingForSession = sid => { calls.clearClarifyPending.push(sid); };
         global.stopApprovalPolling = () => { calls.stopApproval += 1; };
         global.stopClarifyPolling = () => { calls.stopClarify += 1; };
         global.hideApprovalCard = () => { calls.hideApproval += 1; };
@@ -259,8 +281,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global.sendBrowserNotification = () => { calls.browserNotification += 1; };
         global._shouldForceCompletionNotification = () => false;
         global._completionNotificationPreviewText = () => '';
-        global.scrollIfPinned = () => {};
-        global.scrollToBottom = () => {};
+        global.scrollIfPinned = () => { calls.scrollIfPinned += 1; };
+        global.scrollToBottom = () => { calls.scrollToBottom += 1; };
         global._shouldFollowMessagesOnDomReplace = () => false;
         global._armKeepSettledWorklogOpen = () => {};
         global._disarmKeepSettledWorklogOpen = () => {};
@@ -295,6 +317,9 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           clearInflightState:[],
           clearApprovalPending:[],
           clearClarifyPending:[],
+          syncTopbar:0,
+          scrollIfPinned:0,
+          scrollToBottom:0,
           finalizeThinking:0,
           stopApproval:0,
           stopClarify:0,
@@ -321,6 +346,14 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._desktopBackgroundedForNotifications = false;
         global._approvalSessionId = null;
         global._clarifySessionId = null;
+        global._approvalPendingBySession = new Map([
+          ['sid-1', {pending:{_session_id:'sid-1', id:'approval-old'}, pendingCount:1}],
+          ['sid-control', {pending:{_session_id:'sid-control', id:'approval-control'}, pendingCount:1}],
+        ]);
+        global._clarifyPendingBySession = new Map([
+          ['sid-1', {pending:{_session_id:'sid-1', id:'clarify-old'}}],
+          ['sid-control', {pending:{_session_id:'sid-control', id:'clarify-control'}}],
+        ]);
         window.HermesAssistantTurnAnchors = {
           createAssistantTurnAnchorRegistry(){
             return {anchor:{activity_events:[], lifecycle:{}, identity:{session_id:'sid-1', stream_id:'stream-old'}}};
@@ -374,14 +407,49 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         const attachStart = messagesSrc.indexOf('function _isSessionCurrentPane(');
         const attachEnd = messagesSrc.indexOf('\nfunction transcript(){', attachStart);
         if(attachStart < 0 || attachEnd < 0) throw new Error('attachLiveStream source boundary not found');
+        function extractFunctionSource(src, name){
+          const start = src.indexOf(`function ${name}`);
+          if(start < 0) throw new Error(`${name} source not found`);
+          const paren = src.indexOf('(', start);
+          let parenDepth = 0;
+          let signatureEnd = -1;
+          for(let i = paren; i < src.length; i += 1){
+            if(src[i] === '(') parenDepth += 1;
+            else if(src[i] === ')'){
+              parenDepth -= 1;
+              if(parenDepth === 0){
+                signatureEnd = i;
+                break;
+              }
+            }
+          }
+          if(signatureEnd < 0) throw new Error(`${name} signature not found`);
+          const brace = src.indexOf('{', signatureEnd);
+          let depth = 0;
+          for(let i = brace; i < src.length; i += 1){
+            if(src[i] === '{') depth += 1;
+            else if(src[i] === '}'){
+              depth -= 1;
+              if(depth === 0) return src.slice(start, i + 1);
+            }
+          }
+          throw new Error(`${name} source boundary not found`);
+        }
         const context = vm.createContext(global);
+        vm.runInContext(extractFunctionSource(messagesSrc, '_clearApprovalPendingForSession'), context, {filename:'static/messages.js'});
+        vm.runInContext(extractFunctionSource(messagesSrc, '_clearClarifyPendingForSession'), context, {filename:'static/messages.js'});
         vm.runInContext(messagesSrc.slice(attachStart, attachEnd), context, {filename:'static/messages.js'});
         const attachLiveStream = context.attachLiveStream;
 
+        function takeCooldownTimer(){
+          const index = timeoutQueue.findIndex(timer => timer && timer.ms === 5000);
+          assert.notStrictEqual(index, -1, 'expected a stream-finished cooldown timer');
+          return timeoutQueue.splice(index, 1)[0].cb;
+        }
         function drainQueuedWork(){
           let guard = 0;
           while((timeoutQueue.length || rafQueue.length) && guard++ < 100){
-            while(timeoutQueue.length) timeoutQueue.shift()();
+            while(timeoutQueue.length) timeoutQueue.shift().cb();
             while(rafQueue.length) rafQueue.shift()();
           }
           assert.ok(guard < 100, 'queued callbacks should drain');
@@ -397,6 +465,9 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           calls.clearInflightState = [];
           calls.clearApprovalPending = [];
           calls.clearClarifyPending = [];
+          calls.syncTopbar = 0;
+          calls.scrollIfPinned = 0;
+          calls.scrollToBottom = 0;
           calls.finalizeThinking = 0;
           calls.stopApproval = 0;
           calls.stopClarify = 0;
@@ -438,12 +509,37 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         });
         if(scenario === 'stream_just_finished_timer_owner_rotation'){
           assert.strictEqual(window._streamJustFinished, true, 'active done should arm the external-refresh cooldown');
+          const oldOwnerKey = window._streamJustFinishedOwner;
+          assert.ok(oldOwnerKey, 'active done should record the cooldown owner key');
+          assert.ok(timeoutQueue.length > 0, 'active done should queue a cooldown timer');
+          const oldDoneTimer = takeCooldownTimer();
           S.activeStreamId = 'stream-new';
           attachLiveStream('sid-1', 'stream-new');
           assert.strictEqual(window._streamJustFinished, true, 'new owner attach must not clear the old cooldown synchronously');
-          drainQueuedWork();
-          assert.strictEqual(window._streamJustFinished, false, 'old done cooldown timer must clear its own flag after owner rotation');
-          assert.strictEqual(window._streamJustFinishedOwner, undefined, 'old done cooldown owner token should be retired');
+          const newerSource = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+          newerSource.emit('done', {
+            session: {
+              session_id:'sid-1',
+              message_count:3,
+              messages:[
+                {role:'user', content:'question'},
+                {role:'assistant', content:'first final', timestamp:2},
+                {role:'assistant', content:'new final', timestamp:3},
+              ],
+            },
+            usage:{duration_seconds:1},
+          });
+          const newerOwnerKey = window._streamJustFinishedOwner;
+          assert.ok(newerOwnerKey, 'newer done should record its own cooldown owner key');
+          assert.notStrictEqual(newerOwnerKey, oldOwnerKey, 'newer same-session done should use a distinct owner key');
+          assert.ok(timeoutQueue.length > 0, 'newer done should queue its own cooldown timer');
+          const newerDoneTimer = takeCooldownTimer();
+          oldDoneTimer();
+          assert.strictEqual(window._streamJustFinished, true, 'old cooldown timer must not clear newer done grace');
+          assert.strictEqual(window._streamJustFinishedOwner, newerOwnerKey, 'old cooldown timer must preserve newer owner key');
+          newerDoneTimer();
+          assert.strictEqual(window._streamJustFinished, false, 'newer cooldown timer must clear its own flag');
+          assert.strictEqual(window._streamJustFinishedOwner, undefined, 'newer cooldown owner token should be retired');
           process.stdout.write(JSON.stringify({streamJustFinished:window._streamJustFinished}));
           process.exit(0);
         }
@@ -461,8 +557,13 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           assert.strictEqual(calls.clearInflight, 0, 'loading-only old done must not clear active-pane inflight state');
           assert.deepStrictEqual(calls.clearInflightState, ['sid-1'], 'loading-only old done must retire the owner persisted inflight state');
           assert.strictEqual(INFLIGHT['sid-1'], undefined, 'loading-only old done must delete the owner INFLIGHT entry');
-          assert.deepStrictEqual(calls.clearApprovalPending, ['sid-1'], 'loading-only old done must retire old-session approval pending state');
-          assert.deepStrictEqual(calls.clearClarifyPending, ['sid-1'], 'loading-only old done must retire old-session clarify pending state');
+          assert.strictEqual(global._approvalPendingBySession.has('sid-1'), false, 'loading-only old done must delete owner approval pending state');
+          assert.strictEqual(global._clarifyPendingBySession.has('sid-1'), false, 'loading-only old done must delete owner clarify pending state');
+          assert.strictEqual(global._approvalPendingBySession.has('sid-control'), true, 'loading-only old done must preserve control-session approval pending state');
+          assert.strictEqual(global._clarifyPendingBySession.has('sid-control'), true, 'loading-only old done must preserve control-session clarify pending state');
+          assert.strictEqual(calls.syncTopbar, 0, 'loading-only old done must not sync the transitioning pane topbar');
+          assert.strictEqual(calls.scrollIfPinned, 0, 'loading-only old done must not scroll the transitioning pane');
+          assert.strictEqual(calls.scrollToBottom, 0, 'loading-only old done must not bottom-scroll the transitioning pane');
           assert.strictEqual(calls.finalizeThinking, 0, 'loading-only old done must not finalize Thinking UI');
           assert.strictEqual(calls.stopApproval, 0, 'loading-only old done must not stop active-pane approval polling');
           assert.strictEqual(calls.stopClarify, 0, 'loading-only old done must not stop active-pane clarify polling');

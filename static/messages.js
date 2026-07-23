@@ -2276,14 +2276,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _clearApprovalForOwner(){
     const options=arguments[0]||{};
     const allowPaneMutation=!(options&&options.pane===false);
-    if(allowPaneMutation||!_deleteApprovalPendingForOwner()) _clearApprovalPendingForSession(activeSid);
+    if(allowPaneMutation) _clearApprovalPendingForSession(activeSid);
+    else if(!_deleteApprovalPendingForOwner()) _clearApprovalPendingForSession(activeSid,{sync:false});
     if(!allowPaneMutation||!_approvalBelongsToOwner()) return;
     stopApprovalPolling();
     hideApprovalCard(true);
   }
   function _clearClarifyForOwner(reason, options={}){
     const allowPaneMutation=!(options&&options.pane===false);
-    if(allowPaneMutation||!_deleteClarifyPendingForOwner()) _clearClarifyPendingForSession(activeSid);
+    if(allowPaneMutation) _clearClarifyPendingForSession(activeSid);
+    else if(!_deleteClarifyPendingForOwner()) _clearClarifyPendingForSession(activeSid,{sync:false});
     if(!allowPaneMutation||!_clarifyBelongsToOwner()) return;
     stopClarifyPolling();
     hideClarifyCard(true, reason||'terminal');
@@ -7375,9 +7377,10 @@ function _rememberApprovalPending(pending, pendingCount) {
 }
 
 function _clearApprovalPendingForSession(sid) {
+  const options=arguments[1]||{};
   if (sid) {
     _approvalPendingBySession.delete(sid);
-    if (typeof syncTopbar === 'function') syncTopbar();
+    if (!(options&&options.sync===false) && typeof syncTopbar === 'function') syncTopbar();
   }
 }
 
@@ -8194,9 +8197,10 @@ function _rememberClarifyPending(pending) {
 }
 
 function _clearClarifyPendingForSession(sid) {
+  const options=arguments[1]||{};
   if (sid) {
     _clarifyPendingBySession.delete(sid);
-    if (typeof syncTopbar === 'function') syncTopbar();
+    if (!(options&&options.sync===false) && typeof syncTopbar === 'function') syncTopbar();
   }
 }
 
