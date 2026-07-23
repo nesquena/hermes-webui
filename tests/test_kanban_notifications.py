@@ -39,27 +39,21 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_delivery_log():
-    """Change A: the delivery-dedup log lives under the session-shared
-    ``STATE_DIR`` (``_state_dir()`` prefers ``api.config.STATE_DIR`` over the
-    per-test env override). Without clearing it before each test, a
-    ``delivery_id`` recorded by one dispatch — e.g. the shared
-    ``default|t|chat-t||1`` identity reused by several exception-path tests —
-    would dedupe an unrelated later test's dispatch and make it look idle.
-    Intra-test persistence (the point of the dedup) is preserved because the
-    clear runs only once, before the test body."""
+    """Finding 5: the delivery-dedup ledger is now the shared
+    ``delivery_outbox`` DB table (per kanban DB), not a STATE_DIR JSONL file,
+    so there is no cross-test file to clear — each test that uses the
+    ``notifications_module`` fixture gets a fresh ``FakeKanbanDB`` (hence a
+    fresh in-memory outbox), and the low-level unit tests open their own
+    connections.
+
+    This fixture is retained only to reset the process-level
+    ``_NO_NEW_TURNS`` gate: it is set by
+    ``stop_kanban_notification_watcher``/``_request_shutdown`` and persists on
+    the module object, so a gate left CLOSED by a prior test's stop call would
+    otherwise make every later dispatch look idle."""
     try:
         import api.kanban_notifications as _m
 
-        p = _m._delivery_log_path()
-        if p.exists():
-            p.unlink()
-        # Addendum 5: the process-level ``_NO_NEW_TURNS`` gate is set by
-        # ``stop_kanban_notification_watcher``/``_request_shutdown`` and
-        # persists on the module object. Tests that import the module
-        # directly (without the reloading ``notifications_module`` fixture)
-        # would otherwise inherit a gate left CLOSED by a prior test's stop
-        # call and see every dispatch silently suppressed. Reset it so each
-        # test starts with the gate open.
         _m._NO_NEW_TURNS.clear()
     except Exception:
         pass
@@ -146,6 +140,37 @@ class FakeConn:
 
     def execute(self, sql: str, params=()):
         s = " ".join(sql.split())
+        # ── Finding 5: shared delivery_outbox ledger ──────────────────────
+        if s.startswith("CREATE TABLE IF NOT EXISTS delivery_outbox"):
+            # DDL is a no-op for the dict-backed fake.
+            return SimpleNamespace(rowcount=0)
+        if s.startswith("INSERT OR IGNORE INTO delivery_outbox"):
+            # params: (delivery_id, board, task_id, chat_id, thread_id,
+            #          event_id, consumer_id, created_at)
+            delivery_id = params[0]
+            if delivery_id not in self._db.delivery_outbox:
+                self._db.delivery_outbox[delivery_id] = {
+                    "delivery_id": delivery_id,
+                    "board": params[1],
+                    "task_id": params[2],
+                    "chat_id": params[3],
+                    "thread_id": params[4],
+                    "event_id": params[5],
+                    "consumer_id": params[6],
+                    "created_at": params[7],
+                }
+                return SimpleNamespace(rowcount=1)
+            return SimpleNamespace(rowcount=0)
+        if s.startswith("SELECT 1 FROM delivery_outbox WHERE delivery_id"):
+            (delivery_id,) = params
+            hit = delivery_id in self._db.delivery_outbox
+            return SimpleNamespace(fetchone=lambda: _Row(one=1) if hit else None)
+        if s.startswith("DELETE FROM delivery_outbox WHERE created_at"):
+            (cutoff,) = params
+            for did in list(self._db.delivery_outbox):
+                if self._db.delivery_outbox[did].get("created_at", 0) < cutoff:
+                    del self._db.delivery_outbox[did]
+            return SimpleNamespace(rowcount=0)
         if "PRAGMA table_info" in s and "kanban_notify_subs" in s:
             cols = list(self._db.subs_columns)
             return SimpleNamespace(
@@ -420,6 +445,42 @@ class FakeConn:
                         r["updated_at"] = updated_at
                     rowcount += 1
             return SimpleNamespace(rowcount=rowcount)
+        if s.startswith("UPDATE kanban_notify_subs SET consumer_id"):
+            # Finding 2: DB-backed consumer claim. The default fake schema
+            # models the claim columns, so the claim succeeds (production
+            # fails CLOSED only when the columns are genuinely absent).
+            # params: (consumer_id, claimed_at, claim_expires_at, task_id,
+            #          chat_id, [thread_id], consumer_id, expire_before).
+            # The thread predicate is ignored here (task_id+chat_id identify
+            # the sub in tests, mirroring the cursor-UPDATE handler above).
+            consumer_id = params[0]
+            claimed_at = params[1]
+            claim_expires_at = params[2]
+            task_id = params[3]
+            chat_id = params[4]
+            expire_before = params[-1]
+            rowcount = 0
+            for r in self._db.subs:
+                if (
+                    r["task_id"] == task_id
+                    and r["platform"] == "webui"
+                    and r["chat_id"] == chat_id
+                ):
+                    existing = r.get("consumer_id")
+                    existing_expires = r.get("claim_expires_at")
+                    if (
+                        existing is None
+                        or existing == consumer_id
+                        or (
+                            existing_expires is not None
+                            and existing_expires < expire_before
+                        )
+                    ):
+                        r["consumer_id"] = consumer_id
+                        r["claimed_at"] = claimed_at
+                        r["claim_expires_at"] = claim_expires_at
+                        rowcount += 1
+            return SimpleNamespace(rowcount=rowcount)
         if s.startswith("UPDATE kanban_notify_subs SET disabled_at"):
             # Finding 8: subscription-retire UPDATE. params =
             #   (disabled_at, disabled_reason, task_id, chat_id,
@@ -502,6 +563,11 @@ class FakeKanbanDB:
         self.tasks: list[FakeTask] = []
         self.task_events: list[dict] = []
         self.subs: list[dict] = []
+        # Finding 5: shared delivery-dedup ledger. Production stores this as a
+        # ``delivery_outbox`` table in each kanban DB; the fake keeps one dict
+        # keyed by delivery_id (which already encodes the board), so no
+        # cross-board false-dedup is possible.
+        self.delivery_outbox: dict[str, dict] = {}
         self.subs_columns = subs_columns or [
             "task_id",
             "platform",
@@ -772,15 +838,9 @@ def notifications_module(monkeypatch):
     except OSError:
         pass
 
-    # Change A: the delivery-dedup log lives under the SAME (session-shared)
-    # STATE_DIR as the marker. Clear it per-test so a delivery_id recorded
-    # by one test cannot dedupe an unrelated later test's dispatch.
-    try:
-        delivery_log = mod._delivery_log_path()
-        if delivery_log.exists():
-            delivery_log.unlink()
-    except OSError:
-        pass
+    # Finding 5: the delivery-dedup ledger is the shared ``delivery_outbox``
+    # DB table, now backed by this fixture's fresh ``FakeKanbanDB`` — there is
+    # no cross-test STATE_DIR JSONL file to clear.
 
     # Pre-seed a fresh marker at baseline=0 for "default" so tests that add
     # terminal events with id > 0 can still observe dispatch. This mirrors
@@ -3423,7 +3483,10 @@ def test_real_sqlite_full_iteration_cursor_round_trip(
                 notifier_profile TEXT,
                 last_event_id INTEGER,
                 updated_at INTEGER,
-                thread_id TEXT
+                thread_id TEXT,
+                consumer_id TEXT,
+                claimed_at REAL,
+                claim_expires_at REAL
             );
             CREATE TABLE task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3437,7 +3500,9 @@ def test_real_sqlite_full_iteration_cursor_round_trip(
             ("t_real", "Real SQLite task", "done", "s", "r", None),
         )
         conn.execute(
-            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, "
+            "notifier_profile, last_event_id, updated_at, thread_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("t_real", "webui", "chat-real", "teamA", 0, None, ""),
         )
         conn.execute(
@@ -3907,7 +3972,10 @@ def test_real_sqlite_iteration_prompt_includes_task_title_and_summary(
                 notifier_profile TEXT,
                 last_event_id INTEGER,
                 updated_at INTEGER,
-                thread_id TEXT
+                thread_id TEXT,
+                consumer_id TEXT,
+                claimed_at REAL,
+                claim_expires_at REAL
             );
             CREATE TABLE task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3929,7 +3997,9 @@ def test_real_sqlite_iteration_prompt_includes_task_title_and_summary(
             ),
         )
         conn.execute(
-            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, "
+            "notifier_profile, last_event_id, updated_at, thread_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("t_prompt_metadata", "webui", "chat-metadata", "teamA", 0, None, ""),
         )
         conn.execute(
@@ -5066,8 +5136,18 @@ def test_accepted_dispatch_with_failed_cursor_write_enters_backoff_without_immed
         "board": "default",
     }
 
+    # Finding 2: the claim step runs the claim UPDATE against the board
+    # conn BEFORE dispatch. Return a stub conn whose claim/outbox SQL
+    # succeeds so this test still exercises the cursor-write-failure path
+    # (the injected ``_advance_cursor_conn`` below always returns False).
+    class _StubConn:
+        def execute(self, sql, params=()):
+            return SimpleNamespace(
+                rowcount=1, fetchone=lambda: None, fetchall=lambda: []
+            )
+
     def _noop_board_conn(board=None):
-        return None
+        return _StubConn()
 
     def _noop_close():
         pass
@@ -5210,18 +5290,25 @@ def test_null_notifier_profile_cursor_update_does_not_touch_nonnull_profile_row(
                 notifier_profile TEXT,
                 last_event_id INTEGER,
                 updated_at INTEGER,
-                thread_id TEXT
+                thread_id TEXT,
+                consumer_id TEXT,
+                claimed_at REAL,
+                claim_expires_at REAL
             );
             """
         )
         # Two rows on the SAME (task, platform, chat) — one NULL
         # profile at event 0, one ``teamA`` at event 0.
         conn.execute(
-            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, "
+            "notifier_profile, last_event_id, updated_at, thread_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("t_null", "webui", "chat-null", None, 0, None, ""),
         )
         conn.execute(
-            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, "
+            "notifier_profile, last_event_id, updated_at, thread_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("t_null", "webui", "chat-null", "teamA", 0, None, ""),
         )
         conn.commit()
@@ -5836,36 +5923,60 @@ def test_make_delivery_id_is_deterministic_and_identity_scoped():
     assert a != mod._make_delivery_id("default", "t1", "chat-a", "thr", 42)
 
 
-def test_delivery_log_record_and_dedup_roundtrip():
+def test_delivery_outbox_record_and_dedup_roundtrip():
+    """Finding 5: dedup is backed by the shared ``delivery_outbox`` DB table."""
     mod = _fresh_mod()
+    conn = sqlite3.connect(":memory:")
+    assert mod._ensure_outbox_table(conn) is True
     did = mod._make_delivery_id("default", "t1", "chat-a", "", 7)
-    assert mod._is_duplicate_delivery(did) is False
-    mod._record_delivery(did)
-    assert mod._is_duplicate_delivery(did) is True
+    assert mod._is_duplicate_delivery(conn, did) is False
+    mod._record_delivery(
+        conn, did, board="default", task_id="t1", chat_id="chat-a", event_id=7
+    )
+    assert mod._is_duplicate_delivery(conn, did) is True
     # An unrelated id is not falsely deduped.
     other = mod._make_delivery_id("default", "t1", "chat-a", "", 8)
-    assert mod._is_duplicate_delivery(other) is False
+    assert mod._is_duplicate_delivery(conn, other) is False
 
 
-def test_delivery_dedup_respects_ttl():
+def test_delivery_outbox_dedup_is_presence_based_no_ttl():
+    """Finding 5: a recorded delivery stays deduplicated regardless of age —
+    there is no TTL; the row is only removed by an explicit prune."""
     mod = _fresh_mod()
+    conn = sqlite3.connect(":memory:")
+    mod._ensure_outbox_table(conn)
     did = mod._make_delivery_id("default", "t1", "chat-a", "", 9)
-    # Record with a 0s TTL so it is immediately considered expired.
-    mod._record_delivery(did, ttl=0)
-    assert mod._is_duplicate_delivery(did) is False
+    mod._record_delivery(
+        conn, did, board="default", task_id="t1", chat_id="chat-a", event_id=9
+    )
+    assert mod._is_duplicate_delivery(conn, did) is True
 
 
-def test_prune_delivery_log_drops_expired_keeps_live():
+def test_prune_delivery_outbox_drops_expired_keeps_live():
+    """Finding 5: prune deletes rows older than the 24h window; recent rows
+    survive and remain deduplicated."""
     mod = _fresh_mod()
+    conn = sqlite3.connect(":memory:")
+    mod._ensure_outbox_table(conn)
     live = mod._make_delivery_id("default", "t1", "chat-a", "", 1)
     dead = mod._make_delivery_id("default", "t1", "chat-a", "", 2)
-    mod._record_delivery(live, ttl=3600)
-    mod._record_delivery(dead, ttl=0)
-    mod._prune_delivery_log()
+    mod._record_delivery(
+        conn, live, board="default", task_id="t1", chat_id="chat-a", event_id=1
+    )
+    mod._record_delivery(
+        conn, dead, board="default", task_id="t1", chat_id="chat-a", event_id=2
+    )
+    # Force the 'dead' row to look ancient so the 24h prune removes it.
+    conn.execute(
+        "UPDATE delivery_outbox SET created_at = 0 WHERE delivery_id = ?", (dead,)
+    )
+    mod._prune_delivery_outbox(conn)
     # The dead record is gone; the live record survives.
-    assert mod._is_duplicate_delivery(live) is True
-    lines = mod._delivery_log_path().read_text().splitlines()
-    ids = {json.loads(x)["id"] for x in lines if x.strip()}
+    assert mod._is_duplicate_delivery(conn, live) is True
+    assert mod._is_duplicate_delivery(conn, dead) is False
+    ids = {
+        r[0] for r in conn.execute("SELECT delivery_id FROM delivery_outbox").fetchall()
+    }
     assert live in ids and dead not in ids
 
 
@@ -5904,11 +6015,12 @@ def test_claim_candidates_excludes_rows_claimed_by_another_consumer():
     assert claimed_b2 == cand
 
 
-def test_claim_candidates_fails_open_when_claim_columns_absent():
-    """The Agent-owned schema has no claim columns (RFC §5 — the watcher must
-    not migrate it), so the claim UPDATE raises and we must fail OPEN: every
-    candidate is treated as claimed so dispatch proceeds like the pre-claim
-    design."""
+def test_claim_candidates_fails_closed_when_claim_columns_absent():
+    """Finding 2: the Agent-owned schema has no claim columns (RFC §5 — the
+    watcher must not migrate it), so the claim UPDATE raises. We must fail
+    CLOSED: NO candidate is claimed, so nothing is dispatched. Dispatching
+    without a proven exclusive claim would let two WebUI processes sharing
+    one Kanban DB both wake the same session on the same terminal event."""
     mod = _fresh_mod()
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -5919,7 +6031,7 @@ def test_claim_candidates_fails_open_when_claim_columns_absent():
         {"task_id": "t1", "chat_id": "chat-a", "thread_id": ""},
         {"task_id": "t2", "chat_id": "chat-b", "thread_id": ""},
     ]
-    assert mod._claim_candidates(conn, "default", cand, "consumer-A") == cand
+    assert mod._claim_candidates(conn, "default", cand, "consumer-A") == []
 
 
 def test_is_dispatch_accepted_rejects_already_delivered():
@@ -5927,9 +6039,15 @@ def test_is_dispatch_accepted_rejects_already_delivered():
     resp = {"_status": 200, "stream_id": "s1"}
     ok, _ = mod._is_dispatch_accepted(resp)
     assert ok is True
+    conn = sqlite3.connect(":memory:")
+    mod._ensure_outbox_table(conn)
     did = mod._make_delivery_id("default", "t1", "chat-a", "", 5)
-    mod._record_delivery(did)
-    ok2, reason = mod._is_dispatch_accepted(resp, delivery_id=did)
+    mod._record_delivery(
+        conn, did, board="default", task_id="t1", chat_id="chat-a", event_id=5
+    )
+    # Finding 5: the addendum-6 dedup guard now checks the shared outbox via
+    # the passed connection.
+    ok2, reason = mod._is_dispatch_accepted(resp, conn=conn, delivery_id=did)
     assert ok2 is False and "duplicate" in reason
 
 
@@ -6381,3 +6499,113 @@ def test_blank_profile_with_nondefault_session_is_quarantined(
         for r in caplog.records
         if r.levelname == "ERROR"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Second RED gate — Findings 1, 3, 4, 5 regression locks
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_inspect_subs_columns_reports_thread_id_presence(notifications_module):
+    """Finding 1: ``_inspect_subs_columns`` exposes ``has_thread_id`` so the
+    candidate scan / claim / cursor SQL can omit the column on legacy schemas
+    (a missing column would otherwise raise ``no such column: s.thread_id``
+    and skip the whole board)."""
+    mod = notifications_module.mod
+    fb = notifications_module.fake_kanban
+    assert mod._inspect_subs_columns("default").get("has_thread_id") is False
+    fb.subs_columns = list(fb.subs_columns) + ["thread_id"]
+    assert mod._inspect_subs_columns("default").get("has_thread_id") is True
+
+
+def test_apply_fairness_caps_round_robin_and_global_cap(notifications_module):
+    """Finding 3: per-chat cap + round-robin under the global ceiling, so a
+    quiet chat's single row is never crowded out by a flood of busy rows."""
+    mod = notifications_module.mod
+    cands = [{"chat_id": "busy", "event_id": i} for i in range(30)]
+    cands += [{"chat_id": "quiet", "event_id": 999}]
+    out = mod._apply_fairness_caps(cands, per_chat_limit=25, total_limit=500)
+    assert sum(1 for c in out if c["chat_id"] == "busy") == 25
+    assert any(c["chat_id"] == "quiet" for c in out)
+    # Even with a global cap of 2, the round-robin considers one row from EACH
+    # chat before any chat contributes a second — the quiet chat survives.
+    out2 = mod._apply_fairness_caps(cands, per_chat_limit=25, total_limit=2)
+    assert {c["chat_id"] for c in out2} == {"busy", "quiet"}
+    assert len(out2) == 2
+
+
+def test_validate_chat_target_quarantines_on_profile_scope_unavailable(
+    notifications_module, caplog
+):
+    """Finding 4: when the subscription's profile scope cannot be entered,
+    the candidate is quarantined (treated as missing → cursor consumed, never
+    dispatched through another profile's store) rather than deferred."""
+    mod = notifications_module.mod
+
+    def _raise(sid, notifier_profile=None):
+        raise mod._ProfileScopeUnavailable("scope down")
+
+    mod._get_session_for_target = _raise  # type: ignore[assignment]
+    with caplog.at_level("WARNING"):
+        status, resolved = mod._validate_chat_target("chat-x", notifier_profile="work")
+    assert status == "missing" and resolved is None
+
+
+def test_dispatch_in_profile_no_unscoped_fallback_on_scope_failure(monkeypatch):
+    """Finding 4: a profile-scope failure at dispatch time must NOT retry the
+    dispatch unscoped — it returns a synthetic 5xx and never calls
+    ``dispatch_fn`` (which would build the turn against the wrong store)."""
+    mod = _fresh_mod()
+    calls: list = []
+
+    def _dispatch_fn(chat_id, prompt):
+        calls.append((chat_id, prompt))
+        return {"_status": 200, "stream_id": "s1"}
+
+    fake_profiles = types.ModuleType("api.profiles")
+
+    def _boom(profile, *, purpose=None):
+        raise RuntimeError("profile machinery down")
+
+    fake_profiles.profile_scope_for_detached_worker = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "api.profiles", fake_profiles)
+
+    resp = mod._dispatch_in_profile(_dispatch_fn, "chat-a", "prompt", "work")
+    assert calls == [], "dispatch_fn must NOT be called unscoped after scope failure"
+    assert resp.get("_status") == 500
+    assert resp.get("error") == "profile_scope_unavailable"
+    accepted, _reason = mod._is_dispatch_accepted(resp)
+    assert accepted is False
+
+
+def test_accepted_dispatch_records_delivery_outbox(notifications_module):
+    """Finding 5: an accepted, durably-advanced dispatch records the delivery
+    in the shared ``delivery_outbox`` table."""
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    fb.add_task(FakeTask(id="t_ob", title="Outbox", status="done"))
+    fb.add_sub(FakeSub(task_id="t_ob", platform="webui", chat_id="chat-ob"))
+    state = mod._initialize_baseline_state(["default"])
+    fb.add_event("t_ob", "completed", {"status": "done"}, event_id=15)
+    mod._run_one_iteration(state)
+    assert len(notifications_module.dispatched) == 1
+    did = mod._make_delivery_id("default", "t_ob", "chat-ob", "", 15)
+    assert did in fb.delivery_outbox
+
+
+def test_outbox_dedup_suppresses_already_delivered_across_process(
+    notifications_module,
+):
+    """Finding 5: a delivery_id already present in the shared outbox (e.g.
+    written by another WebUI process) suppresses re-dispatch."""
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    fb.add_task(FakeTask(id="t_dup", title="Dup", status="done"))
+    fb.add_sub(FakeSub(task_id="t_dup", platform="webui", chat_id="chat-dup"))
+    state = mod._initialize_baseline_state(["default"])
+    fb.add_event("t_dup", "completed", {"status": "done"}, event_id=21)
+    did = mod._make_delivery_id("default", "t_dup", "chat-dup", "", 21)
+    # Simulate another process having already delivered this (subscription, event).
+    fb.delivery_outbox[did] = {"delivery_id": did, "created_at": time.time()}
+    mod._run_one_iteration(state)
+    assert notifications_module.dispatched == []

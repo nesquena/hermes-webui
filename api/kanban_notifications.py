@@ -70,24 +70,26 @@ def _request_shutdown() -> None:
     before joining the watcher thread (Addendum 5)."""
     _NO_NEW_TURNS.set()
 
-# ── Change A: DB-backed consumer claim + delivery dedup (Findings 7, 2) ──
+# ── Change A: DB-backed consumer claim + delivery dedup (Findings 7, 2, 5) ──
 # CURRENT PROBLEM: two WebUI processes that share one Kanban DB each used a
 # process-local marker file + threading.Lock for ownership, so BOTH could
 # read the same subscription, BOTH dispatch, and produce duplicate agent
 # turns. NEW DESIGN: a random per-process consumer id claims subscription
 # rows in the DB before dispatch, and a deterministic ``delivery_id`` is
-# recorded in a durable append-only log so a replay is recognised and
-# deduplicated. When the Agent-owned ``kanban_notify_subs`` schema has no
-# claim columns (the common case — the watcher must never migrate the
-# Agent's schema, RFC §5), ``_claim_candidates`` fails OPEN and the code
-# degrades to the pre-claim behaviour + delivery-log dedup + cursor marker.
+# recorded in a SHARED ``delivery_outbox`` table in the SAME kanban DB
+# (Finding 5) so a replay — from this OR another process — is recognised and
+# deduplicated with cross-process atomicity. The outbox INSERT commits in
+# the SAME transaction as the cursor UPDATE so a crash / partial commit can
+# neither duplicate nor lose accepted work.
 _CONSUMER_ID = str(uuid.uuid4())
-# Delivery-dedup log (append-only JSONL under STATE_DIR). Each accepted +
-# durably-advanced delivery appends a ``{"id", "ts", "ttl"}`` record; a
-# later attempt with the same deterministic ``delivery_id`` inside the TTL
-# is treated as a duplicate and suppressed.
-_DELIVERY_LOG_FILENAME = "kanban_delivery_log.jsonl"
-_DELIVERY_LOG_TTL_SECONDS = 3600
+# Finding 5: the delivery-dedup ledger is a shared DB table ``delivery_outbox``
+# in the kanban database (NOT a process-local STATE_DIR JSONL file). The
+# ``delivery_id`` PRIMARY KEY gives cross-process INSERT-OR-IGNORE atomicity.
+_DELIVERY_OUTBOX_TABLE = "delivery_outbox"
+# Rows older than this are pruned (the deterministic delivery_id keeps a
+# replay deduplicated only while the row survives; 24h dwarfs any realistic
+# cursor-write contention window).
+_DELIVERY_OUTBOX_PRUNE_SECONDS = 86_400
 # Claim lease: a claimed row is owned by this consumer for at most
 # ``_CLAIM_TTL_SECONDS`` so a crashed consumer cannot hold a row forever.
 _CLAIM_TTL_SECONDS = 30
@@ -175,6 +177,11 @@ _CANDIDATE_ROWS_LIMIT = 500
 # chat cannot starve the others. Overflow candidates stay readable on the
 # next iteration because the cursor only advances for delivered events.
 _CANDIDATE_ROWS_PER_CHAT_LIMIT = 25
+# Finding 5: how often the watcher prunes each board's ``delivery_outbox``.
+# Rows are only removed once they exceed ``_DELIVERY_OUTBOX_PRUNE_SECONDS``
+# (24h), so an hourly sweep keeps the table bounded without opening a
+# connection per board every poll cycle.
+_OUTBOX_PRUNE_INTERVAL_SECONDS = 3600.0
 # Finding 9: dormant poll cadence. When no Kanban boards are reachable the
 # watcher stays dormant and re-checks discovery at this cadence instead of
 # spinning the fail-closed init path every second.
@@ -640,18 +647,27 @@ def _load_baseline_marker() -> dict | None:
 # ── Change A: DB-backed consumer claim + delivery dedup ────────────────
 
 
-def _claim_candidates(conn, board, candidates, consumer_id, claim_ttl=_CLAIM_TTL_SECONDS):
+def _claim_candidates(
+    conn,
+    board,
+    candidates,
+    consumer_id,
+    claim_ttl=_CLAIM_TTL_SECONDS,
+    has_thread_id=True,
+):
     """Try to claim candidate rows for this consumer. Returns only the rows
     successfully claimed. Uses an UPDATE whose WHERE matches only unclaimed
     or expired-claim rows, so a second WebUI process on the same DB cannot
     claim the same subscription.
 
-    Migration path (RFC §5 — the watcher MUST NOT migrate the Agent-owned
-    ``kanban_notify_subs`` schema): a legacy / current Agent schema has no
-    ``consumer_id`` / ``claimed_at`` / ``claim_expires_at`` columns, so the
-    UPDATE raises. We fail OPEN there — return every candidate as "claimed"
-    — so dispatch proceeds exactly like the pre-claim design and dedup
-    falls back to the delivery log + durable cursor marker.
+    FINDING 2 (fail-closed exclusivity): when the Agent-owned
+    ``kanban_notify_subs`` schema has no ``consumer_id`` / ``claimed_at`` /
+    ``claim_expires_at`` columns (RFC §5 — the watcher MUST NOT migrate the
+    schema), the claim UPDATE raises. We fail CLOSED — return an EMPTY list
+    so NO candidate is dispatched. Dispatching without a proven exclusive
+    claim would let two WebUI processes sharing one Kanban DB both wake the
+    same session on the same terminal event. Exclusivity is a correctness
+    requirement, so "cannot prove ownership" means "do not dispatch".
     """
     now = time.time()
     expire_before = now - claim_ttl
@@ -663,37 +679,40 @@ def _claim_candidates(conn, board, candidates, consumer_id, claim_ttl=_CLAIM_TTL
             thread_id = cand.get("thread_id") or ""
             # Claim: only if unclaimed OR already ours OR the previous
             # claim lease expired.
-            cur = conn.execute(
+            sql = (
                 "UPDATE kanban_notify_subs SET consumer_id=?, claimed_at=?, "
                 "claim_expires_at=? "
                 "WHERE task_id=? AND platform='webui' AND chat_id=? "
-                "AND thread_id=? "
-                "AND (consumer_id IS NULL OR consumer_id=? "
-                "OR claim_expires_at < ?)",
-                (
-                    consumer_id,
-                    now,
-                    now + claim_ttl,
-                    task_id,
-                    chat_id,
-                    thread_id,
-                    consumer_id,
-                    expire_before,
-                ),
             )
+            params: list[Any] = [consumer_id, now, now + claim_ttl, task_id, chat_id]
+            # Finding 1: only reference ``thread_id`` when the schema has it.
+            if has_thread_id:
+                if thread_id and str(thread_id).strip():
+                    sql += "AND thread_id=? "
+                    params.append(thread_id)
+                else:
+                    sql += "AND (thread_id = '' OR thread_id IS NULL) "
+            sql += (
+                "AND (consumer_id IS NULL OR consumer_id=? "
+                "OR claim_expires_at < ?)"
+            )
+            params.extend([consumer_id, expire_before])
+            cur = conn.execute(sql, params)
             if int(getattr(cur, "rowcount", 0) or 0) > 0:
                 claimed.append(cand)
     except Exception:
         # No claim columns on this (Agent-owned) schema — DB-backed claims
-        # are unavailable. Fail open so the pre-claim behaviour is
-        # preserved; dedup relies on the delivery log + cursor marker.
-        logger.debug(
+        # are unavailable. Fail CLOSED: claim nothing so a second process
+        # cannot double-dispatch the same terminal event.
+        logger.warning(
             "kanban notification: DB-backed claim unavailable for board=%s "
-            "(claim columns absent?); proceeding without claim dedup",
+            "(claim columns absent?); failing CLOSED — no candidates claimed "
+            "this iteration (dispatching without a proven exclusive claim "
+            "could duplicate a wakeup across WebUI processes)",
             board,
             exc_info=True,
         )
-        return list(candidates)
+        return []
     return claimed
 
 
@@ -704,66 +723,134 @@ def _make_delivery_id(board, task_id, chat_id, thread_id, event_id):
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
-def _delivery_log_path() -> Path:
-    return _state_dir() / _DELIVERY_LOG_FILENAME
+_DELIVERY_OUTBOX_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {_DELIVERY_OUTBOX_TABLE} (\n"
+    "    delivery_id TEXT PRIMARY KEY,\n"
+    "    board TEXT NOT NULL,\n"
+    "    task_id TEXT NOT NULL,\n"
+    "    chat_id TEXT NOT NULL,\n"
+    "    thread_id TEXT NOT NULL DEFAULT '',\n"
+    "    event_id INTEGER NOT NULL,\n"
+    "    consumer_id TEXT NOT NULL,\n"
+    "    created_at REAL NOT NULL\n"
+    ")"
+)
 
 
-def _record_delivery(delivery_id, ttl=_DELIVERY_LOG_TTL_SECONDS):
-    """Record a delivery to prevent duplicates. Append-only JSONL log."""
-    log_path = _delivery_log_path()
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        logger.debug("delivery log mkdir failed for %s", log_path.parent, exc_info=True)
-        return
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            json.dump({"id": delivery_id, "ts": time.time(), "ttl": ttl}, f)
-            f.write("\n")
-    except Exception:
-        logger.debug("delivery log append failed at %s", log_path, exc_info=True)
-
-
-def _is_duplicate_delivery(delivery_id, ttl=_DELIVERY_LOG_TTL_SECONDS):
-    """True if this delivery_id was already recorded within its TTL."""
-    log_path = _delivery_log_path()
-    if not log_path.exists():
+def _ensure_outbox_table(conn) -> bool:
+    """Finding 5: create the shared ``delivery_outbox`` table if it does not
+    exist. This is a NEW table in the kanban DB — NOT a migration of the
+    Agent-owned ``kanban_notify_subs`` schema (RFC §5), so creating it is
+    permitted. Best-effort: returns False if the DDL fails (read-only DB,
+    permissions) so the caller can fall back to a no-dedup path defensively.
+    """
+    if conn is None:
         return False
-    now = time.time()
     try:
-        with open(log_path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("id") == delivery_id:
-                    if now - rec.get("ts", 0) < rec.get("ttl", ttl):
-                        return True
+        conn.execute(_DELIVERY_OUTBOX_DDL)
+        return True
     except Exception:
+        logger.debug(
+            "kanban notification: could not ensure delivery_outbox table",
+            exc_info=True,
+        )
         return False
-    return False
 
 
-def _prune_delivery_log(ttl=_DELIVERY_LOG_TTL_SECONDS):
-    """Truncate expired delivery records so the log cannot grow unbounded."""
-    log_path = _delivery_log_path()
-    if not log_path.exists():
-        return
-    now = time.time()
+def _record_delivery(
+    conn,
+    delivery_id,
+    *,
+    board,
+    task_id,
+    chat_id,
+    thread_id="",
+    event_id=0,
+    consumer_id=_CONSUMER_ID,
+) -> None:
+    """Finding 5: record a delivery in the shared ``delivery_outbox`` table so
+    a replay — from this OR another process — is recognised and suppressed.
+
+    ``INSERT OR IGNORE`` on the ``delivery_id`` PRIMARY KEY is atomic across
+    processes: a second consumer that already recorded the same (subscription,
+    event) is a silent no-op. The caller runs this INSIDE the same transaction
+    as the cursor UPDATE so an accepted delivery and its outbox row commit (or
+    roll back) together. Raises on failure so the caller can roll back the
+    surrounding transaction and preserve at-least-once semantics.
+    """
+    conn.execute(
+        f"INSERT OR IGNORE INTO {_DELIVERY_OUTBOX_TABLE} "
+        "(delivery_id, board, task_id, chat_id, thread_id, event_id, "
+        "consumer_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(delivery_id),
+            str(board or ""),
+            str(task_id or ""),
+            str(chat_id or ""),
+            str(thread_id or ""),
+            int(event_id or 0),
+            str(consumer_id or ""),
+            time.time(),
+        ),
+    )
+
+
+def _is_duplicate_delivery(conn, delivery_id) -> bool:
+    """Finding 5: True if ``delivery_id`` is already present in the shared
+    ``delivery_outbox`` table (delivered by this or another process).
+
+    Fully defensive: a missing table / read failure returns False (not a
+    duplicate) so a first-ever delivery is never wrongly suppressed. A None
+    connection likewise returns False.
+    """
+    if conn is None:
+        return False
     try:
-        with open(log_path, encoding="utf-8") as f:
-            lines = f.readlines()
-        with open(log_path, "w", encoding="utf-8") as f:
-            for line in lines:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if now - rec.get("ts", 0) < rec.get("ttl", ttl):
-                    f.write(line)
+        row = conn.execute(
+            f"SELECT 1 FROM {_DELIVERY_OUTBOX_TABLE} WHERE delivery_id = ? LIMIT 1",
+            (str(delivery_id),),
+        ).fetchone()
+        return row is not None
     except Exception:
-        logger.debug("delivery log prune failed at %s", log_path, exc_info=True)
+        # Missing table (never written yet) or read failure — treat as not a
+        # duplicate. A genuine duplicate is caught once the table exists.
+        return False
+
+
+def _prune_delivery_outbox(conn, max_age_seconds=_DELIVERY_OUTBOX_PRUNE_SECONDS) -> None:
+    """Finding 5: DELETE outbox rows older than ``max_age_seconds`` so the
+    shared table cannot grow unbounded. Best-effort — never raises."""
+    if conn is None:
+        return
+    cutoff = time.time() - max_age_seconds
+    try:
+        conn.execute(
+            f"DELETE FROM {_DELIVERY_OUTBOX_TABLE} WHERE created_at < ?",
+            (cutoff,),
+        )
+    except Exception:
+        logger.debug(
+            "kanban notification: delivery_outbox prune failed", exc_info=True
+        )
+
+
+def _prune_all_outboxes(state) -> None:
+    """Finding 5: prune every observed board's ``delivery_outbox``. Opens a
+    short-lived connection per board; each step is best-effort so a single
+    unreachable board never crashes the watcher."""
+    boards = []
+    if isinstance(state, dict):
+        boards = list(state.get("boards") or [])
+    for board in boards:
+        try:
+            with _open_conn(board) as conn:
+                _prune_delivery_outbox(conn)
+        except Exception:
+            logger.debug(
+                "kanban notification: outbox prune skipped for board=%s",
+                board,
+                exc_info=True,
+            )
 
 
 def _read_baseline_from_db(board):
@@ -824,6 +911,7 @@ def _inspect_subs_columns(board: str | None = None) -> dict:
         "has_profile": False,
         "required_ok": False,
         "profile_column": None,
+        "has_thread_id": False,
         "columns": [],
     }
     try:
@@ -862,6 +950,13 @@ def _inspect_subs_columns(board: str | None = None) -> dict:
     # re-appearing in the candidate scan. Legacy Agent schemas lack it, in
     # which case the retire step is a best-effort no-op (fail-open).
     out["has_disabled_at"] = "disabled_at" in names
+    # Finding 1: detect whether the ``thread_id`` column exists. A legacy
+    # Agent schema predates it, so the candidate scan / claim / cursor SQL
+    # must NOT reference ``thread_id`` (``no such column: s.thread_id``
+    # would be caught, logged, and skip the whole board — terminal wakeups
+    # would never be delivered). When absent, callers select ``'' AS
+    # s_thread_id`` and drop every ``thread_id`` predicate.
+    out["has_thread_id"] = "thread_id" in names
     if has_notifier:
         out["profile_column"] = "notifier_profile"
     elif has_profile:
@@ -1019,19 +1114,25 @@ def _advance_subscriptions_to_baseline(
         profile_select = "NULL"
     try:
         with _open_conn(board) as conn:
+            # Detect the schema shape once per board so the legacy paths
+            # (no ``updated_at`` / no ``thread_id``) use the right SQL.
+            schema = _inspect_subs_columns(board)
+            has_updated_at = bool(schema.get("has_updated_at", True))
+            has_thread_id = bool(schema.get("has_thread_id", True))
+            # Finding 1: a legacy schema without ``thread_id`` must not
+            # reference it in the SELECT (would raise ``no such column``).
+            thread_id_select = (
+                "COALESCE(thread_id, '')" if has_thread_id else "''"
+            )
             rows = conn.execute(
                 "SELECT task_id, chat_id, "
-                "COALESCE(thread_id, '') AS thread_id, "
+                f"{thread_id_select} AS thread_id, "
                 "last_event_id, "
                 f"{profile_select} AS profile_value "
                 "FROM kanban_notify_subs "
                 "WHERE platform = ?",
                 ("webui",),
             ).fetchall()
-            # Detect updated_at once per board so the legacy-no-updated_at
-            # path uses the right SQL shape.
-            schema = _inspect_subs_columns(board)
-            has_updated_at = bool(schema.get("has_updated_at", True))
             for row in rows or []:
                 try:
                     task_id = row["task_id"]
@@ -1066,6 +1167,7 @@ def _advance_subscriptions_to_baseline(
                         profile_column=profile_column,
                         profile_value=profile_value,
                         has_updated_at=has_updated_at,
+                        has_thread_id=has_thread_id,
                     )
                 except Exception:
                     logger.debug(
@@ -1318,12 +1420,14 @@ def _candidate_rows(
     internally (test path); production callers reuse one connection
     per board per iteration.
 
-    Bounded scan: the SQL appends ``LIMIT _CANDIDATE_ROWS_LIMIT`` so a
-    subscription whose Kanban board accumulated thousands of
-    ``task_events`` rows past the cursor cannot blow up the watcher's
-    RSS on a single poll cycle. Overflow candidates stay readable on
-    subsequent iterations because the cursor is only advanced for
-    events that were actually delivered.
+    Bounded scan (Finding 3): the SQL no longer applies a blind global
+    ``LIMIT`` (which starved quiet subscriptions ordered after a flood of
+    busy rows). The candidate volume is bounded downstream by
+    ``_apply_fairness_caps`` — a per-chat cap plus a round-robin selection
+    up to the global ceiling — so at least one pending row from every chat
+    is considered. Overflow candidates stay readable on subsequent
+    iterations because the cursor is only advanced for events that were
+    actually delivered.
     """
     out: list[dict] = []
     schema_by_board = state.get("schema_by_board") or {}
@@ -1336,6 +1440,15 @@ def _candidate_rows(
         profile_select = "s.profile"
     else:
         profile_select = "NULL"
+
+    # Finding 1: a legacy schema without a ``thread_id`` column must not
+    # reference it in the SELECT — ``COALESCE(s.thread_id, '')`` would raise
+    # ``no such column`` and skip the entire board. Emit a literal ''
+    # instead so the candidate still carries a (blank) thread_id.
+    if schema.get("has_thread_id", True):
+        thread_id_select = "COALESCE(s.thread_id, '')"
+    else:
+        thread_id_select = "''"
 
     # Finding 8: exclude subscriptions retired by a prior archived/deleted
     # terminal so they stop appearing in the candidate scan. Only emitted
@@ -1359,7 +1472,7 @@ def _candidate_rows(
     sql = (
         f"SELECT s.task_id AS s_task_id, "
         f"       s.chat_id AS s_chat_id, "
-        f"       COALESCE(s.thread_id, '') AS s_thread_id, "
+        f"       {thread_id_select} AS s_thread_id, "
         f"       s.last_event_id AS s_last_event_id, "
         f"       {profile_select} AS s_profile, "
         f"       e.id AS e_id, "
@@ -1373,7 +1486,12 @@ def _candidate_rows(
         f"  AND e.id > COALESCE(s.last_event_id, 0) "
         f"  AND e.id > ? "
         f"ORDER BY e.id ASC, s.task_id ASC, s.chat_id ASC "
-        f"LIMIT {_CANDIDATE_ROWS_LIMIT}"
+        # Finding 3: NO global SQL ``LIMIT`` here. A blind ``LIMIT 500``
+        # applied before per-chat allocation let a quiet subscription
+        # ordered after 500 busy rows never be considered. Fairness is
+        # enforced in Python by ``_apply_fairness_caps`` (per-chat cap +
+        # round-robin to the global ceiling) so at least one pending row
+        # from every chat is considered before any chat contributes more.
     )
 
     def _scan(local_conn):
@@ -1491,6 +1609,51 @@ def _filter_per_chat(
     return out
 
 
+def _apply_fairness_caps(
+    candidates: list[dict],
+    per_chat_limit: int = _CANDIDATE_ROWS_PER_CHAT_LIMIT,
+    total_limit: int = _CANDIDATE_ROWS_LIMIT,
+) -> list[dict]:
+    """Finding 3: fair candidate selection under the global candidate cap.
+
+    The candidate scan no longer applies a blind SQL ``LIMIT`` (which let a
+    quiet subscription ordered after ``total_limit`` busy rows never be
+    considered). Fairness is applied here instead:
+
+      1. Group by ``chat_id`` preserving scan order, capping each chat to
+         ``per_chat_limit`` so one busy chat can't crowd the scan.
+      2. Round-robin across the chats up to ``total_limit`` total, so at
+         least one pending row from EVERY chat with events is considered
+         before any single chat contributes a second row.
+
+    Overflow candidates stay readable on the next iteration because the
+    cursor only advances for events that were actually delivered. The
+    returned order interleaves chats; downstream regroups by ``chat_id``,
+    so only the SELECTED set matters, not the interleaving — and each
+    chat's internal order is preserved.
+    """
+    by_chat: dict[str, list[dict]] = {}
+    for cand in candidates:
+        chat_id = str(cand.get("chat_id") or "")
+        bucket = by_chat.setdefault(chat_id, [])
+        if len(bucket) < per_chat_limit:
+            bucket.append(cand)
+    out: list[dict] = []
+    idx = 0
+    while len(out) < total_limit:
+        progressed = False
+        for bucket in by_chat.values():
+            if idx < len(bucket):
+                out.append(bucket[idx])
+                progressed = True
+                if len(out) >= total_limit:
+                    break
+        if not progressed:
+            break
+        idx += 1
+    return out
+
+
 def _event_kind(event_row: Any) -> str:
     """Best-effort extraction of the ``kind`` string from an event row
     (dict or sqlite tuple). Mirrors the access pattern in
@@ -1569,6 +1732,7 @@ def _update_cursor_row(
     profile_column: str | None,
     profile_value: str | None = None,
     has_updated_at: bool = True,
+    has_thread_id: bool = True,
 ) -> int:
     """Monotonic conditional UPDATE. Returns rowcount (0 when the row's
     cursor already advanced past new_cursor or the row was deleted).
@@ -1624,11 +1788,16 @@ def _update_cursor_row(
             chat_id,
             int(new_cursor),
         ]
-    if thread_id and str(thread_id).strip():
-        sql += " AND thread_id = ?"
-        params.append(thread_id)
-    else:
-        sql += " AND (thread_id = '' OR thread_id IS NULL)"
+    # Finding 1: only reference ``thread_id`` when the live schema has the
+    # column. A legacy schema without it identifies the subscription by
+    # (task_id, platform, chat_id) alone; emitting any ``thread_id``
+    # predicate would raise ``no such column`` and fail every cursor write.
+    if has_thread_id:
+        if thread_id and str(thread_id).strip():
+            sql += " AND thread_id = ?"
+            params.append(thread_id)
+        else:
+            sql += " AND (thread_id = '' OR thread_id IS NULL)"
     if profile_column == "notifier_profile":
         if profile_value is None:
             sql += " AND notifier_profile IS NULL"
@@ -1655,6 +1824,7 @@ def _advance_cursor(
     profile_column: str | None,
     profile_value: str | None,
     has_updated_at: bool = True,
+    has_thread_id: bool = True,
 ) -> bool:
     """Commit the monotonic cursor write. Best-effort — never raises.
 
@@ -1676,6 +1846,7 @@ def _advance_cursor(
                 profile_column=profile_column,
                 profile_value=profile_value,
                 has_updated_at=has_updated_at,
+                has_thread_id=has_thread_id,
             )
             return rowcount > 0
     except Exception:
@@ -1697,6 +1868,7 @@ def _disable_subscription(
     profile_column: str | None = None,
     profile_value: str | None = None,
     reason: str = "terminal_archived",
+    has_thread_id: bool = True,
 ) -> bool:
     """Finding 8: retire a subscription that reached an archived/deleted
     terminal so it stops re-appearing in the candidate scan.
@@ -1719,11 +1891,12 @@ def _disable_subscription(
         "  AND chat_id = ?"
     )
     params: list[Any] = [int(time.time()), reason, task_id, chat_id]
-    if thread_id and str(thread_id).strip():
-        sql += " AND thread_id = ?"
-        params.append(thread_id)
-    else:
-        sql += " AND (thread_id = '' OR thread_id IS NULL)"
+    if has_thread_id:
+        if thread_id and str(thread_id).strip():
+            sql += " AND thread_id = ?"
+            params.append(thread_id)
+        else:
+            sql += " AND (thread_id = '' OR thread_id IS NULL)"
     if profile_column == "notifier_profile":
         if profile_value is None:
             sql += " AND notifier_profile IS NULL"
@@ -1754,6 +1927,14 @@ def _disable_subscription(
 # ── Target validation (RFC §8) ────────────────────────────────────────
 
 
+class _ProfileScopeUnavailable(Exception):
+    """FINDING 4: raised when a profiled subscription's session cannot be
+    resolved inside its OWN profile scope (missing profile, import error,
+    scope-machinery failure). There is NO unscoped fallback: the caller
+    quarantines the candidate — the cursor is advanced and the wakeup is
+    never dispatched through the default / another profile's store."""
+
+
 def _get_session_for_target(sid: str, notifier_profile: str | None = None) -> Any:
     """Resolve a session, optionally scoped to a specific profile's WebUI store.
 
@@ -1765,13 +1946,17 @@ def _get_session_for_target(sid: str, notifier_profile: str | None = None) -> An
       2. ``api.models.get_session`` import (production).
       3. Raise ``KeyError`` so the caller treats the chat_id as missing.
 
-    FINDING 1: when the subscription carries a ``notifier_profile`` we resolve
-    the session INSIDE that profile's scope. A cold / inactive profile's
-    session is invisible to the default-profile store, so without entering
-    the profile context first ``get_session`` returns "missing" and the
-    wakeup is silently consumed. The profile scope is a no-op for the
-    default / root profile and is entered fully defensively so a profile
-    machinery hiccup never crashes the watcher.
+    A subscription that carries a ``notifier_profile`` resolves the session
+    INSIDE that profile's scope. A cold / inactive profile's session is
+    invisible to the default-profile store, so without entering the profile
+    context first ``get_session`` returns "missing".
+
+    FINDING 4 (fail-closed authority): if the profile scope machinery is
+    unavailable for ANY reason we raise ``_ProfileScopeUnavailable`` instead
+    of falling back to an UNSCOPED lookup — an unscoped lookup could resolve
+    (and the dispatch could then wake) the WRONG profile's session. The
+    resolver is NEVER cached in module globals; each call resolves fresh
+    through the scoped path so a later call can never bypass the scope.
     """
     fn = globals().get("get_session")
     if fn is not None:
@@ -1786,11 +1971,13 @@ def _get_session_for_target(sid: str, notifier_profile: str | None = None) -> An
         raise RuntimeError(
             f"api.models.get_session import failed: {exc!r}"
         ) from exc
-    # Cache the resolution for subsequent calls (still mutable via
-    # monkeypatch.setattr(mod, "get_session", ...) for tests).
-    globals()["get_session"] = _real_get_session
+    # FINDING 4: deliberately do NOT cache ``_real_get_session`` in module
+    # globals — a cached resolver would be reused on later calls and could
+    # resolve a session OUTSIDE the profile scope.
     if notifier_profile and str(notifier_profile).strip():
-        scope = None
+        # FINDING 4: a profiled subscription MUST resolve inside its own
+        # profile scope. If the scope machinery is unavailable, fail CLOSED
+        # (quarantine) — never fall through to an unscoped lookup.
         try:
             from api.profiles import (  # type: ignore
                 profile_scope_for_detached_worker,
@@ -1799,19 +1986,24 @@ def _get_session_for_target(sid: str, notifier_profile: str | None = None) -> An
             scope = profile_scope_for_detached_worker(
                 notifier_profile, purpose="kanban wakeup session resolve"
             )
-        except Exception:
-            logger.debug(
-                "profile scope unavailable for %r; resolving session unscoped",
-                notifier_profile,
-                exc_info=True,
-            )
-            scope = None
-        if scope is not None:
-            # A KeyError (session genuinely absent) from ``get_session``
-            # propagates cleanly out of the scope so the caller's missing
-            # / transient classification is preserved.
-            with scope:
-                return _real_get_session(sid)
+            scope.__enter__()
+        except Exception as exc:
+            raise _ProfileScopeUnavailable(
+                f"profile scope unavailable for {notifier_profile!r}: {exc!r}"
+            ) from exc
+        # A KeyError (session genuinely absent) from ``get_session``
+        # propagates cleanly out of the scope so the caller's missing /
+        # transient classification is preserved. The scope is always exited.
+        try:
+            return _real_get_session(sid)
+        finally:
+            try:
+                scope.__exit__(None, None, None)
+            except Exception:
+                logger.debug(
+                    "profile scope exit failed for %r", notifier_profile,
+                    exc_info=True,
+                )
     return _real_get_session(sid)
 
 
@@ -1989,10 +2181,15 @@ def _dispatch_in_profile(dispatch_fn, chat_id: str, prompt: str, expected_profil
     profile, the ``start_session_turn`` dispatch must run in the SAME
     profile scope so the turn is constructed against the correct profile's
     workspace / model / credentials. The scope is a no-op for the default /
-    root profile and is entered fully defensively — a profile-machinery
-    failure falls back to an unscoped dispatch rather than dropping the
-    wakeup. ``dispatch_fn`` (``_dispatch``) never raises, so the fallback
-    can never double-dispatch.
+    root profile.
+
+    FINDING 4 (fail-closed authority): a profile-machinery failure must NOT
+    fall back to an unscoped dispatch — building the turn against the wrong
+    (default / another) profile's store is worse than deferring. On any
+    scope failure we return a synthetic 5xx so the caller rejects the
+    dispatch, leaves the terminal readable, and retries after backoff.
+    ``dispatch_fn`` (``_dispatch``) never raises, so a genuine dispatch
+    result is always returned when the scope is intact.
     """
     if expected_profile and str(expected_profile).strip():
         try:
@@ -2000,16 +2197,32 @@ def _dispatch_in_profile(dispatch_fn, chat_id: str, prompt: str, expected_profil
                 profile_scope_for_detached_worker,
             )
 
-            with profile_scope_for_detached_worker(
+            scope = profile_scope_for_detached_worker(
                 expected_profile, purpose="kanban wakeup dispatch"
-            ):
-                return dispatch_fn(chat_id, prompt)
+            )
+            scope.__enter__()
         except Exception:
-            logger.debug(
-                "profile-scoped dispatch failed for %r; retrying unscoped",
+            logger.warning(
+                "kanban notification: profile scope unavailable for dispatch "
+                "to chat_id=%r profile=%r; refusing UNSCOPED dispatch (would "
+                "build the turn against the wrong profile's store); terminal "
+                "stays readable for retry",
+                chat_id,
                 expected_profile,
                 exc_info=True,
             )
+            return {"_status": 500, "error": "profile_scope_unavailable"}
+        try:
+            return dispatch_fn(chat_id, prompt)
+        finally:
+            try:
+                scope.__exit__(None, None, None)
+            except Exception:
+                logger.debug(
+                    "profile scope exit failed for dispatch to %r",
+                    expected_profile,
+                    exc_info=True,
+                )
     return dispatch_fn(chat_id, prompt)
 
 
@@ -2331,6 +2544,17 @@ def _run_one_iteration(state: dict) -> list[str]:
             return True
         return bool(schema.get("has_updated_at", True))
 
+    def _has_thread_id(board: str | None) -> bool:
+        """Resolve ``has_thread_id`` from ``state["schema_by_board"]`` for
+        this board (Finding 1). Defaults to True when the schema is unknown
+        (the modern shape). A legacy schema without the column must not have
+        any ``thread_id`` predicate emitted in the cursor / disable SQL."""
+        schema_by_board = state.get("schema_by_board") or {}
+        schema = schema_by_board.get(board)
+        if schema is None:
+            return True
+        return bool(schema.get("has_thread_id", True))
+
     def _advance_cursor_conn(
         board: str | None,
         task_id: str,
@@ -2348,6 +2572,7 @@ def _run_one_iteration(state: dict) -> list[str]:
         schema so a legacy ``kanban_notify_subs`` without that column
         does not crash the iteration (Fix 3)."""
         has_updated_at = _has_updated_at(board)
+        has_thread_id = _has_thread_id(board)
         if conn is None:
             return _advance_cursor(
                 board=board,
@@ -2358,6 +2583,7 @@ def _run_one_iteration(state: dict) -> list[str]:
                 profile_column=profile_column,
                 profile_value=profile_value,
                 has_updated_at=has_updated_at,
+                has_thread_id=has_thread_id,
             )
         try:
             rowcount = _update_cursor_row(
@@ -2369,6 +2595,7 @@ def _run_one_iteration(state: dict) -> list[str]:
                 profile_column=profile_column,
                 profile_value=profile_value,
                 has_updated_at=has_updated_at,
+                has_thread_id=has_thread_id,
             )
             return rowcount > 0
         except Exception:
@@ -2425,6 +2652,13 @@ def _run_one_iteration(state: dict) -> list[str]:
             str(c.get("task_id") or ""),
         )
     )
+
+    # Finding 3: apply the fairness caps (per-chat limit + round-robin to
+    # the global ceiling) AFTER the deterministic sort but BEFORE grouping,
+    # so a quiet chat's single pending row is never crowded out by a flood
+    # of busy-chat rows. The candidate scan no longer applies a blind SQL
+    # ``LIMIT``.
+    candidates = _apply_fairness_caps(candidates)
 
     # Group by chat_id; preserve candidate order within each group so the
     # batch is deterministic.
@@ -2687,6 +2921,10 @@ def _process_chat(
                 cand.get("profile"),
                 reason="terminal_"
                 + (_event_kind(cand.get("event")).strip().lower() or "archived"),
+                has_thread_id=bool(
+                    ((state.get("schema_by_board") or {}).get(cand.get("board")) or {})
+                    .get("has_thread_id", True)
+                ),
             )
 
     if not dispatchable:
@@ -2766,11 +3004,16 @@ def _process_chat(
         selected_by_board.setdefault(entry.get("board"), []).append(entry)
     claimed_keys: set[tuple] = set()
     for board_slug, board_selected in selected_by_board.items():
+        _board_has_thread_id = bool(
+            ((state.get("schema_by_board") or {}).get(board_slug) or {})
+            .get("has_thread_id", True)
+        )
         claimed = _claim_candidates(
             _get_board_conn(board_slug),
             board_slug,
             board_selected,
             _CONSUMER_ID,
+            has_thread_id=_board_has_thread_id,
         )
         for entry in claimed:
             claimed_keys.add(_sub_event_key(entry))
@@ -2778,11 +3021,11 @@ def _process_chat(
     if not selected:
         return
 
-    # Change A (Finding 2): delivery dedup. Suppress any (subscription,
-    # event) we have already delivered — a durable guard against replay
-    # when the cursor write is unreliable across processes. The matching
-    # ``delivery_id`` is recorded only after a fully successful dispatch
-    # (see the accepted branch below).
+    # Change A (Findings 2 + 5): delivery dedup against the shared
+    # ``delivery_outbox`` table. Suppress any (subscription, event) already
+    # delivered by THIS or ANOTHER process — a durable cross-process guard
+    # against replay / duplicate wakeups. The matching ``delivery_id`` is
+    # recorded only inside the accepted-dispatch cursor transaction below.
     def _delivery_id_for(entry: dict) -> str:
         return _make_delivery_id(
             str(entry.get("board") or ""),
@@ -2793,7 +3036,11 @@ def _process_chat(
         )
 
     selected = [
-        entry for entry in selected if not _is_duplicate_delivery(_delivery_id_for(entry))
+        entry
+        for entry in selected
+        if not _is_duplicate_delivery(
+            _get_board_conn(entry.get("board")), _delivery_id_for(entry)
+        )
     ]
     if not selected:
         return
@@ -2831,10 +3078,21 @@ def _process_chat(
     # A3: strict acceptance — real integer status in 200..299 AND a
     # non-empty stream_id. A 2xx response with a stream id means the agent
     # accepted and started the turn; other statuses are not accepted.
-    # Change A (addendum 6): also reject if this delivery was already
-    # recorded (belt-and-suspenders against a concurrent duplicate).
+    # Change A (addendum 6 + Finding 5): also reject if this delivery was
+    # already recorded in the shared ``delivery_outbox`` (belt-and-suspenders
+    # against a concurrent duplicate). The board conns were closed before
+    # dispatch, so reopen the delivered board's conn for the outbox read.
+    _dedup_conn = (
+        _get_board_conn(delivered_entries[0].get("board"))
+        if delivered_entries
+        else None
+    )
     accepted, reason = _is_dispatch_accepted(
-        resp, delivery_id=_delivery_id_for(delivered_entries[0]) if delivered_entries else None
+        resp,
+        conn=_dedup_conn,
+        delivery_id=(
+            _delivery_id_for(delivered_entries[0]) if delivered_entries else None
+        ),
     )
     if accepted:
         # A1 safe-adjacent advance: for each delivered terminal,
@@ -2918,6 +3176,12 @@ def _process_chat(
             advance_plan_by_board.setdefault(sub_key[0], []).append(
                 (sub_key, ceiling)
             )
+        # Finding 5: the delivered entries to record in ``delivery_outbox``,
+        # grouped by board so each board's outbox INSERTs commit in the SAME
+        # transaction as that board's cursor UPDATEs.
+        delivered_by_board: dict[Any, list[dict]] = {}
+        for entry in delivered_entries:
+            delivered_by_board.setdefault(entry.get("board"), []).append(entry)
         # Attempt EVERY cursor advance, then decide based on the
         # aggregate result. ``dispatched_chats.append`` only runs in
         # the success branch below — when any single advance failed,
@@ -2938,6 +3202,10 @@ def _process_chat(
                         first_failed = sub_key
                         first_failed_event = ceiling
                 continue
+            # Finding 5: make sure the shared delivery_outbox table exists on
+            # this board's DB before we open the transaction (DDL outside the
+            # explicit transaction avoids any BEGIN/CREATE interaction).
+            _ensure_outbox_table(conn)
             # Begin a per-board transaction so every cursor write for
             # this board commits together (or rolls back together on
             # any per-row failure).
@@ -2986,6 +3254,46 @@ def _process_chat(
                         exc_info=True,
                     )
                 any_advance_failed = True
+                continue
+            # Finding 5: record each delivered (subscription, event) in the
+            # shared delivery_outbox INSIDE this board's cursor transaction so
+            # the cursor advance and the dedup ledger commit atomically — a
+            # crash / partial commit can neither duplicate nor lose accepted
+            # work. INSERT OR IGNORE is a no-op if another process already
+            # recorded the same delivery_id.
+            try:
+                for entry in delivered_by_board.get(board, []):
+                    _record_delivery(
+                        conn,
+                        _delivery_id_for(entry),
+                        board=board,
+                        task_id=str(entry.get("task_id") or ""),
+                        chat_id=str(entry.get("chat_id") or ""),
+                        thread_id=str(entry.get("thread_id") or ""),
+                        event_id=int(entry.get("event_id") or 0),
+                        consumer_id=_CONSUMER_ID,
+                    )
+            except Exception:
+                logger.warning(
+                    "kanban notification: delivery_outbox INSERT failed for "
+                    "board=%r; rolling back the cursor advance to preserve "
+                    "at-least-once semantics",
+                    board,
+                    exc_info=True,
+                )
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    logger.debug(
+                        "cursor transaction ROLLBACK (after outbox INSERT "
+                        "failure) failed for board=%r",
+                        board,
+                        exc_info=True,
+                    )
+                any_advance_failed = True
+                if first_failed is None:
+                    first_failed = plan[0][0]
+                    first_failed_event = plan[0][1]
                 continue
             try:
                 conn.execute("COMMIT")
@@ -3038,14 +3346,11 @@ def _process_chat(
         # Putting the ``append`` after the success check keeps the
         # invariant visible: a chat that did not durably advance all
         # of its subscription cursors must remain in the candidate
-        # pool for the next iteration.
-        # Change A (Finding 2): record each delivery so a later replay of
-        # the same (subscription, event) is recognised and deduplicated.
-        # Recorded only here — after a FULLY successful, durable delivery —
-        # so an accepted-but-cursor-write-failed path leaves the delivery
-        # unrecorded and at-least-once replay is preserved.
-        for entry in delivered_entries:
-            _record_delivery(_delivery_id_for(entry))
+        # pool for the next iteration. Finding 5: the delivery_outbox
+        # rows were already recorded INSIDE each board's cursor
+        # transaction above, so an accepted-but-cursor-write-failed
+        # path leaves the delivery unrecorded and at-least-once replay
+        # is preserved.
         chat_backoff_state.pop(chat_id, None)
         dispatched_chats.append(chat_id)
         return
@@ -3137,6 +3442,19 @@ def _validate_chat_target(
         session = _get_session_for_target(
             chat_id, notifier_profile=notifier_profile
         )
+    except _ProfileScopeUnavailable:
+        # FINDING 4: the subscription's profile scope could not be entered.
+        # Quarantine (consume the cursor, never dispatch) rather than defer
+        # or fall back to an unscoped lookup that could wake the wrong
+        # profile's session.
+        logger.warning(
+            "kanban notification: profile scope unavailable for chat_id=%r "
+            "profile=%r; quarantining terminal event (cursor advanced, "
+            "never dispatched through another profile's store)",
+            chat_id,
+            notifier_profile,
+        )
+        return "missing", None
     except KeyError:
         logger.warning(
             "kanban notification target session %r is missing; "
@@ -3319,7 +3637,7 @@ def _refresh_board_discovery(state: dict | None) -> float:
 
 
 def _is_dispatch_accepted(
-    resp: dict, delivery_id: str | None = None
+    resp: dict, conn: Any | None = None, delivery_id: str | None = None
 ) -> tuple[bool, str]:
     """A3 / Fix 1: a dispatch response is accepted iff BOTH:
 
@@ -3360,11 +3678,16 @@ def _is_dispatch_accepted(
     stream_id = resp.get("stream_id")
     if not isinstance(stream_id, str) or not stream_id.strip():
         return False, f"missing stream_id (status={status_code})"
-    # Change A (addendum 6): even a well-formed 2xx response is rejected if
-    # this delivery_id was already recorded — a concurrent consumer already
-    # delivered this (subscription, event) and re-delivering would produce
-    # a duplicate agent turn.
-    if delivery_id is not None and _is_duplicate_delivery(delivery_id):
+    # Change A (addendum 6 + Finding 5): even a well-formed 2xx response is
+    # rejected if this delivery_id is already present in the shared
+    # ``delivery_outbox`` — a concurrent consumer already delivered this
+    # (subscription, event) and re-delivering would produce a duplicate agent
+    # turn. A None conn (no board DB available) skips the check.
+    if (
+        conn is not None
+        and delivery_id is not None
+        and _is_duplicate_delivery(conn, delivery_id)
+    ):
         return False, f"duplicate delivery_id={delivery_id}"
     return True, "ok"
 
@@ -3385,6 +3708,10 @@ def _watcher_loop() -> None:
     backoff = _BACKOFF_INITIAL_SECONDS
     state: dict | None = None
     last_board_refresh = 0.0
+    # Finding 5: outbox pruning only reclaims rows older than 24h, so it does
+    # not need to run every poll cycle — opening a connection per board every
+    # second purely to prune would be wasteful. Prune hourly instead.
+    last_outbox_prune = 0.0
     # C7: bounded reinitialization cadence. The watcher re-runs
     # ``_initialize_baseline_state`` at most every
     # ``_REINITIALIZE_RETRY_SECONDS`` while the state is fail-closed
@@ -3503,10 +3830,12 @@ def _watcher_loop() -> None:
                     last_board_refresh = _refresh_board_discovery(state)
                 if state is not None:
                     _run_one_iteration(state)
-                # Change A (Finding 2): prune expired delivery-log records
-                # once per poll cycle so the append-only log can't grow
-                # without bound.
-                _prune_delivery_log()
+                # Finding 5: prune expired delivery_outbox rows periodically
+                # (hourly) so the shared table can't grow without bound.
+                now = time.time()
+                if (now - last_outbox_prune) >= _OUTBOX_PRUNE_INTERVAL_SECONDS:
+                    last_outbox_prune = now
+                    _prune_all_outboxes(state)
                 backoff = _BACKOFF_INITIAL_SECONDS  # reset after a clean pass
             except Exception:
                 # Transient / unknown error. Bound the backoff so a persistent
