@@ -713,12 +713,15 @@ def test_new_session_workspace_precedence_defers_project_default_to_server():
 
 def test_new_session_marks_cross_profile_switch_as_caller_owned():
     src = _read(SESSIONS_JS)
-    assert "let _profileSwitchCallerOwnsNewSession = false;" in src
+    # Ownership is now INVOCATION-SCOPED (passed to switchToProfile), not a page
+    # global — a global stayed true across the awaited switch and let an
+    # overlapping second switch inherit it (Codex #5510 re-gate race).
+    assert "let _profileSwitchCallerOwnsNewSession = false;" not in src, \
+        "the page-global caller-owned flag must be removed (invocation-scoped now)"
     ensure_idx = src.find("async function _ensureProjectProfileForNewSession(project)")
     assert ensure_idx >= 0, "_ensureProjectProfileForNewSession not found in sessions.js"
-    ensure_src = src[ensure_idx: ensure_idx + 600]
-    assert "_profileSwitchCallerOwnsNewSession=true;" in ensure_src
-    assert "_profileSwitchCallerOwnsNewSession=false;" in ensure_src
+    ensure_src = src[ensure_idx: ensure_idx + 900]
+    assert "await switchToProfile(targetProfile,{callerOwnsNewSession:true});" in ensure_src
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

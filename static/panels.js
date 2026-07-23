@@ -6902,7 +6902,7 @@ function _openProfileSwitchSessionBrowser(){
   }catch(_){}
 }
 
-async function switchToProfile(name) {
+async function switchToProfile(name, options) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -6942,7 +6942,12 @@ async function switchToProfile(name) {
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
-  const _callerOwnsNewSession = !!(typeof _profileSwitchCallerOwnsNewSession !== 'undefined' && _profileSwitchCallerOwnsNewSession);
+  // Invocation-scoped: read caller-owns-new-session from THIS call's options,
+  // never a page-global — a page-global stayed true across the awaited switch,
+  // so an overlapping second switch (A→B project-new, then A→C manual) wrongly
+  // took the caller-owned branch for C and skipped creating C's replacement
+  // session (Codex #5510 re-gate race).
+  const _callerOwnsNewSession = !!(options && options.callerOwnsNewSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away

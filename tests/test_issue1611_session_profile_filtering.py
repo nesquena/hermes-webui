@@ -223,7 +223,7 @@ def test_static_all_profiles_toggle_is_persisted_and_not_reset_by_profile_switch
     assert "_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});" in sessions_src
     assert "_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});" in sessions_src
 
-    switch_start = panels_src.index("async function switchToProfile(name) {")
+    switch_start = panels_src.index("async function switchToProfile(name, options) {")
     switch_body = panels_src[switch_start:panels_src.index("function openProfileCreate", switch_start)]
     assert "_showAllProfiles = false" not in switch_body
 

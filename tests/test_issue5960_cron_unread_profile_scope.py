@@ -47,7 +47,7 @@ def test_recent_handler_reuses_dispatcher_cron_context_without_nesting():
 
 
 def test_successful_profile_switch_resets_unread_cron_state():
-    switch_start = PANELS_JS.index("async function switchToProfile(name) {")
+    switch_start = PANELS_JS.index("async function switchToProfile(name, options) {")
     switch_end = PANELS_JS.index("// ── Cron completion alerts", switch_start)
     switch_body = PANELS_JS[switch_start:switch_end]
 

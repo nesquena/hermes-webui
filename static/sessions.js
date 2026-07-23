@@ -1406,12 +1406,11 @@ async function _ensureProjectProfileForNewSession(project){
   const activeProfile=S.activeProfile||'default';
   if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return true;
   if(typeof switchToProfile!=='function') return false;
-  _profileSwitchCallerOwnsNewSession=true;
+  // Invocation-scoped ownership (not a page-global): pass the flag to THIS
+  // switch call so an overlapping second switch can't inherit it (#5510 re-gate).
   try{
-    await switchToProfile(targetProfile);
-  }finally{
-    _profileSwitchCallerOwnsNewSession=false;
-  }
+    await switchToProfile(targetProfile,{callerOwnsNewSession:true});
+  }catch(_){}
   return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
 }
 
@@ -3914,7 +3913,6 @@ let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FI
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
-let _profileSwitchCallerOwnsNewSession = false;  // true while project-targeted newSession() owns the post-switch replacement
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested

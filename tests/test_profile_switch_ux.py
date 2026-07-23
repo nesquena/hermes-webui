@@ -18,7 +18,7 @@ class TestProfileSwitchSpinner:
     JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
     def _get_switch_fn(self):
-        idx = self.JS.find("async function switchToProfile(name) {")
+        idx = self.JS.find("async function switchToProfile(name, options) {")
         assert idx != -1, "switchToProfile not found in panels.js"
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
@@ -83,7 +83,7 @@ class TestParallelizedFetches:
     JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
     def _get_switch_fn(self):
-        idx = self.JS.find("async function switchToProfile(name) {")
+        idx = self.JS.find("async function switchToProfile(name, options) {")
         assert idx != -1
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):

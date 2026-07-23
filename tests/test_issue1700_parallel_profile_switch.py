@@ -14,7 +14,7 @@ PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 
 def _extract_switch_to_profile() -> str:
-    marker = "async function switchToProfile(name) {"
+    marker = "async function switchToProfile(name, options) {"
     idx = PANELS_JS.find(marker)
     assert idx != -1, "switchToProfile() not found in static/panels.js"
     depth = 0
@@ -103,7 +103,12 @@ def test_frontend_treats_active_or_pending_session_as_in_progress():
 def test_frontend_skips_nested_new_session_when_caller_owns_replacement():
     fn = _extract_switch_to_profile()
 
-    assert "_profileSwitchCallerOwnsNewSession" in fn
+    # Ownership is invocation-scoped: read from THIS call's options, not a page
+    # global (Codex #5510 re-gate — a global leaked across the awaited switch).
+    assert "const _callerOwnsNewSession = !!(options && options.callerOwnsNewSession);" in fn, \
+        "switchToProfile() must derive caller-owned from its own options, not a page global"
+    assert "_profileSwitchCallerOwnsNewSession" not in fn, \
+        "the page-global caller-owned flag must not be referenced inside switchToProfile()"
     branch_idx = fn.find("sessionInProgress && _callerOwnsNewSession")
     nested_new_session_idx = fn.find("await newSession(false")
     assert branch_idx != -1, "caller-owned replacement branch not found in switchToProfile()"
@@ -111,6 +116,21 @@ def test_frontend_skips_nested_new_session_when_caller_owns_replacement():
     assert branch_idx < nested_new_session_idx, (
         "switchToProfile() must check the caller-owned replacement path before it awaits nested newSession()"
     )
+
+
+def test_frontend_caller_owned_ownership_is_invocation_scoped_not_global():
+    # An overlapping A→B project-new then A→C manual switch must not let C inherit
+    # B's caller-owned flag. Structural proof: the page-global is gone and the
+    # only owner-setting caller passes {callerOwnsNewSession:true} to its own
+    # switchToProfile() call (Codex #5510 re-gate race).
+    sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert "let _profileSwitchCallerOwnsNewSession = false;" not in sessions_js, \
+        "the page-global caller-owned flag must be removed"
+    ensure_idx = sessions_js.find("async function _ensureProjectProfileForNewSession(project)")
+    assert ensure_idx >= 0
+    ensure_src = sessions_js[ensure_idx: ensure_idx + 900]
+    assert "await switchToProfile(targetProfile,{callerOwnsNewSession:true});" in ensure_src, \
+        "project-new must pass caller-owned as an invocation-scoped option"
 
 
 def test_frontend_caller_owned_profile_switch_keeps_existing_one_shot_workspace():
