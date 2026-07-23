@@ -5981,8 +5981,19 @@ def _stamp_missing_message_timestamps(messages, *, now: float | None = None) -> 
     return stamped
 
 
-def _assistant_reply_added_after_current_turn(result_messages, previous_context, msg_text) -> bool:
-    """Return True only when the just-finished turn produced assistant text."""
+def _assistant_reply_added_after_current_turn(
+    result_messages,
+    previous_context,
+    msg_text,
+    *,
+    previous_display=None,
+    drop_replayed_assistant: bool = False,
+) -> bool:
+    """Return True only when the just-finished turn produced assistant text.
+
+    When a terminal/partial result may contain replayed history, an assistant
+    row already present before this turn is not proof of a new final answer.
+    """
     result_messages = list(result_messages or [])
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
@@ -5990,13 +6001,35 @@ def _assistant_reply_added_after_current_turn(result_messages, previous_context,
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         candidates = result_messages[current_user_idx + 1:] if current_user_idx is not None else result_messages
-    return any(
-        isinstance(m, dict)
-        and m.get('role') == 'assistant'
-        and not m.get('_error')
-        and _assistant_message_has_final_visible_text(m)
-        for m in candidates
-    )
+    prior_assistant_ids = set()
+    prior_legacy_assistant_keys = set()
+    if drop_replayed_assistant:
+        for prior in [*list(previous_display or []), *previous_context]:
+            if not isinstance(prior, dict) or prior.get('role') != 'assistant':
+                continue
+            prior_id = prior.get('id')
+            if prior_id is not None:
+                prior_assistant_ids.add(prior_id)
+            else:
+                prior_legacy_assistant_keys.add(_message_identity(prior))
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get('role') != 'assistant':
+            continue
+        if candidate.get('_error') or not _assistant_message_has_final_visible_text(candidate):
+            continue
+        if drop_replayed_assistant:
+            candidate_id = candidate.get('id')
+            if candidate_id in prior_assistant_ids:
+                continue
+            if _message_identity(candidate) in prior_legacy_assistant_keys:
+                # Pre-stable-id history is ambiguous because result rows are
+                # stamped just before settlement. Fail closed on a content match:
+                # it may be a replayed legacy row wearing a freshly minted id.
+                # Modern history retains row ids, allowing a genuinely new but
+                # text-identical answer to pass via its distinct id.
+                continue
+        return True
+    return False
 
 
 def _session_lacks_final_assistant_answer(messages) -> bool:
@@ -6095,6 +6128,41 @@ def _merged_transcript_lacks_final_assistant_answer(
         source=source,
         drop_replayed_assistant=drop_replayed_assistant,
     )
+
+
+def _settled_turn_answer_state(
+    previous_display,
+    previous_context,
+    result_messages,
+    msg_text,
+    *,
+    source: str = "webui",
+    drop_replayed_assistant: bool = False,
+) -> tuple[bool, bool]:
+    """Return ``(result_added_answer, transcript_lacks_answer)`` for settlement.
+
+    The transcript evaluator remains fail-safe for checkpointed/repeated prompts,
+    while a provenance-checked new result row can prove that the current turn did
+    produce a final answer. Replayed historical rows never provide that proof.
+    """
+    result_added_answer = _assistant_reply_added_after_current_turn(
+        result_messages,
+        previous_context,
+        msg_text,
+        previous_display=previous_display,
+        drop_replayed_assistant=drop_replayed_assistant,
+    )
+    transcript_lacks_answer = _merged_transcript_lacks_final_assistant_answer(
+        previous_display,
+        previous_context,
+        result_messages,
+        msg_text,
+        source=source,
+        drop_replayed_assistant=drop_replayed_assistant,
+    )
+    if result_added_answer:
+        transcript_lacks_answer = False
+    return result_added_answer, transcript_lacks_answer
 
 
 def _agent_result_terminal_failure(result) -> bool:
@@ -9378,11 +9446,6 @@ def _run_agent_streaming(
                 # checks introduced on master.
                 _all_result_messages = result.get('messages') or []
                 _prev_len = len(_previous_context_messages)
-                _assistant_added = _assistant_reply_added_after_current_turn(
-                    _all_result_messages,
-                    _previous_context_messages,
-                    msg_text,
-                )
                 _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                 # #5940: if the Agent aborted on a non-retryable provider error
                 # (captured from its lifecycle status_callback) but left no error on
@@ -9405,7 +9468,7 @@ def _run_agent_streaming(
                     or bool(getattr(agent, '_last_error', None))
                     or ('error' in result and result.get('error') is not None)
                 )
-                _saved_transcript_lacks_final_answer = _merged_transcript_lacks_final_assistant_answer(
+                _result_assistant_added, _saved_transcript_lacks_final_answer = _settled_turn_answer_state(
                     _previous_messages,
                     _previous_context_messages,
                     _all_result_messages,
@@ -9413,6 +9476,7 @@ def _run_agent_streaming(
                     source=getattr(s, 'pending_user_source', None) or 'webui',
                     drop_replayed_assistant=_drop_replayed_assistant,
                 )
+                _assistant_added = _result_assistant_added
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
                 _terminal_failure = (
                     _captured_terminal_failure

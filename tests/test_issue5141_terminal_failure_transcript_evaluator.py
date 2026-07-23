@@ -126,3 +126,126 @@ def test_merged_wrapper_delegates_to_turn_evaluator():
     assert calls[0]["source"] == "cli"
     assert calls[0]["drop_replayed_assistant"] is True
     assert calls[0]["merged_len"] >= 1
+
+
+def test_checkpointed_current_user_accepts_new_result_answer_by_provenance():
+    msg_text = "current prompt"
+    previous_display = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+        {"role": "user", "content": msg_text},
+    ]
+    result_messages = list(previous_display) + [
+        {"role": "assistant", "content": "real final answer"},
+    ]
+
+    # The positional merged evaluator is intentionally conservative at this
+    # checkpoint boundary, but result provenance proves the unique final row.
+    assert streaming._settled_turn_answer_state(
+        previous_display,
+        previous_display,
+        result_messages,
+        msg_text,
+        source="webui",
+        drop_replayed_assistant=True,
+    ) == (True, False)
+
+
+def test_checkpointed_repeated_prompt_rejects_replayed_historical_answer():
+    msg_text = "repeat this"
+    stale_answer = {"id": 2, "role": "assistant", "content": "historical answer"}
+    previous_display = [
+        {"id": 1, "role": "user", "content": msg_text},
+        dict(stale_answer),
+        {"id": 3, "role": "user", "content": msg_text},
+    ]
+    result_messages = list(previous_display) + [dict(stale_answer)]
+
+    assert streaming._settled_turn_answer_state(
+        previous_display,
+        previous_display,
+        result_messages,
+        msg_text,
+        source="webui",
+        drop_replayed_assistant=True,
+    ) == (False, True)
+
+
+def test_identical_new_answer_is_valid_when_it_has_new_row_identity():
+    msg_text = "repeat this"
+    previous_display = [
+        {"id": 1, "role": "user", "content": msg_text},
+        {"id": 2, "role": "assistant", "content": "same answer"},
+        {"id": 3, "role": "user", "content": msg_text},
+    ]
+    result_messages = list(previous_display) + [
+        {"id": 4, "role": "assistant", "content": "same answer"},
+    ]
+
+    assert streaming._settled_turn_answer_state(
+        previous_display,
+        previous_display,
+        result_messages,
+        msg_text,
+        source="webui",
+        drop_replayed_assistant=True,
+    ) == (True, False)
+
+
+def test_replay_filter_unions_display_and_context_row_ids():
+    msg_text = "current prompt"
+    previous_display = [
+        {"id": 1, "role": "user", "content": msg_text},
+    ]
+    context_only_answer = {"id": 2, "role": "assistant", "content": "context answer"}
+    previous_context = [*previous_display, context_only_answer]
+    result_messages = [*previous_context, dict(context_only_answer)]
+
+    assert streaming._assistant_reply_added_after_current_turn(
+        result_messages,
+        previous_context,
+        msg_text,
+        previous_display=previous_display,
+        drop_replayed_assistant=True,
+    ) is False
+
+
+def test_structured_content_without_text_is_not_a_final_answer():
+    previous = [{"id": 1, "role": "user", "content": "prompt"}]
+    result_messages = [
+        *previous,
+        {"id": 2, "role": "assistant", "content": [{"type": "image"}]},
+    ]
+
+    assert streaming._assistant_reply_added_after_current_turn(
+        result_messages,
+        previous,
+        "prompt",
+        previous_display=previous,
+        drop_replayed_assistant=True,
+    ) is False
+
+
+def test_legacy_idless_replay_with_freshly_minted_id_is_rejected():
+    msg_text = "repeat this"
+    previous_display = [
+        {"role": "user", "content": msg_text},
+        {"role": "assistant", "content": "legacy answer"},
+        {"role": "user", "content": msg_text},
+    ]
+    # Settlement stamps an id on every id-less result row. A replayed legacy
+    # assistant can therefore arrive with a fresh id even though its prior copy
+    # had none; content fallback must still reject it.
+    result_messages = [
+        *previous_display,
+        {"id": 4, "role": "assistant", "content": "legacy answer"},
+    ]
+
+    assert streaming._settled_turn_answer_state(
+        previous_display,
+        previous_display,
+        result_messages,
+        msg_text,
+        source="webui",
+        drop_replayed_assistant=True,
+    ) == (False, True)
