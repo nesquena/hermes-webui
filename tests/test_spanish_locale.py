@@ -1,11 +1,10 @@
 from pathlib import Path
 import re
-from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.test_issue2147_profile_concept_help import LOCALE_FALLBACK_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
-PROFILE_CONCEPT_FALLBACK_KEYS = {
-    *PROFILE_CONCEPT_KEYS,
+PROFILE_CONCEPT_FALLBACK_KEYS = LOCALE_FALLBACK_KEYS | {
     "workspace_artifact_source_session",
 }
 

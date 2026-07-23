@@ -7171,6 +7171,7 @@ function renderMd(raw){
     flush(lines.length);
     return out.join('\n');
   })(s);
+  const artifact_stash=[];
   // ── MEDIA: token stash (must run first, before any other processing) ───────
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
@@ -7258,6 +7259,24 @@ function renderMd(raw){
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
   s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
+  // ── [[artifact:path|title]] publish-hint tags ──────────────────────────────
+  // The gateway leaves these tags intact for browser surfaces (messaging
+  // platforms get them normalized to bare paths server-side). HTML artifacts
+  // render as the sandboxed inline preview carrying the title + publish
+  // affordance; every other file type funnels into the MEDIA pipeline via the
+  // already-collected media_stash. Runs AFTER the fence/inline-code stashes so
+  // tags inside code examples stay literal text — the same contract as the
+  // gateway's normalize_artifact_tags (audit finding, 18.07.2026).
+  s=s.replace(/\[\[artifact:([^|\]\n]+)(?:\|([^\]\n]*))?\]\]/g,(_,p,title)=>{
+    const ref=String(p||'').trim();
+    if(!ref) return '';
+    if(/\.html?$/i.test(ref.split('?')[0])){
+      artifact_stash.push({path:ref,title:String(title||'').trim()});
+      return '\x00T'+(artifact_stash.length-1)+'\x00';
+    }
+    media_stash.push(ref);
+    return '\x00D'+(media_stash.length-1)+'\x00';
+  });
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -7692,6 +7711,12 @@ function renderMd(raw){
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
+  // ── Restore artifact stash → sandboxed HTML preview with title/publish ────
+  s=s.replace(/\x00T(\d+)\x00/g,(_,i)=>{
+    const a=artifact_stash[+i]||{};
+    const titleAttr=a.title?` data-artifact-title="${esc(a.title)}"`:'';
+    return `<div class="html-preview-load" data-path="${esc(a.path)}" data-artifact="1"${titleAttr}><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
+  });
 
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
@@ -18938,6 +18963,7 @@ function loadPdfInline(container){
 // ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
 function loadHtmlInline(container){
   const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
+  if(typeof _bindArtifactHandlers==='function') _bindArtifactHandlers();
   const root=container||document;
   root.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
@@ -18956,13 +18982,131 @@ function loadHtmlInline(container){
         }
         const openUrl=publicMediaUrl+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+        const artifactTitle=el.dataset.artifactTitle||'';
+        // The sandbox label is a trust cue and must NEVER be replaced by the
+        // model-controlled title (title-spoofing hardening, audit 18.07.2026);
+        // a title is shown alongside it.
+        const headerLabel=artifactTitle
+          ?`${esc(artifactTitle)} <span class="html-sandbox-note">· ${t('html_sandbox_label')}</span>`
+          :t('html_sandbox_label');
+        const publishBtn=window._artifactsEnabled
+          ?`<button type="button" class="artifact-publish-btn" data-path="${esc(path)}"${artifactTitle?` data-title="${esc(artifactTitle)}"`:''}>${t('artifact_publish')} ⤴</button><button type="button" class="artifact-panel-btn" onclick="showArtifactsPanel()" title="${t('artifacts_title')}">📚</button>`
+          :'';
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${headerLabel}</span><span class="html-preview-actions">${publishBtn}<a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></span></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
         const dlUrl=publicMediaUrl+'&download=1';
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
+}
+
+// ── Artifacts: publish button + management panel ───────────────────────────
+let _artifactHandlersBound=false;
+function _bindArtifactHandlers(){
+  if(_artifactHandlersBound) return;
+  _artifactHandlersBound=true;
+  document.addEventListener('click',async ev=>{
+    const btn=ev.target&&ev.target.closest&&ev.target.closest('.artifact-publish-btn');
+    if(btn){
+      ev.preventDefault();
+      if(btn.disabled) return;
+      btn.disabled=true;
+      const path=btn.dataset.path||'';
+      const title=btn.dataset.title||'';
+      try{
+        const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+        // api() returns the decoded JSON body and throws on non-ok statuses.
+        const d=await api('/api/artifact/publish',{
+          method:'POST',
+          body:JSON.stringify({path,title:title||undefined,session_id:sid||undefined}),
+        });
+        if(!d||!d.ok) throw new Error((d&&d.error)||'publish failed');
+        const art=d.artifact;
+        const abs=new URL(art.url.replace(/^\//,''),document.baseURI||location.href).href;
+        const wrap=document.createElement('span');
+        wrap.className='artifact-published';
+        // The copied link is session-gated until the artifact is made public;
+        // the 🌐 button re-publishes with public=true so shared links work
+        // for recipients without a WebUI session.
+        wrap.innerHTML=`<a href="${esc(art.url)}" target="_blank" rel="noopener" class="artifact-link">v${art.version} ↗</a> <button type="button" class="artifact-copy-btn" data-url="${esc(abs)}">${t('artifact_copy')}</button>${art.public?'':` <button type="button" class="artifact-public-btn" data-token="${esc(art.token)}" data-path="${esc(path)}" title="${t('artifact_make_public')}">🌐</button>`}`;
+        btn.replaceWith(wrap);
+        showToast(t('artifact_published'));
+      }catch(e){
+        btn.disabled=false;
+        showToast(t('artifact_publish_failed')+': '+(e&&e.message||e));
+      }
+      return;
+    }
+    const pub=ev.target&&ev.target.closest&&ev.target.closest('.artifact-public-btn');
+    if(pub){
+      ev.preventDefault();
+      if(pub.disabled) return;
+      pub.disabled=true;
+      try{
+        const d=await api('/api/artifact/publish',{
+          method:'POST',
+          body:JSON.stringify({path:pub.dataset.path||'',token:pub.dataset.token||'',public:true}),
+        });
+        if(!d||!d.ok) throw new Error((d&&d.error)||'publish failed');
+        pub.remove();
+        showToast(t('artifact_now_public'));
+      }catch(e){
+        pub.disabled=false;
+        showToast(t('artifact_publish_failed')+': '+(e&&e.message||e));
+      }
+      return;
+    }
+    const copy=ev.target&&ev.target.closest&&ev.target.closest('.artifact-copy-btn');
+    if(copy){
+      ev.preventDefault();
+      try{
+        await navigator.clipboard.writeText(copy.dataset.url||'');
+        showToast(t('artifact_copied'));
+      }catch(_){showToast(copy.dataset.url||'');}
+      return;
+    }
+    const revoke=ev.target&&ev.target.closest&&ev.target.closest('.artifact-revoke-btn');
+    if(revoke){
+      ev.preventDefault();
+      try{
+        const d=await api('/api/artifact/revoke',{
+          method:'POST',
+          body:JSON.stringify({token:revoke.dataset.token||''}),
+        });
+        if(!d||!d.ok) throw new Error((d&&d.error)||'revoke failed');
+        const row=revoke.closest('.artifact-row');
+        if(row) row.remove();
+        showToast(t('artifact_revoked'));
+      }catch(e){showToast(t('artifact_publish_failed')+': '+(e&&e.message||e));}
+      return;
+    }
+    if(ev.target&&ev.target.id==='artifactsPanelClose'){
+      const ov=$('artifactsPanelOverlay');
+      if(ov) ov.remove();
+    }
+  });
+}
+
+async function showArtifactsPanel(){
+  _bindArtifactHandlers();
+  let items=[];
+  try{
+    const d=await api('/api/artifact/list');
+    items=(d&&d.artifacts)||[];
+  }catch(_){}
+  const old=$('artifactsPanelOverlay');
+  if(old) old.remove();
+  const ov=document.createElement('div');
+  ov.id='artifactsPanelOverlay';
+  ov.className='artifacts-panel-overlay';
+  const rows=items.length?items.map(a=>{
+    const abs=new URL(String(a.url||'').replace(/^\//,''),document.baseURI||location.href).href;
+    return `<div class="artifact-row"><span class="artifact-row-title" title="${esc(a.filename||'')}">${esc(a.title||a.filename||'?')}</span><span class="artifact-row-meta">v${a.version}${a.public?' · '+t('artifact_public'):''}</span><span class="artifact-row-actions"><a href="${esc(a.url)}" target="_blank" rel="noopener">↗</a><button type="button" class="artifact-copy-btn" data-url="${esc(abs)}">${t('artifact_copy')}</button><button type="button" class="artifact-revoke-btn" data-token="${esc(a.token)}">${t('artifact_revoke')}</button></span></div>`;
+  }).join(''):`<div class="artifact-row artifact-row-empty">${t('artifacts_empty')}</div>`;
+  ov.innerHTML=`<div class="artifacts-panel"><div class="artifacts-panel-header"><span>${t('artifacts_title')}</span><button type="button" id="artifactsPanelClose">✕</button></div><div class="artifacts-panel-body">${rows}</div></div>`;
+  ov.addEventListener('click',ev=>{if(ev.target===ov) ov.remove();});
+  document.body.appendChild(ov);
 }
 
 function renderMermaidBlocks(container){
