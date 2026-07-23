@@ -10203,17 +10203,17 @@ def _run_agent_streaming(
                     ))
                     return
                 _session_save_failed = False
-                with _stream_writeback_stage(_writeback_timings, "session_save"):
-                    try:
+                try:
+                    with _stream_writeback_stage(_writeback_timings, "session_save"):
                         s.save()
-                    except Exception:
-                        _session_save_failed = True
-                        logger.debug(
-                            "Failed to persist completed terminal session for %s stream %s",
-                            getattr(s, 'session_id', session_id),
-                            stream_id,
-                            exc_info=True,
-                        )
+                except Exception:
+                    _session_save_failed = True
+                    logger.debug(
+                        "Failed to persist completed terminal session for %s stream %s",
+                        getattr(s, 'session_id', session_id),
+                        stream_id,
+                        exc_info=True,
+                    )
                 if _session_save_failed:
                     _save_error_payload = _provider_error_payload(
                         'The response completed, but Hermes could not save this session to disk.',

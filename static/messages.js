@@ -2330,7 +2330,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _setActivePaneIdleIfOwner(){
-    if(!_activePaneStreamOwnerStillCurrent()) return;
+    const activePaneCanIdle=!S.session||!INFLIGHT[S.session.session_id];
+    if(!_activePaneStreamOwnerStillCurrent()&&!activePaneCanIdle) return;
     setBusy(false);
     setComposerStatus('');
     if(typeof setStatus==='function') setStatus('');
@@ -5077,7 +5078,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ? parsed.displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
   }
-  function _drainStreamFadeBeforeDone(onDone, options={}){
+  function _drainStreamFadeBeforeDone(onDone, options){
+    options=options||{};
     const ownerStillCurrent=typeof options.ownerStillCurrent==='function'
       ? options.ownerStillCurrent
       : _activePaneStreamOwnerStillCurrent;
