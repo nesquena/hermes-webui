@@ -75,6 +75,17 @@ process.stdout.write(JSON.stringify({{
 
 def _run_current_turn_scope_probe() -> dict:
     prompt = "repeat me"
+    tool_call_noop = json.dumps({"name": "noop", "arguments": "{}"})
+    tool_turn_envelope = json.dumps(
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": 3.2,
+            "tool_calls": [
+                {"id": "tool-turn-call", "type": "function", "function": json.loads(tool_call_noop)}
+            ],
+        }
+    )
     historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
     current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
     helpers = "\n".join(
@@ -156,8 +167,22 @@ const completedBoundaryDedupe = _hasCurrentTailUserDuplicate(
   [historical, historicalAnswer, compaction],
   {{role:'user', content:{json.dumps(prompt)}, _ts:3}}
 );
+const toolTurnPrompt = {json.dumps("tool-call prompt")};
+const toolTurnUser = {{role:'user', content:toolTurnPrompt, _ts:3}};
+const toolTurnEnvelope = {tool_turn_envelope};
+const toolTurnResult = {{role:'tool', content:'tool result', _ts:3.6, tool_call_id:'tool-turn-call'}};
+const toolTurnBase = [historical, historicalAnswer, toolTurnUser, toolTurnEnvelope, toolTurnResult];
+const toolTurnInflight = _mergeInflightTailMessages(
+  toolTurnBase,
+  [{{role:'user', content:toolTurnPrompt, _ts:3}}, {{role:'assistant', content:'live turn', _live:true, _ts:4}}]
+);
+const toolTurnPendingMessage = {{pending_user_message:toolTurnPrompt, pending_started_at:4}};
+const toolTurnPendingMerged = _mergePendingSessionMessage(toolTurnPendingMessage, toolTurnBase);
 const distinctCompletedTurnPromptCount = inflightAfterHistory.filter(
   m=>m&&m.role==='user'&&_normalizeUserTranscriptText(m.content)==={json.dumps(prompt)}
+).length;
+const toolTurnInflightPromptCount = toolTurnInflight.filter(
+  m=>m&&m.role==='user'&&_normalizeUserTranscriptText(m.content)===_normalizeUserTranscriptText(toolTurnPrompt)
 ).length;
 
 process.stdout.write(JSON.stringify({{
@@ -177,6 +202,8 @@ process.stdout.write(JSON.stringify({{
   compactionLiveAssistantRetained,
   completedBoundaryDedupe,
   distinctCompletedTurnPromptCount,
+  toolTurnPendingMerged,
+  toolTurnInflightPromptCount,
 }}));
 """
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
@@ -185,6 +212,21 @@ process.stdout.write(JSON.stringify({{
 
 def _run_pending_session_message_probe() -> dict:
     prompt = "repeat me"
+    tool_call_inspect = json.dumps({"name": "inspect", "arguments": "{}"})
+    tool_envelope_current_turn = json.dumps(
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": 2.5,
+            "tool_calls": [
+                {
+                    "id": "turn-envelope-call",
+                    "type": "function",
+                    "function": json.loads(tool_call_inspect),
+                }
+            ],
+        }
+    )
     historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
     current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
     helpers = "\n".join(
@@ -228,6 +270,9 @@ const repeatedCompletedBase = [
   repeatedPromptTurnTwo,
   repeatedPromptAnswerTwo,
 ];
+const toolEnvelopeCurrentTurn = {tool_envelope_current_turn};
+const toolEnvelopeResult = {{role:'tool', content:'tool result', tool_call_id:'turn-envelope-call', _ts:2.6}};
+const toolEnvelopeCurrentMessages = [historical, historicalAnswer, currentTail, toolEnvelopeCurrentTurn, toolEnvelopeResult];
 
 const fromHistoricalSameText = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:3}},
@@ -277,6 +322,10 @@ process.stdout.write(JSON.stringify({{
   exactCurrentTailAttachmentsCopied: Array.isArray(currentTail.attachments) && currentTail.attachments[0].name==='note.txt',
   workspaceCurrentTailDedupe: workspaceCurrentResult===null,
   liveAfterCurrentTailDedupe: liveAfterCurrentResult===null,
+  toolEnvelopeTurnSuppressesPending: getPendingSessionMessage(
+    {{pending_user_message:prompt, pending_started_at:4}},
+    toolEnvelopeCurrentMessages
+  )===null,
   differentCurrentTailSurvives: !!differentTailResult && differentTailResult.content===prompt && differentTailResult._pending===true,
   compactionBoundaryDedupe: compactionTailResult===null,
   compactionBoundaryCurrentTail: compactionCurrentTail&&compactionCurrentTail.role==='user'&&compactionCurrentTail.content===prompt,
@@ -472,6 +521,8 @@ def test_user_turn_dedupe_is_scoped_to_current_turn_by_behavior():
     assert result["compactionLiveAssistantRetained"] is True
     assert result["completedBoundaryDedupe"] is False
     assert result["distinctCompletedTurnPromptCount"] == 2
+    assert result["toolTurnPendingMerged"] is False
+    assert result["toolTurnInflightPromptCount"] == 1
 
 
 def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
@@ -498,6 +549,7 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["repeatedCompletedPromptsRemainValid"] is True
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
+    assert result["toolEnvelopeTurnSuppressesPending"] is True
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():

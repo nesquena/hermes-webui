@@ -3286,6 +3286,11 @@ function _currentTailUserMessage(messages){
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
       return msg;
     }
+    if(
+      String(msg.role||'')==='assistant' &&
+      Array.isArray(msg.tool_calls) &&
+      msg.tool_calls.length>0
+    ) continue;
     if(msg._live||String(msg.role||'')==='tool') continue;
     return null;
   }
