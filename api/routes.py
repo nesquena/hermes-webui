@@ -12468,9 +12468,21 @@ def handle_get(handler, parsed) -> bool:
         # Inject the running version so the UI badge stays in sync with git tags
         # without any manual release step.
         try:
-            from api.updates import AGENT_VERSION, WEBUI_VERSION
+            from api.updates import (
+                AGENT_VERSION,
+                WEBUI_VERSION,
+                _cached_agent_version_from_gateway,
+            )
             settings["webui_version"] = WEBUI_VERSION
-            settings["agent_version"] = AGENT_VERSION
+            # Prefer live gateway health detection so Docker gateway
+            # deployments always show the actual running Agent version
+            # even when the import-time AGENT_VERSION is stale (#6150).
+            # Uses a TTL cache so unreachable gateways don't block every
+            # page load (#6289).
+            settings["agent_version"] = (
+                _cached_agent_version_from_gateway()
+                or AGENT_VERSION
+            )
         except Exception:
             pass
         # Channel-scoped display badge — SEPARATE from webui_version (which is

@@ -519,10 +519,17 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
 
 
 def _gateway_health_base_url() -> str:
-    """Return the configured/default Hermes Agent gateway base URL."""
+    """Return the configured/default Hermes Agent gateway base URL.
+
+    Falls back through the same env-var chain used by agent_health.py
+    (#6150): GATEWAY_HEALTH_URL → HERMES_GATEWAY_HEALTH_URL →
+    HERMES_API_URL → HERMES_WEBUI_GATEWAY_BASE_URL → default.
+    """
     raw = (
         os.environ.get('GATEWAY_HEALTH_URL')
         or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
+        or os.environ.get('HERMES_API_URL')
+        or os.environ.get('HERMES_WEBUI_GATEWAY_BASE_URL')
         or 'http://hermes-agent:8642'
     ).strip()
     if raw.endswith('/health/detailed'):
@@ -566,6 +573,56 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
         if version:
             return version
     return None
+
+
+# Cache wrapper so /api/settings doesn't block on every page load when
+# the gateway is unreachable (#6150, #6289).  Negative results (None)
+# are cached with a shorter TTL so a recovering gateway is picked up
+# promptly.
+_GATEWAY_AGENT_VERSION_CACHE: dict[str, object] = {
+    "value": None,
+    "at": 0.0,
+}
+_GATEWAY_AGENT_VERSION_TTL = 30.0
+_GATEWAY_AGENT_VERSION_NEGATIVE_TTL = 5.0
+_gateway_version_lock = threading.Lock()
+
+
+def _cached_agent_version_from_gateway() -> str | None:
+    """Return a cached gateway agent version, refreshing at most once per TTL.
+
+    Uses double-checked locking under ``_gateway_version_lock`` to guarantee
+    that at most one thread performs the gateway probe per TTL window, even
+    under the ``ThreadingHTTPServer`` (128 workers) request model (#6289).
+    """
+    now = time.monotonic()
+    cached = _GATEWAY_AGENT_VERSION_CACHE["value"]
+    cached_at = _GATEWAY_AGENT_VERSION_CACHE["at"]
+    ttl = (
+        _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+        if cached is None
+        else _GATEWAY_AGENT_VERSION_TTL
+    )
+    if cached_at and (now - cached_at) < ttl:
+        return cached
+
+    with _gateway_version_lock:
+        # Double-check: another thread may have refreshed while we waited
+        now = time.monotonic()
+        cached = _GATEWAY_AGENT_VERSION_CACHE["value"]
+        cached_at = _GATEWAY_AGENT_VERSION_CACHE["at"]
+        ttl = (
+            _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+            if cached is None
+            else _GATEWAY_AGENT_VERSION_TTL
+        )
+        if cached_at and (now - cached_at) < ttl:
+            return cached
+
+        result = _detect_agent_version_from_gateway_health(timeout=0.75)
+        _GATEWAY_AGENT_VERSION_CACHE["value"] = result
+        _GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic()
+    return result
 
 
 def _detect_agent_version() -> str:

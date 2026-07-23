@@ -13,6 +13,8 @@ Covers:
 import importlib
 import subprocess
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -487,3 +489,181 @@ class TestServerVersionHeader:
         assert 'removeprefix' in src, (
             "server.py must use removeprefix('v') to strip the leading 'v' from the version tag"
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. _cached_agent_version_from_gateway — thread-safe TTL cache
+# ---------------------------------------------------------------------------
+
+class TestCachedAgentVersionFromGateway:
+
+    def _reset_cache(self):
+        """Reset the module-level cache to empty/unset state."""
+        import api.updates as upd
+        upd._GATEWAY_AGENT_VERSION_CACHE["value"] = None
+        upd._GATEWAY_AGENT_VERSION_CACHE["at"] = 0.0
+
+    def test_single_flight_on_cache_miss(self):
+        """Eight concurrent callers on an empty cache produce exactly one
+        gateway detector call and share the same result."""
+        import api.updates as upd
+
+        self._reset_cache()
+
+        call_count = 0
+        call_lock = threading.Lock()
+
+        def counting_detector(timeout=0.75):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+            return "v0.60.0"
+
+        result_box = [None] * 8
+        errors = [None] * 8
+        barrier = threading.Barrier(8)
+
+        def worker(idx):
+            try:
+                barrier.wait()
+                with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                                  side_effect=counting_detector):
+                    result_box[idx] = upd._cached_agent_version_from_gateway()
+            except Exception as e:
+                errors[idx] = e
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        for err in errors:
+            assert err is None, f"Worker raised: {err}"
+        assert call_count == 1, (
+            f"Expected exactly 1 detector call, got {call_count}"
+        )
+        assert all(r == "v0.60.0" for r in result_box), (
+            f"All workers must share the same result: {result_box}"
+        )
+
+    def test_positive_ttl_returns_cached(self):
+        """A fresh positive cache entry is returned without re-probing."""
+        import api.updates as upd
+
+        self._reset_cache()
+        # Seed the cache with a fresh positive entry
+        upd._GATEWAY_AGENT_VERSION_CACHE["value"] = "v0.60.0"
+        upd._GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic()
+
+        call_count = 0
+
+        def counting_detector(timeout=0.75):
+            nonlocal call_count
+            call_count += 1
+            return "v0.61.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=counting_detector):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result == "v0.60.0", f"Expected cached value, got {result}"
+        assert call_count == 0, f"Detector should not be called: {call_count}"
+
+    def test_negative_ttl_returns_cached_none(self):
+        """A fresh negative cache entry (None) is returned without re-probing."""
+        import api.updates as upd
+
+        self._reset_cache()
+        # Seed the cache with a fresh negative entry
+        upd._GATEWAY_AGENT_VERSION_CACHE["value"] = None
+        upd._GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic()
+
+        call_count = 0
+
+        def counting_detector(timeout=0.75):
+            nonlocal call_count
+            call_count += 1
+            return "v0.61.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=counting_detector):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result is None, f"Expected None, got {result}"
+        assert call_count == 0, f"Detector should not be called: {call_count}"
+
+    def test_expired_positive_ttl_triggers_refresh(self):
+        """An expired positive cache entry triggers a refresh."""
+        import api.updates as upd
+
+        self._reset_cache()
+        # Seed the cache with an expired positive entry
+        upd._GATEWAY_AGENT_VERSION_CACHE["value"] = "v0.60.0"
+        upd._GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic() - 31.0
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          return_value="v0.62.0"):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result == "v0.62.0", f"Expected refreshed value, got {result}"
+
+    def test_expired_negative_ttl_triggers_refresh(self):
+        """An expired negative cache entry (None) triggers a refresh."""
+        import api.updates as upd
+
+        self._reset_cache()
+        # Seed the cache with an expired negative entry
+        upd._GATEWAY_AGENT_VERSION_CACHE["value"] = None
+        upd._GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic() - 6.0
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          return_value="v0.63.0"):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result == "v0.63.0", f"Expected refreshed value, got {result}"
+
+    def test_exception_does_not_stick(self):
+        """A detector returning None (simulating caught exception) is cached
+        with negative TTL.  After the negative TTL expires, a new caller
+        re-probes and gets an updated value — the cache is not stuck."""
+        import api.updates as upd
+
+        self._reset_cache()
+
+        call_log = []
+
+        def two_phase_detector(timeout=0.75):
+            call_log.append("called")
+            if len(call_log) == 1:
+                return None  # simulate internal exception → None
+            return "v0.64.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=two_phase_detector):
+            # First call — detector returns None (caught-exception path)
+            result1 = upd._cached_agent_version_from_gateway()
+            assert result1 is None, "First call should return None on failure"
+
+            # Second call within negative TTL — uses cache, no re-probe
+            result2 = upd._cached_agent_version_from_gateway()
+            assert result2 is None, (
+                "Second call should return cached None (negative TTL)"
+            )
+            assert len(call_log) == 1, (
+                f"Detector should be called once within negative TTL, "
+                f"got {len(call_log)}"
+            )
+
+        # Force-expire the negative cache so the next call re-probes
+        upd._GATEWAY_AGENT_VERSION_CACHE["at"] = time.monotonic() - 6.0
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=two_phase_detector):
+            # Third call — negative TTL expired, re-probes
+            result3 = upd._cached_agent_version_from_gateway()
+            assert result3 == "v0.64.0", f"Expected refreshed value, got {result3}"
+            assert len(call_log) == 2, (
+                f"Detector should be called twice total (initial fail + retry "
+                f"after expiry), got {len(call_log)}"
+            )
