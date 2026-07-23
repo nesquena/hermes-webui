@@ -142,14 +142,93 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
+def _read_jsonl(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
+    tail: bool = False,
+) -> tuple[list[dict], list[dict]]:
+    """Read a run-journal JSONL file into (events, malformed).
+
+    Memory: unbounded by default this reads the WHOLE file via read_text() and
+    parses every line — fine for small journals but a turn with heavy tool use
+    / large file reads can produce a multi-MB journal that gets fully re-parsed
+    on every status/sidebar poll that touches it. The bounded modes cap that:
+
+    - ``tail=True`` with ``max_bytes``/``max_rows``: read only the TRAILING
+      ``max_bytes`` of the file (seek-to-end) and return at most the last
+      ``max_rows`` events. Used by the summary readers
+      (``latest_run_summary`` / ``find_run_summary``) which derive
+      ``last_seq``/``last_event_id``/``terminal_state`` from the LAST events —
+      a tail read keeps those correct for a large COMPLETED run without parsing
+      the whole history. A line split at the seek boundary is discarded.
+    - ``tail=False`` with caps: read forward but stop once ``max_bytes``/``max_rows``
+      is exceeded (head cap), via the existing bounded line iterator.
+
+    ``malformed`` entries carry ``{"line": n, "raw": ...}`` with 1-based line
+    numbers relative to the whole file (tail mode computes the offset).
+    """
     events: list[dict] = []
     malformed: list[dict] = []
+
+    if tail:
+        # tail=True only makes sense with a bound (it seeks to size - max_bytes).
+        # If a caller passes tail=True with no caps, default to the replay caps
+        # rather than silently falling through to the unbounded whole-file read
+        # (which would ignore tail entirely).
+        if max_bytes is None:
+            max_bytes = _SESSION_REPLAY_MAX_BYTES
+        if max_rows is None:
+            max_rows = _SESSION_REPLAY_MAX_ROWS
+        return _read_jsonl_tail(path, max_bytes=max_bytes, max_rows=max_rows)
+
+    if max_bytes is not None or max_rows is not None:
+        mb = max_bytes if max_bytes is not None else (1 << 62)
+        mr = max_rows if max_rows is not None else (1 << 62)
+        line_no = 0
+        try:
+            for ln, raw, _cumulative in _iter_bounded_raw_jsonl_lines(path, max_bytes=mb):
+                line_no = ln
+                if not raw.strip():
+                    continue
+                if line_no > mr:
+                    break
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    malformed.append({"line": line_no, "raw": raw.decode("utf-8", "replace")})
+                    continue
+                if isinstance(parsed, dict):
+                    events.append(parsed)
+                else:
+                    malformed.append({"line": line_no, "raw": raw.decode("utf-8", "replace")})
+        except FileNotFoundError:
+            return events, malformed
+        except ValueError:
+            # _iter_bounded_raw_jsonl_lines raises "replay_limit_bytes" once the
+            # byte cap is exceeded; the events collected so far are returned.
+            return events, malformed
+        return events, malformed
+
+    # Unbounded whole-file read (original behavior).
+    # Read RAW BYTES and split on b"\n" only — NOT read_text() (which does
+    # universal-newline conversion, silently turning bare \r into \n) and NOT
+    # splitlines() (which splits on bare \r). A crash-truncated final record
+    # ending in bare \r or at EOF-without-\n must be rejected, matching the tail
+    # reader's terminator gate. (#6139 round-6 alignment.)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        raw_bytes = path.read_bytes()
     except FileNotFoundError:
         return events, malformed
-    for line_no, raw in enumerate(lines, start=1):
+    # Accept a final record only if it ends in \n (covers both LF and CRLF,
+    # since CRLF ends in \n). Otherwise discard the last line.
+    if raw_bytes and not raw_bytes.endswith(b"\n"):
+        # Drop the unterminated final line (before the split, so it never parses).
+        last_nl = raw_bytes.rfind(b"\n")
+        raw_bytes = raw_bytes[:last_nl + 1] if last_nl >= 0 else b""
+    lines_list = raw_bytes.decode("utf-8", errors="replace").split("\n")
+    for line_no, raw in enumerate(lines_list, start=1):
         if not raw.strip():
             continue
         try:
@@ -161,6 +240,438 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
             events.append(parsed)
         else:
             malformed.append({"line": line_no, "raw": raw})
+    return events, malformed
+
+
+# Bounded prefix read for oversized journal records. The record layout from
+# append_run_event puts ALL summary fields before the (potentially huge) payload:
+#   {"version","event_id","seq","run_id","session_id","event","type","created_at",
+#    "terminal","terminal_state","payload":{...huge...}}
+# So we can read a small prefix, truncate at the "payload" key, close the object,
+# and parse the summary fields WITHOUT materializing the payload. This bounds
+# memory even when a single record (e.g. the terminal `done` with the full
+# transcript) is many MB.
+_BOUNDARY_SUMMARY_PREFIX_BYTES = 8192
+
+
+def _find_record_start_before(path: Path, seek_pos: int) -> int:
+    """Return the byte offset where the JSONL record overlapping ``seek_pos``
+    begins, i.e. the byte just after the last newline strictly before seek_pos.
+    Returns 0 if there is no preceding newline (the record starts at byte 0).
+    Scans backward in bounded chunks."""
+    if seek_pos <= 0:
+        return 0
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return 0
+    pos = min(seek_pos, size)
+    try:
+        with path.open("rb") as fh:
+            while pos > 0:
+                read_from = max(0, pos - chunk_size)
+                fh.seek(read_from)
+                block = fh.read(pos - read_from)
+                nl = block.rfind(b"\n")
+                if nl >= 0:
+                    return read_from + nl + 1
+                pos = read_from
+    except (FileNotFoundError, OSError):
+        # TOCTOU: journal deleted between the stat() above and this open/read
+        # (cleanup racing a status poll). Return the safe fallback rather than
+        # letting the exception escape to the HTTP handler. (#6139 Greptile P1)
+        return 0
+    return 0
+
+
+def _read_last_complete_line_before(path: Path, end_offset: int) -> dict | None:
+    """Return the summary of the last complete JSONL record strictly before
+    ``end_offset``, without materializing a multi-MB payload.
+
+    Finds the last complete line boundary before ``end_offset`` (two backward
+    newline scans), then uses ``_extract_boundary_record_summary`` (the bounded
+    prefix extractor) to read ONLY the record's summary fields. This keeps the
+    recovery path within the cap even when the preceding record is itself an
+    oversized multi-MB event. Returns the summary dict, or None if there's no
+    preceding complete record.
+    """
+    if end_offset <= 0:
+        return None
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return None
+    scan_end = min(end_offset, size)
+    # Find the newline at or before scan_end (terminator of the preceding line).
+    first_nl = _rfind_byte_before(path, b"\n", scan_end)
+    if first_nl is None or first_nl == 0:
+        return None
+    # Find the start of that line (newline before it, or byte 0).
+    second_nl = _rfind_byte_before(path, b"\n", first_nl)
+    line_start = (second_nl + 1) if second_nl is not None else 0
+    line_len = first_nl - line_start
+    # For a normal-sized preceding record, read and parse the whole line.
+    # For an oversized one, use the bounded prefix extractor.
+    if line_len <= _BOUNDARY_SUMMARY_PREFIX_BYTES:
+        try:
+            with path.open("rb") as fh:
+                fh.seek(line_start)
+                raw = fh.read(line_len)
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, OSError):
+            return None
+    # Oversized preceding record: bounded prefix extraction (no payload materialized).
+    return _extract_boundary_record_summary(path, line_start)
+
+
+def _rfind_byte_before(path: Path, byte: bytes, end_offset: int) -> int | None:
+    """Return the offset of the last occurrence of ``byte`` at or before
+    ``end_offset - 1``, scanning backward in bounded chunks. None if not found."""
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    pos = end_offset
+    try:
+        with path.open("rb") as fh:
+            while pos > 0:
+                read_from = max(0, pos - chunk_size)
+                fh.seek(read_from)
+                block = fh.read(pos - read_from)
+                idx = block.rfind(byte)
+                if idx >= 0:
+                    return read_from + idx
+                pos = read_from
+    except (FileNotFoundError, OSError):
+        # TOCTOU: journal deleted before/during the scan. Return the safe
+        # fallback (None = byte not found) rather than escaping to the caller.
+        # (#6139 Greptile P1)
+        return None
+    return None
+
+
+def _record_is_structurally_complete(path: Path, record_start: int) -> bool:
+    """Return True iff the JSONL record at ``record_start`` is structurally
+    complete — i.e. its JSON object is closed (brace depth returns to 0) AND
+    followed by a newline terminator — scanning forward in bounded chunks WITHOUT
+    materializing the (potentially multi-MB) payload.
+
+    Used to gate trusting a fabricated prefix summary: a crash-truncated
+    ``done`` (write interrupted mid-payload, no closing brace/newline) must NOT
+    be accepted as terminal, or an interrupted run is misreported as completed
+    and its recovery signal is silently dropped. Returns False if EOF is reached
+    at brace depth > 0 (the record was truncated mid-write).
+    """
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    depth = 0
+    pos = record_start
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return False
+    in_string = False
+    escaped = False
+    try:
+        with path.open("rb") as fh:
+            fh.seek(record_start)
+            while pos < size:
+                chunk = fh.read(min(chunk_size, size - pos))
+                if not chunk:
+                    break
+                chunk_len = len(chunk)
+                for ci in range(chunk_len):
+                    b = chunk[ci]
+                    pos += 1
+                    if in_string:
+                        if escaped:
+                            escaped = False
+                        elif b == 0x5C:  # backslash
+                            escaped = True
+                        elif b == 0x22:  # closing quote
+                            in_string = False
+                        continue
+                    if b == 0x22:  # opening quote
+                        in_string = True
+                    elif b == 0x7B:  # '{'
+                        depth += 1
+                    elif b == 0x7D:  # '}'
+                        depth -= 1
+                        if depth == 0:
+                            # Object closed at position `pos` (1 past the '}').
+                            # The record is complete iff the byte(s) right after are a
+                            # newline terminator (\n or \r\n). Look at the next byte
+                            # in the current chunk first (avoid file-cursor drift),
+                            # else read fresh from the file.
+                            if ci + 1 < chunk_len:
+                                nb = chunk[ci + 1]
+                                if nb == 0x0A:  # \n — complete
+                                    return True
+                                if nb == 0x0D:  # \r — need to check for \r\n
+                                    if ci + 2 < chunk_len:
+                                        return chunk[ci + 2] == 0x0A
+                                    # \r at chunk end: read from file to check for \n
+                                    fh.seek(pos + 1)
+                                    return fh.read(1) == b"\n"
+                                return False  # any other byte after } is not a terminator
+                            # Terminator is in the next chunk: read up to 2 bytes
+                            # from file to distinguish \r\n (CRLF) from a bare \r.
+                            fh.seek(pos)
+                            nb = fh.read(2)
+                            return nb == b"\r\n" or nb[:1] == b"\n"
+                    elif b == 0x0A and depth == 0:  # newline at depth 0 before close
+                        return False
+                # depth > 0 here means the record spans more chunks; keep scanning.
+            # Reached EOF: a record ending at EOF is only complete if a real newline
+            # terminator was seen — NOT if the `}` is the last byte. A write
+            # interrupted after `}` but before the `\n` is crash-truncated.
+            return False
+    except (FileNotFoundError, OSError):
+        # TOCTOU: journal deleted between the stat() above and this open/read
+        # (cleanup racing a status poll). Return the safe fallback (False =
+        # record not complete) rather than letting the exception escape to the
+        # HTTP handler. (#6139 Greptile P1)
+        return False
+
+
+def _extract_boundary_record_summary(path: Path, record_start: int) -> dict | None:
+    """Extract ONLY the summary fields of an oversized journal record that
+    straddles the tail-window boundary, without materializing its payload.
+
+    Reads a bounded prefix (``_BOUNDARY_SUMMARY_PREFIX_BYTES``) from
+    ``record_start``, locates the top-level ``"payload"`` key via a brace-depth
+    scan, truncates the JSON before it, closes the object, and parses. Returns
+    a dict with the summary fields (``event``/``seq``/``event_id``/``terminal``/
+    ``terminal_state``) or ``None`` if the layout is unexpected. The payload is
+    replaced with an empty dict so downstream consumers see the shape but not
+    the bytes.
+    """
+    try:
+        with path.open("rb") as fh:
+            fh.seek(record_start)
+            prefix_raw = fh.read(_BOUNDARY_SUMMARY_PREFIX_BYTES)
+    except (FileNotFoundError, OSError):
+        return None
+    text = prefix_raw.decode("utf-8", errors="replace")
+    # Find the top-level "payload" key (depth 1 inside the record object).
+    payload_pos = _find_top_level_payload_key(text)
+    if payload_pos is None:
+        # No payload key in the prefix — either the record is small enough that
+        # the whole thing fit (parse directly if it ends in this prefix), or the
+        # layout is unexpected. Try a direct parse of the prefix up to the first
+        # newline; if that fails, give up.
+        nl = text.find("\n")
+        candidate = text if nl < 0 else text[:nl]
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    # Truncate before "payload", strip trailing comma/whitespace, close object.
+    head = text[:payload_pos].rstrip()
+    if head.endswith(","):
+        head = head[:-1].rstrip()
+    head += "\n}"
+    try:
+        parsed = json.loads(head)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    # Replace the (unread) payload with an empty dict so the shape is consistent
+    # but no payload bytes are materialized.
+    parsed["payload"] = {}
+    parsed["_summary_extracted_from_oversized_record"] = True
+    return parsed
+
+
+def _find_top_level_payload_key(text: str) -> int | None:
+    """Return the byte offset of the top-level (depth-1) ``"payload"`` key in
+    a JSON object prefix, or None if not found. Mirrors the depth-tracking
+    approach of the session scanner but specialized for the journal record."""
+    depth = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            # Parse the string token to get its content + end.
+            i += 1
+            start = i
+            escaped = False
+            while i < n:
+                c = text[i]
+                if escaped:
+                    escaped = False
+                elif c == "\\":
+                    escaped = True
+                elif c == '"':
+                    break
+                i += 1
+            if i >= n:
+                return None
+            key = text[start:i]
+            if depth == 1 and key == "payload":
+                # Confirm it's a key (followed by optional ws + ':').
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j < n and text[j] == ":":
+                    return start - 1  # offset of the opening quote
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        i += 1
+    return None
+
+
+def _read_jsonl_tail(
+    path: Path, *, max_bytes: int | None, max_rows: int | None
+) -> tuple[list[dict], list[dict]]:
+    """Read the trailing portion of a JSONL journal (bounded memory).
+
+    Seeks to (size - max_bytes) and reads forward, discarding the partial line
+    at the seek boundary, then returns at most the last ``max_rows`` parsed
+    events. ``line`` numbers in ``malformed`` are 1-based across the whole file.
+    Used by summary readers that need the LAST events of a possibly huge journal
+    (terminal_state / last_seq live in the tail).
+    """
+    events: list[dict] = []
+    malformed: list[dict] = []
+    try:
+        size = path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return events, malformed
+    if size <= 0:
+        return events, malformed
+    read_bytes_cap = (
+        max_bytes if (max_bytes is not None and max_bytes > 0)
+        else _SESSION_REPLAY_MAX_BYTES
+    )
+    read_bytes = min(size, read_bytes_cap)
+    rows_cap = max_rows if (max_rows is not None and max_rows > 0) else (1 << 62)
+    try:
+        with path.open("rb") as fh:
+            if size > read_bytes:
+                fh.seek(size - read_bytes)
+            raw = fh.read(read_bytes)
+    except (FileNotFoundError, OSError):
+        return events, malformed
+    text = raw.decode("utf-8", errors="replace")
+    # If we sought into the middle of the file, the window's first "line" is a
+    # partial fragment of a record that STRADDLES the seek boundary. streaming.py
+    # journals the terminal `done` event with the FULL transcript as its payload,
+    # so that record can be many MB — bigger than the whole tail window. Two
+    # sub-cases, both of which must not drop the straddling record's summary
+    # (terminal_state / last_seq / last_event_id) or restart recovery misreports
+    # a finished run as still-running:
+    #   (a) nl >= 0: the straddling record's tail is at the start of the window
+    #       and is followed by more complete records (e.g. the production order
+    #       done(tool_limit_reached) -> metering -> stream_end). Slicing past
+    #       the first newline loses the straddling record but keeps the rest.
+    #   (b) nl < 0: the ENTIRE window is inside one oversized record (no newline
+    #       at all), so there are no complete records in the window.
+    # In both cases, recover the straddling record's summary via a BOUNDED prefix
+    # read (_extract_boundary_record_summary): the record layout puts all summary
+    # fields before "payload", so we read a few KB, truncate at "payload", and
+    # parse the summary WITHOUT materializing the (multi-MB) payload. The
+    # extracted summary is prepended to the events so _summary_from_events sees
+    # both the straddling record's terminal state AND any trailing events.
+    boundary_summary: dict | None = None
+    if size > read_bytes:
+        seek_pos = size - read_bytes
+        record_start = _find_record_start_before(path, seek_pos)
+        # record_start is where the straddling record begins. Extract its summary
+        # via a bounded prefix read (never materializes the payload) — BUT only
+        # trust it as terminal if the record is structurally complete. A crash-
+        # truncated `done` (write interrupted mid-payload: no closing brace, no
+        # newline) must NOT be fabricated into a terminal event, or an interrupted
+        # run is misreported as completed and its apperror recovery signal is
+        # silently dropped. Stale-but-nonterminal is recoverable; falsely-terminal
+        # is not. If incomplete, discard the summary and fall through to the
+        # preceding complete records (the run stays nonterminal/`running`).
+        boundary_summary = _extract_boundary_record_summary(path, record_start)
+        if boundary_summary is not None and not _record_is_structurally_complete(path, record_start):
+            boundary_summary = None  # crash-truncated record: don't trust its prefix
+            # Retain the last COMPLETE event before the truncated boundary record,
+            # so last_seq/running survive and the apperror recovery signal fires
+            # (matching master). Without this, rejecting the boundary record also
+            # drops the preceding valid event → event_count=0, last_seq=0, no
+            # recovery. Read the last complete record's summary via bounded prefix
+            # extraction (never materializes a multi-MB payload).
+            preceding = _read_last_complete_line_before(path, record_start)
+            if preceding is not None:
+                events.append(preceding)
+        # Now drop the partial first fragment from the window so we only parse
+        # the complete trailing records.
+        nl = text.find("\n")
+        if nl >= 0:
+            text = text[nl + 1:]
+        else:
+            text = ""  # entire window was inside the oversized record
+    if boundary_summary is not None:
+        events.append(boundary_summary)
+    if not text.strip() and boundary_summary is None:
+        # No straddling record recovered AND no complete lines in the window.
+        # (When boundary_summary was recovered we already have it; an empty text
+        # just means there were no trailing complete records, which is fine.)
+        return events, malformed
+    # 1-based line number of the first whole line in `text`, across the whole
+    # file. The discarded prefix (size - read_bytes bytes) contains some number
+    # of complete lines; the first whole line in the window is the next one. We
+    # must COUNT newlines in the discarded prefix — a byte offset is NOT a line
+    # number (a 4 MB head with ~80 B/line has ~50000 lines, not ~4 M). Count by
+    # streaming the head in chunks so a huge file doesn't get materialized twice.
+    head_bytes = size - read_bytes if size > read_bytes else 0
+    lines_before_window = 0
+    if head_bytes > 0:
+        try:
+            with path.open("rb") as _hf:
+                _remaining = head_bytes
+                while _remaining > 0:
+                    _chunk = _hf.read(min(_SESSION_REPLAY_READ_CHUNK_BYTES, _remaining))
+                    if not _chunk:
+                        break
+                    lines_before_window += _chunk.count(b"\n")
+                    _remaining -= len(_chunk)
+        except (FileNotFoundError, OSError):
+            lines_before_window = 0  # best-effort attribution; events are unaffected
+    # `text`'s first whole line in the file: the discarded head ended mid-line,
+    # so the partial line it left (line `lines_before_window + 1`) was dropped
+    # above, making the first whole line `lines_before_window + 2`. When there
+    # was no seek (whole file read), the first line is 1.
+    base_start_line = lines_before_window + 2 if head_bytes > 0 else 1
+    # Split on \n only (NOT splitlines, which accepts bare \r). A crash-truncated
+    # record ending in bare \r must not be parsed as a complete line.
+    # First check: if the text doesn't end with \n, the last line is unterminated.
+    text_ends_with_newline = text.endswith("\n")
+    all_lines = text.split("\n")
+    # Drop trailing empty string if text ended with \n.
+    if all_lines and all_lines[-1] == "":
+        all_lines.pop()
+    # If text didn't end with \n, the last "line" is unterminated (bare \r or
+    # EOF) — discard it, matching the full reader's terminator gate.
+    if not text_ends_with_newline and all_lines:
+        all_lines.pop()
+    # Keep only the last `rows_cap` lines so a huge tail window still bounds the
+    # parsed-event list (and the JSON decode cost). If we trim lines from the
+    # front, advance the starting line number by the trim count.
+    trim_from_front = max(0, len(all_lines) - rows_cap)
+    if trim_from_front:
+        all_lines = all_lines[-rows_cap:]
+    start_line = base_start_line + trim_from_front
+    for idx, raw_line in enumerate(all_lines):
+        line_no = start_line + idx
+        if not raw_line.strip():
+            continue
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            malformed.append({"line": line_no, "raw": raw_line})
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+        else:
+            malformed.append({"line": line_no, "raw": raw_line})
     return events, malformed
 
 
@@ -461,9 +972,11 @@ def read_run_events(
     after_seq: int | None = None,
     max_seq: int | None = None,
     session_dir: Path | None = None,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path)
+    events, malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -498,13 +1011,26 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
     }
 
 
-def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
+def latest_run_summary(
+    session_id: str,
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int | None = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int | None = _SESSION_REPLAY_MAX_ROWS,
+) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
     cached = _get_cached_summary(path)
     if cached is not None:
         return cached
+    # Summary derives last_seq / last_event_id / terminal_state from the LAST
+    # events, so read the bounded TAIL (not the whole file) — a large completed
+    # run's terminal marker lives at the end and must not require parsing the
+    # full history. Callers needing head/all events use read_run_events().
     pre_read_signature = _summary_cache_signature(path)
-    events, _malformed = _read_jsonl(path)
+    events, _malformed = _read_jsonl(
+        path, max_bytes=max_bytes, max_rows=max_rows, tail=True
+    )
     summary = _summary_from_events(session_id, run_id, events)
     _cache_summary(path, summary, expected_signature=pre_read_signature)
     return summary
@@ -544,7 +1070,13 @@ def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = N
     return (count, max_mtime, total_size)
 
 
-def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | None:
+def find_run_summary(
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int | None = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int | None = _SESSION_REPLAY_MAX_ROWS,
+) -> dict | None:
     rid = _validate_id(run_id, "run_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     journal_root = root / RUN_JOURNAL_DIR_NAME
@@ -553,7 +1085,11 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
         summary = _get_cached_summary(path)
         if summary is None:
             pre_read_signature = _summary_cache_signature(path)
-            events, _malformed = _read_jsonl(path)
+            # Tail read: summary needs the terminal/last events (see
+            # latest_run_summary), so bound memory on large completed runs.
+            events, _malformed = _read_jsonl(
+                path, max_bytes=max_bytes, max_rows=max_rows, tail=True
+            )
             summary = _summary_from_events(session_id, rid, events)
             _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
