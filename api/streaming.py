@@ -7094,6 +7094,118 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _builtin_toolset_names():
+    """Names the agent resolves to a static/builtin toolset (not an MCP server).
+
+    A per-session override name that collides with one of these must NOT be
+    treated as an "enable this MCP server" tick, because the static toolset
+    shadows the same-named MCP alias at resolution time.
+
+    Returns the full set of names that shadow an MCP alias: the static
+    ``TOOLSETS`` keys PLUS any registered canonical/plugin toolset names, so a
+    plugin-named MCP server can't slip past the collision guard. Returns
+    ``None`` (not an empty set) when the registry is *unavailable* — that is an
+    "I don't know" signal, distinct from "there are genuinely no builtins", and
+    the classifier must fail closed (restrict) rather than treat every name as
+    MCP-additive.
+    """
+    try:
+        import toolsets
+    except Exception:
+        return None
+    names = set()
+    found = False
+    static = getattr(toolsets, 'TOOLSETS', None)
+    if isinstance(static, dict):
+        names.update(static.keys())
+        found = True
+    # Registered canonical / plugin toolsets also shadow same-named MCP aliases
+    # at resolution time. Cover whichever accessor this build exposes.
+    for _accessor in ('registered_toolset_names', 'all_toolset_names',
+                      'canonical_toolset_names'):
+        try:
+            _fn = getattr(toolsets, _accessor, None)
+            if callable(_fn):
+                _extra = _fn()
+                if isinstance(_extra, (set, list, tuple, dict)) and _extra:
+                    names.update(_extra)
+                    found = True
+        except Exception:
+            continue
+    for _attr in ('REGISTERED_TOOLSETS', 'CANONICAL_TOOLSETS',
+                  'PLUGIN_TOOLSETS'):
+        _val = getattr(toolsets, _attr, None)
+        if isinstance(_val, dict):
+            names.update(_val.keys())
+            found = True
+        elif isinstance(_val, (set, list, tuple)):
+            names.update(_val)
+            found = True
+    if not found:
+        # Module imported but exposed no recognizable registry → unknown.
+        return None
+    return names
+
+
+def _apply_session_toolset_override(defaults, override, mcp_server_names,
+                                    builtin_names=None):
+    """Resolve a per-session ``enabled_toolsets`` override against the profile
+    defaults.
+
+    Two intents share the one override field:
+
+    * **Additive** — the override names *only* configured MCP servers (the
+      composer toolset picker ticks a server for this chat). Keep the profile
+      defaults and append the ticked servers (dedup, order-preserving), so the
+      built-in toolsets survive. The bare server name is intentional: the CLI
+      resolver (`_resolve_cli_toolsets`) and `enabled_mcp_server_names` both
+      emit bare names, and the registry aliases ``<server>`` → ``mcp-<server>``,
+      so a bare name resolves correctly — a ``mcp-`` prefix would NOT validate.
+
+    * **Restrict** — the override names any non-MCP toolset (power-user
+      free-text): replace the defaults, as before.
+
+    A name that is *both* a configured MCP server and a builtin toolset (e.g. a
+    server literally named ``web``) is a collision: the builtin shadows the MCP
+    alias, so it must not flip the whole override into additive mode. Such names
+    are excluded from the MCP-only test, leaving the override to restrict
+    semantics — unambiguous and backward-compatible.
+
+    Fail-closed: if the builtin registry is *unavailable* (``builtin_names`` is
+    ``None`` — an "I don't know" signal), we cannot prove a name is a pure MCP
+    server that isn't shadowed by a builtin, so the override falls back to the
+    conservative RESTRICT semantics. It is never treated as additive on an
+    unknown registry, because that would re-open the very collision this guard
+    exists to close.
+    """
+    if not override:
+        return list(defaults)
+    mcp_server_names = set(mcp_server_names or ())
+    if builtin_names is None:
+        builtin_names = _builtin_toolset_names()
+    # ``None`` here means the builtin registry could not be resolved → we do not
+    # know which names are shadowed by a builtin, so we cannot safely classify
+    # any override name as a pure MCP tick. Fail closed to restrict.
+    if builtin_names is None:
+        return list(override)
+    builtin_names = set(builtin_names)
+    # Only names that are MCP servers AND not shadowed by a builtin count as a
+    # pure "enable this server" tick.
+    pure_mcp = mcp_server_names - builtin_names
+    override_only_mcp = bool(pure_mcp) and all(
+        name in pure_mcp for name in override
+    )
+    if override_only_mcp:
+        merged = list(defaults)
+        seen = set(merged)
+        for name in override:
+            if name not in seen:
+                merged.append(name)
+                seen.add(name)
+        return merged
+    return list(override)
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -8506,7 +8618,23 @@ def _run_agent_streaming(
             _toolsets = _resolve_cli_toolsets(_cfg)
 
             # Per-session toolset override (#493): if the session has
-            # enabled_toolsets set, use that instead of the global config.
+            # enabled_toolsets set, apply it on top of the profile defaults.
+            #
+            # The per-session toolset picker lets users tick configured MCP
+            # servers for the current chat. Those checkboxes emit the bare MCP
+            # server name (e.g. "my-search"). Previously ANY override value
+            # *replaced* the profile defaults wholesale, so ticking a single MCP
+            # server dropped every built-in toolset (web, file, terminal,
+            # delegation, …). The agent then received a toolset the registry had
+            # no matching tools for (MCP tools register under "mcp-<server>"),
+            # leaving the model with an empty tool list and a broken session.
+            #
+            # Fix: treat an override that is composed *only* of configured MCP
+            # server names as an ADDITION to the profile defaults (the "enable
+            # this server for this chat" intent the checkbox UI implies). An
+            # override that names any non-MCP toolset keeps the original
+            # RESTRICT semantics (the power-user free-text "limit to these
+            # toolsets" use case).
             try:
                 from api.models import Session, SESSION_DIR
                 _session_path = SESSION_DIR / f"{session_id}.json"
@@ -8520,7 +8648,21 @@ def _run_agent_streaming(
                     # (Opus pre-release advisor finding for v0.50.257.)
                     _override = getattr(_session_meta, 'enabled_toolsets', None) if _session_meta else None
                     if _override:
-                        _toolsets = _override
+                        try:
+                            _mcp_server_names = set(
+                                (_cfg.get('mcp_servers') or {}).keys()
+                            )
+                        except Exception:
+                            _mcp_server_names = set()
+                        # Additive when the override names only configured MCP
+                        # servers (composer picker tick); restrict otherwise.
+                        # Names colliding with a builtin toolset are excluded
+                        # from the MCP-only test so a server named e.g. "web"
+                        # can't silently flip the override into additive mode
+                        # and get shadowed by the builtin.
+                        _toolsets = _apply_session_toolset_override(
+                            _toolsets, _override, _mcp_server_names
+                        )
             except Exception as _ts_err:
                 print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
 
