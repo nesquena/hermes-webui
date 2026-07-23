@@ -567,3 +567,99 @@ def test_normalize_allow_values_and_scopes_use_separate_delimiters():
     assert auth_oidc._normalize_text_list("openid profile email") == ["openid", "profile", "email"]
     scopes = auth_oidc._normalize_scopes("openid profile email")
     assert scopes[:3] == ["openid", "profile", "email"]
+
+
+# ---------------------------------------------------------------------------
+# #6136 — OIDC SSRF protection: issuer-scoped opt-in for self-hosted providers
+# ---------------------------------------------------------------------------
+
+
+def test_allow_private_endpoints_matching_issuer_host(monkeypatch):
+    """When allow_private_endpoints=True and the URL host matches the
+    configured issuer host, private IP resolution must NOT raise."""
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+    # URL on the same host as the configured issuer — must skip SSRF check
+    auth_oidc._validate_outbound_oidc_url(
+        "https://auth.internal.example/.well-known/openid-configuration"
+    )
+
+
+def test_allow_private_endpoints_different_host_still_blocked(monkeypatch):
+    """When allow_private_endpoints=True but the URL host differs from the
+    issuer host, private IPs must still be blocked (prevents discovery pivot)."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
+        ],
+    )
+    # Different host from issuer — must still reject private IPs
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://evil-token.internal.example/token"
+        )
+
+
+def test_allow_private_endpoints_default_false_blocks_private_dns(monkeypatch):
+    """Without allow_private_endpoints=True, private IPs must still be blocked."""
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": False,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
+        ],
+    )
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://auth.internal.example/.well-known/openid-configuration"
+        )

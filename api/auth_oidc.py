@@ -169,6 +169,15 @@ def _resolve_oidc_config() -> dict[str, Any]:
     allow_values = _normalize_allow_values(
         pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
     )
+    allow_private_raw = pick(
+        "allow_private_endpoints", "HERMES_WEBUI_OIDC_ALLOW_PRIVATE_ENDPOINTS"
+    )
+    allow_private = False
+    if allow_private_raw is not None:
+        if isinstance(allow_private_raw, bool):
+            allow_private = allow_private_raw
+        else:
+            allow_private = str(allow_private_raw).strip().lower() in ("1", "true", "yes")
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
@@ -177,6 +186,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "allow_private_endpoints": allow_private,
     }
 
 
@@ -406,6 +416,33 @@ def _oidc_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect)
 
 
+def _is_oidc_issuer_allowed_private_host(hostname: str) -> bool:
+    """Check whether *hostname* is the configured issuer's host under
+    the ``allow_private_endpoints`` opt-in.
+
+    When ``webui_oidc.allow_private_endpoints`` is enabled, only the
+    configured issuer's own hostname is permitted to resolve to private
+    / loopback / link-local addresses.  Any other host — including those
+    returned by the discovery document (``token_endpoint``, ``jwks_uri``)
+    — is still subject to the full SSRF check, preventing discovery-
+    controlled pivots to metadata, internal, or loopback endpoints.
+    """
+    try:
+        cfg = _resolve_oidc_config()
+        if not cfg.get("allow_private_endpoints"):
+            return False
+        issuer = str(cfg.get("issuer") or "").strip()
+        if not issuer:
+            return False
+        issuer_hostname = urllib.parse.urlparse(issuer).hostname
+        if not issuer_hostname:
+            return False
+        return hostname == issuer_hostname
+    except Exception:
+        logger.debug("Failed to read allow_private_endpoints config", exc_info=True)
+        return False
+
+
 def _validate_outbound_oidc_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
@@ -415,6 +452,8 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
+    if _is_oidc_issuer_allowed_private_host(hostname):
+        return
     if _is_disallowed_oidc_host(hostname):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
