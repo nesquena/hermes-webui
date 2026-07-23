@@ -45,9 +45,12 @@ def test_models_dev_unknown_allows_compatibility_fallback(monkeypatch):
 
     import api.config as cfg
 
+    # models.dev unknown → heuristic fallback. Grok family soft ceiling still
+    # applies on the fallback route (low/medium/high/xhigh); it must NOT clamp
+    # authoritative models.dev results (covered by the True cases above).
     assert cfg.resolve_model_reasoning_efforts(
         "x-ai/grok-4", provider_id="openrouter"
-    ) == list(cfg.VALID_REASONING_EFFORTS)
+    ) == ["low", "medium", "high", "xhigh"]
 
 
 def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):

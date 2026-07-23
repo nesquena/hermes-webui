@@ -582,3 +582,23 @@ def test_grok_prefix_without_family_token_is_not_reasoning_capable():
     for model in ("grokfast-150x", "my-provider/grokfast-150x", "notgrok-4.5"):
         assert cfg._candidate_supports_reasoning(model) is False, model
 
+
+def test_grok_45_regex_does_not_false_match_suffix_aliases():
+    # #6438 re-gate: end-anchor the 4.5 matcher so turbo/letter suffixes are
+    # not treated as mandatory-reasoning 4.5 (which would hide None / drop xhigh).
+    for model in ("grok-4.5x", "grok-4-5-turbo", "x-ai/grok-4.5-preview"):
+        assert cfg._is_grok_45_model_id(model) is False, model
+        # Still Grok-family, so family ceiling applies (xhigh ok, max dropped).
+        assert cfg._is_grok_model_id(model) is True, model
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="custom:proxy")
+        assert "xhigh" in efforts, model
+        assert "max" not in efforts, model
+        assert cfg.coerce_reasoning_effort_for_model(
+            "none", model, provider_id="custom:proxy"
+        ) == "none", model
+
+
+def test_grok_45_positive_spellings_and_latest_alias():
+    for model in ("grok-4.5", "grok-4-5", "grok-4_5", "x-ai/grok-4.5", "grok-4.5-latest"):
+        assert cfg._is_grok_45_model_id(model) is True, model
+

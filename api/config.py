@@ -3555,13 +3555,10 @@ def _filter_reasoning_efforts_for_provider(
         return normalized
     if zai_supports is False:
         return []
-    # xAI Grok family: native text models top out at xhigh and do not accept
-    # WebUI-only 'max' or the OpenAI-style 'minimal' floor. Cap the whole family
-    # first, then tighten Grok-4.5 further to low/medium/high (no xhigh either).
-    if _is_grok_model_id(model_id):
-        if _is_grok_45_model_id(model_id):
-            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        return [eff for eff in normalized if eff in {"low", "medium", "high", "xhigh"}]
+    # NOTE: Grok family ceilings intentionally live in
+    # ``_apply_grok_family_effort_ceiling`` (applied by the heuristic fallback
+    # only). models.dev / agent-metadata results must remain authoritative and
+    # must NOT be re-clamped here (#6438 review).
     return normalized
 
 
@@ -3586,11 +3583,36 @@ def _is_grok_model_id(model_id: str | None) -> bool:
 
 
 def _is_grok_45_model_id(model_id: str | None) -> bool:
-    """True for Grok-4.5 ids (dot, hyphen, or underscore minor separators)."""
+    """True for bare Grok-4.5 ids (dot/hyphen/underscore), optional -latest.
+
+    End-anchored so aliases like ``grok-4.5x`` or ``grok-4-5-turbo`` are NOT
+    misclassified as 4.5 (which would wrongly hide None and drop xhigh).
+    """
     bare = _grok_bare_model_id(model_id)
     if not bare or "grok" not in bare:
         return False
-    return bool(re.search(r"(?:^|[^a-z0-9])grok-4(?:[._-])5(?:$|[^0-9])", bare))
+    # bare is already the last path segment (and custom-hint stripped). Match
+    # the 4.5 version at end-of-string, allowing only an optional -latest alias.
+    return bool(re.search(r"(?:^|[^a-z0-9])grok-4[._-]5(?:-latest)?$", bare))
+
+
+def _apply_grok_family_effort_ceiling(
+    efforts: list[str],
+    model_id: str | None,
+) -> list[str]:
+    """Apply Grok family effort ceilings for heuristic/fallback routes only.
+
+    Whole family: low/medium/high/xhigh (drop minimal/max).
+    Grok-4.5: low/medium/high (drop xhigh as well).
+    No-op for non-Grok ids. models.dev authoritative results must NOT pass here.
+    """
+    if not efforts or not _is_grok_model_id(model_id):
+        return efforts
+    if _is_grok_45_model_id(model_id):
+        allowed = {"low", "medium", "high"}
+    else:
+        allowed = {"low", "medium", "high", "xhigh"}
+    return [eff for eff in efforts if eff in allowed]
 
 
 _KNOWN_REASONING_PROVIDERS = frozenset({
@@ -3682,15 +3704,15 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "xiaomi/",
     )
     if any(model.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+        return _apply_grok_family_effort_ceiling(list(VALID_REASONING_EFFORTS), model)
     if _nested_gateway_route_reasoning(model):
-        return list(VALID_REASONING_EFFORTS)
+        return _apply_grok_family_effort_ceiling(list(VALID_REASONING_EFFORTS), model)
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
     # "vendor.deepseek.v3.2" are treated consistently.
     if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
-        return list(VALID_REASONING_EFFORTS)
+        return _apply_grok_family_effort_ceiling(list(VALID_REASONING_EFFORTS), model)
     return []
 
 
