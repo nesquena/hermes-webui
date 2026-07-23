@@ -4164,12 +4164,24 @@ def coerce_reasoning_effort_for_model(
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
+
+    resolved_provider = str(provider_id or "").strip() or None
+    resolved_base_url = base_url
+    if not resolved_provider:
+        try:
+            _, resolved_provider, resolved_base_url = resolve_model_provider(
+                str(model_id or "")
+            )
+        except Exception:
+            resolved_provider = None
+            resolved_base_url = base_url
+
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled at all — a stored 'none' must coerce to '' (provider default =
     # thinking on) so streaming does not build disabled reasoning for a model
     # that forces thinking on regardless. Checked BEFORE the generic 'none'
     # early-return below so the forced-tier contract wins. (#6219 round-3)
-    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
+    if raw == "none" and _zai_glm_classification(model_id, resolved_provider) == "forced":
         return ""
     if raw == "none":
         return "none"
@@ -4177,8 +4189,8 @@ def coerce_reasoning_effort_for_model(
         return ""
     supported = resolve_model_reasoning_efforts(
         model_id,
-        provider_id=provider_id,
-        base_url=base_url,
+        provider_id=resolved_provider,
+        base_url=resolved_base_url,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -4194,7 +4206,9 @@ def coerce_reasoning_effort_for_model(
     # ceiling rule the filter returns the full list unchanged, so genuinely
     # unknown models still preserve the configured effort (#3505 behavior).
     ceiling = _filter_reasoning_efforts_for_provider(
-        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
+        list(VALID_REASONING_EFFORTS),
+        str(model_id or ""),
+        str(resolved_provider or ""),
     )
     if ceiling and raw not in ceiling:
         ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
@@ -4221,11 +4235,11 @@ def coerce_reasoning_effort_for_model(
     # to accept reasoning_effort at all, so omit the field rather than preserving
     # a stale value that Z.AI would silently ignore.
     if not supported:
-        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
+        if _zai_glm_reasoning_efforts_supported(model_id, resolved_provider) is False:
             return ""
         if raw == "ultra":
             return "xhigh"
-        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
+        if raw == "max" and not _provider_known_reasoning_capable(resolved_provider):
             return "xhigh"
         return raw
     if raw in supported:
@@ -4244,7 +4258,9 @@ def coerce_reasoning_effort_for_model(
     # Only GPT-5.6 has the explicit minimal → none contract. For other
     # partially-known capability sets, keep the requested effort rather than
     # disabling reasoning merely because `none` is present.
-    bare_model = _strip_provider_hint_for_reasoning(model_id, provider_id).lower().rsplit("/", 1)[-1]
+    bare_model = _strip_provider_hint_for_reasoning(
+        model_id, resolved_provider
+    ).lower().rsplit("/", 1)[-1]
     if raw == "minimal" and bare_model in _GPT56_MODEL_IDS and "none" in supported:
         return "none"
     return raw

@@ -86,6 +86,16 @@ def test_coerce_minimal_to_none_for_gpt56_named_custom_provider():
     ) == "none"
 
 
+def test_coerce_minimal_to_none_for_gpt56_named_custom_provider_without_explicit_provider():
+    # Validate the resolver path when provider_id is omitted (common with raw
+    # persisted session values). This path must still parse the ``@custom:`` model
+    # hint and apply the GPT-5.6 minimal→none contract.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "minimal",
+        "@custom:agg:gpt-5.6-sol",
+    ) == "none"
+
+
 def test_coerce_preserves_effort_for_unrecognized_model():
     # #3505 review: resolve_model_reasoning_efforts() returns [] for BOTH
     # known-unsupported AND simply-unrecognized models (custom providers,
