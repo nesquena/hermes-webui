@@ -357,6 +357,11 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_buildSidebarLineageProjectResolver'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -367,7 +372,8 @@ const raw = [
   {{session_id:'child', title:'Subtask', parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:30, last_message_at:30}},
 ];
 const collapsed = _collapseSessionLineageForSidebar(raw);
-const attached = _attachChildSessionsToSidebarRows(collapsed, raw);
+const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const attached = _attachChildSessionsToSidebarRows(collapsed, raw, [], undefined, effectiveProject);
 console.log(JSON.stringify(attached));
 """
     rows = json.loads(_run_node(source))
@@ -396,6 +402,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_authoritativeLineageTipId'));
@@ -464,6 +473,9 @@ function extractFunc(name) {{
 function _isExternalSession(s) {{ return !!(s && (s.is_cli_session || s.session_source === 'messaging')); }}
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const collapsed = [{{
@@ -521,6 +533,9 @@ function extractFunc(name) {{
 function _isExternalSession(s) {{ return !!(s && (s.is_cli_session || s.session_source === 'messaging')); }}
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const collapsed = [{{
@@ -575,6 +590,9 @@ function extractFunc(name) {{
 function _isExternalSession(s) {{ return !!(s && (s.is_cli_session || s.session_source === 'messaging')); }}
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const collapsed = [{{session_id:'parent', title:'Parent', source_label:'WebUI Continuation'}}];
@@ -609,6 +627,9 @@ function extractFunc(name) {{
 }}
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const collapsed = [{{session_id:'telegram_parent', title:'Telegram parent', session_source:'messaging', raw_source:'telegram', source_label:'Telegram'}}];
@@ -667,6 +688,9 @@ function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source 
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -715,6 +739,9 @@ function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source 
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -752,6 +779,9 @@ var _showArchived = false;
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const parent = {{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10}};
@@ -795,6 +825,9 @@ var _showArchived = false;
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const parent = {{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10}};
@@ -830,6 +863,9 @@ var _showArchived = false;
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -868,6 +904,9 @@ var _showArchived = false;
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -885,9 +924,10 @@ console.log(JSON.stringify({{correctRows, wrongRows}}));
     result = json.loads(_run_node(source))
     assert [row["session_id"] for row in result["correctRows"]] == ["fork"]
     assert "_orphan_child_session" not in result["correctRows"][0]
-    # This documents why render references must be active-project scoped: a
-    # cross-project archived parent would make the active-project fork vanish.
-    assert result["wrongRows"] == []
+    # Scope-keyed durable lineage must ignore archived parents that live in a
+    # different project, even if a bad caller passes them in the reference set.
+    assert [row["session_id"] for row in result["wrongRows"]] == ["fork"]
+    assert "_orphan_child_session" not in result["wrongRows"][0]
 
 
 def test_inactive_source_tab_count_uses_its_own_archived_parent_references():
@@ -912,6 +952,9 @@ var _showArchived = false;
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -961,6 +1004,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const decoratedParent = {{
@@ -1006,6 +1052,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
@@ -1039,6 +1088,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'missing', updated_at:20, last_message_at:20}};
@@ -1048,6 +1100,270 @@ console.log(JSON.stringify(rows));
     rows = json.loads(_run_node(source))
     assert [row["session_id"] for row in rows] == ["fork1"]
     assert "_child_sessions" not in rows[0]
+
+
+def test_lineage_scope_keeps_all_profile_fork_grouped_across_rebuilds():
+    """All-profiles renders must resolve fork lineage by the row's own scope."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var _allSessions = [];
+function _isCliSession(session) {{
+  return !!(session && session.is_cli_session);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && session.active_stream_id);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+function snapshot(referenceRows, delegatedStreaming) {{
+  delegated.active_stream_id = delegatedStreaming ? 'stream-1' : '';
+  return _renderSidebarRowsFromRawSessions(
+    [activeRoot, foreignRoot, foreignFork, delegated],
+    referenceRows,
+    {{isCli:false, profile:'a'}}
+  )
+    .map(row => ({{
+      id: row.session_id,
+      childStreaming: !!row._child_session_streaming,
+      children: (row._child_sessions||[]).map(child=>child.session_id),
+    }}))
+    .sort((a,b)=>a.id.localeCompare(b.id));
+}}
+const activeRoot = {{session_id:'a-root', title:'Active root', profile:'a', profile_scope:'a', updated_at:5, last_message_at:5}};
+const foreignRoot = {{session_id:'b-root', title:'Renamed root', profile:'b', profile_scope:'b', updated_at:10, last_message_at:10}};
+const foreignFork = {{session_id:'b-fork', title:'Fork B', profile:'b', profile_scope:'b', session_source:'fork', parent_session_id:'b-root', updated_at:20, last_message_at:20}};
+const delegated = {{session_id:'b-child', title:'Delegated child', profile:'b', profile_scope:'b', parent_session_id:'b-fork', relationship_type:'child_session', updated_at:30, last_message_at:30}};
+_allSessions = [activeRoot, foreignRoot, foreignFork, delegated];
+const narrow = snapshot([foreignFork, delegated], true);
+const complete = snapshot([foreignRoot, foreignFork, delegated], false);
+console.log(JSON.stringify({{narrow, complete}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["narrow"] == [
+        {"id": "a-root", "childStreaming": False, "children": []},
+        {"id": "b-root", "childStreaming": True, "children": ["b-fork", "b-child"]},
+    ]
+    assert result["complete"] == [
+        {"id": "a-root", "childStreaming": False, "children": []},
+        {"id": "b-root", "childStreaming": False, "children": ["b-fork", "b-child"]},
+    ]
+    for key in ("narrow", "complete"):
+        flattened = [
+            item
+            for row in result[key]
+            for item in [row["id"], *row["children"]]
+        ]
+        assert sorted(flattened) == ["a-root", "b-child", "b-fork", "b-root"]
+        assert len(flattened) == len(set(flattened))
+
+
+def test_default_and_renamed_root_profiles_share_lineage_scope():
+    """Default-profile children should attach under a renamed-root parent."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var _allSessions = [];
+var _profilesCache = null;
+function _isCliSession() {{
+  return false;
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const root = {{session_id:'root', title:'Renamed root', profile:'Renamed root', profile_scope:'default', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork', title:'Fork', profile:'default', profile_scope:'default', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
+_allSessions = [root, fork];
+const rows = _renderSidebarRowsFromRawSessions([root, fork], [fork], {{isCli:false, profile:'default'}})
+  .map(row => ({{id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+console.log(JSON.stringify(rows));
+"""
+    assert json.loads(_run_node(source)) == [{"id": "root", "children": ["fork"]}]
+
+
+def test_local_sidebar_rows_keep_default_profile_scope_before_server_refresh():
+    """Local active-session rows must carry canonical default scope before `/api/sessions` returns."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('(', start);
+  let parenDepth = 1; i++;
+  while (parenDepth > 0 && i < src.length) {{
+    if (src[i] === '(') parenDepth++;
+    else if (src[i] === ')') parenDepth--;
+    i++;
+  }}
+  i = src.indexOf('{{', i);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var _allSessions = [];
+var S = {{
+  activeProfile: 'Renamed root',
+  activeProfileIsDefault: true,
+  session: {{
+    session_id: 'root',
+    title: 'Renamed root',
+    profile: 'Renamed root',
+    updated_at: 10,
+    last_message_at: 10,
+  }},
+  messages: [{{role:'user', content:'hello'}}],
+}};
+function _isCliSession() {{
+  return false;
+}}
+function renderSessionListFromCache() {{}}
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+eval(extractFunc('upsertActiveSessionForLocalTurn'));
+eval(extractFunc('_sessionRowsWithActiveEphemeralSession'));
+const fork = {{session_id:'fork', title:'Fork', profile:'default', profile_scope:'default', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
+const ephemeralRoot = _sessionRowsWithActiveEphemeralSession([])[0];
+const ephemeralRows = (() => {{
+  _allSessions = [ephemeralRoot, fork];
+  return _renderSidebarRowsFromRawSessions([ephemeralRoot, fork], [fork], {{isCli:false, profile:'default'}})
+    .map(row => ({{id:row.session_id, profile_scope:row.profile_scope, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+}})();
+_allSessions = [];
+upsertActiveSessionForLocalTurn({{title:'Renamed root', messageCount:1, timestampMs:20000}});
+const optimisticRoot = _allSessions[0];
+const optimisticRows = _renderSidebarRowsFromRawSessions([optimisticRoot, fork], [fork], {{isCli:false, profile:'default'}})
+  .map(row => ({{id:row.session_id, profile_scope:row.profile_scope, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+console.log(JSON.stringify({{
+  ephemeralScope: ephemeralRoot.profile_scope,
+  optimisticScope: optimisticRoot.profile_scope,
+  ephemeralRows,
+  optimisticRows,
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "ephemeralScope": "default",
+        "optimisticScope": "default",
+        "ephemeralRows": [{"id": "root", "profile_scope": "default", "children": ["fork"]}],
+        "optimisticRows": [{"id": "root", "profile_scope": "default", "children": ["fork"]}],
+    }
+
+
+def test_filtered_visible_rows_do_not_attach_fork_across_scope():
+    """Filtered renders must not attach a fork under another scope's visible lineage row."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var _allSessions = [];
+function _isCliSession() {{
+  return false;
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_buildSidebarLineageProjectResolver'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const realParent = {{session_id:'parent-a', title:'Parent A', profile:'a', profile_scope:'a', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork-a', title:'Fork A', profile:'a', profile_scope:'a', session_source:'fork', parent_session_id:'parent-a', updated_at:20, last_message_at:20}};
+const wrongVisible = {{session_id:'wrong-b', title:'Wrong B', profile:'b', profile_scope:'b', _lineage_root_id:'parent-a', updated_at:30, last_message_at:30}};
+_allSessions = [realParent, fork, wrongVisible];
+const rows = _renderSidebarRowsFromRawSessions(
+  [fork, wrongVisible],
+  [fork, wrongVisible],
+  {{isCli:false, profile:'a'}}
+).map(row => ({{id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+console.log(JSON.stringify(rows));
+"""
+    assert json.loads(_run_node(source)) == [
+        {"id": "wrong-b", "children": []},
+        {"id": "fork-a", "children": []},
+    ]
 
 
 def test_pinned_fork_with_visible_parent_stays_top_level():
@@ -1070,6 +1386,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
@@ -1102,6 +1421,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
@@ -1146,6 +1468,9 @@ function _hasUnreadForSession(session) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const visibleTip = {{
@@ -1209,6 +1534,9 @@ function _hasUnreadForSession(session) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const visibleTip = {{
@@ -1271,6 +1599,9 @@ function _hasUnreadForSession(session) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const visibleTip = {{
@@ -1334,6 +1665,9 @@ function _hasUnreadForSession(session) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const visibleTip = {{
@@ -1397,6 +1731,9 @@ function _hasUnreadForSession(session) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -1442,6 +1779,9 @@ function _hasUnreadForSession(session) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -1486,6 +1826,9 @@ function extractFunc(name) {{
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -2031,6 +2374,9 @@ function extractFunc(name) {{
 }}
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_sidebarLineageScopeKey'));
+eval(extractFunc('_sidebarScopedIdentityKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -2118,3 +2464,36 @@ def test_nested_fork_rows_render_select_checkbox():
     fork_render_block = js[fork_render_start:fork_render_start + 2000]
     assert "session-select-cb" in fork_render_block
     assert "_sessionSelectMode" in fork_render_block
+
+
+def test_effective_project_resolves_root_only_within_canonical_profile_scope():
+    """Null-project descendants inherit a root project from their own profile,
+    while a same-id root in another profile cannot donate its project."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isCliSession(s) {{ return !!(s && s.is_cli_session); }}
+eval(extractFunc('_sidebarLineageSourceBucket'));
+eval(extractFunc('_sessionProfileScope'));
+eval(extractFunc('_buildSidebarLineageProjectResolver'));
+const root = {{session_id:'root', profile_scope:'work', project_id:'projA'}};
+const foreignRoot = {{session_id:'root', profile_scope:'other', project_id:'projB'}};
+const child = {{session_id:'child', profile_scope:'work', _parent_lineage_root_id:'root'}};
+const resolve = _buildSidebarLineageProjectResolver([root, foreignRoot, child], []);
+console.log(JSON.stringify({{child:resolve(child), foreign:resolve({{...child, profile_scope:'other'}})}}));
+"""
+    out = json.loads(_run_node(source))
+    assert out == {"child": "projA", "foreign": "projB"}

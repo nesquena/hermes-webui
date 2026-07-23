@@ -648,6 +648,91 @@ function _cronMarkerProfileMatchesActive(origin, activeProfile) {
   return false;
 }
 
+function _sessionProfileScope(session){
+  if(!session||typeof session!=='object') return 'default';
+  if(typeof session.profile_scope==='string'&&session.profile_scope.trim()) return session.profile_scope.trim();
+  const name=(typeof session.profile==='string'&&session.profile.trim())?session.profile.trim():'default';
+  if(name==='default') return 'default';
+  const activeName=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ? S.activeProfile.trim()
+    : '';
+  if(activeName&&typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&activeName===name) return 'default';
+  return name;
+}
+
+function _sidebarLineageSourceBucket(session, fallbackIsCli){
+  const isCli=typeof _isCliSession==='function'
+    ? !!_isCliSession(session)
+    : (typeof fallbackIsCli==='boolean' ? !!fallbackIsCli : !!(session&&session.is_cli_session));
+  return isCli?'cli':'webui';
+}
+
+function _buildSidebarLineageProjectResolver(sessions, referenceSessions){
+  const rows=[...(Array.isArray(sessions)?sessions:[]),...(Array.isArray(referenceSessions)?referenceSessions:[])];
+  const byScopeIdentity=new Map();
+  const ancestorFields=['parent_session_id','_parent_lineage_tip_id','_parent_lineage_root_id','_lineage_root_id','lineage_root_id'];
+  for(const row of rows){
+    if(!row) continue;
+    const scope=`${_sidebarLineageSourceBucket(row)}\u0000${_sessionProfileScope(row)}`;
+    const identity=row.session_id;
+    if(!identity) continue;
+    const key=`${scope}\u0000${identity}`;
+    if(!byScopeIdentity.has(key)) byScopeIdentity.set(key,[]);
+    byScopeIdentity.get(key).push(row);
+  }
+  return (session, fallbackIsCli)=>{
+    if(!session) return null;
+    if(session.project_id) return session.project_id;
+    const scope=`${_sidebarLineageSourceBucket(session, fallbackIsCli)}\u0000${_sessionProfileScope(session)}`;
+    const active=new Set([session.session_id]);
+    const completed=new Set();
+    const projects=new Set();
+    const visit=(identity)=>{
+      if(!identity) return true;
+      if(active.has(identity)) return false;
+      if(completed.has(identity)) return true;
+      active.add(identity);
+      for(const candidate of byScopeIdentity.get(`${scope}\u0000${identity}`)||[]){
+        if(candidate.project_id) projects.add(candidate.project_id);
+        for(const field of ancestorFields){
+          const isBenignSelfRoot=(field==='_lineage_root_id'||field==='lineage_root_id')
+            &&candidate[field]===candidate.session_id;
+          if(candidate[field]&&!isBenignSelfRoot&&!visit(candidate[field])) return false;
+        }
+      }
+      active.delete(identity);
+      completed.add(identity);
+      return true;
+    };
+    for(const field of ancestorFields){
+      const isBenignSelfRoot=(field==='_lineage_root_id'||field==='lineage_root_id')
+        &&session[field]===session.session_id;
+      if(session[field]&&!isBenignSelfRoot&&!visit(session[field])) return null;
+    }
+    return projects.size===1?[...projects][0]:null;
+  };
+}
+
+function _sidebarLineageScopeKey(session, fallbackIsCli){
+  if(!session) return null;
+  const effectiveProject=arguments[2];
+  const isCli=typeof _isCliSession==='function'
+    ? !!_isCliSession(session)
+    : (typeof fallbackIsCli==='boolean' ? !!fallbackIsCli : !!session.is_cli_session);
+  const project=typeof effectiveProject==='function'
+    ? (effectiveProject(session, fallbackIsCli)||'')
+    : (session.project_id||'');
+  return `${isCli?'cli':'webui'}\u0000${project}\u0000${_sessionProfileScope(session)}`;
+}
+
+function _sidebarScopedIdentityKey(session, identity, fallbackIsCli){
+  const effectiveProject=arguments[3];
+  const scopeKey=_sidebarLineageScopeKey(session, fallbackIsCli, effectiveProject);
+  const raw=String(identity||'');
+  if(!scopeKey||!raw) return null;
+  return `${scopeKey}\u0000${raw}`;
+}
+
 // Drop persisted cron unread dots that belong to inactive profiles. Ordinary
 // (non-cron) completion markers stay put — sticky all-profile sidebars still
 // need those. Called from the shared profile-switch reset in panels.js.
@@ -6880,10 +6965,26 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
-function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
+function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions, durableLineageIds, effectiveProject){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
-  const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
-  const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
+  const sessionIdsInList=durableLineageIds instanceof Set
+    ? durableLineageIds
+    : new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
+  const scopeKeyForSession=(session)=>_sidebarLineageScopeKey(session, undefined, effectiveProject);
+  const scopedIdentityKey=(session, identity)=>_sidebarScopedIdentityKey(session, identity, undefined, effectiveProject);
+  const sessionIdsFor=(session)=>{
+    if(durableLineageIds instanceof Map){
+      const key=scopeKeyForSession(session);
+      const scopedIds=key&&durableLineageIds.get(key);
+      if(scopedIds instanceof Set) return scopedIds;
+    }
+    return sessionIdsInList;
+  };
+  const rawSessionsById=new Map();
+  for(const session of referenceSessions){
+    const key=session&&session.session_id&&scopedIdentityKey(session, session.session_id);
+    if(key&&!rawSessionsById.has(key)) rawSessionsById.set(key, session);
+  }
   const cleanSidebarRow=(s)=>{
     const row={...s};
     // Child-session decoration is render-derived.  Drop stale copies so an
@@ -6899,7 +7000,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     return row;
   };
   const rows=(collapsedRows||[])
-    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
+    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsFor(s))))
     .map(cleanSidebarRow);
   const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
     ? _isSessionEffectivelyStreaming(childRow)
@@ -6935,23 +7036,27 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const attachDepthCache=new Map();
   const attachDepthFor=(session, seen=new Set())=>{
     if(!session||!session.session_id) return 0;
-    if(attachDepthCache.has(session.session_id)) return attachDepthCache.get(session.session_id);
-    if(seen.has(session.session_id)) return 0;
-    seen.add(session.session_id);
-    const parent=session.parent_session_id&&rawSessionsById.get(session.parent_session_id);
+    const sessionKey=scopedIdentityKey(session, session.session_id)||session.session_id;
+    if(attachDepthCache.has(sessionKey)) return attachDepthCache.get(sessionKey);
+    if(seen.has(sessionKey)) return 0;
+    seen.add(sessionKey);
+    const parent=session.parent_session_id&&rawSessionsById.get(scopedIdentityKey(session, session.parent_session_id));
     let depth=0;
-    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsInList)&&!(session&&session.pinned)))){
+    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsFor(session))&&!(session&&session.pinned)))){
       depth=1+attachDepthFor(parent, seen);
     }
-    attachDepthCache.set(session.session_id, depth);
+    attachDepthCache.set(sessionKey, depth);
     return depth;
   };
   for(const row of rows){
-    if(row&&row.session_id) visibleBySid.set(row.session_id,row);
+    const rowSidKey=row&&row.session_id&&scopedIdentityKey(row, row.session_id);
+    if(rowSidKey) visibleBySid.set(rowSidKey,row);
     const lineageKey=_sidebarLineageKeyForRow(row);
-    if(lineageKey&&!visibleByLineageKey.has(lineageKey)) visibleByLineageKey.set(lineageKey,row);
+    const scopedLineageKey=lineageKey&&scopedIdentityKey(row, lineageKey);
+    if(scopedLineageKey&&!visibleByLineageKey.has(scopedLineageKey)) visibleByLineageKey.set(scopedLineageKey,row);
     for(const seg of (Array.isArray(row._lineage_segments)?row._lineage_segments:[])){
-      if(seg&&seg.session_id) visibleBySegmentSid.set(seg.session_id,{row,seg});
+      const segKey=seg&&seg.session_id&&scopedIdentityKey(row, seg.session_id);
+      if(segKey) visibleBySegmentSid.set(segKey,{row,seg});
     }
   }
   const hiddenArchivedChildTree=new Set();
@@ -6959,48 +7064,57 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const hasHiddenArchivedAncestor=(session)=>{
     if(!session||!session.session_id||archivedRowsVisible) return false;
     const seen=new Set();
+    let current=session;
     let parentSid=session.parent_session_id;
     while(parentSid){
       if(hiddenArchivedChildTree.has(parentSid)) return true;
       if(seen.has(parentSid)) break;
       seen.add(parentSid);
-      const rawParent=rawSessionsById.get(parentSid);
+      const rawParent=rawSessionsById.get(scopedIdentityKey(current, parentSid));
       if(!rawParent) break;
       if(rawParent.archived) return true;
+      current=rawParent;
       parentSid=rawParent.parent_session_id;
     }
     return false;
   };
   const orphans=[];
-  const renderableChildIds=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const renderableChildIds=new Set(
+    (rawSessions||[])
+      .map(s=>s&&s.session_id&&scopedIdentityKey(s, s.session_id))
+      .filter(Boolean)
+  );
   const attachQueueById=new Map();
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
-    if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
+    const candidateKey=candidate&&candidate.session_id&&(scopedIdentityKey(candidate, candidate.session_id)||candidate.session_id);
+    if(candidateKey&&!attachQueueById.has(candidateKey)) attachQueueById.set(candidateKey,candidate);
   }
   const attachQueue=[...attachQueueById.values()].sort((a,b)=>attachDepthFor(a)-attachDepthFor(b));
   for(const child of attachQueue){
-    const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
-    if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
-    const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    const childSidKey=child&&child.session_id&&scopedIdentityKey(child, child.session_id);
+    const childRenderable=!!(childSidKey&&renderableChildIds.has(childSidKey));
+    if(childSidKey&&visibleBySid.has(childSidKey)) continue;
+    const isForkChild=_isForkWithResolvableParent(child, sessionIdsFor(child))&&!(child&&child.pinned);
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
     const parentSid=child.parent_session_id;
-    let parentRow=visibleBySid.get(parentSid);
+    let parentRow=parentSid&&visibleBySid.get(scopedIdentityKey(child, parentSid));
     let parentSegment=null;
-    if(!parentRow&&visibleBySegmentSid.has(parentSid)){
-      const resolved=visibleBySegmentSid.get(parentSid);
+    const parentSegmentKey=parentSid&&scopedIdentityKey(child, parentSid);
+    if(!parentRow&&parentSegmentKey&&visibleBySegmentSid.has(parentSegmentKey)){
+      const resolved=visibleBySegmentSid.get(parentSegmentKey);
       parentRow=resolved.row;
       parentSegment=resolved.seg;
     }
     if(!parentRow&&child._parent_lineage_tip_id){
-      parentRow=visibleBySid.get(child._parent_lineage_tip_id)||null;
+      parentRow=visibleBySid.get(scopedIdentityKey(child, child._parent_lineage_tip_id))||null;
     }
     if(!parentRow&&child._parent_lineage_root_id){
-      parentRow=visibleByLineageKey.get(child._parent_lineage_root_id)||null;
+      parentRow=visibleByLineageKey.get(scopedIdentityKey(child, child._parent_lineage_root_id))||null;
     }
     if(!parentRow){
-      parentRow=visibleByLineageKey.get(childLineageKey||parentSid)||null;
+      parentRow=visibleByLineageKey.get(scopedIdentityKey(child, childLineageKey||parentSid))||null;
     }
     if(!parentRow&&hasHiddenArchivedAncestor(child)){
       hiddenArchivedChildTree.add(child.session_id);
@@ -7037,7 +7151,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
         parentRow._child_session_count=parentRow._child_sessions.length;
       }
       bubbleSidebarState(parentRow, childCopy);
-      visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
+      const childCopyKey=childCopy&&childCopy.session_id&&scopedIdentityKey(childCopy, childCopy.session_id);
+      if(childCopyKey) visibleBySegmentSid.set(childCopyKey,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
       // #5305: a delegated subagent child whose WebUI parent is NOT a visible
       // row in this render (filtered out by the active project / profile / source
@@ -7155,6 +7270,7 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     last_message_at:nowSec,
     updated_at:nowSec,
     profile:S.session.profile||S.activeProfile||'default',
+    profile_scope:_sessionProfileScope(S.session||{profile:S.activeProfile||'default'}),
     is_streaming:true,
   };
   if(existingIdx>=0) _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
@@ -7177,6 +7293,7 @@ function _sessionRowsWithActiveEphemeralSession(rows){
     last_message_at:S.session.last_message_at||S.session.updated_at||nowSec,
     updated_at:S.session.updated_at||S.session.last_message_at||nowSec,
     profile:S.session.profile||S.activeProfile||'default',
+    profile_scope:_sessionProfileScope(S.session||{profile:S.activeProfile||'default'}),
     is_streaming:false,
   };
   return [activeRow,...rows];
@@ -7391,6 +7508,7 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
 }
 
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  const effectiveProject=arguments[2];
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -7404,15 +7522,16 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
-    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    const project=typeof effectiveProject==='function' ? effectiveProject(s) : s.project_id;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&project===_activeProject)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
     profileFiltered.push(s);
     if(_activeProject===NO_PROJECT_FILTER){
-      if(s.project_id) continue;
+      if(project) continue;
     } else if(_activeProject){
-      if(s.project_id!==_activeProject) continue;
+      if(project!==_activeProject) continue;
     }
     referenceRaw.push(s);
     if(s.archived){
@@ -7448,21 +7567,49 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // ancestor lives outside the current view. Scope the references to the same
 // project + source bucket as the render they feed before using them.
 function _scopedSidebarReferenceRows(isCli){
+  const effectiveProject=arguments[1];
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
     if(_isCliSession(s)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
-    if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
-    else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
+    const project=typeof effectiveProject==='function' ? effectiveProject(s) : s.project_id;
+    if(_activeProject===NO_PROJECT_FILTER){ if(project) return false; }
+    else if(_activeProject){ if(project!==_activeProject) return false; }
     return true;
   });
 }
 
-function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
+function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, lineageScope){
+  const effectiveProject=arguments[3];
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
-  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
+  const durableRows=[];
+  if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)) durableRows.push(..._allSessions);
+  durableRows.push(...referenceRows);
+  const scopeKeyForSession=(session)=>_sidebarLineageScopeKey(
+    session,
+    lineageScope&&typeof lineageScope.isCli==='boolean' ? lineageScope.isCli : undefined
+    ,effectiveProject
+  );
+  const durableLineageIdsByScope=new Map();
+  for(const session of durableRows){
+    if(!session) continue;
+    if(lineageScope&&typeof lineageScope.isCli==='boolean'
+      &&typeof _isCliSession==='function'
+      &&_isCliSession(session)!==lineageScope.isCli) continue;
+    if(lineageScope&&lineageScope.project!==undefined){
+      const project=typeof effectiveProject==='function' ? effectiveProject(session) : session.project_id;
+      if(lineageScope.project===NO_PROJECT_FILTER){ if(project) continue; }
+      else if(lineageScope.project&&project!==lineageScope.project) continue;
+    }
+    const key=scopeKeyForSession(session);
+    if(!key||!session.session_id) continue;
+    if(!durableLineageIdsByScope.has(key)) durableLineageIdsByScope.set(key,new Set());
+    durableLineageIdsByScope.get(key).add(session.session_id);
+  }
+  return _attachChildSessionsToSidebarRows(
+    _collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIdsByScope, effectiveProject);
 }
 
 function _attachProjectQuickCreateButton(chip, project){
@@ -7541,6 +7688,9 @@ function renderSessionListFromCache(){
   const q=searchQueryRaw.toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
   const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);
+  const effectiveProject=_buildSidebarLineageProjectResolver(
+    [...(_allSessions||[]),...sidebarRows],
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
   // Merge direct session-id/link matches, title matches, then content matches (deduped).
   // Direct matches must not disable content search: if a user pasted the same
   // session id into another conversation, that content hit should still appear.
@@ -7555,19 +7705,29 @@ function renderSessionListFromCache(){
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
-  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
+  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar, effectiveProject);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const lineageScope={
+    isCli:isCliView,
+    project:_activeProject,
+    profile:_allSessionsScope&&_allSessionsScope.profile,
+  };
+  const sessions=_renderSidebarRowsFromRawSessions(
+    sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, effectiveProject)], lineageScope, effectiveProject);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
+    ? _renderSidebarRowsFromRawSessions(
+      webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, effectiveProject)],
+      {...lineageScope, isCli:false}, effectiveProject).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length
+    ? _renderSidebarRowsFromRawSessions(
+      cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, effectiveProject)],
+      {...lineageScope, isCli:true}, effectiveProject).length
     : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
@@ -7629,7 +7789,7 @@ function renderSessionListFromCache(){
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
-  const hasUnprojected=profileFiltered.some(s=>!s.project_id);
+  const hasUnprojected=profileFiltered.some(s=>!effectiveProject(s));
   if(_allProjects.length>0||hasUnprojected){
     const bar=document.createElement('div');
     bar.className='project-bar';

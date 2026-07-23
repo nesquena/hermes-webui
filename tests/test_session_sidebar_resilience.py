@@ -155,6 +155,7 @@ def test_sidebar_allowlist_preserves_fields_consumed_by_frontend():
         "display_title",
         "_state_db_title",
         "has_pending_user_message",
+        "profile_scope",
         "worktree_branch",
     }
 
