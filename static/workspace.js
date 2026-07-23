@@ -868,10 +868,35 @@ function setLargeMarkdownForceRenderVisible(visible){
   if(btn) btn.style.display=visible?'inline-flex':'none';
 }
 
+function _resolveWorkspaceImagePaths(content){
+  // Rewrite local image references (e.g. ![alt](./image.png)) to workspace
+  // API URLs so they render as <img> tags in the markdown preview.
+  // Only runs when we have a current file path and active session.
+  if(!_previewCurrentPath || !S.session) return content;
+  const baseDir = _previewCurrentPath.includes('/')
+    ? _previewCurrentPath.substring(0, _previewCurrentPath.lastIndexOf('/'))
+    : '.';
+  return content.replace(/!\[([^\]]*)\]\(((?!https?:\/\/)[^\)]+)\)/g, (_, alt, relPath) => {
+    // Skip absolute URLs (http://, https://, /absolute-path)
+    if(/^https?:\/\//i.test(relPath) || /^\//.test(relPath)) return _;
+    // Resolve relative path against the markdown file directory
+    const stripped = relPath.replace(/^\.\//, '');
+    const resolvedPath = baseDir === '.' ? stripped : baseDir + '/' + stripped;
+    const normalized = _normalizeWorkspaceRelPath(resolvedPath);
+    if(!normalized) return _;
+    // Build the workspace API URL for the resolved image path
+    const url = _workspaceRouteForPath(normalized, 'raw');
+    if(!url) return _;
+    return `![${alt}](${url})`;
+  });
+}
+
 function renderMarkdownPreviewContent(data){
   const target=data&&data.el?data.el:$('previewMd');
   if(!data||!data.el) showPreview('md');
-  target.innerHTML=renderMd(data.content);
+  // Resolve local image paths before rendering markdown
+  const resolvedContent = _resolveWorkspaceImagePaths(data.content);
+  target.innerHTML=renderMd(resolvedContent);
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 
