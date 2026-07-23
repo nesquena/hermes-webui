@@ -160,10 +160,10 @@ function _interimCollapseDelegatedClick(e){
 }
 document.addEventListener('click', _interimCollapseDelegatedClick);
 
-// TTS: pause speech synthesis when user focuses the composer (#499)
+// TTS: pause the shared lifecycle when the user focuses the composer (#499)
 const _msgEl=document.getElementById('msg');
-if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
-if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
+if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if(window.HermesTTS) window.HermesTTS.pause(); });
+if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if(window.HermesTTS) window.HermesTTS.resume(); });
 
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';

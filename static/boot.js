@@ -1357,68 +1357,6 @@ window._readPersistedDefaultMessageMode=_readPersistedDefaultMessageMode;
 // the boot window honor the persisted preference instead of the raw default.
 window._defaultMessageMode=_readPersistedDefaultMessageMode();
 
-// ── Extension TTS-engine registry (registerHermesTtsEngine) ──────────────────
-// Defined at MODULE scope (not inside the voice-mode IIFE below) so the public
-// API exists even on browsers without SpeechRecognition / speechSynthesis — an
-// extension can register a TTS engine regardless of STT/browser-TTS support.
-// Lets a trusted local extension contribute a TTS engine that appears in the
-// Settings -> TTS Engine dropdown and is used by BOTH playback paths (voice-mode
-// auto-read and the per-message Listen button). The extension provides an async
-// synthesize(text, opts) that returns audio bytes (ArrayBuffer or Blob); core
-// handles selection, the dropdown option, and playback. Mirrors registerHermesSkin.
-//
-//   window.registerHermesTtsEngine({
-//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs/openai)
-//     label: 'VOICEVOX (local)',
-//     synthesize(text, opts) { return Promise<ArrayBuffer|Blob>; }
-//   }) -> true on success, false if rejected
-var _HERMES_TTS_ENGINES = Object.create(null);
-var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1, openai:1 };
-function _hermesTtsValidId(id){ return typeof id==='string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(id); }
-function _hermesAddTtsOption(id, label){
-  var sel=document.getElementById('settingsTtsEngine');
-  if(!sel) return;
-  if(sel.querySelector('option[value="'+id+'"]')) return;
-  var opt=document.createElement('option');
-  opt.value=id;
-  opt.textContent=label;   // textContent — never innerHTML (no injection)
-  sel.appendChild(opt);
-}
-window.registerHermesTtsEngine=function(desc){
-  try{
-    if(!desc||typeof desc!=='object') return false;
-    var id=String(desc.id||'').toLowerCase();
-    if(!_hermesTtsValidId(id)) return false;
-    if(_HERMES_TTS_RESERVED[id]) return false;          // can't shadow a built-in
-    if(typeof desc.synthesize!=='function') return false;
-    var label=(typeof desc.label==='string' && desc.label.trim()) ? desc.label.trim().slice(0,48) : id;
-    _HERMES_TTS_ENGINES[id]={ id:id, label:label, synthesize:desc.synthesize };
-    _hermesAddTtsOption(id, label);
-    return true;
-  }catch(_){ return false; }
-};
-window._hermesTtsIsRegistered=function(id){ return !!_HERMES_TTS_ENGINES[id]; };
-// List registered engines (for the settings panel to re-add options on render).
-window._hermesTtsEngineOptions=function(){
-  return Object.keys(_HERMES_TTS_ENGINES).map(function(k){
-    return { id:_HERMES_TTS_ENGINES[k].id, label:_HERMES_TTS_ENGINES[k].label };
-  });
-};
-// Returns a Promise<ArrayBuffer> or null if the engine isn't registered.
-window._hermesTtsSynth=function(id, text, opts){
-  var eng=_HERMES_TTS_ENGINES[id];
-  if(!eng) return null;
-  return Promise.resolve()
-    .then(function(){ return eng.synthesize(text, opts||{}); })
-    .then(function(out){
-      if(!out) throw new Error('empty TTS result');
-      if(out instanceof ArrayBuffer) return out;
-      if(typeof Blob!=='undefined' && out instanceof Blob) return out.arrayBuffer();
-      if(out.buffer instanceof ArrayBuffer) return out.buffer;   // typed array
-      throw new Error('TTS engine returned an unsupported type');
-    });
-};
-
 // ── Session-open hook (for extensions) ────────────────────────────────────
 var _HERMES_SESSION_OPEN_HANDLERS=[];
 window.registerHermesSessionOpenHandler=function(fn){
@@ -1486,10 +1424,8 @@ window.renderTranscript=function(container, messages, opts){
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const hasSTT=!(!SpeechRecognition);
-  const hasTTS=!!('speechSynthesis' in window);
-
-  // Need both STT and TTS for turn-based voice mode
-  if(!hasSTT||!hasTTS) return;
+  // SpeechRecognition gates input; output support is resolved per engine by HermesTTS.
+  if(!hasSTT) return;
 
   const modeBtn=$('btnVoiceMode');
   const bar=$('voiceModeBar');
@@ -1527,52 +1463,14 @@ window.renderTranscript=function(container, messages, opts){
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
   let _voiceModeThinkingSid=null;
-  let _browserTtsKeepAlive=null;
-  let _browserTtsWatchdog=null;
-  let _browserTtsSuppressNextErrorRearm=false;
+  let _voiceTtsRearmTimer=null;
+  let _voiceTtsGeneration=0;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
   //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
   //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
   function _voiceSilenceMs(){
     const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
     return (Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
-  }
-
-  function _clearBrowserTtsRecovery(){
-    if(_browserTtsKeepAlive){
-      clearInterval(_browserTtsKeepAlive);
-      _browserTtsKeepAlive=null;
-    }
-    if(_browserTtsWatchdog){
-      clearTimeout(_browserTtsWatchdog);
-      _browserTtsWatchdog=null;
-    }
-  }
-
-  function _armBrowserTtsRecovery(clean, rate){
-    _clearBrowserTtsRecovery();
-    _browserTtsSuppressNextErrorRearm=false;
-    const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
-    // Chromium can drop utter.onend on later turns, so force a recovery path.
-    const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
-    _browserTtsWatchdog=setTimeout(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
-      _browserTtsSuppressNextErrorRearm=true;
-      try{ speechSynthesis.cancel(); }catch(_){}
-      _clearBrowserTtsRecovery();
-      _startListening();
-    },watchdogMs);
-    _browserTtsKeepAlive=setInterval(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking'){
-        _clearBrowserTtsRecovery();
-        return;
-      }
-      if(!speechSynthesis.speaking) return;
-      try{
-        speechSynthesis.pause();
-        speechSynthesis.resume();
-      }catch(_){}
-    },10000);
   }
 
   function _setState(state){
@@ -1592,7 +1490,7 @@ window.renderTranscript=function(container, messages, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
-    _clearBrowserTtsRecovery();
+    if(_voiceTtsRearmTimer){clearTimeout(_voiceTtsRearmTimer);_voiceTtsRearmTimer=null;}
     _setState('listening');
 
     _recognition=new SpeechRecognition();
@@ -1682,249 +1580,40 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _speakResponse(){
-    if(!_voiceModeActive) return;
-    // Bail out if the user navigated to a different session between send and
-    // stream completion. The patched autoReadLastAssistant fires globally;
-    // without this guard it would TTS-read the wrong session's last assistant
-    // message. Drop back to listening on the new session instead.
+    if(!_voiceModeActive)return;
     const currentSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
-    if(_voiceModeThinkingSid && currentSid && currentSid!==_voiceModeThinkingSid){
+    if(_voiceModeThinkingSid&&currentSid&&currentSid!==_voiceModeThinkingSid){
       _voiceModeThinkingSid=null;
       _startListening();
       return;
     }
     _voiceModeThinkingSid=null;
-    _setState('speaking');
-
-    // Find last assistant message
     const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
-    if(!rows.length){ _startListening(); return; }
-    const last=rows[rows.length-1];
-    const rawText=last.dataset.rawText||'';
-    if(!rawText.trim()){ _startListening(); return; }
-
-    // Strip for TTS (reuse existing helper if available)
-    let clean=rawText;
-    if(typeof _stripForTTS==='function') clean=_stripForTTS(rawText);
-    else{
-      // Basic strip: remove code blocks, images, links
-      clean=clean.replace(/```[\s\S]*?```/g,' code block ')
-        .replace(/`([^`]*)`/g,'$1')
-        .replace(/!\[([^\]]*)\]\([^)]*\)/g,'$1')
-        .replace(/\[([^\]]*)\]\([^)]*\)/g,'$1')
-        .replace(/#{1,6}\s/g,'')
-        .replace(/[*_~]+/g,'')
-        .replace(/\n{2,}/g,'. ')
-        .replace(/\n/g,' ')
-        .trim();
-    }
-    if(!clean){ _startListening(); return; }
-    const engine=localStorage.getItem("hermes-tts-engine")||"browser";
-    // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
-    // via the extension, then play through the same Audio lifecycle as edge.
-    if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-      _ttsSpeaking=true;
-      const _opts={
-        voice: localStorage.getItem("hermes-tts-voice")||'',
-        rate: parseFloat(localStorage.getItem("hermes-tts-rate")),
-        pitch: parseFloat(localStorage.getItem("hermes-tts-pitch")),
-      };
-      Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-        .then(function(buf){
-          const blob=new Blob([buf]);
-          const url=URL.createObjectURL(blob);
-          const audio=new Audio(url);
-          _playingEdgeAudio=audio;
-          audio.onended=function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
-          };
-          audio.onerror=function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-          };
-          audio.play().catch(function(){
-            _ttsSpeaking=false;
-            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-            URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-          });
-        })
-        .catch(function(){
-          _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
-        });
-      return;
-    }
-    if(engine==="elevenlabs"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(e => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    if(engine==="openai"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'openai'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(() => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    if(engine==="edge"){
-      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
-      const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
-      const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
-      let rate='', pitch='';
-      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        // Register with the shared handle (declared in ui.js, same global scope;
-        // both scripts are fully evaluated before any voice interaction) so
-        // stopTTS() — called from _deactivate() — can actually pause hands-free
-        // Edge playback. Without this the audio is local here and unstoppable.
-        _playingEdgeAudio=audio;
-        audio.onended = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-        };
-        audio.onerror = () => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        };
-        audio.play().catch(e => {
-          _ttsSpeaking=false;
-          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-        });
-      })
-      .catch(() => {
-        _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-      });
-      return;
-    }
-    const utter=new SpeechSynthesisUtterance(clean);
-
-    // Apply saved voice preferences
-    const savedVoice=localStorage.getItem('hermes-tts-voice');
-    const voices=speechSynthesis.getVoices();
-    if(savedVoice&&voices.length){
-      const match=voices.find(v=>v.name===savedVoice);
-      if(match) utter.voice=match;
-    }
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
-    utter.onend=()=>{
-      _browserTtsSuppressNextErrorRearm=false;
-      _clearBrowserTtsRecovery();
-      // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+    if(!rows.length){_startListening();return;}
+    const rawText=rows[rows.length-1].dataset.rawText||'';
+    let clean=typeof _stripForTTS==='function'?_stripForTTS(rawText):rawText.trim();
+    if(!clean){_startListening();return;}
+    _setState('speaking');
+    const voiceGeneration=++_voiceTtsGeneration;
+    const rearm=delay=>{
+      if(!_voiceModeActive||voiceGeneration!==_voiceTtsGeneration)return;
+      if(_voiceTtsRearmTimer)clearTimeout(_voiceTtsRearmTimer);
+      _voiceTtsRearmTimer=setTimeout(()=>{
+        _voiceTtsRearmTimer=null;
+        if(_voiceModeActive&&voiceGeneration===_voiceTtsGeneration)_startListening();
+      },delay);
     };
-    utter.onerror=()=>{
-      _clearBrowserTtsRecovery();
-      if(_browserTtsSuppressNextErrorRearm){
-        _browserTtsSuppressNextErrorRearm=false;
-        return;
-      }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-    };
-
-    _armBrowserTtsRecovery(clean, utter.rate);
-    try{
-      speechSynthesis.speak(utter);
-    }catch(_){
-      _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-    }
+    void window.HermesTTS.speak(clean,{
+      source:'voice-mode',
+      onEnd:()=>rearm(500),
+      onError:error=>{
+        if(typeof showToast==='function')showToast((error&&error.message)||t('tts_not_supported'),4000,'error');
+        rearm(1000);
+      },
+      onDegraded:()=>{
+        if(typeof showToast==='function')showToast(t('tts_effective_browser_fallback'),3500,'warning');
+      },
+    }).catch(()=>{});
   }
 
   // Hook into response completion — observe when the agent finishes
@@ -1977,7 +1666,8 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     // Cancel any existing TTS
-    if(typeof stopTTS==='function') stopTTS();
+    if(window.HermesTTS)window.HermesTTS.stop('voice-mode-start');
+    else if(typeof stopTTS==='function') stopTTS();
     _startListening();
   }
 
@@ -1985,17 +1675,16 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeActive=false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
-    _browserTtsSuppressNextErrorRearm=false;
+    _voiceTtsGeneration+=1;
+    if(_voiceTtsRearmTimer){clearTimeout(_voiceTtsRearmTimer);_voiceTtsRearmTimer=null;}
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
-    _clearBrowserTtsRecovery();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
-    if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    if(window.HermesTTS)window.HermesTTS.stop('voice-mode-deactivated');
+    else if(typeof stopTTS==='function') stopTTS();
     // Clear textarea if it was only voice input
     ta.value='';
     autoResize();
@@ -3146,12 +2835,13 @@ function _applyTitlebarProfileVisibility(){
 }
 window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
 
-function _mirrorSpeechSettingsFromServer(s){
+function _mirrorSpeechSettingsFromServer(s,generation){
   if(!s||typeof s!=='object') return;
   const persistedSpeechKeys = new Set(
     Array.isArray(s.persisted_speech_keys) ? s.persisted_speech_keys : []
   );
   const hasServerValue=(settingKey)=>persistedSpeechKeys.has(settingKey);
+  const mayMirror=(settingKey)=>!window.HermesTTS||window.HermesTTS.shouldMirrorSetting(settingKey,generation);
   const defaults={
     tts_enabled:false,
     tts_auto_read:false,
@@ -3191,7 +2881,7 @@ function _mirrorSpeechSettingsFromServer(s){
     ['voice_continuous','hermes-voice-continuous'],
   ];
   boolKeys.forEach(([settingKey,storageKey])=>{
-    if(hasServerValue(settingKey)){
+    if(hasServerValue(settingKey)&&mayMirror(settingKey)){
       try{localStorage.setItem(storageKey,resolveBool(settingKey,storageKey)?'true':'false');}catch(_){}
     }
   });
@@ -3202,11 +2892,11 @@ function _mirrorSpeechSettingsFromServer(s){
     ['tts_pitch','hermes-tts-pitch'],
     ['voice_silence_ms','hermes-voice-silence-ms'],
   ].forEach(([settingKey,storageKey])=>{
-    if(hasServerValue(settingKey)){
+    if(hasServerValue(settingKey)&&mayMirror(settingKey)){
       try{localStorage.setItem(storageKey,String(resolveScalar(settingKey,storageKey)));}catch(_){}
     }
   });
-  if(hasServerValue('raw_audio_mode')){
+  if(hasServerValue('raw_audio_mode')&&mayMirror('raw_audio_mode')){
     const rawAudioMode=resolveBool('raw_audio_mode','hermes-raw-audio-mode');
     if(typeof window._applyRawAudioModePreference==='function'){
       window._applyRawAudioModePreference(rawAudioMode);
@@ -3220,6 +2910,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 (async()=>{
   // Load send key preference
   let _bootSettings={};
+  const _bootSpeechSettingsGeneration=window.HermesTTS?window.HermesTTS.captureSettingsGeneration():undefined;
   const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
   try{
     const s=await api('/api/settings');
@@ -3375,7 +3066,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    _mirrorSpeechSettingsFromServer(s);
+    _mirrorSpeechSettingsFromServer(s,_bootSpeechSettingsGeneration);
     // Apply voice-mode visibility BEFORE computing the divider so the
     // .composer-divider (#5451) sees #btnVoiceMode final display even
     // when a server/localStorage sync path flipped the pref between
