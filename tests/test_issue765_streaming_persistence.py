@@ -863,3 +863,130 @@ class TestIssue765FollowupHardening:
 
         with SESSION_AGENT_LOCKS_LOCK:
             SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+
+class TestCrossClientDesyncMerge:
+    """Regression tests for cross-client desync merge (PR #6422 / #6299).
+
+    The merge logic in ``Session._merge_concurrent_appends()`` must:
+      1. Merge extra messages from disk when another client appended concurrently
+      2. NOT resurrect messages that ``/undo`` or ``/retry`` intentionally deleted
+      3. Handle the equal-length case where both clients appended one message
+    """
+
+    def test_merge_concurrent_appends(self, _isolate_session_dir):
+        """Two clients with same base [A] each append distinct messages.
+
+        Client 1 saves [A, B], then Client 2 (loaded before Client 1's save)
+        calls _merge_concurrent_appends() and saves [A, B, C].
+        The final transcript must contain all three messages.
+        """
+        session_dir, index_file = _isolate_session_dir
+        base_messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "greeting"},
+        ]
+        c1_msg = {"role": "user", "content": "follow-up-1"}
+        c2_msg = {"role": "user", "content": "follow-up-2"}
+
+        # Client 1: loads base, appends, saves
+        s1 = Session(session_id="concurrent_test", messages=list(base_messages))
+        s1.save()
+        s1.messages.append(c1_msg)
+        s1.save()
+
+        # Client 2: loads new instance from same base (simulates second client
+        # that loaded before Client 1's save), appends, merges, saves
+        s2 = Session(session_id="concurrent_test", messages=list(base_messages))
+        s2.messages.append(c2_msg)
+        s2._merge_concurrent_appends()
+        s2.save()
+
+        persisted = json.loads((session_dir / "concurrent_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["hello", "greeting", "follow-up-1", "follow-up-2"], (
+            f"Expected all 4 messages but got {contents}"
+        )
+        assert persisted["message_count"] == 4
+
+    def test_undo_does_not_resurrect_messages(self, _isolate_session_dir):
+        """After /undo truncates messages, save must NOT resurrect the tail.
+
+        Session has [A, B, C]. /undo truncates to [A]. save() should persist
+        exactly [A] — the cross-client merge must not re-append B and C.
+        """
+        session_dir, index_file = _isolate_session_dir
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply1"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "reply2"},
+        ]
+
+        s = Session(session_id="undo_test", messages=list(messages))
+        s.save()
+
+        # Simulate /undo: truncate to before last user message
+        s.messages = messages[:3]
+        s.save()
+
+        persisted = json.loads((session_dir / "undo_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["first", "reply1", "second"], (
+            f"/undo resurrected tail messages: {contents}"
+        )
+        assert persisted["message_count"] == 3
+
+    def test_undo_retry_merge_concurrent(self, _isolate_session_dir):
+        """Combined test: /undo must not resurrect even with stale disk snapshot.
+
+        Session has [A, B, C, D]. /undo truncates to [A, B].
+        save() must persist [A, B] — the tail must stay gone.
+        Since _merge_concurrent_appends() is NOT called by undo/retry
+        (it's only called at append sites like streaming completion),
+        a plain save() must NOT resurrect.
+        """
+        session_dir, index_file = _isolate_session_dir
+        full = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+
+        s = Session(session_id="undo_concurrent_test", messages=list(full))
+        s.save()
+
+        # /undo truncation — save() must NOT resurrect because the merge
+        # was removed from save() (PR #6422).
+        s.messages = full[:2]
+        s.save()
+
+        persisted = json.loads((session_dir / "undo_concurrent_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["q1", "a1"], (
+            f"/undo with stale disk resurrected messages: {contents}"
+        )
+
+    def test_retry_does_not_resurrect_messages(self, _isolate_session_dir):
+        """After /retry truncates messages, save must NOT resurrect the tail."""
+        session_dir, index_file = _isolate_session_dir
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply1"},
+            {"role": "user", "content": "second"},
+        ]
+
+        s = Session(session_id="retry_test", messages=list(messages))
+        s.save()
+
+        # Simulate /retry: truncate to before the last user message
+        s.messages = messages[:1]
+        s.save()
+
+        persisted = json.loads((session_dir / "retry_test.json").read_text(encoding="utf-8"))
+        contents = [m["content"] for m in persisted["messages"]]
+        assert contents == ["first"], (
+            f"/retry resurrected tail messages: {contents}"
+        )
+        assert persisted["message_count"] == 1

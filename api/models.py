@@ -1343,6 +1343,72 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
+    def _merge_concurrent_appends(self) -> None:
+        """Merge messages appended by another client since we loaded this session.
+
+        Reads the current on-disk state. If disk has messages we don't know
+        about AND the shared prefix is identical (verified by message ``id``
+        first, then ``role``+``content`` as fallback), appends the extra
+        disk-only messages to ``self.messages`` so our save doesn't clobber a
+        concurrent append.
+
+        This handles two cases:
+        1. Disk is longer than our copy (standard append race).
+        2. Same length but divergent tail (concurrent equal-length append).
+
+        This is safe to call only when the caller KNOWS it is appending new
+        messages (e.g. streaming completion handler).  It must NOT be called
+        from generic ``save()``, because ``save()`` cannot distinguish an
+        append race from an intentional truncation (``/undo``, ``/retry``).
+        """
+        if not self.path.exists():
+            return
+        try:
+            existing_text = self.path.read_text(encoding='utf-8')
+            existing = json.loads(existing_text)
+        except (json.JSONDecodeError, ValueError, OSError):
+            return
+        existing_msgs = existing.get('messages') or []
+        our_msgs = self.messages or []
+        if not existing_msgs or not our_msgs:
+            return
+
+        # Find the longest prefix where every position matches (by id or content).
+        prefix_len = 0
+        min_len = min(len(existing_msgs), len(our_msgs))
+        for i in range(min_len):
+            our_msg = our_msgs[i]
+            disk_msg = existing_msgs[i]
+            if not isinstance(our_msg, dict) or not isinstance(disk_msg, dict):
+                break
+            our_id = our_msg.get('id')
+            disk_id = disk_msg.get('id')
+            if our_id is not None and disk_id is not None:
+                if our_id != disk_id:
+                    break
+            elif (our_msg.get('role'), our_msg.get('content')) != (disk_msg.get('role'), disk_msg.get('content')):
+                break
+            prefix_len += 1
+
+        if prefix_len == 0:
+            return  # No common ground — bail, don't risk data corruption.
+
+        # Messages on disk beyond the common prefix.
+        disk_tail = existing_msgs[prefix_len:]
+        if not disk_tail:
+            return  # Disk has nothing we don't already have.
+
+        # Case 1: our messages are a prefix of disk (append race).
+        if prefix_len == len(our_msgs):
+            self.messages = list(our_msgs) + list(disk_tail)
+            return
+
+        # Case 2: same length but divergent tails (concurrent equal-length append)
+        # or disk is shorter than our copy.
+        # Merge: keep the common prefix, insert disk's extras, then our extras.
+        our_tail = our_msgs[prefix_len:]
+        self.messages = list(our_msgs[:prefix_len]) + list(disk_tail) + list(our_tail)
+
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
