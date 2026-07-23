@@ -1252,20 +1252,36 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="dictation_append_desc">When ON, dictated text is appended to any text already in the composer (with a space if needed). When OFF, dictated text replaces the composer content.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option><option value="openai">OpenAI TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
+              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label>
+              <select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="browser" data-i18n="tts_engine_browser">Browser speech synthesis</option>
+                <option value="agent" data-i18n="tts_engine_agent">Hermes Agent</option>
+              </select>
+              <div id="settingsTtsStatus" role="status" aria-live="polite" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Browser speech stays local. Hermes Agent uses the active profile's configured provider.</div>
+            </div>
+            <div class="settings-field" id="settingsTtsProviderField" hidden>
+              <label for="settingsTtsProvider" data-i18n="settings_label_tts_provider">Hermes Agent provider</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <select id="settingsTtsProvider" style="min-width:0;flex:1;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                <button type="button" class="sm-btn" id="settingsTtsProviderRefresh" data-i18n="tts_provider_refresh">Refresh</button>
+              </div>
+              <div id="settingsTtsProviderGuidance" style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="tts_provider_guidance">Provider configuration belongs to the active Hermes profile. Use Hermes Desktop, hermes tools, or config.yaml to configure credentials.</div>
+            </div>
+            <div class="settings-field" id="settingsTtsVoiceField"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="">Default system voice</option>
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_voice">Preferred voice. Populated from your browser's available voices.</div>
             </div>
-            <div class="settings-field">
+            <div class="settings-field" id="settingsTtsRateField">
               <label for="settingsTtsRate" data-i18n="settings_label_tts_rate">Speech rate</label>
               <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
                 <input type="range" id="settingsTtsRate" min="0.5" max="2" step="0.1" value="1" style="flex:1;accent-color:var(--accent)">
                 <span id="settingsTtsRateValue" style="font-size:12px;color:var(--muted);min-width:32px;text-align:right">1.0x</span>
               </div>
             </div>
-            <div class="settings-field">
+            <div class="settings-field" id="settingsTtsPitchField">
               <label for="settingsTtsPitch" data-i18n="settings_label_tts_pitch">Speech pitch</label>
               <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
                 <input type="range" id="settingsTtsPitch" min="0" max="2" step="0.1" value="1" style="flex:1;accent-color:var(--accent)">
@@ -1765,6 +1781,7 @@
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/tts.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
