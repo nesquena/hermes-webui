@@ -840,6 +840,82 @@ def test_public_share_snapshot_omits_local_payloads_inside_public_media_urls(mon
     assert snapshot["title"].count(OMITTED_ATTACHMENT) == 1
 
 
+def test_public_share_snapshot_omits_overlapping_relative_and_http_scheme_payloads(
+    monkeypatch,
+):
+    import api.shares as shares
+
+    monkeypatch.setenv(
+        "HERMES_WEBUI_ALLOWED_ORIGINS",
+        "http://hermes.example.test:8787",
+    )
+
+    harmless_public = (
+        "MEDIA:https://cdn.example.test/assets//image.png"
+        "?next=/public?source=label#caption=public"
+    )
+    session = SimpleNamespace(
+        title=(
+            "Title MEDIA:https://cdn.example.test/image.png"
+            "?next=/public?next=/safe/../api/media"
+            "?path=/private-not-known/title-overlap.png "
+            "MEDIA:http://cdn.example.test/image.png"
+            "?next=//hermes.example.test:8787/safe/../api/media"
+            "?path=/private-not-known/title-http-scheme.png"
+        ),
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    f"Harmless {harmless_public}\n"
+                    "Overlap MEDIA:https://cdn.example.test/image.png"
+                    "?next=/public?next=/safe/../api/media"
+                    "?path=/private-not-known/overlap.png\n"
+                    "HTTP scheme MEDIA:http://cdn.example.test/image.png"
+                    "?next=//hermes.example.test:8787/safe/../api/media"
+                    "?path=/private-not-known/http-scheme.png"
+                ),
+            }
+        ],
+    )
+
+    snapshot = shares.build_share_snapshot(session)
+    content = snapshot["messages"][0]["content"]
+    title = snapshot["title"]
+
+    assert harmless_public in content
+    assert "assets//image.png" in content
+    assert "next=/public?source=label" in content
+    assert "private-not-known" not in content
+    assert "hermes.example.test" not in content
+    assert "/api/media" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 2
+    assert "private-not-known" not in title
+    assert "hermes.example.test" not in title
+    assert "/api/media" not in title
+    assert title.count(OMITTED_ATTACHMENT) == 2
+
+
+def test_public_share_snapshot_replaces_unresolved_generated_code_marker(monkeypatch):
+    import api.shares as shares
+
+    monkeypatch.setattr(shares.secrets, "token_hex", lambda _size: "fixed")
+    session = SimpleNamespace(
+        title="Generated marker share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Before \x00SHARE_CODE_fixed_42\x00 after",
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert content == f"Before {OMITTED_ATTACHMENT} after"
+    assert "SHARE_CODE_fixed" not in content
+
+
 def test_public_share_snapshot_bracketed_local_media_has_clean_placeholder():
     import api.shares as shares
 

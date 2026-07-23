@@ -354,18 +354,35 @@ def _has_invalid_bracketed_authority(parsed) -> bool:
     return False
 
 
-def _bounded_unquote_variants(value: str) -> list[str]:
+class _MediaPayloadScanContext:
+    def __init__(self, *, max_steps: int = 160, max_decoded_bytes: int = 65536):
+        self.remaining_steps = max_steps
+        self.remaining_decoded_bytes = max_decoded_bytes
+
+    def consume(self, value: str) -> bool:
+        self.remaining_steps -= 1
+        self.remaining_decoded_bytes -= len(str(value or "").encode("utf-8", "ignore"))
+        return self.remaining_steps >= 0 and self.remaining_decoded_bytes >= 0
+
+
+def _bounded_unquote_variants(
+    value: str,
+    *,
+    scan_context: _MediaPayloadScanContext,
+) -> tuple[list[str], bool]:
     variants: list[str] = []
     decoded = str(value or "")
     for _ in range(5):
         normalized = decoded.replace("\\", "/")
+        if not scan_context.consume(normalized):
+            return variants, True
         if normalized not in variants:
             variants.append(normalized)
         next_decoded = unquote(decoded)
         if next_decoded == decoded:
-            break
+            return variants, False
         decoded = next_decoded
-    return variants
+    return variants, unquote(decoded) != decoded
 
 
 def _payload_candidate_end(value: str, start: int) -> int:
@@ -378,6 +395,7 @@ def _payload_candidate_end(value: str, start: int) -> int:
 def _nested_http_payload_has_local_media_reference(
     variant: str,
     *,
+    scan_context: _MediaPayloadScanContext,
     payload_budget: int,
 ) -> bool:
     for match in _NESTED_HTTP_START_RE.finditer(variant):
@@ -387,6 +405,7 @@ def _nested_http_payload_has_local_media_reference(
         candidate = variant[match.start():end]
         if not candidate or not _is_public_media_url(
             candidate,
+            scan_context=scan_context,
             payload_budget=payload_budget - 1,
         ):
             return True
@@ -396,20 +415,32 @@ def _nested_http_payload_has_local_media_reference(
 def _scheme_relative_payload_has_local_media_reference(
     variant: str,
     *,
+    base_scheme: str,
+    scan_context: _MediaPayloadScanContext,
     payload_budget: int,
 ) -> bool:
     for match in _SCHEME_RELATIVE_URL_RE.finditer(variant):
+        if match.start() > 0 and variant[match.start() - 1] not in "=&?#":
+            continue
         if payload_budget <= 0:
             return True
+        scheme = base_scheme if base_scheme in {"http", "https"} else "https"
         if not _is_public_media_url(
-            f"https:{match.group(0)}",
+            f"{scheme}:{match.group(0)}",
+            scan_context=scan_context,
             payload_budget=payload_budget - 1,
         ):
             return True
     return False
 
 
-def _relative_payload_has_local_api_media_reference(value: str) -> bool:
+def _relative_payload_has_local_api_media_reference(
+    value: str,
+    *,
+    base_scheme: str,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
     index = 0
     while index < len(value):
         starts_path = (
@@ -421,14 +452,39 @@ def _relative_payload_has_local_api_media_reference(value: str) -> bool:
             index += 1
             continue
         if value.startswith("//", index):
-            index += 2
+            index += 1
             continue
         end = _payload_candidate_end(value, index)
         candidate = value[index:end]
-        normalized_path = _media_url_path_for_boundary_check(urlsplit(candidate).path)
+        if not candidate or not scan_context.consume(candidate):
+            return True
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            return True
+        normalized_path = _media_url_path_for_boundary_check(parsed.path)
         if _API_MEDIA_PATH_RE.search(normalized_path):
             return True
-        index = max(end, index + 1)
+        if payload_budget <= 0:
+            return True
+        if (
+            _payload_has_local_media_reference(
+                parsed.query,
+                relative_api_media=True,
+                base_scheme=base_scheme,
+                scan_context=scan_context,
+                payload_budget=payload_budget - 1,
+            )
+            or _payload_has_local_media_reference(
+                parsed.fragment,
+                relative_api_media=True,
+                base_scheme=base_scheme,
+                scan_context=scan_context,
+                payload_budget=payload_budget - 1,
+            )
+        ):
+            return True
+        index += 1
     return False
 
 
@@ -436,11 +492,16 @@ def _payload_has_local_media_reference(
     value: str,
     *,
     relative_api_media: bool,
+    base_scheme: str,
+    scan_context: _MediaPayloadScanContext,
     payload_budget: int,
 ) -> bool:
     if payload_budget <= 0:
         return bool(value)
-    for variant in _bounded_unquote_variants(value):
+    variants, exhausted = _bounded_unquote_variants(value, scan_context=scan_context)
+    if exhausted:
+        return True
+    for variant in variants:
         lowered = variant.lower()
         if "file://" in lowered or "file:/" in lowered:
             return True
@@ -448,45 +509,73 @@ def _payload_has_local_media_reference(
             return True
         if (
             relative_api_media
-            and _relative_payload_has_local_api_media_reference(variant)
+            and _relative_payload_has_local_api_media_reference(
+                variant,
+                base_scheme=base_scheme,
+                scan_context=scan_context,
+                payload_budget=payload_budget,
+            )
         ):
             return True
         if _nested_http_payload_has_local_media_reference(
             variant,
+            scan_context=scan_context,
             payload_budget=payload_budget,
         ):
             return True
         if _scheme_relative_payload_has_local_media_reference(
             variant,
+            base_scheme=base_scheme,
+            scan_context=scan_context,
             payload_budget=payload_budget,
         ):
             return True
     return False
 
 
-def _media_url_has_local_payload(parsed, *, payload_budget: int) -> bool:
+def _media_url_has_local_payload(
+    parsed,
+    *,
+    scan_context: _MediaPayloadScanContext,
+    payload_budget: int,
+) -> bool:
+    scheme = parsed.scheme.lower()
     return (
         _payload_has_local_media_reference(
             parsed.path,
             relative_api_media=False,
+            base_scheme=scheme,
+            scan_context=scan_context,
             payload_budget=payload_budget,
         )
         or _payload_has_local_media_reference(
             parsed.query,
             relative_api_media=True,
+            base_scheme=scheme,
+            scan_context=scan_context,
             payload_budget=payload_budget,
         )
         or _payload_has_local_media_reference(
             parsed.fragment,
             relative_api_media=True,
+            base_scheme=scheme,
+            scan_context=scan_context,
             payload_budget=payload_budget,
         )
     )
 
 
-def _is_public_media_url(raw_ref: str, *, payload_budget: int = 5) -> bool:
+def _is_public_media_url(
+    raw_ref: str,
+    *,
+    scan_context: _MediaPayloadScanContext | None = None,
+    payload_budget: int = 5,
+) -> bool:
     ref = str(raw_ref or "")
     if payload_budget < 0:
+        return False
+    scan_context = scan_context or _MediaPayloadScanContext()
+    if not scan_context.consume(ref):
         return False
     if "[" in ref or "]" in ref:
         return False
@@ -521,7 +610,11 @@ def _is_public_media_url(raw_ref: str, *, payload_budget: int = 5) -> bool:
             or _hostname_has_non_global_embedded_ip(hostname)
         ):
             return False
-    if _media_url_has_local_payload(parsed, payload_budget=payload_budget):
+    if _media_url_has_local_payload(
+        parsed,
+        scan_context=scan_context,
+        payload_budget=payload_budget,
+    ):
         return False
     if _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path)):
         return not _is_trusted_webui_origin(parsed, hostname)
@@ -705,6 +798,9 @@ def _stash_share_code_regions(text: str):
         for index in reversed(range(len(stashed))):
             original = stashed[index]
             value = value.replace(f"{stash_prefix}{index}\x00", original)
+        if stash_prefix in value:
+            marker_re = re.compile(rf"{re.escape(stash_prefix)}\d+\x00")
+            value = marker_re.sub(_PLACEHOLDER, value)
         return value
 
     return protected, restore
