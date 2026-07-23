@@ -75,6 +75,17 @@ def test_coerce_never_escalates_above_configured_effort():
     ) == "low"
 
 
+def test_coerce_minimal_to_none_for_gpt56_named_custom_provider():
+    # The raw provider-hint parser must run with the effective provider to strip
+    # both ``@custom:`` and the named custom slug before checking the GPT-5.6
+    # minimal→none contract.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "minimal",
+        "@custom:agg:gpt-5.6-sol",
+        provider_id="custom:agg",
+    ) == "none"
+
+
 def test_coerce_preserves_effort_for_unrecognized_model():
     # #3505 review: resolve_model_reasoning_efforts() returns [] for BOTH
     # known-unsupported AND simply-unrecognized models (custom providers,

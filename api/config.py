@@ -4244,7 +4244,7 @@ def coerce_reasoning_effort_for_model(
     # Only GPT-5.6 has the explicit minimal → none contract. For other
     # partially-known capability sets, keep the requested effort rather than
     # disabling reasoning merely because `none` is present.
-    bare_model = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    bare_model = _strip_provider_hint_for_reasoning(model_id, provider_id).lower().rsplit("/", 1)[-1]
     if raw == "minimal" and bare_model in _GPT56_MODEL_IDS and "none" in supported:
         return "none"
     return raw
