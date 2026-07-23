@@ -113,7 +113,13 @@ def test_cron_run_detail_oversized_file_is_truncated(monkeypatch, tmp_path):
     body = _payload(handler)
     assert body["truncated"] is True
     # The returned content was bounded, not the full oversized payload.
-    assert len(body["content"].encode("utf-8")) <= _FILE_READ_MAX_BYTES
+    # _read_cron_output_bounded composites a bounded head (frontmatter) + a
+    # bounded tail (marker + body), de-duplicating the overlap so the body is
+    # not doubled. Result is bounded to roughly 2 * _FILE_READ_MAX_BYTES.
+    assert len(body["content"].encode("utf-8")) <= _FILE_READ_MAX_BYTES * 2 + 200, (
+        f"content must be bounded; got {len(body['content'].encode('utf-8'))}"
+    )
+    assert "## Response" in body["content"], "the response marker must survive"
 
 
 # ── cron recent (batch) ──────────────────────────────────────────────────────
@@ -465,3 +471,134 @@ def test_cron_run_detail_marker_ends_exactly_at_boundary(monkeypatch, tmp_path):
 
 
 
+
+
+# ── Gate blocker regressions (2026-07-23 RED gate) ────────────────────────────
+
+
+def test_read_text_bounded_stat_failure_never_returns_unbounded(monkeypatch, tmp_path):
+    """Blocker 1: if stat() raises, _read_text_bounded must NOT fall back to an
+    unbounded read_text(). The previous shape returned the whole >512 KiB file
+    with truncated=False on a stat failure — the exact OOM path the PR exists to
+    close. Now it opens once + fstat on the descriptor + always capped read."""
+    from pathlib import Path
+    from api.routes import _read_text_bounded
+
+    big = tmp_path / "big.txt"
+    big.write_text("x" * (_FILE_READ_MAX_BYTES + 5000))
+    real_stat = Path.stat
+
+    def failing_stat(self, *a, **k):
+        if self == big:
+            raise OSError("simulated stat failure")
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    text, trunc = _read_text_bounded(big)
+    # Must NOT return the whole file. Either empty (open also failed) or bounded.
+    assert len(text) <= _FILE_READ_MAX_BYTES, (
+        f"stat failure must not trigger unbounded read; got {len(text)} bytes"
+    )
+
+
+def test_read_text_bounded_always_caps_oversized_file(tmp_path):
+    """Blocker 1: an oversized file is always read at most max_bytes, never
+    whole (no matter the stat/open race outcome)."""
+    from api.routes import _read_text_bounded
+
+    big = tmp_path / "big.txt"
+    big.write_text("y" * (_FILE_READ_MAX_BYTES + 10000))
+    text, trunc = _read_text_bounded(big)
+    assert trunc is True
+    assert len(text) <= _FILE_READ_MAX_BYTES
+
+
+def test_read_cron_output_bounded_body_survives_marker_at_boundary(tmp_path):
+    """Blocker 2: when ## Response sits near the head cap with minimal body in
+    the head, the response body at EOF must survive (not be reduced to a prefix).
+
+    Constructs a file where the prompt section pushes ## Response + a byte of
+    body into the head, with the real body continuing at EOF. The previous
+    head-only early return yielded snippet: 'R'; now the tail-splice preserves
+    the full body."""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    marker = "## Response\n\n"
+    # Push the marker near the cap so only ~1 body byte lands in the head.
+    prompt_len = _FILE_READ_MAX_BYTES - len(marker) - 1
+    content = (
+        "## Prompt\n" + ("P" * (prompt_len - 20)) + "\n" + marker
+        + "R" + ("EST_OF_BODY_LINE\n" * 50)
+    )
+    f = tmp_path / "cron.md"
+    f.write_text(content)
+    text, trunc = _read_cron_output_bounded(f)
+    snippet = _cron_output_snippet(text)
+    # The snippet must contain body content well beyond the single 'R' prefix.
+    assert "BODY" in snippet or "EST_OF_BODY" in snippet, (
+        f"response body must survive the cap splice; snippet={snippet!r}"
+    )
+
+
+def test_read_cron_output_bounded_no_body_duplication(tmp_path):
+    """Blocker 2 de-dup: when head and tail both contain ## Response (overlap),
+    the body must not be duplicated in the spliced result."""
+    from api.routes import _read_cron_output_bounded
+
+    # File just over 1 cap so head and tail overlap heavily.
+    content = "## Response\n" + ("B" * (_FILE_READ_MAX_BYTES + 8192))
+    f = tmp_path / "cron.md"
+    f.write_text(content)
+    text, trunc = _read_cron_output_bounded(f)
+    # Exactly one ## Response marker (the head's partial body was dropped in
+    # favor of the tail's complete marker + body).
+    assert text.count("## Response") == 1, (
+        f"marker/body must not duplicate on overlap; count="
+        f"{text.count('## Response')}"
+    )
+
+
+def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_path):
+    """Blocker 3: the batch budget must be charged AFTER a successful read
+    appends an entry, not before. Two unreadable large files previously
+    consumed the budget via `spent += charge` in their except branches, so a
+    later valid older file hit the cap and returned outputs: []."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Two "unreadable" large files (we'll make _read_cron_output_bounded raise
+    # on them) + one valid smaller file that should still appear.
+    big_a = out_dir / "run-2.md"
+    big_a.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    big_b = out_dir / "run-1.md"
+    big_b.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    valid = out_dir / "run-0.md"
+    valid.write_text("## Response\nVALID_OLDER_OUTPUT\n", encoding="utf-8")
+    # run-1 is newest (mtime highest), run-2 middle, run-0 oldest.
+    os.utime(big_a, (100, 100))
+    os.utime(big_b, (200, 200))
+    os.utime(valid, (300, 300))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Make the two big files "unreadable" by patching _read_cron_output_bounded
+    # to raise on them, simulating the OSError path that previously consumed
+    # budget without producing an entry.
+    original = routes._read_cron_output_bounded
+
+    def failing_for_big(path, *a, **kw):
+        if path.name in ("run-1.md", "run-2.md"):
+            raise OSError("simulated unreadable")
+        return original(path, *a, **kw)
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_big)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    # The valid older file's output must still appear despite the two unreadable
+    # newer files consuming budget-attempted reads.
+    contents = [e.get("content", "") for e in body.get("outputs", [])]
+    assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
+        f"valid older output must survive unreadable newer files; got {contents}"
+    )
