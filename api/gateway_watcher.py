@@ -465,6 +465,23 @@ def restart_watcher_for_profile(name: str):
     return watcher
 
 
+def start_gateway_watcher_safe():
+    """Start the gateway watcher in a daemon thread with a 5-second startup
+    timeout. Prints a warning on failure or a tip if still initializing."""
+
+    def _start_watcher_safe():
+        try:
+            start_watcher()
+        except Exception as e:
+            print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+    t = threading.Thread(target=_start_watcher_safe, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    if t.is_alive():
+        print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
+
+
 def get_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None) -> GatewayWatcher | None:
     """Get or lazily start the watcher for the resolved request profile."""
     resolved_profile, resolved_home = _resolve_watcher_target(

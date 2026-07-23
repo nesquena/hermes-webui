@@ -21262,6 +21262,7 @@ def _chat_start_response_from_run_start(result):
     ):
         if key in payload:
             response[key] = payload[key]
+    response.setdefault("_status", 200)
     response.setdefault("stream_id", result.stream_id)
     response.setdefault("session_id", result.session_id)
     return response
@@ -21624,6 +21625,15 @@ def start_session_turn(
         source=turn_source,
         route="start_session_turn",
     )
+
+    # Normalize legacy adapter responses: a stream_id without _status is a
+    # successful start, but _is_dispatch_accepted requires _status to be an
+    # explicit integer in 200..299. Belt-and-suspenders: the default code path
+    # via _start_chat_stream_for_session now always sets _status=200, but a
+    # custom runtime adapter may still return the old shape.
+    if isinstance(resp, dict) and resp.get("_status") is None and str(resp.get("stream_id") or "").strip():
+        resp = dict(resp)
+        resp["_status"] = 200
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is
