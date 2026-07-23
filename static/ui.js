@@ -18156,6 +18156,23 @@ function clearLiveToolCards(){
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
 }
+function _removeIdleLiveAssistantTurn(sessionId){
+  const turn=$('liveAssistantTurn');
+  if(!turn) return false;
+  const expectedSid=String(sessionId||'');
+  const currentSid=String(S&&S.session&&S.session.session_id||'');
+  const turnSid=String(turn.dataset&&turn.dataset.sessionId||'');
+  if(expectedSid&&turnSid&&turnSid!==expectedSid) return false;
+  if(expectedSid&&currentSid&&currentSid!==expectedSid) return false;
+  if(S&&S.activeStreamId) return false;
+  if(expectedSid&&typeof INFLIGHT==='object'&&INFLIGHT&&INFLIGHT[expectedSid]) return false;
+  turn.remove();
+  if(expectedSid&&_sessionHtmlCache&&typeof _sessionHtmlCache.delete==='function'){
+    _sessionHtmlCache.delete(expectedSid);
+    if(_sessionHtmlCacheSid===expectedSid) _sessionHtmlCacheSid=null;
+  }
+  return true;
+}
 function _hideLiveActivityForFinalAnswerOnly(){
   clearLiveToolCards();
   if(typeof removeThinking==='function') removeThinking();

@@ -1,4 +1,7 @@
 from pathlib import Path
+import shutil
+import subprocess
+import textwrap
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
@@ -46,6 +49,73 @@ def test_terminal_done_render_preserves_manual_scroll_after_active_stream_is_cle
         "but must pass preserveScroll so renderMessages does not infer bottom-pin "
         "from S.activeStreamId alone"
     )
+
+
+def test_terminal_done_removes_idle_live_turn_after_settled_render():
+    done_block = _event_listener_body(MESSAGES_JS, "done")
+
+    final_render_idx = done_block.index(
+        "if(typeof _renderMessagesWithScrollSnapshot==='function') "
+        "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});"
+    )
+    cleanup_idx = done_block.index("_removeIdleLiveAssistantTurn(activeSid)")
+
+    assert final_render_idx < cleanup_idx, (
+        "the done handler must remove any stale #liveAssistantTurn only after "
+        "the final settled render has put the completed assistant message in the DOM"
+    )
+
+
+def test_remove_idle_live_assistant_turn_is_session_and_liveness_guarded():
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+
+    helper = _function_body(UI_JS, "_removeIdleLiveAssistantTurn")
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        let S = {{activeStreamId:null, session:{{session_id:'sid-1'}}}};
+        let INFLIGHT = {{}};
+        let _sessionHtmlCacheSid = 'sid-1';
+        const cacheDeletes = [];
+        const _sessionHtmlCache = {{delete: sid => cacheDeletes.push(sid)}};
+        let currentTurn = null;
+        function $(id){{ return id === 'liveAssistantTurn' ? currentTurn : null; }}
+        {helper}
+        function turn(sid){{
+          return {{
+            dataset: {{sessionId: sid}},
+            removed: false,
+            remove(){{ this.removed = true; }},
+          }};
+        }}
+
+        currentTurn = turn('sid-1');
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), true);
+        assert.strictEqual(currentTurn.removed, true);
+        assert.deepStrictEqual(cacheDeletes, ['sid-1']);
+        assert.strictEqual(_sessionHtmlCacheSid, null);
+
+        currentTurn = turn('sid-1');
+        S.activeStreamId = 'stream-1';
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), false);
+        assert.strictEqual(currentTurn.removed, false);
+
+        S.activeStreamId = null;
+        INFLIGHT = {{'sid-1': {{streamId:'stream-1'}}}};
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), false);
+        assert.strictEqual(currentTurn.removed, false);
+
+        INFLIGHT = {{}};
+        currentTurn = turn('sid-2');
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), false);
+        assert.strictEqual(currentTurn.removed, false);
+        """
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_liveness():
