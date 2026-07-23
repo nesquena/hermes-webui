@@ -435,15 +435,65 @@ def _message_ref_digest(message: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _terminal_payload_session_persisted(payload: dict, session_payload: dict) -> bool:
+    if not isinstance(payload, dict) or not isinstance(session_payload, dict):
+        return False
+    if payload.get("terminal_session_persisted") is not True:
+        return False
+    target_session_id = str(session_payload.get("session_id") or payload.get("session_id") or "").strip()
+    persisted_session_id = str(
+        payload.get("terminal_session_persisted_session_id")
+        or target_session_id
+    ).strip()
+    return bool(target_session_id and persisted_session_id == target_session_id)
+
+
+def _terminal_payload_lineage_valid(
+    origin_session_id: str,
+    target_session_id: str,
+    payload: dict,
+    session_payload: dict,
+    *,
+    persisted_parent_session_id: str | None = None,
+) -> bool:
+    origin_session_id = str(origin_session_id or "").strip()
+    target_session_id = str(target_session_id or "").strip()
+    if not origin_session_id or not target_session_id:
+        return False
+    if target_session_id == origin_session_id:
+        return True
+    if not isinstance(payload, dict) or not isinstance(session_payload, dict):
+        return False
+    payload_origin_id = str(payload.get("old_session_id") or "").strip()
+    continuation_ids = {
+        str(payload.get("new_session_id") or "").strip(),
+        str(payload.get("continuation_session_id") or "").strip(),
+    }
+    if payload_origin_id != origin_session_id or target_session_id not in continuation_ids:
+        return False
+    nested_parent_id = str(session_payload.get("parent_session_id") or "").strip()
+    if nested_parent_id and nested_parent_id != origin_session_id:
+        return False
+    if persisted_parent_session_id is not None:
+        return str(persisted_parent_session_id or "").strip() == origin_session_id
+    return nested_parent_id == origin_session_id
+
+
 def _terminal_message_target_from_session_payload(
     session_id: str,
     run_id: str,
     session_payload: dict,
+    payload: dict | None = None,
 ) -> dict | None:
     if not isinstance(session_payload, dict):
         return None
     target_session_id = str(session_payload.get("session_id") or "").strip()
-    if target_session_id != str(session_id or "").strip():
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        target_session_id,
+        payload or {},
+        session_payload,
+    ):
         return None
     messages = session_payload.get("messages")
     if not isinstance(messages, list):
@@ -502,6 +552,7 @@ _TERMINAL_SESSION_METADATA_KEYS = {
     "active_stream_id",
     "pending_user_message",
     "pending_started_at",
+    "parent_session_id",
     "source_tag",
     "raw_source",
     "session_source",
@@ -560,14 +611,16 @@ def _compact_terminal_payload_for_journal(
     for key, value in payload.items():
         key_str = str(key)
         if key_str == "session" and isinstance(value, dict):
-            derived_target = _terminal_message_target_from_session_payload(
-                session_id,
-                run_id,
-                value,
-            )
-            compact_session = _compact_terminal_session_payload(value)
-            compact_session["session_id"] = str(session_id)
-            compact[key_str] = compact_session
+            if _terminal_payload_session_persisted(payload, value):
+                derived_target = _terminal_message_target_from_session_payload(
+                    session_id,
+                    run_id,
+                    value,
+                    payload,
+                )
+                compact[key_str] = _compact_terminal_session_payload(value)
+            else:
+                compact[key_str] = value
             continue
         if key_str in {"terminal_message_target", "terminal_disposition"}:
             compact[key_str] = _bound_run_journal_snapshot_value(

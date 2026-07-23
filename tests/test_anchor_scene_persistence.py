@@ -2736,6 +2736,8 @@ def test_terminal_journal_materialization_advances_across_compacted_oversized_te
         writer.append_sse_event(
             "done",
             {
+                "terminal_session_persisted": True,
+                "terminal_session_persisted_session_id": session_id,
                 "session": {
                     "session_id": session_id,
                     "message_count": message_index + 1,

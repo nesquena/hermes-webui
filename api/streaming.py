@@ -9696,8 +9696,10 @@ def _run_agent_streaming(
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
+                        _error_session_persisted = False
                         try:
                             s.save()
+                            _error_session_persisted = True
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
@@ -9705,6 +9707,9 @@ def _run_agent_streaming(
                         )
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
+                        if _error_session_persisted:
+                            _error_payload['terminal_session_persisted'] = True
+                            _error_payload['terminal_session_persisted_session_id'] = s.session_id
                         if _compression_continuation_session_id is not None:
                             _error_payload['new_session_id'] = _compression_continuation_session_id
                             _error_payload['continuation_session_id'] = _compression_continuation_session_id
@@ -10556,7 +10561,17 @@ def _run_agent_streaming(
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
                 raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                _done_payload = {
+                    'session': redact_session_data(raw_session),
+                    'usage': usage,
+                    'terminal_session_persisted': True,
+                    'terminal_session_persisted_session_id': s.session_id,
+                }
+                if _compression_continuation_session_id is not None:
+                    _done_payload['session_id'] = s.session_id
+                    _done_payload['old_session_id'] = _compression_origin_session_id
+                    _done_payload['new_session_id'] = _compression_continuation_session_id
+                    _done_payload['continuation_session_id'] = _compression_continuation_session_id
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'

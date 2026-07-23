@@ -569,6 +569,8 @@ def test_replay_run_journal_hydrates_compacted_terminal_session(tmp_path, monkey
         run_id,
         "done",
         {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": session_id,
             "session": session.compact()
             | {"messages": list(session.messages), "message_count": len(session.messages)}
         },
@@ -603,6 +605,323 @@ def test_replay_run_journal_hydrates_compacted_terminal_session(tmp_path, monkey
     assert data["session"]["session_id"] == session_id
     assert data["session"]["messages"][0]["content"] == huge_context
     assert data["session"]["messages"][1]["content"] == "final answer"
+
+
+def test_replay_run_journal_hydrates_compacted_continuation_terminal_session(tmp_path, monkeypatch):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "compression_origin"
+    continuation_session_id = "compression_continuation"
+    run_id = "run_replay_compression"
+    origin = Session(
+        session_id=origin_session_id,
+        title="Pre compression",
+        messages=[
+            {"role": "user", "content": "old prompt", "timestamp": 1.0},
+            {"role": "assistant", "content": "old snapshot", "_ts": 2.0},
+        ],
+        pre_compression_snapshot=True,
+    )
+    continuation = Session(
+        session_id=continuation_session_id,
+        title="Continuation",
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 3.0},
+            {"role": "assistant", "content": "continuation final", "_ts": 4.0},
+        ],
+        parent_session_id=origin_session_id,
+    )
+    origin.save(skip_index=True)
+    continuation.save(skip_index=True)
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "done",
+        {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": continuation_session_id,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "session": continuation.compact()
+            | {
+                "messages": list(continuation.messages),
+                "message_count": len(continuation.messages),
+            },
+        },
+        session_dir=session_dir,
+    )
+    compact = run_journal.read_run_events(origin_session_id, run_id, session_dir=session_dir)
+    compact_payload = compact["events"][0]["payload"]
+    assert "messages" not in compact_payload["session"]
+    assert compact_payload["session"]["session_id"] == continuation_session_id
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is True
+
+    data_line = next(
+        line for line in handler.wfile.getvalue().decode("utf-8").splitlines() if line.startswith("data: ")
+    )
+    data = json.loads(data_line.removeprefix("data: "))
+    assert data["session"]["session_id"] == continuation_session_id
+    assert data["session"]["parent_session_id"] == origin_session_id
+    assert data["session"]["messages"][0]["content"] == "continue"
+    assert data["session"]["messages"][1]["content"] == "continuation final"
+
+
+def test_replay_run_journal_fails_closed_for_bad_continuation_lineage(tmp_path, monkeypatch):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "compression_origin_bad_lineage"
+    continuation_session_id = "compression_continuation_bad_lineage"
+    run_id = "run_bad_lineage"
+    assistant = {"role": "assistant", "content": "continuation final", "_ts": 4.0}
+    continuation = Session(
+        session_id=continuation_session_id,
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 3.0},
+            assistant,
+        ],
+        parent_session_id="different_origin",
+    )
+    continuation.save(skip_index=True)
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "token",
+        {"text": "must not leak before bad terminal"},
+        session_dir=session_dir,
+    )
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "done",
+        {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": continuation_session_id,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": continuation_session_id,
+                "run_id": run_id,
+                "stream_id": run_id,
+                "message_index": 1,
+                "message_ref": routes._assistant_anchor_scene_message_ref(assistant),
+            },
+            "session": continuation.compact()
+            | {"messages": list(continuation.messages), "message_count": len(continuation.messages)},
+        },
+        session_dir=session_dir,
+    )
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is False
+    assert handler.wfile.getvalue() == b""
+
+
+def test_replay_run_journal_fails_closed_for_terminal_message_ref_mismatch(tmp_path, monkeypatch):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "compression_origin_bad_ref"
+    continuation_session_id = "compression_continuation_bad_ref"
+    run_id = "run_bad_ref"
+    continuation = Session(
+        session_id=continuation_session_id,
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 3.0},
+            {"role": "assistant", "content": "continuation final", "_ts": 4.0},
+        ],
+        parent_session_id=origin_session_id,
+    )
+    continuation.save(skip_index=True)
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "token",
+        {"text": "must not leak before bad terminal"},
+        session_dir=session_dir,
+    )
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "done",
+        {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": continuation_session_id,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": continuation_session_id,
+                "run_id": run_id,
+                "stream_id": run_id,
+                "message_index": 1,
+                "message_ref": "0" * 64,
+            },
+            "session": continuation.compact()
+            | {"messages": list(continuation.messages), "message_count": len(continuation.messages)},
+        },
+        session_dir=session_dir,
+    )
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is False
+    assert handler.wfile.getvalue() == b""
+
+
+def test_replay_run_journal_keeps_unpersisted_terminal_payload_after_save_failure(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session_id = "save_failure_replay"
+    run_id = "run_save_failure_replay"
+    assistant = {"role": "assistant", "content": "journal-only terminal", "_ts": 8.0}
+    run_journal.append_run_event(
+        session_id,
+        run_id,
+        "apperror",
+        {
+            "terminal_session_persisted": False,
+            "session": {
+                "session_id": session_id,
+                "messages": [
+                    {"role": "user", "content": "please recover", "timestamp": 7.0},
+                    assistant,
+                ],
+                "message_count": 2,
+            },
+        },
+        session_dir=session_dir,
+    )
+    compact = run_journal.read_run_events(session_id, run_id, session_dir=session_dir)
+    assert compact["events"][0]["payload"]["session"]["messages"][-1] == assistant
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is True
+
+    data_line = next(
+        line for line in handler.wfile.getvalue().decode("utf-8").splitlines() if line.startswith("data: ")
+    )
+    data = json.loads(data_line.removeprefix("data: "))
+    assert data["session"]["session_id"] == session_id
+    assert data["session"]["messages"][1] == assistant
 
 
 def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):

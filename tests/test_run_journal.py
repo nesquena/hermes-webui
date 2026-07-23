@@ -96,6 +96,8 @@ def test_run_journal_compacts_oversized_terminal_session_payload(tmp_path):
     huge_context = "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
     assistant = {"role": "assistant", "content": "final answer", "_ts": 10.0}
     payload = {
+        "terminal_session_persisted": True,
+        "terminal_session_persisted_session_id": session_id,
         "session": {
             "session_id": session_id,
             "title": huge_context,
@@ -134,6 +136,77 @@ def test_run_journal_compacts_oversized_terminal_session_payload(tmp_path):
         "message_index": 1,
         "message_ref": _message_ref(assistant),
     }
+
+
+def test_run_journal_compacts_continuation_terminal_without_rewriting_session_id(tmp_path):
+    origin_session_id = "compression_origin"
+    continuation_session_id = "compression_continuation"
+    run_id = "run_compression"
+    assistant = {"role": "assistant", "content": "continuation final", "_ts": 20.0}
+    payload = {
+        "terminal_session_persisted": True,
+        "terminal_session_persisted_session_id": continuation_session_id,
+        "session_id": continuation_session_id,
+        "old_session_id": origin_session_id,
+        "new_session_id": continuation_session_id,
+        "continuation_session_id": continuation_session_id,
+        "session": {
+            "session_id": continuation_session_id,
+            "parent_session_id": origin_session_id,
+            "messages": [
+                {"role": "user", "content": "continue", "timestamp": 19.0},
+                assistant,
+            ],
+            "message_count": 2,
+        },
+    }
+
+    append_run_event(origin_session_id, run_id, "done", payload, session_dir=tmp_path)
+
+    journal = read_run_events(origin_session_id, run_id, session_dir=tmp_path)
+    event = journal["events"][0]
+    event_payload = event["payload"]
+    assert event["session_id"] == origin_session_id
+    assert event_payload["session_id"] == continuation_session_id
+    assert event_payload["old_session_id"] == origin_session_id
+    assert event_payload["new_session_id"] == continuation_session_id
+    assert event_payload["continuation_session_id"] == continuation_session_id
+    assert event_payload["session"]["session_id"] == continuation_session_id
+    assert event_payload["session"]["parent_session_id"] == origin_session_id
+    assert "messages" not in event_payload["session"]
+    assert event_payload["terminal_message_target"] == {
+        "version": "terminal_message_target_v1",
+        "session_id": continuation_session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "message_index": 1,
+        "message_ref": _message_ref(assistant),
+    }
+
+
+def test_run_journal_does_not_omit_unpersisted_terminal_session_payload(tmp_path):
+    session_id = "session_save_failed"
+    run_id = "run_save_failed"
+    assistant = {"role": "assistant", "content": "only journal has me", "_ts": 5.0}
+    payload = {
+        "terminal_session_persisted": False,
+        "session": {
+            "session_id": session_id,
+            "messages": [
+                {"role": "user", "content": "please answer", "timestamp": 4.0},
+                assistant,
+            ],
+            "message_count": 2,
+        },
+    }
+
+    append_run_event(session_id, run_id, "apperror", payload, session_dir=tmp_path)
+
+    journal = read_run_events(session_id, run_id, session_dir=tmp_path)
+    event_payload = journal["events"][0]["payload"]
+    assert event_payload["session"]["messages"][-1] == assistant
+    assert "messages_omitted" not in event_payload["session"]
+    assert "terminal_message_target" not in event_payload
 
 
 def test_run_journal_fails_closed_on_physical_seq_reorder(tmp_path):

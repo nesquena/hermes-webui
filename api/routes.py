@@ -3222,7 +3222,19 @@ def _terminal_anchor_scene_target_from_payload(
         target_message_ref = _normalize_anchor_scene_message_ref(raw_target.get("message_ref") or "")
         if not target_session_id or not target_run_id or not target_stream_id or not target_message_ref:
             return None
-        if target_session_id != session_id or target_run_id != run_id or target_stream_id != stream_id:
+        terminal_session = (
+            terminal_payload.get("session")
+            if isinstance(terminal_payload.get("session"), dict)
+            else {}
+        )
+        if not _terminal_payload_lineage_valid(
+            session_id,
+            target_session_id,
+            terminal_payload,
+            terminal_session,
+        ):
+            return None
+        if target_run_id != run_id or target_stream_id != stream_id:
             return None
         return {
             "version": "terminal_message_target_v1",
@@ -3242,7 +3254,12 @@ def _terminal_anchor_scene_target_from_payload(
     )
     terminal_message_count = terminal_session.get("message_count")
     terminal_session_id = str(terminal_session.get("session_id") or "").strip()
-    if terminal_session_id != session_id:
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        terminal_session_id,
+        terminal_payload,
+        terminal_session,
+    ):
         return None
     if (
         not isinstance(terminal_message_count, int)
@@ -10853,6 +10870,8 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    _terminal_payload_lineage_valid,
+    _terminal_payload_session_persisted,
     TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
     bound_run_journal_snapshot_args,
     compact_terminal_run_index_for_session,
@@ -18357,6 +18376,56 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
+_TERMINAL_REPLAY_HYDRATION_FAILED = object()
+
+
+def _compact_terminal_session_requires_hydration(session_payload: dict) -> bool:
+    if not isinstance(session_payload, dict):
+        return False
+    if isinstance(session_payload.get("messages"), list):
+        return False
+    for key in (
+        "messages_omitted",
+        "tool_calls_omitted",
+        "runtime_journal_snapshot_omitted",
+    ):
+        if isinstance(session_payload.get(key), dict):
+            return True
+    return False
+
+
+def _terminal_replay_target_from_payload(payload: dict, payload_session_id: str) -> dict | None:
+    raw_target = payload.get("terminal_message_target")
+    if not isinstance(raw_target, dict):
+        return None
+    if raw_target.get("version") != "terminal_message_target_v1":
+        return None
+    raw_message_index = raw_target.get("message_index")
+    if not isinstance(raw_message_index, int) or isinstance(raw_message_index, bool) or raw_message_index < 0:
+        return None
+    target_session_id = str(raw_target.get("session_id") or "").strip()
+    target_message_ref = _normalize_anchor_scene_message_ref(raw_target.get("message_ref") or "")
+    if target_session_id != payload_session_id or not target_message_ref:
+        return None
+    return {
+        "message_index": raw_message_index,
+        "message_ref": target_message_ref,
+    }
+
+
+def _terminal_replay_target_matches_session(session, target: dict) -> bool:
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list):
+        return False
+    message_index = target.get("message_index")
+    if not isinstance(message_index, int) or message_index < 0 or message_index >= len(messages):
+        return False
+    message = messages[message_index]
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    return _assistant_anchor_scene_message_ref(message) == target.get("message_ref")
+
+
 def _hydrate_replayed_terminal_payload(session_id: str, payload):
     if not isinstance(payload, dict):
         return payload
@@ -18365,11 +18434,44 @@ def _hydrate_replayed_terminal_payload(session_id: str, payload):
         return payload
     if isinstance(session_payload.get("messages"), list):
         return payload
+    hydration_required = _compact_terminal_session_requires_hydration(session_payload)
     payload_session_id = str(session_payload.get("session_id") or session_id or "").strip()
-    if not payload_session_id or payload_session_id != str(session_id or "").strip():
-        return payload
+    if not payload_session_id:
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_session_persisted(payload, session_payload):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    target = _terminal_replay_target_from_payload(payload, payload_session_id)
+    if target is None:
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        payload_session_id,
+        payload,
+        session_payload,
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     try:
         session = get_session(payload_session_id, metadata_only=False)
+    except Exception:
+        logger.debug(
+            "Failed to hydrate compact terminal journal payload for session %s",
+            payload_session_id,
+            exc_info=True,
+        )
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if session is None:
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        payload_session_id,
+        payload,
+        session_payload,
+        persisted_parent_session_id=getattr(session, "parent_session_id", None),
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_target_matches_session(session, target):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    try:
         hydrated = redact_session_data(
             _session_payload_with_full_messages(
                 session,
@@ -18382,10 +18484,22 @@ def _hydrate_replayed_terminal_payload(session_id: str, payload):
             payload_session_id,
             exc_info=True,
         )
-        return payload
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not isinstance(hydrated, dict):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        str(hydrated.get("session_id") or "").strip(),
+        payload,
+        hydrated,
+        persisted_parent_session_id=getattr(session, "parent_session_id", None),
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_target_matches_session(session, target):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     merged = dict(payload)
     merged["session"] = hydrated
-    merged.setdefault("session_id", payload_session_id)
+    merged["session_id"] = payload_session_id
     return merged
 
 
@@ -18409,6 +18523,7 @@ def _replay_run_journal(
     )
     if not _run_journal_page_complete(journal):
         return False
+    replay_frames = []
     for entry in journal.get("events") or []:
         if not isinstance(entry, dict):
             continue
@@ -18416,11 +18531,15 @@ def _replay_run_journal(
         payload = entry.get("payload")
         if entry.get("terminal"):
             payload = _hydrate_replayed_terminal_payload(session_id, payload)
+            if payload is _TERMINAL_REPLAY_HYDRATION_FAILED:
+                return False
+        replay_frames.append((event_name, payload, entry.get("event_id")))
+    for event_name, payload, event_id in replay_frames:
         _sse_with_id(
             handler,
             event_name,
             payload,
-            entry.get("event_id"),
+            event_id,
         )
     if include_stale and not summary.get("terminal"):
         stale = stale_interrupted_event(
