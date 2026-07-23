@@ -9569,9 +9569,40 @@ async function refreshSession() {
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
-    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
-    if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
+    // #6419: a mid-stream soft recovery (iOS background/resume, via
+    // _recoverFromOfflineSoftly) must keep the initiating user turn ABOVE the
+    // live assistant worklog it started, not after it. The server holds that
+    // turn as pending_user_message and omits both it and the live assistant
+    // from session.messages until the turn settles, so rebuild the live tail
+    // from INFLIGHT first — mirroring loadSession's reattach — before merging
+    // the pending row. Without a _live row in S.messages the merge below would
+    // fall back to push()-at-end and reorder the turn (run-state-consistency
+    // invariants 2 & 3).
+    const _sid=S.session&&S.session.session_id;
+    if(S.activeStreamId&&_sid&&INFLIGHT[_sid]
+       &&typeof _ensureInflightLiveAssistantMessage==='function'
+       &&typeof _mergeInflightTailMessages==='function'
+       &&typeof _mergePendingSessionMessage==='function'){
+      _ensureInflightLiveAssistantMessage(INFLIGHT[_sid]);
+      const inflightMessages=typeof _projectInflightMessagesForActivityBursts==='function'
+        ? _projectInflightMessagesForActivityBursts(INFLIGHT[_sid])
+        : (INFLIGHT[_sid].messages||[]);
+      if(typeof _prepareRunningLiveTail==='function'
+         &&_prepareRunningLiveTail(S.messages,inflightMessages)
+         &&typeof _dropCurrentTurnAssistantMessages==='function'){
+        S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+      }
+      S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+      if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[_sid].messages||[])){
+        INFLIGHT[_sid].messages=S.messages;
+      }
+    }else if(typeof _mergePendingSessionMessage==='function'){
+      _mergePendingSessionMessage(S.session,S.messages);
+    }else{
+      const pendingMsg=getPendingSessionMessage(data.session,S.messages);
+      if(pendingMsg) S.messages.push(pendingMsg);
+    }
 
     syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
