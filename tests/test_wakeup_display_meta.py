@@ -59,7 +59,9 @@ def test_completion_empty_sid_and_command():
     assert meta["command"] == ""
 
 
-def test_watch_match_round_trip_with_suppressed():
+def test_watch_match_header_only_no_suppression_derived():
+    # The producer appends a suppression note to the body; the parser must NOT
+    # lift it into metadata — it is free-form output tail (#6350 finding 2).
     evt = {
         "type": "watch_match",
         "session_id": "w1",
@@ -74,8 +76,33 @@ def test_watch_match_round_trip_with_suppressed():
         "task_id": "w1",
         "command": "tail -f app.log",
         "pattern": "ERROR.*timeout",
-        "suppressed": 3,
     }
+    assert "suppressed" not in meta
+
+
+def test_watch_match_output_that_looks_like_suppression_is_not_misparsed():
+    # Adversarial: legitimate output ends with the exact suppression phrasing
+    # while the event's real suppressed count is 0. The metadata must carry no
+    # suppression field, and the body must still contain the output verbatim so
+    # the UI renders it (the phrase is not stripped).
+    evt = {
+        "type": "watch_match",
+        "session_id": "w2",
+        "command": "tail",
+        "pattern": "ERR",
+        "output": "log line\n(3 earlier matches were suppressed by rate limit)",
+        "suppressed": 0,
+    }
+    body = format_wakeup_prompt(evt)
+    meta = wakeup_display_meta(body)
+    assert meta == {
+        "type": "watch_match",
+        "task_id": "w2",
+        "command": "tail",
+        "pattern": "ERR",
+    }
+    assert "suppressed" not in meta
+    assert "(3 earlier matches were suppressed by rate limit)" in body
 
 
 def test_watch_match_pattern_with_quotes_round_trips():

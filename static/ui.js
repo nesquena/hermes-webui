@@ -15345,10 +15345,15 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 // null and keep the raw-notice fallback.
 function _parseProcessWakeupBody(text){
   const s=String(text||'');
+  // Header groups are single-line by grammar; the output group captures the
+  // rest verbatim (leading indentation / trailing blank lines preserved). The
+  // watch suppression note is intentionally NOT split out of the output — real
+  // process output can contain the identical text, so stripping it would drop
+  // legitimate content (#6350 review finding 2). It rides along in `output`.
   let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
-  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null,suppressed:0};
-  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*?)(?:\n\((\d+) earlier matches were suppressed by rate limit\))?\]$/);
-  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null,suppressed:m[5]?parseInt(m[5],10):0};
+  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
+  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
+  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
   return null;
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
@@ -15368,7 +15373,6 @@ function _processWakeupInfo(m, text){
     command:String(pick('command','command')||''),
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
-    suppressed:Number(pick('suppressed','suppressed')||0),
     output:parsed?parsed.output:null,
   };
 }
@@ -15387,11 +15391,17 @@ function _processWakeupCardHtml(info, rawText, extras){
     chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
   }
   const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
-  const outText=info.output!=null?String(info.output).trim():String(rawText||'').trim();
-  const outHtml=outText?`<pre class="process-wakeup-text">${esc(outText)}</pre>`:'';
+  // Preserve output byte-for-byte for the <pre>; trim ONLY for the
+  // empty/non-empty decision so leading indentation and trailing blank lines
+  // survive (#6350 review finding 1).
+  const outRaw=info.output!=null?String(info.output):String(rawText||'');
+  const outHtml=outRaw.trim()?`<pre class="process-wakeup-text">${esc(outRaw)}</pre>`:'';
   const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
-  const supHtml=info.suppressed?`<div class="process-wakeup-suppressed">${esc(t('process_wakeup_suppressed',info.suppressed))}</div>`:'';
-  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${supHtml}${extras.footHtml||''}</div></details>`;
+  // The collapsed watch chip truncates the pattern; surface the full,
+  // wrapping value in the expanded detail so touch/keyboard users can read it
+  // without relying on a hover tooltip (#6350 review finding 4).
+  const patternRow=(isWatch&&info.pattern)?`<div class="process-wakeup-pattern-row"><span class="process-wakeup-detail-key">${esc(t('process_wakeup_matched'))}</span><code>${esc(String(info.pattern))}</code></div>`:'';
+  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
 function renderMessages(options){

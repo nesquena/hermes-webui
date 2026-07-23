@@ -72,19 +72,24 @@ _WAKEUP_WATCH_MATCH_RE = re.compile(
     r"Command: (?P<cmd>[^\n]*)\n"
     r"Matched output:\n"
 )
-_WAKEUP_SUPPRESSED_RE = re.compile(
-    r"\n\((?P<suppressed>\d+) earlier matches were suppressed by rate limit\)\]\Z"
-)
 
 
 def wakeup_display_meta(text: Any) -> dict | None:
     """Parse a ``format_wakeup_prompt`` body into display-only metadata.
 
     Returns ``{type, task_id, command, exit_code}`` for completion events and
-    ``{type, task_id, command, pattern[, suppressed]}`` for watch matches, or
-    None when the text is not one of those pinned shapes. Header fields only —
-    the output section stays in the message body (the UI extracts it there),
-    so the metadata never duplicates multi-KB process output in the store.
+    ``{type, task_id, command, pattern}`` for watch matches, or None when the
+    text is not one of those pinned shapes. Header fields only — the output
+    section stays in the message body (the UI extracts it there), so the
+    metadata never duplicates multi-KB process output in the store.
+
+    Header fields are anchored to the pinned single-line grammar (``sid``,
+    ``exit_code``, ``command``, ``pattern`` never contain newlines). The
+    optional watch suppression note is deliberately NOT parsed out: it lives in
+    the free-form output tail, where process output can contain the exact same
+    "(N earlier matches were suppressed…)" text, so inferring it from the body
+    would misclassify legitimate output and drop it. The note stays part of the
+    rendered output verbatim (#6350 review finding 2).
     """
     body = str(text or "")
     m = _WAKEUP_COMPLETION_RE.match(body)
@@ -102,16 +107,12 @@ def wakeup_display_meta(text: Any) -> dict | None:
         }
     m = _WAKEUP_WATCH_MATCH_RE.match(body)
     if m:
-        meta: dict[str, Any] = {
+        return {
             "type": "watch_match",
             "task_id": m.group("sid"),
             "command": m.group("cmd"),
             "pattern": m.group("pattern"),
         }
-        sup = _WAKEUP_SUPPRESSED_RE.search(body)
-        if sup:
-            meta["suppressed"] = int(sup.group("suppressed"))
-        return meta
     return None
 
 

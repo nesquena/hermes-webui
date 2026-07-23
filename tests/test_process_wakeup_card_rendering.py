@@ -9,6 +9,7 @@ tests/test_process_wakeup_rendering.py.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -69,12 +70,19 @@ const failBody = '[IMPORTANT: Background process proc_2 completed (exit_code=3).
 const signalBody = '[IMPORTANT: Background process proc_3 completed (exit_code=-9).\nCommand: sleep 999\nOutput:\n]';
 const watchBody = '[IMPORTANT: Background process w1 matched watch pattern "ERROR.*timeout".\nCommand: tail -f app.log\nMatched output:\nERROR request timeout\n(3 earlier matches were suppressed by rate limit)]';
 const htmlBody = '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: echo "<script>alert(1)</script>"\nOutput:\n<b>bold</b>]';
+// Finding 1: leading indentation + trailing blank lines must survive.
+const wsBody = '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: build\nOutput:\n    indented line\n\n]';
+// Finding 2: output that legitimately ends with the suppression phrasing must
+// be preserved intact (not lifted into a suppression field and dropped).
+const supLikeBody = '[IMPORTANT: Background process w9 matched watch pattern "ERR".\nCommand: tail\nMatched output:\nreal log\n(3 earlier matches were suppressed by rate limit)]';
 
 const okInfo = _processWakeupInfo({}, okBody);
 const failInfo = _processWakeupInfo({}, failBody);
 const signalInfo = _processWakeupInfo({}, signalBody);
 const watchInfo = _processWakeupInfo({}, watchBody);
 const htmlInfo = _processWakeupInfo({}, htmlBody);
+const wsInfo = _processWakeupInfo({}, wsBody);
+const supLikeInfo = _processWakeupInfo({}, supLikeBody);
 const metaOnlyInfo = _processWakeupInfo(
   {_wakeup_meta: {type: 'completion', task_id: 'srv_1', command: 'cargo test', exit_code: 1}},
   'some future format the client parser does not know'
@@ -91,11 +99,15 @@ process.stdout.write(JSON.stringify({
   metaOverParseTaskId: metaOverParse.taskId,
   unparseableIsNull: _processWakeupInfo({}, 'plain text') === null,
   emptyIsNull: _processWakeupInfo({content: ''}, '') === null,
+  wsInfoOutput: wsInfo.output,
+  supLikeInfo,
   okCard: _processWakeupCardHtml(okInfo, okBody, extras),
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
   signalCard: _processWakeupCardHtml(signalInfo, signalBody, extras),
   watchCard: _processWakeupCardHtml(watchInfo, watchBody, extras),
   htmlCard: _processWakeupCardHtml(htmlInfo, htmlBody, extras),
+  wsCard: _processWakeupCardHtml(wsInfo, wsBody, extras),
+  supLikeCard: _processWakeupCardHtml(supLikeInfo, supLikeBody, extras),
   metaOnlyCard: _processWakeupCardHtml(metaOnlyInfo, 'some future format the client parser does not know', extras),
 }));
 """
@@ -128,11 +140,31 @@ def test_client_parser_mirrors_the_two_structured_wakeup_shapes():
     assert watch["type"] == "watch_match"
     assert watch["pattern"] == "ERROR.*timeout"
     assert watch["command"] == "tail -f app.log"
-    assert watch["output"] == "ERROR request timeout"
-    assert watch["suppressed"] == 3
+    # The suppression note is part of the output tail, never a separate field.
+    assert watch["output"] == "ERROR request timeout\n(3 earlier matches were suppressed by rate limit)"
+    assert "suppressed" not in watch
 
     assert result["unparseableIsNull"] is True
     assert result["emptyIsNull"] is True
+
+
+def test_output_whitespace_is_preserved_byte_for_byte():
+    # #6350 finding 1: leading indentation and trailing blank lines must not be
+    # trimmed away in the rendered <pre>.
+    result = _run_driver()
+    assert result["wsInfoOutput"] == "    indented line\n\n"
+    ws_card = result["wsCard"]
+    assert "<pre class=\"process-wakeup-text\">    indented line\n\n</pre>" in ws_card
+
+
+def test_output_that_looks_like_suppression_metadata_is_kept_in_full():
+    # #6350 finding 2: adversarial output ending with the suppression phrasing
+    # is preserved verbatim, with no suppression field inferred/deleted.
+    result = _run_driver()
+    sup = result["supLikeInfo"]
+    assert sup["output"] == "real log\n(3 earlier matches were suppressed by rate limit)"
+    assert "suppressed" not in sup
+    assert "(3 earlier matches were suppressed by rate limit)" in result["supLikeCard"]
 
 
 def test_server_meta_is_authoritative_and_covers_unparseable_bodies():
@@ -177,9 +209,13 @@ def test_card_markup_collapsed_by_default_with_exit_chip():
     watch_card = result["watchCard"]
     assert 'class="process-wakeup-chip watch"' in watch_card
     assert "ERROR.*timeout" in watch_card
-    assert "process_wakeup_suppressed:3" in watch_card
-    # The truncatable pattern <code> must expose the full pattern on hover.
-    assert '<code title="ERROR.*timeout">' in watch_card
+    # No separate suppression line anymore; the note rides in the output pre.
+    assert "process_wakeup_suppressed" not in watch_card
+    # Finding 4: the full pattern is rendered in the expanded detail (a
+    # dedicated pattern row), not only inside the collapsed chip's hover title.
+    assert "process-wakeup-pattern-row" in watch_card
+    # Pattern appears twice: once in the collapsed chip, once in the detail row.
+    assert watch_card.count("ERROR.*timeout") >= 2
 
 
 def test_card_escapes_command_and_output():
@@ -211,3 +247,9 @@ def test_render_branch_and_css_wire_the_card_variant():
     assert ".process-wakeup-chip.fail{" in STYLE_CSS
     assert ".process-wakeup-notice.process-wakeup-fail{" in STYLE_CSS
     assert ".process-wakeup-detail pre.process-wakeup-text{max-height" in STYLE_CSS
+    # #6350 finding 3: watch chip shrinks, summary wraps, mobile gets a 44px target.
+    assert ".process-wakeup-chip.watch{flex:0 1 auto;min-width:0;}" in STYLE_CSS
+    base_summary = re.search(r"\.process-wakeup-card>summary\{[^}]*\}", STYLE_CSS)
+    assert base_summary and "flex-wrap:wrap" in base_summary.group(0)
+    assert "@media(max-width:700px){.process-wakeup-card>summary{min-height:44px;}}" in STYLE_CSS
+    assert ".process-wakeup-pattern-row" in STYLE_CSS
