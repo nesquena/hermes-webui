@@ -97,20 +97,39 @@ jobs:
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-mutation-artifacts
         run: |
+          mkdir -p "$LIFECYCLE_ARTIFACT_DIR"
+
           run_expected_failure() {
             local name="$1"
-            shift
-            if "$@"; then
+            local expected_marker="$2"
+            shift 2
+            local log="$LIFECYCLE_ARTIFACT_DIR/${name}.log"
+
+            echo "::group::$name"
+            set +e
+            "$@" 2>&1 | tee "$log"
+            local status="${PIPESTATUS[0]}"
+            set -e
+            echo "::endgroup::"
+
+            if [ "$status" -eq 0 ]; then
               echo "::error title=Mutation survived::$name unexpectedly passed"
               return 1
             fi
-            echo "$name failed as expected"
+            if ! grep -Fq -- "$expected_marker" "$log"; then
+              echo "::error title=Unexpected mutation failure::$name failed without expected marker: $expected_marker"
+              tail -200 "$log"
+              return 1
+            fi
+            echo "$name failed as expected with marker: $expected_marker"
           }
 
           run_expected_failure normal-anchor-persistence \
+            'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
             env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
             python tests/browser_conversation_lifecycle.py
           run_expected_failure terminal-error-row \
+            'MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed the terminal row from the hard-reloaded Anchor scene' \
             env LIFECYCLE_SCENARIO=terminal-error \
             LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
             python tests/browser_conversation_lifecycle.py

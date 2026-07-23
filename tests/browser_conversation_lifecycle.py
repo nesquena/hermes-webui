@@ -40,6 +40,16 @@ TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+EXPECTED_MUTATION_FAILURE_MARKERS = {
+    "drop-anchor-persistence": (
+        "MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed "
+        "the transcript-backed Anchor scene before hard reload"
+    ),
+    "drop-terminal-anchor-row": (
+        "MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed "
+        "the terminal row from the hard-reloaded Anchor scene"
+    ),
+}
 
 
 def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
@@ -680,6 +690,26 @@ def _assert_process_row_present(snapshot: dict) -> list[dict]:
     return rows
 
 
+def _raise_expected_mutation_failure(
+    marker: str,
+    *,
+    errors: list,
+    proc: subprocess.Popen | None,
+    cause: Exception,
+) -> None:
+    if errors:
+        raise AssertionError(
+            "unexpected browser errors before expected mutation failure: "
+            f"{errors!r}"
+        ) from cause
+    if proc is not None and proc.poll() is not None:
+        raise AssertionError(
+            "WebUI server exited before expected mutation failure: "
+            f"{proc.returncode}"
+        ) from cause
+    raise AssertionError(marker) from cause
+
+
 def _semantic_activity(snapshot: dict) -> list[dict]:
     """Canonical user-visible activity, independent of renderer row ordering."""
     semantic = []
@@ -988,17 +1018,74 @@ def main() -> int:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
-        page.wait_for_function(
-            "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-            arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
-            timeout=15000,
+        try:
+            page.wait_for_function(
+                "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
+                timeout=15000,
+            )
+        except Exception as exc:
+            if TEST_BITE == "drop-anchor-persistence":
+                _raise_expected_mutation_failure(
+                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
+                    errors=errors,
+                    proc=proc,
+                    cause=exc,
+                )
+            raise
+        try:
+            _expand_settled_worklog(page)
+        except Exception as exc:
+            if TEST_BITE == "drop-anchor-persistence":
+                _raise_expected_mutation_failure(
+                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
+                    errors=errors,
+                    proc=proc,
+                    cause=exc,
+                )
+            raise
+        settled_anchor_selector = (
+            '.assistant-turn [data-anchor-settled-scene-owner="1"] '
+            '[data-anchor-scene-row="1"]'
         )
-        _expand_settled_worklog(page)
+        if TEST_BITE == "drop-anchor-persistence":
+            try:
+                page.wait_for_selector(settled_anchor_selector, timeout=2000)
+            except Exception as exc:
+                _raise_expected_mutation_failure(
+                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
+                    errors=errors,
+                    proc=proc,
+                    cause=exc,
+                )
+            raise AssertionError(
+                "Mutation survived: drop-anchor-persistence still rendered a "
+                "transcript-backed Anchor scene after hard reload"
+            )
         page.wait_for_selector(
-            '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            settled_anchor_selector,
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)
+        if TEST_BITE == "drop-terminal-anchor-row":
+            if errors:
+                raise AssertionError(
+                    "unexpected browser errors before expected mutation failure: "
+                    f"{errors!r}"
+                )
+            if proc is not None and proc.poll() is not None:
+                raise AssertionError(
+                    "WebUI server exited before expected mutation failure: "
+                    f"{proc.returncode}"
+                )
+            if _terminal_rows(reloaded_snapshot):
+                raise AssertionError(
+                    "Mutation survived: drop-terminal-anchor-row still rendered "
+                    "a terminal row after hard reload"
+                )
+            raise AssertionError(
+                EXPECTED_MUTATION_FAILURE_MARKERS["drop-terminal-anchor-row"]
+            )
         _assert_settled(reloaded_snapshot, scenario)
         if scenario == "terminal-error":
             _assert_process_row_present(reloaded_snapshot)
