@@ -1,4 +1,9 @@
+import json
 import pathlib
+import shutil
+import subprocess
+
+import pytest
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -54,3 +59,45 @@ def test_fmt_ollama_label_preserves_dotted_acronyms():
     assert "if (t.length <= 3 && /^[a-zA-Z.]+$/.test(t)) return t.toUpperCase();" in src, (
         "JS Ollama formatter should preserve dotted acronyms like 'a.b' -> 'A.B'."
     )
+
+
+def test_fmt_ollama_label_uses_title_case_for_gpt_5_6_variant_names():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the JavaScript formatter regression test")
+
+    src = _read_ui()
+    start = src.index("function _fmtOllamaLabel")
+    end = src.index("\nfunction getModelLabel", start)
+    formatter = src[start:end]
+    model_ids = [
+        "gpt-5.6-sol-pro",
+        "gpt-5.6-terra-pro",
+        "gpt-5.6-luna-pro",
+        "api-xl:7b",
+    ]
+    script = formatter + "\nconsole.log(JSON.stringify(modelIds.map(_fmtOllamaLabel)));"
+
+    completed = subprocess.run(
+        [node, "-e", "const modelIds = " + json.dumps(model_ids) + ";\n" + script],
+        check=True,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+    )
+
+    assert json.loads(completed.stdout) == [
+        "GPT 5.6 Sol Pro",
+        "GPT 5.6 Terra Pro",
+        "GPT 5.6 Luna Pro",
+        "API XL (7B)",
+    ]
+
+
+def test_server_catalog_uses_title_case_for_gpt_5_6_variant_names():
+    from api.config import _get_label_for_model
+
+    assert _get_label_for_model("gpt-5.6-sol-pro", []) == "GPT 5.6 Sol Pro"
+    assert _get_label_for_model("gpt-5.6-terra-pro", []) == "GPT 5.6 Terra Pro"
+    assert _get_label_for_model("gpt-5.6-luna-pro", []) == "GPT 5.6 Luna Pro"
+    assert _get_label_for_model("api-xl", []) == "API XL"
