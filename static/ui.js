@@ -13544,7 +13544,13 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
   if(!(savedDisclosure==='open'||(errored&&savedDisclosure!=='closed'))){
+    const detailDisclosure=typeof _captureWorklogDetailDisclosureState==='function'
+      ? _captureWorklogDetailDisclosureState(group)
+      : null;
     group._deferredWorklogRows=rows;
+    group._deferredWorklogDisclosure=detailDisclosure&&detailDisclosure.size
+      ? detailDisclosure
+      : null;
     group.setAttribute('data-worklog-rows-deferred','1');
     group.classList.add('tool-call-group-collapsed');
     group.classList.remove('open');
