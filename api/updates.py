@@ -24,6 +24,7 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from api._subprocess_compat import windows_detach_flags, windows_hide_flags
 from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
@@ -217,6 +218,7 @@ def _run_git(args, cwd, timeout=10):
             [git_executable] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
             encoding='utf-8', errors='replace',
+            creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
@@ -1795,11 +1797,7 @@ def _schedule_restart(delay: float = 2.0) -> None:
                     subprocess.Popen(
                         args,
                         cwd=os.getcwd(),
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
+                        creationflags=windows_detach_flags(),
                         close_fds=True,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,

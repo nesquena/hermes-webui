@@ -10,6 +10,7 @@ import sys
 import threading
 from pathlib import Path
 
+from api._subprocess_compat import windows_hide_flags
 from api.profiles import (
     _PROFILE_ID_RE,
     _is_root_profile,
@@ -123,6 +124,9 @@ def restart_active_profile_gateway(
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            # Hide, don't detach: the communicate() below reads this child's
+            # stdout/stderr, and DETACHED_PROCESS would sever those handles.
+            creationflags=windows_hide_flags(),
         )
 
         try:

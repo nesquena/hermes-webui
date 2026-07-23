@@ -26,6 +26,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+from api._subprocess_compat import windows_hide_flags
 from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
@@ -930,6 +931,7 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
             stderr=subprocess.PIPE,
             timeout=_prefill_script_timeout(config_data),
             check=False,
+            creationflags=windows_hide_flags(),
         )
     except subprocess.TimeoutExpired:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script timed out"}

@@ -32,6 +32,7 @@ try:  # POSIX-only; Windows-style environments fall back to process-local lockin
 except ImportError:  # pragma: no cover - exercised only where fcntl is unavailable
     fcntl = None  # type: ignore[assignment]
 
+from api._subprocess_compat import windows_hide_flags
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
@@ -1770,6 +1771,8 @@ class _AccountUsageProbeWorker:
         }
         if hasattr(os, "fork"):  # POSIX
             kwargs["preexec_fn"] = _account_usage_preexec_fn
+        else:  # Windows — hide the worker's console window (no-op elsewhere).
+            kwargs["creationflags"] = windows_hide_flags()
 
         try:
             self._proc = subprocess.Popen(
@@ -1810,6 +1813,8 @@ def _launch_account_usage_worker_process(
     }
     if hasattr(os, "fork"):  # POSIX
         kwargs["preexec_fn"] = _account_usage_preexec_fn
+    else:  # Windows — hide the worker's console window (no-op elsewhere).
+        kwargs["creationflags"] = windows_hide_flags()
 
     try:
         return subprocess.Popen(

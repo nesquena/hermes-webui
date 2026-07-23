@@ -34,6 +34,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from api._subprocess_compat import windows_hide_flags
 from api.agent_runtime import (
     AgentRuntimeChangedError,
     ensure_agent_runtime_current,
@@ -1239,6 +1240,7 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+        creationflags=windows_hide_flags(),
     )
 
 
@@ -23513,13 +23515,16 @@ def _handle_file_reveal(handler, body):
                 target_str = host_prefix + target_str[len(container_prefix):]
 
         system = platform.system()
+        # windows_hide_flags() is 0 off Windows, so the two POSIX branches keep
+        # it purely for the guard test's uniform "every spawn declares its
+        # flags" rule — it is a no-op there, not a behavior change.
         if system == "Darwin":
-            subprocess.Popen(["open", "-R", target_str])
+            subprocess.Popen(["open", "-R", target_str], creationflags=windows_hide_flags())
         elif system == "Windows":
-            subprocess.Popen(["explorer.exe", "/select," + target_str])
+            subprocess.Popen(["explorer.exe", "/select," + target_str], creationflags=windows_hide_flags())
         else:
             # Linux / other — open parent directory
-            subprocess.Popen(["xdg-open", str(Path(target_str).parent)])
+            subprocess.Popen(["xdg-open", str(Path(target_str).parent)], creationflags=windows_hide_flags())
 
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
@@ -23634,7 +23639,10 @@ def _handle_file_open_vscode(handler, body):
                 "Install VS Code and ensure the 'code' CLI is on PATH, "
                 "or set vscode.command in config.yaml to the full path.",
             )
-        subprocess.Popen([resolved_cmd, target_str])
+        # On Windows `resolved_cmd` is `code.cmd`, a batch shim — spawning it
+        # without CREATE_NO_WINDOW pops a visible cmd window on every
+        # "open in VS Code" click.
+        subprocess.Popen([resolved_cmd, target_str], creationflags=windows_hide_flags())
 
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
