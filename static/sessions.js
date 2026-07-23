@@ -986,7 +986,282 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   _rememberObservedStreamingSession(s);
 }
 
-function _inflightHasVisibleLiveState(inflight) {
+function _sessionAnchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, sceneIdentity){
+  if(!event||typeof event!=='object') return '';
+  const sourceType=String(
+    event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
+  ).trim();
+  if(sourceType!==expectedType) return '';
+  const identity=(sceneIdentity&&typeof sceneIdentity==='object')?sceneIdentity:{};
+  const requiresCompleteSceneIdentity=!!(sceneIdentity&&typeof sceneIdentity==='object');
+  const expectedSession=String(identity.sessionId||identity.session_id||'').trim();
+  const expectedStream=String(identity.streamId||identity.stream_id||'').trim();
+  const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
+  if(requiresCompleteSceneIdentity&&(!expectedSession||!expectedStream||!expectedRun)) return '';
+  const eventSession=String(event.session_id||event.sessionId||'').trim();
+  const eventStream=String(event.stream_id||event.streamId||'').trim();
+  if(expectedSession&&eventSession!==expectedSession) return '';
+  if(expectedStream&&eventStream!==expectedStream) return '';
+  const eventId=String(event.event_id||event.lastEventId||event.last_event_id||'').trim();
+  const eventRunId=String(event.run_id||event.runId||'').trim();
+  let eventIdRunId='';
+  let eventIdSeq='';
+  if(eventId){
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt<=0||splitAt===eventId.length-1) return '';
+    eventIdRunId=eventId.slice(0,splitAt);
+    eventIdSeq=eventId.slice(splitAt+1);
+    if(!/^[1-9][0-9]*$/.test(eventIdSeq)) return '';
+  }
+  if(eventRunId&&eventIdRunId&&eventRunId!==eventIdRunId) return '';
+  const effectiveRunId=eventRunId||eventIdRunId;
+  if(expectedRun&&(!effectiveRunId||effectiveRunId!==expectedRun)) return '';
+  const hasSeq=event.seq!==undefined&&event.seq!==null&&event.seq!=='';
+  let seqText='';
+  if(hasSeq){
+    seqText=String(event.seq).trim();
+    if(!/^[1-9][0-9]*$/.test(seqText)) return '';
+    if(eventIdSeq&&seqText!==eventIdSeq) return '';
+  }
+  if(eventId) return `event:${eventId}`;
+  return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
+}
+
+const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
+const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;
+const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;
+
+function _sessionAnchorCanonicalOutcomeReason(reason){
+  const value=String(reason||'').trim();
+  return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
+}
+
+function _sessionAnchorMarkerInt(value, maximum){
+  return (typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=maximum)?value:null;
+}
+
+function _sessionAnchorOutcomeTruncationMarker(scene){
+  const marker=scene&&scene.outcomes_truncated;
+  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
+  const reason=_sessionAnchorCanonicalOutcomeReason(marker.reason);
+  const acceptedCount=_sessionAnchorMarkerInt(marker.accepted_count,_SESSION_ANCHOR_OUTCOME_MAX_EVENTS);
+  const acceptedBytes=_sessionAnchorMarkerInt(marker.accepted_bytes,_SESSION_ANCHOR_OUTCOME_MAX_BYTES);
+  if(!reason||acceptedCount===null||acceptedBytes===null) return null;
+  return {
+    reason,
+    accepted_count:acceptedCount,
+    max_count:_SESSION_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:acceptedBytes,
+    max_bytes:_SESSION_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
+
+function _anchorActivitySceneStrictIdentity(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return null;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||scene.run_id||scene.runId||'').trim();
+  if(!sessionId||!streamId||!runId) return null;
+  return {sessionId,streamId,runId};
+}
+
+function _sessionAnchorUtf8ByteLength(text){
+  const raw=String(text||'');
+  try{
+    if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(raw).length;
+  }catch(_){}
+  try{
+    if(typeof Buffer!=='undefined'&&Buffer&&typeof Buffer.byteLength==='function') return Buffer.byteLength(raw,'utf8');
+  }catch(_){}
+  try{
+    return encodeURIComponent(raw).replace(/%[0-9A-F]{2}/gi,'x').length;
+  }catch(_){
+    return raw.length;
+  }
+}
+
+function _sessionAnchorCompactSceneBytes(scene){
+  try{
+    return _sessionAnchorUtf8ByteLength(JSON.stringify(scene));
+  }catch(_){
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function _sessionAnchorOutcomeBytes(events){
+  let total=0;
+  for(const event of (Array.isArray(events)?events:[])){
+    const payload=(event&&typeof event==='object'&&event.event&&typeof event.event==='object')?event.event:event;
+    try{ total+=_sessionAnchorUtf8ByteLength(JSON.stringify(payload)); }catch(_){}
+  }
+  return total;
+}
+
+function _sessionAnchorReasonRank(reason){
+  if(reason==='scene_bytes') return 3;
+  if(reason==='bytes') return 2;
+  if(reason==='count') return 1;
+  return 0;
+}
+
+function _sessionAnchorMergedReason(markers, fallback){
+  let selected=_sessionAnchorCanonicalOutcomeReason(fallback);
+  for(const marker of (Array.isArray(markers)?markers:[])){
+    const reason=_sessionAnchorCanonicalOutcomeReason(marker&&marker.reason);
+    if(_sessionAnchorReasonRank(reason)>_sessionAnchorReasonRank(selected)) selected=reason;
+  }
+  return selected;
+}
+
+function _sessionAnchorOutcomeMarker(reason, items){
+  const accepted=Array.isArray(items)?items:[];
+  return {
+    reason:_sessionAnchorCanonicalOutcomeReason(reason)||'scene_bytes',
+    accepted_count:accepted.length,
+    max_count:_SESSION_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:_sessionAnchorOutcomeBytes(accepted),
+    max_bytes:_SESSION_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
+
+function _sessionAnchorOutcomeSeq(event){
+  const direct=Number(event&&event.seq);
+  if(Number.isFinite(direct)&&direct>0) return direct;
+  const eventId=String(event&&(event.event_id||event.lastEventId||event.last_event_id)||'').trim();
+  const splitAt=eventId.lastIndexOf(':');
+  if(splitAt>0&&splitAt<eventId.length-1){
+    const parsed=Number(eventId.slice(splitAt+1));
+    if(Number.isFinite(parsed)&&parsed>0) return parsed;
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function _sessionAnchorOutcomeItems(scene){
+  const items=[];
+  let order=0;
+  const append=(events,type)=>{
+    for(const event of (Array.isArray(events)?events:[])){
+      if(!event||typeof event!=='object'||Array.isArray(event)) continue;
+      items.push({type,event,seq:_sessionAnchorOutcomeSeq(event),order:order++});
+    }
+  };
+  append(scene&&scene.artifacts,'artifact_reference');
+  append(scene&&scene.side_effects,'state_saved');
+  return items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
+}
+
+function _sessionAnchorSceneWithOutcomeItems(scene, items, marker){
+  const next={...(scene||{})};
+  next.artifacts=items.filter(item=>item.type==='artifact_reference').map(item=>item.event);
+  next.side_effects=items.filter(item=>item.type==='state_saved').map(item=>item.event);
+  if(marker) next.outcomes_truncated=marker;
+  else delete next.outcomes_truncated;
+  return next;
+}
+
+function _sessionAnchorMinimalOutcomeScene(scene, marker){
+  const base={
+    version:'activity_scene_v1',
+    mode:String((scene&&scene.mode)||'compact_worklog')||'compact_worklog',
+    identity:{...(((scene&&scene.identity)&&typeof scene.identity==='object')?scene.identity:{})},
+    lifecycle:{...(((scene&&scene.lifecycle)&&typeof scene.lifecycle==='object')?scene.lifecycle:{})},
+    final_answer:'',
+    final_message_ref:null,
+    terminal_state:null,
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+  if(_sessionAnchorCompactSceneBytes(base)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  base.identity={};
+  base.lifecycle={};
+  if(_sessionAnchorCompactSceneBytes(base)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  return {
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+}
+
+function _sessionAnchorBoundedActivityScene(scene, preferredReason){
+  if(!scene||scene.version!=='activity_scene_v1') return scene;
+  const priorMarker=_sessionAnchorOutcomeTruncationMarker(scene);
+  const base={...(scene||{}),artifacts:[],side_effects:[]};
+  delete base.outcomes_truncated;
+  const items=_sessionAnchorOutcomeItems(scene);
+  const accepted=[];
+  let acceptedBytes=0;
+  let reason=_sessionAnchorMergedReason([priorMarker].filter(Boolean), preferredReason);
+  for(const item of items){
+    const itemBytes=_sessionAnchorOutcomeBytes([item]);
+    let rejectReason='';
+    if(accepted.length+1>_SESSION_ANCHOR_OUTCOME_MAX_EVENTS) rejectReason='count';
+    else if(acceptedBytes+itemBytes>_SESSION_ANCHOR_OUTCOME_MAX_BYTES) rejectReason='bytes';
+    else{
+      const trial=[...accepted,item];
+      const trialMarker=reason?_sessionAnchorOutcomeMarker(reason,trial):null;
+      const trialScene=_sessionAnchorSceneWithOutcomeItems(base,trial,trialMarker);
+      if(_sessionAnchorCompactSceneBytes(trialScene)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+        accepted.push(item);
+        acceptedBytes+=itemBytes;
+        continue;
+      }
+      rejectReason='scene_bytes';
+    }
+    reason=_sessionAnchorMergedReason([{reason},{reason:rejectReason}], '');
+    break;
+  }
+  if(accepted.length<items.length&&!reason) reason='scene_bytes';
+  let marker=reason?_sessionAnchorOutcomeMarker(reason,accepted):null;
+  let next=_sessionAnchorSceneWithOutcomeItems(base,accepted,marker);
+  while(accepted.length&&_sessionAnchorCompactSceneBytes(next)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    const removed=accepted.pop();
+    acceptedBytes=Math.max(0,acceptedBytes-_sessionAnchorOutcomeBytes([removed]));
+    marker=_sessionAnchorOutcomeMarker('scene_bytes',accepted);
+    next=_sessionAnchorSceneWithOutcomeItems(base,accepted,marker);
+  }
+  if(_sessionAnchorCompactSceneBytes(next)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return next;
+  marker=_sessionAnchorOutcomeMarker('scene_bytes',[]);
+  const degraded={...base,activity_rows:[],artifacts:[],side_effects:[],outcomes_truncated:marker};
+  if(_sessionAnchorCompactSceneBytes(degraded)<=_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return degraded;
+  return _sessionAnchorMinimalOutcomeScene(scene,marker);
+}
+
+function _anchorActivitySceneHasRecoveryState(scene){
+  if (!scene || scene.version !== 'activity_scene_v1') return false;
+  const sceneIdentity=_anchorActivitySceneStrictIdentity(scene);
+  const hasVisibleRows=Array.isArray(scene.activity_rows) && scene.activity_rows.length;
+  if(!sceneIdentity){
+    return !!hasVisibleRows;
+  }
+  const expectedRunId=sceneIdentity.runId;
+  const hasOutcome=(events,expectedType)=>Array.isArray(events)
+    &&events.some((event)=>!!_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRunId,sceneIdentity));
+  return Boolean(
+    hasVisibleRows
+    || hasOutcome(scene.artifacts,'artifact_reference')
+    || hasOutcome(scene.side_effects,'state_saved')
+    || _sessionAnchorOutcomeTruncationMarker(scene)
+  );
+}
+
+function _anchorActivitySceneMergeIdentity(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return null;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||'').trim()||streamId;
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  return {sessionId,streamId,runId};
+}
+
+function _inflightHasVisibleLiveState(inflight){
   if (!inflight || typeof inflight !== 'object') return false;
   if (String(inflight.lastAssistantText || '').trim()) return true;
   if (String(inflight.lastReasoningText || '').trim()) return true;
@@ -1049,7 +1324,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=_anchorActivitySceneHasRecoveryState(anchorActivityScene);
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     streamId:String(snapshot.stream_id||snapshot.streamId||''),
@@ -1069,6 +1344,72 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
     activityBurstAnchors,
   };
+}
+
+function _mergeServerLiveSnapshotOutcomesIntoInflight(inflight, serverSnapshot, activeStreamId){
+  if(!inflight||typeof inflight!=='object'||!serverSnapshot||typeof serverSnapshot!=='object') return false;
+  const journalScene=serverSnapshot.anchorActivityScene;
+  if(!journalScene||journalScene.version!=='activity_scene_v1') return false;
+  const cachedScene=(inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1')
+    ? inflight.anchorActivityScene
+    : null;
+  if(!cachedScene) return false;
+  const activeStream=String(activeStreamId||serverSnapshot.streamId||inflight.streamId||'').trim();
+  const cachedIdentity=_anchorActivitySceneStrictIdentity(cachedScene);
+  const journalIdentity=_anchorActivitySceneStrictIdentity(journalScene);
+  if(
+    !activeStream
+    ||!cachedIdentity||!journalIdentity
+    ||cachedIdentity.sessionId!==journalIdentity.sessionId
+    ||cachedIdentity.streamId!==activeStream
+    ||journalIdentity.streamId!==activeStream
+    ||cachedIdentity.runId!==journalIdentity.runId
+  ) return false;
+  const cachedRun=cachedIdentity.runId;
+  const journalRun=journalIdentity.runId;
+  const items=[];
+  const seen=new Set();
+  let order=0;
+  const appendCollection=(events,expectedType,expectedRun,identity)=>{
+    for(const event of (Array.isArray(events)?events:[])){
+      const identityKey=_sessionAnchorOutcomeEnvelopeIdentityKey(event,expectedType,expectedRun,identity);
+      const seenKey=`${expectedType}:${identityKey}`;
+      if(!identityKey||seen.has(seenKey)) continue;
+      seen.add(seenKey);
+      items.push({type:expectedType,event,seq:_sessionAnchorOutcomeSeq(event),order:order++});
+    }
+  };
+  appendCollection(journalScene.artifacts,'artifact_reference',journalRun,journalIdentity);
+  appendCollection(journalScene.side_effects,'state_saved',journalRun,journalIdentity);
+  appendCollection(cachedScene&&cachedScene.artifacts,'artifact_reference',cachedRun,cachedIdentity);
+  appendCollection(cachedScene&&cachedScene.side_effects,'state_saved',cachedRun,cachedIdentity);
+  items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
+  const markerList=[
+    _sessionAnchorOutcomeTruncationMarker(journalScene),
+    _sessionAnchorOutcomeTruncationMarker(cachedScene),
+  ].filter(Boolean);
+  if(!items.length&&!markerList.length) return false;
+  const baseScene={
+    ...(cachedScene||journalScene),
+    identity:{
+      ...((cachedScene&&cachedScene.identity)||{}),
+      ...((journalScene&&journalScene.identity)||{}),
+    },
+  };
+  const reason=_sessionAnchorMergedReason(markerList,'');
+  const mergedScene=_sessionAnchorBoundedActivityScene(
+    _sessionAnchorSceneWithOutcomeItems(baseScene,items,reason?_sessionAnchorOutcomeMarker(reason,[]):null),
+    reason
+  );
+  if(_sessionAnchorCompactSceneBytes(mergedScene)>_SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return false;
+  inflight.anchorActivityScene=mergedScene;
+  const journalSeq=Number(serverSnapshot.lastRunJournalSeq||0);
+  const cachedSeq=Number(inflight.lastRunJournalSeq||0);
+  inflight.lastRunJournalSeq=Math.max(
+    Number.isFinite(cachedSeq)?cachedSeq:0,
+    Number.isFinite(journalSeq)?journalSeq:0
+  );
+  return true;
 }
 
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
@@ -2083,7 +2424,12 @@ async function loadSession(sid){
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 
-  if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
+  if(
+    activeStreamId
+    &&INFLIGHT[sid]
+    &&!_inflightHasVisibleLiveState(INFLIGHT[sid])
+    &&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)
+  ){
     // A stale cursor-only INFLIGHT entry is worse than no cache: replay would
     // resume after lastRunJournalSeq while the pane has no prose/tool DOM to
     // preserve, making a session switch look like the live turn vanished.
@@ -2096,7 +2442,12 @@ async function loadSession(sid){
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
-  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
+  if(liveRecoveryInflight){
+    INFLIGHT[sid]=liveRecoveryInflight;
+    if(serverLiveSnapshot&&liveRecoveryInflight!==serverLiveSnapshot){
+      _mergeServerLiveSnapshotOutcomesIntoInflight(INFLIGHT[sid],serverLiveSnapshot,activeStreamId);
+    }
+  }
   else if(hadLiveRecoveryInflight&&activeStreamId){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
@@ -2167,7 +2518,7 @@ async function loadSession(sid){
     const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
       String(INFLIGHT[sid].lastAssistantText||'').trim()||
       String(INFLIGHT[sid].lastReasoningText||'').trim()||
-      !!(INFLIGHT[sid].anchorActivityScene&&Array.isArray(INFLIGHT[sid].anchorActivityScene.activity_rows)&&INFLIGHT[sid].anchorActivityScene.activity_rows.length)||
+      _anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene)||
       (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
       (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
     ));

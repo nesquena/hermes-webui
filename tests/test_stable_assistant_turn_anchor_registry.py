@@ -217,6 +217,8 @@ api.applyAssistantTurnAnchorSourceEvents(registry, [
     activitySegmentSeq:3,
     assistant_msg_idx:12
   }}, event_id:'run-scene:5', seq:5}},
+  {{event:'artifact_reference', payload:{{path:'reports/final.md', kind:'workspace_file'}}, event_id:'run-scene:7', seq:7}},
+  {{event:'state_saved', payload:{{kind:'memory', name:'scene-state'}}, event_id:'run-scene:8', seq:8}},
   {{event:'done', payload:{{}}, event_id:'run-scene:6', seq:6}},
   {{source_type:'settled_message', payload:{{role:'assistant', id:'message-scene', content:'final answer'}}}},
 ], {{run_id:'run-scene', stream_id:'stream-scene'}});
@@ -853,6 +855,8 @@ const activeSid='sid-owned-outcome';
 const streamId='stream-owned-outcome';
 const _anchorRegistry={{}};
 let persisted=0;
+function _anchorOutcomeTruncationMarker(){{ return null; }}
+function _messageAnchorBoundedActivityScene(scene){{ return scene; }}
 function _anchorSceneHasOwnedOutcomes(scene){{{has_owned_outcomes}}}
 function _anchorSceneHasWorklogWorthyRows(){{ return false; }}
 function _projectLiveAnchorActivityScene(){{
@@ -1109,6 +1113,28 @@ def test_activity_scene_projects_current_activity_events_for_both_render_modes()
         "compact_worklog": "tool_row",
         "transparent_stream": "chronological_activity",
     }
+    assert len(compact["artifacts"]) == 1
+    assert compact["artifacts"][0]["source_event_type"] == "artifact_reference"
+    assert compact["artifacts"][0]["event_id"] == "run-scene:7"
+    assert compact["artifacts"][0]["run_id"] == "run-scene"
+    assert compact["artifacts"][0]["stream_id"] == "stream-scene"
+    assert compact["artifacts"][0]["seq"] == 7
+    assert compact["artifacts"][0]["payload"] == {
+        "kind": "workspace_file",
+        "path": "reports/final.md",
+    }
+    assert transparent["artifacts"] == compact["artifacts"]
+    assert len(compact["side_effects"]) == 1
+    assert compact["side_effects"][0]["source_event_type"] == "state_saved"
+    assert compact["side_effects"][0]["event_id"] == "run-scene:8"
+    assert compact["side_effects"][0]["run_id"] == "run-scene"
+    assert compact["side_effects"][0]["stream_id"] == "stream-scene"
+    assert compact["side_effects"][0]["seq"] == 8
+    assert compact["side_effects"][0]["payload"] == {
+        "kind": "memory",
+        "name": "scene-state",
+    }
+    assert transparent["side_effects"] == compact["side_effects"]
     seqless_ids = [row["row_id"] for row in data["seqless"]["activity_rows"]]
     assert len(seqless_ids) == len(set(seqless_ids))
     assert seqless_ids == [
@@ -1441,10 +1467,14 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     helper_body = src.split("function _applyToAnchor", 1)[1].split(
         "function _mergeSettledToolCallsWithLiveMetadata", 1
     )[0]
+    registry_helper_body = src.split("function _liveAnchorRegistryForActivityScene", 1)[
+        1
+    ].split("function attachLiveStream", 1)[0]
 
     assert "window._liveAnchorRegistries=window._liveAnchorRegistries||new Map()" in src
     assert "_anchorRegistryMap.get(streamId)" in src
-    assert "_anchorRegistryMap.set(streamId,_anchorRegistry)" in src
+    assert "let _anchorRegistry=_liveAnchorRegistryForActivityScene(" in src
+    assert "registryMap.set(streamId,registry)" in registry_helper_body
     assert "createAssistantTurnAnchorRegistry" in src
     assert "applyAssistantTurnAnchorSourceEvent" in src
     assert "const eventId=(sseEvent&&sseEvent.lastEventId)||raw.event_id||raw.lastEventId||raw.last_event_id||'';" in helper_body
@@ -1456,6 +1486,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
         "tool_complete",
         "approval",
         "clarify",
+        "state_saved",
         "goal_continue",
         "pending_steer_leftover",
         "compressing",

@@ -281,6 +281,9 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
         lambda stream_id: {
             "session_id": "session_1",
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 4,
             "last_event_id": f"{stream_id}:4",
         },
@@ -381,6 +384,9 @@ def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
         lambda stream_id: {
             "session_id": "session_1",
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 1,
             "last_event_id": f"{stream_id}:1",
         },

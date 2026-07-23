@@ -7132,7 +7132,7 @@ def _run_agent_streaming(
         ephemeral=bool(ephemeral),
     )
     try:
-        run_journal = RunJournalWriter(session_id, stream_id)
+        run_journal = RunJournalWriter(session_id, stream_id, stable_run_id=stream_id)
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)

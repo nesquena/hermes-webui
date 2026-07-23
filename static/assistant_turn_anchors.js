@@ -152,6 +152,9 @@
     'constructor',
     'prototype',
   ]);
+  const ACTIVITY_SCENE_MAX_BYTES=256000;
+  const ACTIVITY_SCENE_OUTCOME_MAX_EVENTS=512;
+  const ACTIVITY_SCENE_OUTCOME_MAX_BYTES=128000;
 
   function _isUnsafeObjectKey(key){
     return UNSAFE_OBJECT_KEYS.indexOf(key)!==-1;
@@ -1017,6 +1020,221 @@
     });
   }
 
+  function _activitySceneOutcomeEvent(event){
+    if(!event||typeof event!=='object') return null;
+    const payload=_own(event,'payload');
+    return Object.freeze({
+      ..._copyObject(event),
+      kind:_cleanString(_own(event,'kind'))||null,
+      status:_cleanString(_own(event,'status'))||null,
+      source_event_type:_cleanString(_own(event,'source_event_type'))||null,
+      event_id:_cleanString(_own(event,'event_id'))||null,
+      local_id:_cleanString(_own(event,'local_id'))||null,
+      run_id:_cleanString(_own(event,'run_id'))||null,
+      stream_id:_cleanString(_own(event,'stream_id'))||null,
+      seq:_own(event,'seq')??null,
+      created_at:_own(event,'created_at')??null,
+      payload:_sanitizePayload(payload),
+    });
+  }
+
+  function _activitySceneOutcomeEvents(events){
+    if(!Array.isArray(events)) return Object.freeze([]);
+    return Object.freeze(events.map(_activitySceneOutcomeEvent).filter(Boolean));
+  }
+
+  function _activitySceneOutcomesTruncated(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)) return null;
+    const reason=_activitySceneCanonicalOutcomeReason(_own(value,'reason'));
+    const acceptedCount=_activitySceneMarkerInt(_own(value,'accepted_count'),ACTIVITY_SCENE_OUTCOME_MAX_EVENTS);
+    const acceptedBytes=_activitySceneMarkerInt(_own(value,'accepted_bytes'),ACTIVITY_SCENE_OUTCOME_MAX_BYTES);
+    if(!reason||acceptedCount===null||acceptedBytes===null) return null;
+    return Object.freeze({
+      reason,
+      accepted_count:acceptedCount,
+      max_count:ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
+      accepted_bytes:acceptedBytes,
+      max_bytes:ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
+      max_scene_bytes:ACTIVITY_SCENE_MAX_BYTES,
+    });
+  }
+
+  function _activitySceneCanonicalOutcomeReason(reason){
+    const value=_cleanString(reason);
+    return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
+  }
+
+  function _activitySceneMarkerInt(value, maximum){
+    return (typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=maximum)?value:null;
+  }
+
+  function _activitySceneUtf8ByteLength(text){
+    const raw=String(text||'');
+    try{
+      if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(raw).length;
+    }catch(_){}
+    try{
+      if(typeof Buffer!=='undefined'&&Buffer&&typeof Buffer.byteLength==='function') return Buffer.byteLength(raw,'utf8');
+    }catch(_){}
+    try{
+      return encodeURIComponent(raw).replace(/%[0-9A-F]{2}/gi,'x').length;
+    }catch(_){
+      return raw.length;
+    }
+  }
+
+  function _activitySceneCompactBytes(scene){
+    try{
+      return _activitySceneUtf8ByteLength(JSON.stringify(scene));
+    }catch(_){
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  function _activitySceneOutcomeBytes(events){
+    let total=0;
+    for(const event of (Array.isArray(events)?events:[])){
+      const payload=(event&&typeof event==='object'&&event.event&&typeof event.event==='object')?event.event:event;
+      try{ total+=_activitySceneUtf8ByteLength(JSON.stringify(payload)); }catch(_){}
+    }
+    return total;
+  }
+
+  function _activitySceneOutcomeMarker(reason, items){
+    const accepted=Array.isArray(items)?items:[];
+    return Object.freeze({
+      reason:_activitySceneCanonicalOutcomeReason(reason)||'scene_bytes',
+      accepted_count:accepted.length,
+      max_count:ACTIVITY_SCENE_OUTCOME_MAX_EVENTS,
+      accepted_bytes:_activitySceneOutcomeBytes(accepted),
+      max_bytes:ACTIVITY_SCENE_OUTCOME_MAX_BYTES,
+      max_scene_bytes:ACTIVITY_SCENE_MAX_BYTES,
+    });
+  }
+
+  function _activitySceneOutcomeSeq(event){
+    const direct=Number(event&&event.seq);
+    if(Number.isFinite(direct)&&direct>0) return direct;
+    const eventId=_cleanString(event&&(event.event_id||event.lastEventId||event.last_event_id));
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt>0&&splitAt<eventId.length-1){
+      const parsed=Number(eventId.slice(splitAt+1));
+      if(Number.isFinite(parsed)&&parsed>0) return parsed;
+    }
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  function _activitySceneOutcomeItems(scene){
+    const items=[];
+    let order=0;
+    const append=(events,type)=>{
+      for(const event of (Array.isArray(events)?events:[])){
+        if(!event||typeof event!=='object'||Array.isArray(event)) continue;
+        items.push({type,event,seq:_activitySceneOutcomeSeq(event),order:order++});
+      }
+    };
+    append(scene&&scene.artifacts,'artifact_reference');
+    append(scene&&scene.side_effects,'state_saved');
+    return items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
+  }
+
+  function _activitySceneWithOutcomeItems(scene, items, marker){
+    const next={...(scene||{})};
+    next.artifacts=Object.freeze(items.filter(item=>item.type==='artifact_reference').map(item=>item.event));
+    next.side_effects=Object.freeze(items.filter(item=>item.type==='state_saved').map(item=>item.event));
+    if(marker) next.outcomes_truncated=marker;
+    else delete next.outcomes_truncated;
+    return next;
+  }
+
+  function _activitySceneReasonRank(reason){
+    if(reason==='scene_bytes') return 3;
+    if(reason==='bytes') return 2;
+    if(reason==='count') return 1;
+    return 0;
+  }
+
+  function _activitySceneMergedReason(markers, fallback){
+    let selected=_activitySceneCanonicalOutcomeReason(fallback);
+    for(const marker of (Array.isArray(markers)?markers:[])){
+      const reason=_activitySceneCanonicalOutcomeReason(marker&&marker.reason);
+      if(_activitySceneReasonRank(reason)>_activitySceneReasonRank(selected)) selected=reason;
+    }
+    return selected;
+  }
+
+  function _activitySceneMinimalOutcomeScene(scene, marker){
+    const base={
+      version:'activity_scene_v1',
+      mode:_cleanString(scene&&scene.mode)||'compact_worklog',
+      identity:{...(((scene&&scene.identity)&&typeof scene.identity==='object')?scene.identity:{})},
+      lifecycle:{...(((scene&&scene.lifecycle)&&typeof scene.lifecycle==='object')?scene.lifecycle:{})},
+      final_answer:'',
+      final_message_ref:null,
+      terminal_state:null,
+      activity_rows:Object.freeze([]),
+      artifacts:Object.freeze([]),
+      side_effects:Object.freeze([]),
+      outcomes_truncated:marker,
+    };
+    if(_activitySceneCompactBytes(base)<=ACTIVITY_SCENE_MAX_BYTES) return base;
+    base.identity={};
+    base.lifecycle={};
+    if(_activitySceneCompactBytes(base)<=ACTIVITY_SCENE_MAX_BYTES) return base;
+    return {
+      version:'activity_scene_v1',
+      mode:'compact_worklog',
+      activity_rows:Object.freeze([]),
+      artifacts:Object.freeze([]),
+      side_effects:Object.freeze([]),
+      outcomes_truncated:marker,
+    };
+  }
+
+  function _activitySceneBoundedScene(scene){
+    if(!scene||scene.version!=='activity_scene_v1') return scene;
+    const marker=_activitySceneOutcomesTruncated(scene.outcomes_truncated);
+    const base={...(scene||{}),artifacts:Object.freeze([]),side_effects:Object.freeze([])};
+    delete base.outcomes_truncated;
+    const items=_activitySceneOutcomeItems(scene);
+    const accepted=[];
+    let acceptedBytes=0;
+    let reason=_activitySceneMergedReason([marker].filter(Boolean),'');
+    for(const item of items){
+      const itemBytes=_activitySceneOutcomeBytes([item]);
+      let rejectReason='';
+      if(accepted.length+1>ACTIVITY_SCENE_OUTCOME_MAX_EVENTS) rejectReason='count';
+      else if(acceptedBytes+itemBytes>ACTIVITY_SCENE_OUTCOME_MAX_BYTES) rejectReason='bytes';
+      else{
+        const trial=[...accepted,item];
+        const trialMarker=reason?_activitySceneOutcomeMarker(reason,trial):null;
+        const trialScene=_activitySceneWithOutcomeItems(base,trial,trialMarker);
+        if(_activitySceneCompactBytes(trialScene)<=ACTIVITY_SCENE_MAX_BYTES){
+          accepted.push(item);
+          acceptedBytes+=itemBytes;
+          continue;
+        }
+        rejectReason='scene_bytes';
+      }
+      reason=_activitySceneMergedReason([{reason},{reason:rejectReason}], '');
+      break;
+    }
+    if(accepted.length<items.length&&!reason) reason='scene_bytes';
+    let nextMarker=reason?_activitySceneOutcomeMarker(reason,accepted):null;
+    let next=_activitySceneWithOutcomeItems(base,accepted,nextMarker);
+    while(accepted.length&&_activitySceneCompactBytes(next)>ACTIVITY_SCENE_MAX_BYTES){
+      const removed=accepted.pop();
+      acceptedBytes=Math.max(0,acceptedBytes-_activitySceneOutcomeBytes([removed]));
+      nextMarker=_activitySceneOutcomeMarker('scene_bytes',accepted);
+      next=_activitySceneWithOutcomeItems(base,accepted,nextMarker);
+    }
+    if(_activitySceneCompactBytes(next)<=ACTIVITY_SCENE_MAX_BYTES) return next;
+    nextMarker=_activitySceneOutcomeMarker('scene_bytes',[]);
+    const degraded={...base,activity_rows:Object.freeze([]),artifacts:Object.freeze([]),side_effects:Object.freeze([]),outcomes_truncated:nextMarker};
+    if(_activitySceneCompactBytes(degraded)<=ACTIVITY_SCENE_MAX_BYTES) return degraded;
+    return _activitySceneMinimalOutcomeScene(scene,nextMarker);
+  }
+
   function projectAssistantTurnAnchorActivityScene(input, options){
     const anchor=_anchorFromProjectionInput(input);
     const opts=(options&&typeof options==='object')?options:{};
@@ -1040,7 +1258,7 @@
       .map((event,index)=>_activitySceneRow(event,index,mode));
     const lifecycle=_copyObject(anchor.lifecycle);
     const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
-    return Object.freeze({
+    const scene={
       version:'activity_scene_v1',
       mode,
       identity:_frozenIdentityCopy(anchor.identity||{}),
@@ -1049,15 +1267,12 @@
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
       terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
       activity_rows:Object.freeze(rows),
-      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(event=>Object.freeze({
-        ..._copyObject(event),
-        payload:Object.freeze(_copyObject(_own(event,'payload'))),
-      }))),
-      side_effects:Object.freeze((Array.isArray(anchor.side_effects)?anchor.side_effects:[]).map(event=>Object.freeze({
-        ..._copyObject(event),
-        payload:Object.freeze(_copyObject(_own(event,'payload'))),
-      }))),
-    });
+      artifacts:_activitySceneOutcomeEvents(anchor.artifacts),
+      side_effects:_activitySceneOutcomeEvents(anchor.side_effects),
+    };
+    const outcomesTruncated=_activitySceneOutcomesTruncated(anchor.outcomes_truncated);
+    if(outcomesTruncated) scene.outcomes_truncated=outcomesTruncated;
+    return Object.freeze(_activitySceneBoundedScene(scene));
   }
 
   function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){
@@ -1662,6 +1877,7 @@
       side_effects:[],
       metadata_events:[],
       transport_events:[],
+      outcomes_truncated:_activitySceneOutcomesTruncated(opts.outcomes_truncated),
       usage:null,
     };
   }

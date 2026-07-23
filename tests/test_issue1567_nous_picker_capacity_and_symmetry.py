@@ -331,6 +331,48 @@ class TestApiModelsLargeCatalog:
         finally:
             restore()
 
+    def test_absent_configured_nous_default_is_routeable_and_preserves_cap(self, monkeypatch, tmp_path):
+        _scrub_provider_env(monkeypatch)
+        catalog = _build_big_catalog()
+        configured_default = "newvendor/model-not-yet-live"
+        assert configured_default not in catalog
+        _install_fake_hermes_cli(monkeypatch, nous_ids=catalog)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        restore = _swap_in_test_config({
+            "model": {"provider": "nous", "default": configured_default},
+        })
+        try:
+            data = config.get_available_models()
+            nous_groups = [g for g in data["groups"] if g["provider_id"] == "nous"]
+            assert len(nous_groups) == 1
+
+            from api.config import _NOUS_FEATURED_TARGET, _build_nous_featured_set
+
+            grp = nous_groups[0]
+            visible_ids = [m["id"] for m in grp["models"]]
+            extra_ids = [m["id"] for m in grp.get("extra_models", [])]
+            routeable_default = f"@nous:{configured_default}"
+
+            assert routeable_default in visible_ids, (
+                "An explicit Nous default missing from the live catalog must "
+                "remain visible for forward compatibility."
+            )
+            assert all(mid.startswith("@nous:") for mid in visible_ids), (
+                f"Every visible Nous id must remain route-qualified, got {visible_ids!r}."
+            )
+            assert len(visible_ids) == _NOUS_FEATURED_TARGET
+            assert len(visible_ids) + len(extra_ids) == len(catalog) + 1
+
+            original_featured, _ = _build_nous_featured_set(catalog)
+            displaced = {f"@nous:{original_featured[-1]}"}
+            assert displaced.issubset(set(extra_ids)), (
+                "Keeping the configured default visible must move the displaced "
+                "featured Nous entry to extra_models instead of dropping it."
+            )
+        finally:
+            restore()
+
     def test_picker_does_not_cap_small_catalog(self, monkeypatch, tmp_path):
         _scrub_provider_env(monkeypatch)
         # 20 models — below threshold, should pass through with no extras.

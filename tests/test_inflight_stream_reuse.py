@@ -1051,7 +1051,11 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     assert "msg.role !== 'assistant'" in helper_body
 
     compact_load = re.sub(r"\s+", "", load_body)
-    guard = "if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid]))"
+    guard = (
+        "if(activeStreamId&&INFLIGHT[sid]"
+        "&&!_inflightHasVisibleLiveState(INFLIGHT[sid])"
+        "&&!_anchorActivitySceneHasRecoveryState(INFLIGHT[sid].anchorActivityScene))"
+    )
     assert guard in compact_load
     guard_pos = compact_load.find(guard)
     # rfind: anchor on the Phase-2 restore branch, not #3899's earlier idle-reset
@@ -1147,7 +1151,17 @@ def test_run_journal_recovery_persists_stream_scoped_event_cursor():
     script = "\n".join(
         [
             "const assert=require('assert');",
+            "const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;",
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorCanonicalOutcomeReason"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorMarkerInt"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
             """
 const inflight = _serverLiveSnapshotInflight({
@@ -1256,6 +1270,9 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
         lambda sid: {
             "session_id": "session-1",
             "run_id": sid,
+            "stable_run_id": sid,
+            "stable_run_id_status": "ok",
+            "stream_id": sid,
             "last_seq": 5,
             "last_event_id": f"{sid}:5",
         }
@@ -1290,7 +1307,17 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
     script = "\n".join(
         [
             "const assert=require('assert');",
+            "const _SESSION_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_EVENTS=512;",
+            "const _SESSION_ANCHOR_OUTCOME_MAX_BYTES=128000;",
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeEnvelopeIdentityKey"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorCanonicalOutcomeReason"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorMarkerInt"),
+            _function_decl(SESSIONS_JS, "_sessionAnchorOutcomeTruncationMarker"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneStrictIdentity"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneMergeIdentity"),
+            _function_decl(SESSIONS_JS, "_anchorActivitySceneHasRecoveryState"),
             _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
             _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
             _function_decl(SESSIONS_JS, "_selectLiveRecoveryInflight"),

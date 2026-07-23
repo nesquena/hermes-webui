@@ -2015,6 +2015,349 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _anchorOutcomeEnvelopeIdentityKey(event, expectedType, expectedRunId, sceneIdentity){
+  if(!event||typeof event!=='object') return '';
+  const sourceType=String(
+    event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
+  ).trim();
+  if(sourceType!==expectedType) return '';
+  const identity=(sceneIdentity&&typeof sceneIdentity==='object')?sceneIdentity:{};
+  const requiresCompleteSceneIdentity=!!(sceneIdentity&&typeof sceneIdentity==='object');
+  const expectedSession=String(identity.sessionId||identity.session_id||'').trim();
+  const expectedStream=String(identity.streamId||identity.stream_id||'').trim();
+  const expectedRun=String(expectedRunId||identity.runId||identity.run_id||'').trim();
+  if(requiresCompleteSceneIdentity&&(!expectedSession||!expectedStream||!expectedRun)) return '';
+  const eventSession=String(event.session_id||event.sessionId||'').trim();
+  const eventStream=String(event.stream_id||event.streamId||'').trim();
+  if(expectedSession&&eventSession!==expectedSession) return '';
+  if(expectedStream&&eventStream!==expectedStream) return '';
+  const eventId=String(event.event_id||event.lastEventId||event.last_event_id||'').trim();
+  const eventRunId=String(event.run_id||event.runId||'').trim();
+  let eventIdRunId='';
+  let eventIdSeq='';
+  if(eventId){
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt<=0||splitAt===eventId.length-1) return '';
+    eventIdRunId=eventId.slice(0,splitAt);
+    eventIdSeq=eventId.slice(splitAt+1);
+    if(!/^[1-9][0-9]*$/.test(eventIdSeq)) return '';
+  }
+  if(eventRunId&&eventIdRunId&&eventRunId!==eventIdRunId) return '';
+  const effectiveRunId=eventRunId||eventIdRunId;
+  if(expectedRun&&(!effectiveRunId||effectiveRunId!==expectedRun)) return '';
+  const hasSeq=event.seq!==undefined&&event.seq!==null&&event.seq!=='';
+  let seqText='';
+  if(hasSeq){
+    seqText=String(event.seq).trim();
+    if(!/^[1-9][0-9]*$/.test(seqText)) return '';
+    if(eventIdSeq&&seqText!==eventIdSeq) return '';
+  }
+  if(eventId) return `event:${eventId}`;
+  return effectiveRunId&&seqText?`run-seq:${effectiveRunId}:${seqText}`:'';
+}
+
+const _MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES=256000;
+const _MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS=512;
+const _MESSAGE_ANCHOR_OUTCOME_MAX_BYTES=128000;
+
+function _messageAnchorCanonicalOutcomeReason(reason){
+  const value=String(reason||'').trim();
+  return (value==='count'||value==='bytes'||value==='scene_bytes')?value:'';
+}
+
+function _messageAnchorMarkerInt(value, maximum){
+  return (typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=maximum)?value:null;
+}
+
+function _anchorOutcomeTruncationMarker(scene){
+  const marker=scene&&scene.outcomes_truncated;
+  if(!marker||typeof marker!=='object'||Array.isArray(marker)) return null;
+  const reason=_messageAnchorCanonicalOutcomeReason(marker.reason);
+  const acceptedCount=_messageAnchorMarkerInt(marker.accepted_count,_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS);
+  const acceptedBytes=_messageAnchorMarkerInt(marker.accepted_bytes,_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES);
+  if(!reason||acceptedCount===null||acceptedBytes===null) return null;
+  return {
+    reason,
+    accepted_count:acceptedCount,
+    max_count:_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:acceptedBytes,
+    max_bytes:_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
+
+function _liveAnchorStrictActivitySceneIdentity(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return null;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||scene.run_id||scene.runId||'').trim();
+  if(!sessionId||!streamId||!runId) return null;
+  return {sessionId,streamId,runId};
+}
+
+function _messageAnchorUtf8ByteLength(text){
+  const raw=String(text||'');
+  try{
+    if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(raw).length;
+  }catch(_){}
+  try{
+    if(typeof Buffer!=='undefined'&&Buffer&&typeof Buffer.byteLength==='function') return Buffer.byteLength(raw,'utf8');
+  }catch(_){}
+  try{
+    return encodeURIComponent(raw).replace(/%[0-9A-F]{2}/gi,'x').length;
+  }catch(_){
+    return raw.length;
+  }
+}
+
+function _messageAnchorCompactSceneBytes(scene){
+  try{
+    return _messageAnchorUtf8ByteLength(JSON.stringify(scene));
+  }catch(_){
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function _messageAnchorOutcomeBytes(events){
+  let total=0;
+  for(const event of (Array.isArray(events)?events:[])){
+    const payload=(event&&typeof event==='object'&&event.event&&typeof event.event==='object')?event.event:event;
+    try{ total+=_messageAnchorUtf8ByteLength(JSON.stringify(payload)); }catch(_){}
+  }
+  return total;
+}
+
+function _messageAnchorOutcomeTruncationMarker(reason, items){
+  const accepted=Array.isArray(items)?items:[];
+  return {
+    reason:_messageAnchorCanonicalOutcomeReason(reason)||'scene_bytes',
+    accepted_count:accepted.length,
+    max_count:_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS,
+    accepted_bytes:_messageAnchorOutcomeBytes(accepted),
+    max_bytes:_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES,
+    max_scene_bytes:_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES,
+  };
+}
+
+function _messageAnchorOutcomeSeq(event){
+  const direct=Number(event&&event.seq);
+  if(Number.isFinite(direct)&&direct>0) return direct;
+  const eventId=String(event&&(event.event_id||event.lastEventId||event.last_event_id)||'').trim();
+  const splitAt=eventId.lastIndexOf(':');
+  if(splitAt>0&&splitAt<eventId.length-1){
+    const parsed=Number(eventId.slice(splitAt+1));
+    if(Number.isFinite(parsed)&&parsed>0) return parsed;
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function _messageAnchorSceneOutcomeItems(scene){
+  const items=[];
+  let order=0;
+  const append=(events,type)=>{
+    for(const event of (Array.isArray(events)?events:[])){
+      if(!event||typeof event!=='object'||Array.isArray(event)) continue;
+      items.push({type,event,seq:_messageAnchorOutcomeSeq(event),order:order++});
+    }
+  };
+  append(scene&&scene.artifacts,'artifact_reference');
+  append(scene&&scene.side_effects,'state_saved');
+  return items.sort((a,b)=>(a.seq-b.seq)||(a.order-b.order));
+}
+
+function _messageAnchorSceneWithOutcomeItems(scene, items, marker){
+  const next={...(scene||{})};
+  next.artifacts=items.filter(item=>item.type==='artifact_reference').map(item=>item.event);
+  next.side_effects=items.filter(item=>item.type==='state_saved').map(item=>item.event);
+  if(marker) next.outcomes_truncated=marker;
+  else delete next.outcomes_truncated;
+  return next;
+}
+
+function _messageAnchorReasonRank(reason){
+  if(reason==='scene_bytes') return 3;
+  if(reason==='bytes') return 2;
+  if(reason==='count') return 1;
+  return 0;
+}
+
+function _messageAnchorMergedReason(markers, fallback){
+  let selected=_messageAnchorCanonicalOutcomeReason(fallback);
+  for(const marker of (Array.isArray(markers)?markers:[])){
+    const reason=_messageAnchorCanonicalOutcomeReason(marker&&marker.reason);
+    if(_messageAnchorReasonRank(reason)>_messageAnchorReasonRank(selected)) selected=reason;
+  }
+  return selected;
+}
+
+function _messageAnchorMinimalOutcomeScene(scene, marker){
+  const base={
+    version:'activity_scene_v1',
+    mode:String((scene&&scene.mode)||'compact_worklog')||'compact_worklog',
+    identity:{...(((scene&&scene.identity)&&typeof scene.identity==='object')?scene.identity:{})},
+    lifecycle:{...(((scene&&scene.lifecycle)&&typeof scene.lifecycle==='object')?scene.lifecycle:{})},
+    final_answer:'',
+    final_message_ref:null,
+    terminal_state:null,
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+  if(_messageAnchorCompactSceneBytes(base)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  base.identity={};
+  base.lifecycle={};
+  if(_messageAnchorCompactSceneBytes(base)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return base;
+  return {
+    version:'activity_scene_v1',
+    mode:'compact_worklog',
+    activity_rows:[],
+    artifacts:[],
+    side_effects:[],
+    outcomes_truncated:marker,
+  };
+}
+
+function _messageAnchorBoundedActivityScene(scene){
+  if(!scene||scene.version!=='activity_scene_v1') return scene;
+  const existingMarker=_anchorOutcomeTruncationMarker(scene);
+  let reason=_messageAnchorMergedReason([existingMarker].filter(Boolean),'');
+  const base={...(scene||{}),artifacts:[],side_effects:[]};
+  delete base.outcomes_truncated;
+  const items=_messageAnchorSceneOutcomeItems(scene);
+  const accepted=[];
+  let acceptedBytes=0;
+  for(const item of items){
+    const itemBytes=_messageAnchorOutcomeBytes([item]);
+    let rejectReason='';
+    if(accepted.length+1>_MESSAGE_ANCHOR_OUTCOME_MAX_EVENTS) rejectReason='count';
+    else if(acceptedBytes+itemBytes>_MESSAGE_ANCHOR_OUTCOME_MAX_BYTES) rejectReason='bytes';
+    else{
+      const trial=[...accepted,item];
+      const trialMarker=reason?_messageAnchorOutcomeTruncationMarker(reason,trial):null;
+      const trialScene=_messageAnchorSceneWithOutcomeItems(base,trial,trialMarker);
+      if(_messageAnchorCompactSceneBytes(trialScene)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+        accepted.push(item);
+        acceptedBytes+=itemBytes;
+        continue;
+      }
+      rejectReason='scene_bytes';
+    }
+    reason=_messageAnchorMergedReason([{reason},{reason:rejectReason}], '');
+    break;
+  }
+  if(accepted.length<items.length&&!reason) reason='scene_bytes';
+  let marker=reason?_messageAnchorOutcomeTruncationMarker(reason,accepted):null;
+  let next=_messageAnchorSceneWithOutcomeItems(base,accepted,marker);
+  while(accepted.length&&_messageAnchorCompactSceneBytes(next)>_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES){
+    const removed=accepted.pop();
+    acceptedBytes=Math.max(0,acceptedBytes-_messageAnchorOutcomeBytes([removed]));
+    marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',accepted);
+    next=_messageAnchorSceneWithOutcomeItems(base,accepted,marker);
+  }
+  if(_messageAnchorCompactSceneBytes(next)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return next;
+  marker=_messageAnchorOutcomeTruncationMarker('scene_bytes',[]);
+  const degraded={...base,activity_rows:[],artifacts:[],side_effects:[],outcomes_truncated:marker};
+  if(_messageAnchorCompactSceneBytes(degraded)<=_MESSAGE_ANCHOR_ACTIVITY_SCENE_MAX_BYTES) return degraded;
+  return _messageAnchorMinimalOutcomeScene(scene,marker);
+}
+
+function _applyAnchorRegistryOutcomesFromActivityScene(anchorApi, anchorRegistry, scene, context){
+  if(!anchorApi||typeof anchorApi.applyAssistantTurnAnchorSourceEvent!=='function'||!anchorRegistry) return false;
+  if(!scene||scene.version!=='activity_scene_v1') return false;
+  const sceneIdentity=_liveAnchorStrictActivitySceneIdentity(scene);
+  const contextSession=String(context&&context.session_id||'').trim();
+  const contextStream=String(context&&context.stream_id||'').trim();
+  const contextRun=String(context&&context.run_id||'').trim();
+  if(
+    !sceneIdentity
+    ||(contextSession&&sceneIdentity.sessionId!==contextSession)
+    ||(contextStream&&sceneIdentity.streamId!==contextStream)
+    ||(contextRun&&sceneIdentity.runId!==contextRun)
+  ) return false;
+  const truncationMarker=_anchorOutcomeTruncationMarker(scene);
+  if(truncationMarker&&anchorRegistry.anchor&&typeof anchorRegistry.anchor==='object'){
+    anchorRegistry.anchor.outcomes_truncated=truncationMarker;
+  }
+  const outcomeContext={
+    ...(context||{}),
+    session_id:sceneIdentity.sessionId,
+    stream_id:sceneIdentity.streamId,
+    run_id:sceneIdentity.runId,
+  };
+  const collections=[
+    [Array.isArray(scene.artifacts)?scene.artifacts:[],'artifact_reference'],
+    [Array.isArray(scene.side_effects)?scene.side_effects:[],'state_saved'],
+  ];
+  let accepted=false;
+  for(const [events,expectedType] of collections){
+    for(const event of events){
+      if(!event||typeof event!=='object') continue;
+      const sourceType=String(
+        event.source_event_type||event.sourceType||event.source_type||event.event_type||event.type||event.event||''
+      ).trim();
+      if(sourceType!==expectedType) continue;
+      if(!_anchorOutcomeEnvelopeIdentityKey(event,expectedType,sceneIdentity.runId,sceneIdentity)) continue;
+      let result=null;
+      try{ result=anchorApi.applyAssistantTurnAnchorSourceEvent(anchorRegistry,event,outcomeContext); }catch(_){ continue; }
+      if(result&&(result.applied||result.reason==='duplicate')) accepted=true;
+    }
+  }
+  return accepted||!!truncationMarker;
+}
+
+function _liveAnchorActivitySceneIdentity(scene, fallbackStreamId){
+  if(!scene||scene.version!=='activity_scene_v1') return {sessionId:'',streamId:'',runId:''};
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const streamId=String(identity.stream_id||identity.streamId||scene.stream_id||scene.streamId||fallbackStreamId||'').trim();
+  const runId=String(identity.run_id||identity.runId||'').trim()||streamId;
+  const sessionId=String(identity.session_id||identity.sessionId||scene.session_id||scene.sessionId||'').trim();
+  return {sessionId,streamId,runId};
+}
+
+function _liveAnchorRegistryIdentity(registry){
+  const anchorIdentity=registry&&registry.anchor&&registry.anchor.identity&&typeof registry.anchor.identity==='object'
+    ? registry.anchor.identity
+    : {};
+  const registryIdentity=registry&&registry.identity&&typeof registry.identity==='object'
+    ? registry.identity
+    : {};
+  return {
+    sessionId:String(anchorIdentity.session_id||registryIdentity.session_id||'').trim(),
+    runId:String(anchorIdentity.run_id||registryIdentity.run_id||'').trim(),
+    streamId:String(anchorIdentity.stream_id||registryIdentity.stream_id||'').trim(),
+  };
+}
+
+function _liveAnchorRegistryForActivityScene(anchorApi, registryMap, streamId, activeSid, scene, existingRegistry){
+  const sceneIdentity=_liveAnchorStrictActivitySceneIdentity(scene);
+  const stableRunId=sceneIdentity&&sceneIdentity.streamId===String(streamId||'').trim()
+    &&sceneIdentity.runId
+    &&sceneIdentity.runId!==sceneIdentity.streamId
+    ? sceneIdentity.runId
+    : '';
+  let registry=existingRegistry||null;
+  if(registry&&stableRunId){
+    const registryIdentity=_liveAnchorRegistryIdentity(registry);
+    if(
+      (registryIdentity.sessionId&&registryIdentity.sessionId!==String(activeSid||'').trim())
+      ||(registryIdentity.runId&&registryIdentity.runId!==stableRunId)
+    ){
+      registry=null;
+    }
+  }
+  if(!registry&&anchorApi&&typeof anchorApi.createAssistantTurnAnchorRegistry==='function'){
+    registry=anchorApi.createAssistantTurnAnchorRegistry({
+      session_id:activeSid,
+      stream_id:streamId,
+      run_id:stableRunId||null,
+    });
+  }
+  if(registryMap&&registry) registryMap.set(streamId,registry);
+  return registry;
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -2624,17 +2967,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ? (window._liveAnchorRegistries=window._liveAnchorRegistries||new Map())
     : null;
   const _existingAnchorRegistry=_anchorRegistryMap?_anchorRegistryMap.get(streamId):null;
-  const _anchorRegistry=_existingAnchorRegistry||(_anchorApi&&typeof _anchorApi.createAssistantTurnAnchorRegistry==='function'
-    ? _anchorApi.createAssistantTurnAnchorRegistry({
-      session_id:activeSid,
-      stream_id:streamId,
-      run_id:null,
-    })
-    : null);
+  const _recoveryAnchorActivityScene=(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene&&INFLIGHT[activeSid].anchorActivityScene.version==='activity_scene_v1')
+    ? INFLIGHT[activeSid].anchorActivityScene
+    : null;
+  let _anchorRegistry=_liveAnchorRegistryForActivityScene(
+    _anchorApi,
+    _anchorRegistryMap,
+    streamId,
+    activeSid,
+    _recoveryAnchorActivityScene,
+    _existingAnchorRegistry
+  );
   let _anchorShadowWarned=false;
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
-  if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
@@ -3710,8 +4056,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _anchorSceneHasOwnedOutcomes(scene){
     return !!(
-      (Array.isArray(scene&&scene.artifacts)&&scene.artifacts.length)
-      || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
+      scene&&scene.version==='activity_scene_v1'
+      &&((Array.isArray(scene.artifacts)&&scene.artifacts.length)
+      ||(Array.isArray(scene.side_effects)&&scene.side_effects.length)
+      ||_anchorOutcomeTruncationMarker(scene))
     );
   }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
@@ -3728,7 +4076,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const scene=_messageAnchorBoundedActivityScene(_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene));
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
@@ -4043,12 +4391,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
     if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
-    const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
-    const sceneStreamId=sceneIdentity.stream_id||streamId;
-    const sceneRunId=sceneIdentity.run_id||sceneStreamId;
+    const sceneIdentity=_liveAnchorActivitySceneIdentity(scene, streamId);
+    if(!sceneIdentity.streamId||!sceneIdentity.runId) return false;
     const sceneKey=[
-      sceneRunId||'',
-      sceneStreamId||'',
+      sceneIdentity.runId||'',
+      sceneIdentity.streamId||'',
       scene.activity_rows.length,
       scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
     ].join(':');
@@ -4078,22 +4425,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
       }
       const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
+      const rowStreamId=String(row.stream_id||rowIdentity.stream_id||sceneIdentity.streamId||'').trim();
+      if(!rowStreamId||rowStreamId!==sceneIdentity.streamId) return false;
+      const rawRowRunId=String(row.run_id||rowIdentity.run_id||'').trim();
+      const rowRunId=(!rawRowRunId||rawRowRunId===sceneIdentity.streamId||rawRowRunId===sceneIdentity.runId)
+        ? sceneIdentity.runId
+        : '';
+      if(!rowRunId) return false;
       const sourceEvent={
         ...payload,
         source_event_type:sourceType,
-        local_id:row.local_id||row.row_id||`snapshot:${sceneStreamId}:${i}`,
+        local_id:row.local_id||row.row_id||`snapshot:${sceneIdentity.streamId}:${i}`,
         event_id:row.event_id||null,
         seq:row.seq??undefined,
         status:row.status||undefined,
-        stream_id:row.stream_id||rowIdentity.stream_id||sceneStreamId,
-        run_id:row.run_id||rowIdentity.run_id||sceneRunId,
+        stream_id:rowStreamId,
+        run_id:rowRunId,
         // Carry the row's persisted creation timestamp through hydration so the
         // worklog event timestamp (#5700/#5739) survives a settled-snapshot rebuild
         // (payload may not carry created_at even when the row does). (#5739 gate.)
         created_at:payload.created_at??row.created_at??undefined,
       };
       try{
-        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneIdentity.streamId,run_id:sceneIdentity.runId});
       }catch(err){
         if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
           _anchorShadowWarned=true;
@@ -4106,6 +4460,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
   _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
+  const _inflightAnchorActivityScene=INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene;
+  if(_inflightAnchorActivityScene&&_inflightAnchorActivityScene.version==='activity_scene_v1'){
+    const _outcomeSceneIdentity=_liveAnchorStrictActivitySceneIdentity(_inflightAnchorActivityScene);
+    if(_outcomeSceneIdentity&&_outcomeSceneIdentity.streamId===streamId){
+      _applyAnchorRegistryOutcomesFromActivityScene(
+        _anchorApi,
+        _anchorRegistry,
+        _inflightAnchorActivityScene,
+        {session_id:activeSid,stream_id:_outcomeSceneIdentity.streamId,run_id:_outcomeSceneIdentity.runId}
+      );
+    }
+  }
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
@@ -5634,7 +6000,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('state_saved',e=>{
       let d={};
-      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      try{
+        const parsed=JSON.parse(e.data||'{}');
+        d=(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))?parsed:{};
+      }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       _applyToAnchor('state_saved',d,e,null,{render:false});
