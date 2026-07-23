@@ -16654,13 +16654,15 @@ def _discover_rg_candidates(query: str, sessions: list) -> set | None:
     """
     if not query or not SESSION_DIR.is_dir():
         return None
-    # Queries containing characters that JSON-escapes in stored session files
-    # (double-quote and backslash) will NOT match as raw bytes under `rg -F`,
-    # because the on-disk JSON stores them as `\"` / `\\`.  Returning None makes
-    # the caller skip the prefilter and fall back to full Python decode+match,
-    # which handles escaping correctly.  Without this guard, sessions whose
-    # content contains `"` or `\` are silently dropped from results.
-    if any(ch in query for ch in ('"', "\\")):
+    # rg -F searches raw on-disk bytes, but the final matcher searches decoded
+    # text.  When JSON serialization would change the query (quotes, backslashes,
+    # tabs, newlines, NUL, etc.), rg cannot find the literal match in the file
+    # and would silently exclude valid sessions.  The round-trip check catches
+    # every character that JSON escapes — one guard covers all edge cases.
+    try:
+        if json.dumps(query, ensure_ascii=False)[1:-1] != query:
+            return None
+    except (ValueError, UnicodeEncodeError):
         return None
     try:
         import subprocess
@@ -16678,7 +16680,7 @@ def _discover_rg_candidates(query: str, sessions: list) -> set | None:
             for line in proc.stdout.strip().split("\n")
             if line.strip()
         }
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
         return None
 
 
@@ -16795,27 +16797,42 @@ def _handle_sessions_search(handler, parsed):
             sid = str(s.get("session_id") or "")
             if not sid:
                 continue
-            # rg filter: skip sessions that don't contain the query string at all
-            if rg_candidates is not None and sid not in rg_candidates:
-                continue
-            try:
-                # Prefer the ripgrep-backed content search when available; it
-                # loads a normalized head of the session messages and returns the
-                # first matching message text (or None). Preserve upstream's
-                # redaction behavior by honoring `_search_redact_enabled`.
+            matched_text = None
+            # Fast path: rg confirmed this session contains the query on disk.
+            # The file read is safe because rg's match proves the bytes exist.
+            if rg_candidates is not None and sid in rg_candidates:
                 matched_text = _rg_content_match(sid, q, depth)
-                if matched_text is not None:
-                    item = dict(s, match_type="content")
-                    preview = _session_search_preview(matched_text, q)
-                    if preview:
-                        item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
-                    if isinstance(item.get("title"), str):
-                        item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-                    _redact_sidebar_title_fields(item, _search_redact_enabled)
-                    results.append(item)
-            except (KeyError, Exception):
-                # Keep the same safe-fail behavior as upstream: ignore and continue.
-                pass
+            # Canonical path: rg missed or was unavailable — use the session
+            # resolver so cached/ahead-of-disk messages, journal recovery, and
+            # state.db rows remain searchable.  This is the fallback that
+            # prevents rg from hiding fresher canonical content.
+            if matched_text is None:
+                try:
+                    sess = get_session(s["session_id"])
+                    if sess is not None:
+                        msgs = sess.messages[:depth] if depth else sess.messages
+                        for m in msgs:
+                            c = _session_search_message_text(m)
+                            if q in str(c).lower():
+                                matched_text = c
+                                break
+                except (KeyError, Exception):
+                    pass
+                # File-read fallback: when the resolver is unavailable or
+                # returns no match, the on-disk JSON may still hold the
+                # query text.  Never hides canonical content because the
+                # resolver was already tried above.
+                if matched_text is None:
+                    matched_text = _rg_content_match(sid, q, depth)
+            if matched_text is not None:
+                item = dict(s, match_type="content")
+                preview = _session_search_preview(matched_text, q)
+                if preview:
+                    item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
+                if isinstance(item.get("title"), str):
+                    item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+                _redact_sidebar_title_fields(item, _search_redact_enabled)
+                results.append(item)
     return j(handler, {
         "sessions": results,
         "query": q,

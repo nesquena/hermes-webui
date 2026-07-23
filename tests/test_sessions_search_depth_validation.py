@@ -361,3 +361,84 @@ def test_depth_limit_sees_message_past_collapsed_partials(session_s1_json, monke
 
     assert captured["status"] == 200
     assert captured["payload"]["count"] == 1
+
+
+# ── Control-character queries (gate Blocker 1 regression) ─────────────────
+
+def test_query_with_tab_is_not_dropped(session_s1_json, monkeypatch):
+    """Query containing a literal tab must find the session.  The json.dumps
+    round-trip guard bypasses rg when the query contains control characters
+    that JSON escapes (tab -> \\t), so the file-read fallback handles it.
+    """
+    import api.routes as routes
+
+    s1_with_tab = {
+        "session_id": "s1",
+        "title": "Tab test",
+        "profile": "default",
+        "messages": [
+            {"role": "user", "content": "alpha\tbeta"},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1_with_tab), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Tab test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=alpha%09beta&content=1"),  # %09 = tab
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
+
+
+def test_query_with_newline_is_not_dropped(session_s1_json, monkeypatch):
+    """Query containing a literal newline must find the session."""
+    import api.routes as routes
+
+    s1_with_nl = {
+        "session_id": "s1",
+        "title": "Newline test",
+        "profile": "default",
+        "messages": [
+            {"role": "user", "content": "hello\nworld"},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1_with_nl), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Newline test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=hello%0Aworld&content=1"),  # %0A = newline
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
