@@ -6587,6 +6587,24 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .html-preview-wrap{border:1px solid var(--border);border-radius:6px;overflow:hidden;margin:4px 0;background:var(--surface);}
 .html-preview-header{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--surface-2);font-size:12px;font-weight:600;}
 .html-preview-header a{color:var(--accent);text-decoration:none;font-weight:500;}
+.html-preview-actions{display:flex;align-items:center;gap:10px;}
+.artifact-publish-btn,.artifact-panel-btn,.artifact-copy-btn,.artifact-revoke-btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--accent);cursor:pointer;font-size:12px;padding:2px 8px;}
+.artifact-publish-btn:disabled{opacity:.5;cursor:default;}
+.artifact-panel-btn{padding:2px 5px;}
+.artifact-revoke-btn{color:var(--danger,#c0392b);}
+.artifact-published{display:inline-flex;align-items:center;gap:6px;font-size:12px;}
+.artifacts-panel-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1200;display:flex;align-items:center;justify-content:center;}
+.artifacts-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;width:min(560px,92vw);max-height:70vh;display:flex;flex-direction:column;}
+.artifacts-panel-header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;font-weight:600;border-bottom:1px solid var(--border);}
+.artifacts-panel-header button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;}
+.artifacts-panel-body{overflow-y:auto;padding:6px 14px 12px;}
+.artifact-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.artifact-row:last-child{border-bottom:none;}
+.artifact-row-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.artifact-row-meta{color:var(--muted);font-size:12px;white-space:nowrap;}
+.artifact-row-actions{display:inline-flex;align-items:center;gap:6px;}
+.artifact-row-empty{color:var(--muted);justify-content:center;}
+.html-sandbox-note{color:var(--muted);font-weight:400;}
 .html-preview-header a:hover{text-decoration:underline;}
 .html-preview-iframe{width:100%;height:400px;border:none;display:block;background:#fff;}
 .html-preview-fallback{padding:8px;font-size:13px;}

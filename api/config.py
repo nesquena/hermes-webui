@@ -9264,6 +9264,7 @@ _SETTINGS_DEFAULTS = {
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "workspace_todos_tab": False,  # show a Todos tab in the workspace panel (right side)
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
+    "artifacts_enabled": bool(os.getenv("HERMES_WEBUI_ARTIFACTS", "") not in ("", "0", "false", "no", "off")),  # publish agent files under stable /artifact/<token> URLs (opt-in)
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
@@ -9537,6 +9538,7 @@ _SETTINGS_BOOL_KEYS = {
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
     "api_redact_enabled",
+    "artifacts_enabled",
     "session_jump_buttons",
     "render_user_markdown",
     "large_text_paste_as_attachment",

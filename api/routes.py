@@ -13435,6 +13435,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
 
+    if parsed.path.startswith("/artifact/"):
+        return _handle_artifact_get(handler, parsed)
+
+    if parsed.path == "/api/artifact/list":
+        from api.artifacts import artifacts_enabled, list_artifacts
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        return j(handler, {"ok": True, "artifacts": list_artifacts()})
+
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
 
@@ -14142,6 +14151,35 @@ def handle_post(handler, parsed) -> bool:
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True, "prompt": new_prompt})
+
+    if parsed.path == "/api/artifact/publish":
+        from api.artifacts import artifacts_enabled, publish_artifact
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        try:
+            result = publish_artifact(
+                str(body.get("path") or ""),
+                title=body.get("title"),
+                # Tri-state: omitted key preserves the artifact's current
+                # public flag (a plain re-publish must not un-share it).
+                public=(bool(body.get("public")) if "public" in body else None),
+                session_id=str(body.get("session_id") or "") or None,
+                token=str(body.get("token") or "") or None,
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        return j(handler, {"ok": True, "artifact": result})
+
+    if parsed.path == "/api/artifact/revoke":
+        from api.artifacts import artifacts_enabled, revoke_artifact
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        token = str(body.get("token") or "").strip()
+        if not token:
+            return bad(handler, "token is required", 400)
+        if not revoke_artifact(token):
+            return bad(handler, "unknown artifact token", 404)
+        return j(handler, {"ok": True})
 
     if parsed.path == "/api/share/create":
         sid = str(body.get("session_id") or "").strip()
@@ -18833,6 +18871,58 @@ def _path_is_within_root(child: Path, root: Path) -> bool:
         return False
 
 
+def _handle_artifact_get(handler, parsed):
+    """Serve a published artifact version under its stable URL.
+
+    Access model (see api/artifacts.py): public artifacts serve without auth;
+    non-public artifacts require a valid session cookie and return 404 (not
+    401) to anonymous callers so artifact tokens cannot be probed. HTML is
+    served inside a scripts-only CSP sandbox (same hardening as /api/media
+    inline previews); SVG gets a script-less sandbox.
+    """
+    from api.artifacts import artifacts_enabled, resolve_artifact_file
+
+    if not artifacts_enabled():
+        return j(handler, {"error": "not found"}, status=404)
+    token = parsed.path[len("/artifact/"):].strip().strip("/")
+    if not token or "/" in token:
+        return j(handler, {"error": "not found"}, status=404)
+    qs = parse_qs(parsed.query)
+    v_raw = qs.get("v", [""])[0].strip()
+    version = int(v_raw) if v_raw.isdigit() else None
+    resolved = resolve_artifact_file(token, version)
+    if resolved is None:
+        return j(handler, {"error": "not found"}, status=404)
+    meta, ventry, fpath = resolved
+    # Anonymous access requires BOTH: artifact is public AND this specific
+    # version's stored copy is public-safe (redacted / non-redactable binary
+    # published while public). Versions published while private stay
+    # session-gated even after a later public toggle — otherwise ?v=N would
+    # resurrect unredacted bytes (audit finding, 18.07.2026).
+    anonymous_ok = bool(meta.get("public")) and bool(ventry.get("public_safe"))
+    if not anonymous_ok:
+        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        if is_auth_enabled():
+            cv = parse_cookie(handler)
+            if not (cv and verify_session(cv)):
+                return j(handler, {"error": "not found"}, status=404)
+    mime = str(ventry.get("mime") or meta.get("mime") or "application/octet-stream")
+    csp = None
+    if mime == "text/html":
+        csp = "sandbox allow-scripts"
+    elif mime == "image/svg+xml":
+        csp = "sandbox"
+    inline = (
+        mime in ("text/html", "image/svg+xml", "application/pdf", "text/plain", "application/json")
+        or mime.startswith(("image/", "audio/", "video/"))
+    )
+    disposition = "inline" if inline else "attachment"
+    # A pinned version is immutable; the floating URL must revalidate so a
+    # re-publish is picked up promptly.
+    cache_control = "private, max-age=3600" if version is not None else "private, max-age=0, must-revalidate"
+    return _serve_file_bytes(handler, fpath, mime, disposition, cache_control, csp=csp)
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -18869,7 +18959,9 @@ def _handle_media(handler, parsed):
 
     # Resolve the path and check it is within an allowed root
     try:
-        target = Path(raw_path).resolve()
+        # expanduser: agent replies routinely reference ~/workspace/... paths
+        # (the gateway's deliverable pipeline expands them the same way).
+        target = Path(_os.path.expanduser(raw_path)).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
 
