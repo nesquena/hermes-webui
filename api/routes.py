@@ -18368,41 +18368,24 @@ def _replay_run_journal(
     if not summary:
         return False
     session_id = str(summary.get("session_id") or "")
-    cursor = after_seq
-    replay_complete = False
-    for _page_idx in range(_RUN_JOURNAL_COMPLETE_READ_MAX_PAGES):
-        journal = read_run_events(
-            session_id,
-            stream_id,
-            after_seq=cursor,
-            max_seq=max_seq,
+    journal = _read_run_journal_until_complete(
+        session_id,
+        stream_id,
+        after_seq=after_seq,
+        max_seq=max_seq,
+    )
+    if not _run_journal_page_complete(journal):
+        return False
+    for entry in journal.get("events") or []:
+        if not isinstance(entry, dict):
+            continue
+        _sse_with_id(
+            handler,
+            entry.get("event") or entry.get("type") or "message",
+            entry.get("payload"),
+            entry.get("event_id"),
         )
-        page_events = [
-            entry for entry in (journal.get("events") or []) if isinstance(entry, dict)
-        ]
-        for entry in page_events:
-            _sse_with_id(
-                handler,
-                entry.get("event") or entry.get("type") or "message",
-                entry.get("payload"),
-                entry.get("event_id"),
-            )
-        if _run_journal_page_complete(journal):
-            replay_complete = True
-            break
-        if not page_events:
-            break
-        try:
-            next_cursor = int(journal.get("next_after_seq"))
-        except (TypeError, ValueError):
-            try:
-                next_cursor = int(page_events[-1].get("seq") or 0)
-            except (TypeError, ValueError):
-                break
-        if cursor is not None and next_cursor <= int(cursor):
-            break
-        cursor = next_cursor
-    if include_stale and replay_complete and not summary.get("terminal"):
+    if include_stale and not summary.get("terminal"):
         stale = stale_interrupted_event(
             session_id,
             stream_id,
@@ -18410,7 +18393,7 @@ def _replay_run_journal(
         )
         if stale:
             _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
-    return replay_complete
+    return True
 
 
 def _run_journal_same_run_seq(event_id: str | None, stream_id: str) -> int | None:

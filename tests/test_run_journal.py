@@ -79,6 +79,19 @@ def test_run_journal_reads_suffix_after_default_row_cap(tmp_path):
     assert [event["event"] for event in journal["events"]] == ["token", "done"]
 
 
+def test_run_journal_fails_closed_on_physical_seq_reorder(tmp_path):
+    append_run_event("session_1", "run_reorder", "token", {"text": "one"}, session_dir=tmp_path, seq=1)
+    append_run_event("session_1", "run_reorder", "token", {"text": "three"}, session_dir=tmp_path, seq=3)
+    append_run_event("session_1", "run_reorder", "token", {"text": "two"}, session_dir=tmp_path, seq=2)
+
+    journal = read_run_events("session_1", "run_reorder", session_dir=tmp_path)
+
+    assert journal["complete"] is False
+    assert journal["limit_reason"] == "replay_noncontiguous"
+    assert [event["seq"] for event in journal["events"]] == [1]
+    assert journal["malformed"] == [{"line": 2, "reason": "replay_noncontiguous"}]
+
+
 def test_run_journal_rejects_single_over_cap_row_before_json_parse(tmp_path):
     path = tmp_path / "_run_journal" / "session_1" / "run_giant.jsonl"
     path.parent.mkdir(parents=True)

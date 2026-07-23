@@ -941,21 +941,17 @@ class RunJournalWriter:
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # Let append_run_event() reserve the seq and write the JSONL row under
+        # one per-path critical section. Splitting reservation from append lets
+        # two callers write seq N+1 before seq N at a page boundary.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
 
 
@@ -977,6 +973,7 @@ def read_run_events(
     complete = True
     limit_reason: str | None = None
     next_after_seq = int(after_seq) if after_seq is not None else None
+    expected_seq = 1
     floor = int(after_seq) if after_seq is not None else None
     ceiling = int(max_seq) if max_seq is not None else None
     row_cap = None if max_rows is None else max(0, int(max_rows))
@@ -1036,10 +1033,21 @@ def read_run_events(
                 seq = int(parsed.get("seq") or 0)
             except (TypeError, ValueError):
                 seq = 0
+            if ceiling is not None and expected_seq > ceiling and seq > ceiling:
+                break
+            if (
+                seq != expected_seq
+                or parsed.get("event_id") != f"{run_id}:{seq}"
+                or parsed.get("run_id") != str(run_id)
+                or parsed.get("session_id") != str(session_id)
+            ):
+                limit_reason = "replay_noncontiguous"
+                malformed.append({"line": line_no, "reason": limit_reason})
+                complete = False
+                break
+            expected_seq += 1
             if floor is not None and seq <= floor:
                 continue
-            if ceiling is not None and seq > ceiling:
-                break
             if row_cap is not None and emitted_rows >= row_cap:
                 limit_reason = "replay_limit_rows"
                 malformed.append({"line": line_no, "reason": limit_reason})

@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 import io
 import json
 import queue
+import threading
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -257,7 +258,7 @@ def test_replay_emits_event_ids_and_stale_restart_diagnostic():
     replay_pos = ROUTES_SRC.index("def _replay_run_journal")
     block = ROUTES_SRC[replay_pos : replay_pos + 2400]
 
-    assert "read_run_events" in block
+    assert "_read_run_journal_until_complete" in block
     assert "_sse_with_id" in block
     assert "stale_interrupted_event" in block
 
@@ -617,6 +618,76 @@ def test_replay_run_journal_returns_complete_after_paged_boundary(monkeypatch):
 
     assert routes._replay_run_journal(handler, "run_1", 0, include_stale=False) is True
     assert calls == [0, 2]
+
+
+def test_replay_run_journal_keeps_writer_boundary_reorder_exact_once(tmp_path, monkeypatch):
+    import api.run_journal as run_journal
+    import api.routes as routes
+
+    session_id = "session_boundary"
+    run_id = "run_boundary"
+    writer = run_journal.RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    for seq in range(1, 2048):
+        writer.append_sse_event("token", {"text": str(seq)})
+
+    real_append = run_journal.append_run_event
+    first_append_ready = threading.Event()
+    release_first_append = threading.Event()
+    first_append_blocked = {"value": False}
+
+    def interleaved_append(session_id, run_id, event_name, payload=None, **kwargs):
+        if payload == {"text": "delayed-2048"} and not first_append_blocked["value"]:
+            first_append_blocked["value"] = True
+            first_append_ready.set()
+            assert release_first_append.wait(timeout=5)
+        return real_append(session_id, run_id, event_name, payload, **kwargs)
+
+    monkeypatch.setattr(run_journal, "append_run_event", interleaved_append)
+    errors = []
+
+    def append_delayed():
+        try:
+            writer.append_sse_event("token", {"text": "delayed-2048"})
+        except Exception as exc:  # pragma: no cover - failure reported below.
+            errors.append(exc)
+
+    delayed_thread = threading.Thread(target=append_delayed)
+    delayed_thread.start()
+    assert first_append_ready.wait(timeout=5)
+    writer.append_sse_event("token", {"text": "fast-2049"})
+    release_first_append.set()
+    delayed_thread.join(timeout=5)
+
+    assert not delayed_thread.is_alive()
+    assert errors == []
+    assert first_append_blocked["value"] is True
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=tmp_path),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=tmp_path,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is True
+
+    replayed_ids = [
+        line.removeprefix("id: ")
+        for line in handler.wfile.getvalue().decode("utf-8").splitlines()
+        if line.startswith("id: ")
+    ]
+    assert replayed_ids == [f"{run_id}:{seq}" for seq in range(1, 2050)]
 
 
 def test_active_stream_replay_keeps_items_for_new_run_with_same_seq_range(monkeypatch):
