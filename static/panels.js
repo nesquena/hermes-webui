@@ -7984,113 +7984,58 @@ function _extractSettingsValueText(field) {
   return chunks.join(' ');
 }
 
-async function _buildSettingsIndex() {
-  if (_settingsIndex) return;
-  // Memoize the in-flight build so concurrent searches share one pass; the
-  // lazy pane loaders are not guaranteed re-entrant.
-  if (_settingsIndexPromise) return _settingsIndexPromise;
-  const promise = (async () => {
-    // Ensure lazy-loaded panes are populated before reading the DOM
-    await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
-    const index = [];
-    const add = (entry) => {
-      index.push({ ...entry, _settingsSearchIndex: index.length });
-    };
-    const sectionMap = {
-      settingsPaneConversation: 'conversation',
-      settingsPaneAppearance: 'appearance',
-      settingsPanePreferences: 'preferences',
-      settingsPaneProviders: 'providers',
-      settingsPanePlugins: 'plugins',
-      settingsPaneExtensions: 'extensions',
-      settingsPaneSystem: 'system',
-      settingsPaneHelp: 'help',
-    };
-    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
-      const pane = $(paneId);
-      if (!pane) continue;
-      pane.querySelectorAll('.settings-field').forEach(field => {
-        // The i18n key may live on the <label> itself (label[data-i18n]) OR on
-        // a child of the label — the common toggle shape is
-        // <label><input><span data-i18n="..."></span></label>. Match both, plus
-        // a plain <label> with no i18n key, so every field is searchable
-        // (previously only label[data-i18n] indexed, silently dropping most
-        // checkbox settings). #4340 review fix.
-        const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
-        if (!labelEl) return;
-        const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (!titleText) return;
-        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
-        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        add({
-          label: titleText,
-          titleText,
-          valueText,
-          descriptionText,
-          searchBlob,
-          sectionKey,
-          i18nKey,
-          el: field,
-        });
+function _scanSettingsPanes() {
+  const index = [];
+  const add = (entry) => {
+    index.push({ ...entry, _settingsSearchIndex: index.length });
+  };
+  const sectionMap = {
+    settingsPaneConversation: 'conversation',
+    settingsPaneAppearance: 'appearance',
+    settingsPanePreferences: 'preferences',
+    settingsPaneProviders: 'providers',
+    settingsPanePlugins: 'plugins',
+    settingsPaneExtensions: 'extensions',
+    settingsPaneSystem: 'system',
+    settingsPaneHelp: 'help',
+  };
+  for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+    const pane = $(paneId);
+    if (!pane) continue;
+    pane.querySelectorAll('.settings-field').forEach(field => {
+      // The i18n key may live on the <label> itself (label[data-i18n]) OR on
+      // a child of the label — the common toggle shape is
+      // <label><input><span data-i18n="..."></span></label>. Match both, plus
+      // a plain <label> with no i18n key, so every field is searchable
+      // (previously only label[data-i18n] indexed, silently dropping most
+      // checkbox settings). #4340 review fix.
+      const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
+      if (!labelEl) return;
+      const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
+      const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+      if (!titleText) return;
+      const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+      const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+      const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      add({
+        label: titleText,
+        titleText,
+        valueText,
+        descriptionText,
+        searchBlob,
+        sectionKey,
+        i18nKey,
+        el: field,
       });
-      if (sectionKey === 'providers') {
-        pane.querySelectorAll('.provider-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) {
-            const titleText = cardName;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
-            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label: cardName,
-              titleText,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: card,
-              cardName,
-            });
-          }
-          card.querySelectorAll('.provider-card-field').forEach(field => {
-            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
-            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (!label) return;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
-            const searchBlob = [label, valueText, descriptionText, field.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label,
-              titleText: label,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: field,
-              cardName,
-              fieldLabel,
-            });
-          });
-        });
-      }
-      if (sectionKey === 'plugins') {
-        pane.querySelectorAll('.plugin-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (!cardName) return;
+    });
+    if (sectionKey === 'providers') {
+      pane.querySelectorAll('.provider-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (cardName) {
           const titleText = cardName;
           const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
           const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
@@ -8109,12 +8054,92 @@ async function _buildSettingsIndex() {
             el: card,
             cardName,
           });
+        }
+        card.querySelectorAll('.provider-card-field').forEach(field => {
+          const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+          if (!label) return;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+          const searchBlob = [label, valueText, descriptionText, field.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label,
+            titleText: label,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: field,
+            cardName,
+            fieldLabel,
+          });
         });
-      }
+      });
     }
-    // A panel-session reset while building clears the memo; drop this result
-    // instead of resurrecting a stale index for the new session.
-    if (_settingsIndexPromise === promise) _settingsIndex = index;
+    if (sectionKey === 'plugins') {
+      pane.querySelectorAll('.plugin-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (!cardName) return;
+        const titleText = cardName;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+        const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: cardName,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          el: card,
+          cardName,
+        });
+      });
+    }
+  }
+  return index;
+}
+
+let _settingsDynamicPromise = null;
+
+async function _buildSettingsIndex() {
+  if (_settingsIndex) return;
+  // Memoize the in-flight build so concurrent searches share one pass; the
+  // lazy pane loaders are not guaranteed re-entrant.
+  if (_settingsIndexPromise) return _settingsIndexPromise;
+  var promise;
+  promise = (async () => {
+    // Phase 1: build index from whatever DOM is available right now.
+    // Static panes (Conversation, Appearance, Preferences, System, Help) are
+    // always present; dynamic panes (Providers, Plugins, Extensions) may or
+    // may not have finished loading. We do NOT await the dynamic pane loaders
+    // here — static results render immediately. #6369 fix.
+    const staticIndex = _scanSettingsPanes();
+    if (_settingsIndexPromise === promise) _settingsIndex = staticIndex;
+
+    // Phase 2: load dynamic panes in the background and re-index when done.
+    // filterSettings() awaits this promise to refresh the dropdown with
+    // dynamic matches after the initial static render.
+    _settingsDynamicPromise = Promise.all([
+      loadProvidersPanel(),
+      loadPluginsPanel(),
+      loadExtensionsPanel(),
+    ]).then(() => {
+      // Only update if no newer build was started
+      if (_settingsIndexPromise === promise) {
+        _settingsIndex = _scanSettingsPanes();
+      }
+    }).catch(() => {
+      // Individual pane loaders handle their own errors; don't crash search
+    });
   })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
   _settingsIndexPromise = promise;
   return promise;
@@ -8126,9 +8151,29 @@ async function filterSettings(query) {
   const q = (query || '').trim().toLowerCase();
   if (!q) { ++_settingsSearchSeq; resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
   const seq = ++_settingsSearchSeq;
+
+  // Phase 1: build index from available DOM (fast — no network). Static panes
+  // are always present so results render immediately. #6369 fix.
   await _buildSettingsIndex();
-  // A newer keystroke superseded this query while the index was building.
   if (seq !== _settingsSearchSeq) return;
+
+  // Render immediately with whatever is in the index (static matches)
+  _renderSettingsResults(resultsEl, q, seq);
+
+  // Phase 2: if dynamic panes are still loading, await them and re-render
+  // with the full index (including dynamic Provider/Plugin/Extension matches).
+  if (_settingsDynamicPromise) {
+    await _settingsDynamicPromise;
+    if (seq !== _settingsSearchSeq) return;
+    _renderSettingsResults(resultsEl, q, seq);
+  }
+}
+
+function _renderSettingsResults(resultsEl, q, seq) {
+  if (!resultsEl) return;
+  if (seq !== _settingsSearchSeq) return;
+  if (!q) return;
+
   const sectionLabels = {
     conversation: t('settings_tab_conversation') || 'Conversation',
     appearance: t('settings_tab_appearance') || 'Appearance',
