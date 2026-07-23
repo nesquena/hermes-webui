@@ -1078,6 +1078,9 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
+_TODO_STATE_METADATA_PREFIX_MAX_BYTES = 6 * 1024 * 1024
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     """Read only the metadata portion before the large arrays.
 
@@ -1090,24 +1093,81 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     — still captures ``message_count`` (which is written before both). Without
     the scenes-stop a legacy large-scene sidecar overflows ``max_prefix_bytes``
     and forces a full multi-MB parse on every poll (the #4633 churn).
+
+    Compression snapshots may carry a bounded ``todo_state`` before ``messages``.
+    After that top-level key is detected, the reader uses a larger todo-specific
+    ceiling so a valid list does not fall back to parsing the parent transcript.
+    Other oversized metadata remains subject to ``max_prefix_bytes``.
     """
     buf = ''
+    bytes_read = 0
+    active_limit = max_prefix_bytes
+    chunk_chars = 4096
+    todo_state_prefix = False
+    modern_messages_marker = '\n  "messages":'
+    modern_scenes_marker = '\n  "anchor_activity_scenes":'
+    marker_overlap = max(len(modern_messages_marker), len(modern_scenes_marker))
+
+    def _closed_prefix(stop_pos):
+        prefix = buf[:stop_pos].rstrip()
+        if prefix.endswith(','):
+            prefix = prefix[:-1].rstrip()
+        return f'{prefix}\n}}'
+
     with open(path, 'r', encoding='utf-8') as f:
-        while len(buf.encode('utf-8')) < max_prefix_bytes:
-            chunk = f.read(4096)
+        while bytes_read < active_limit:
+            previous_len = len(buf)
+            chunk = f.read(chunk_chars)
             if not chunk:
-                return None
+                break
             buf += chunk
-            stop_pos = _find_top_level_json_key(buf, 'messages')
-            scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
-            if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
-                stop_pos = scenes_pos
-            if stop_pos is None:
-                continue
-            prefix = buf[:stop_pos].rstrip()
-            if prefix.endswith(','):
-                prefix = prefix[:-1].rstrip()
-            return f'{prefix}\n}}'
+            bytes_read += len(chunk.encode('utf-8'))
+
+            if todo_state_prefix:
+                # Session.save() writes indent=2 JSON. Search only the newly
+                # appended range (plus marker overlap) instead of rescanning the
+                # complete, potentially multi-megabyte todo value each time.
+                search_from = max(0, previous_len - marker_overlap)
+                messages_marker_pos = buf.find(modern_messages_marker, search_from)
+                scenes_marker_pos = buf.find(modern_scenes_marker, search_from)
+                stop_pos = None
+                if messages_marker_pos >= 0:
+                    stop_pos = messages_marker_pos + 3  # skip newline + two spaces
+                if scenes_marker_pos >= 0:
+                    scenes_pos = scenes_marker_pos + 3
+                    if stop_pos is None or scenes_pos < stop_pos:
+                        stop_pos = scenes_pos
+            else:
+                stop_pos = _find_top_level_json_key(buf, 'messages')
+                scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
+                if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
+                    stop_pos = scenes_pos
+
+            if stop_pos is not None:
+                return _closed_prefix(stop_pos)
+
+            if not todo_state_prefix and _find_top_level_json_key(buf, 'todo_state') is not None:
+                # Compression snapshots persist the settled todo list in the
+                # metadata prefix. The todo tool permits 256 items with 4,000
+                # characters each, so a valid snapshot can exceed the normal
+                # 64 KiB metadata budget. Extend the budget only after seeing
+                # this top-level key; unrelated oversized metadata still fails
+                # closed at the normal limit. Larger chunks avoid repeatedly
+                # rescanning a multi-megabyte todo payload in 4 KiB steps.
+                todo_state_prefix = True
+                active_limit = max(active_limit, _TODO_STATE_METADATA_PREFIX_MAX_BYTES)
+                chunk_chars = 256 * 1024
+
+    if todo_state_prefix:
+        # Compatibility fallback for compact or externally-authored JSON that
+        # does not use Session.save()'s two-space top-level indentation. This is
+        # intentionally a single scan after EOF/cap, not one scan per chunk.
+        stop_pos = _find_top_level_json_key(buf, 'messages')
+        scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
+        if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
+            stop_pos = scenes_pos
+        if stop_pos is not None:
+            return _closed_prefix(stop_pos)
     return None
 
 
@@ -1223,9 +1283,10 @@ class Session:
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
-                parent_session_id: str=None,
-                worktree_path=None,
-                worktree_branch=None,
+                 parent_session_id: str=None,
+                 compression_disjoint_parent_boundary=None,
+                 worktree_path=None,
+                 worktree_branch=None,
                  worktree_repo_root=None,
                  worktree_created_at=None,
                  enabled_toolsets=None,
@@ -1306,6 +1367,11 @@ class Session:
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        self.compression_disjoint_parent_boundary = (
+            copy.deepcopy(compression_disjoint_parent_boundary)
+            if isinstance(compression_disjoint_parent_boundary, dict)
+            else None
+        )
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1330,6 +1396,9 @@ class Session:
         # fall back to reading keys/updated_at off anchor_activity_scenes.
         _raw_scene_index = kwargs.get('anchor_scene_index')
         self._anchor_scene_index = _raw_scene_index if isinstance(_raw_scene_index, dict) else None
+        raw_todo_state = kwargs.get('todo_state')
+        self.todo_state = raw_todo_state if isinstance(raw_todo_state, dict) else None
+        self._todo_state_metadata_available = 'todo_state' in kwargs
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -1365,6 +1434,11 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        self.todo_state = None
+        if self.pre_compression_snapshot:
+            from api.todo_state import derive_todo_state
+            self.todo_state = derive_todo_state(self.messages)
+        self._todo_state_metadata_available = True
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1376,7 +1450,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
-            'compression_anchor_summary', 'pre_compression_snapshot',
+            'compression_anchor_summary', 'pre_compression_snapshot', 'todo_state',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
@@ -1387,7 +1461,7 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
-            'parent_session_id',
+            'parent_session_id', 'compression_disjoint_parent_boundary',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
@@ -7812,14 +7886,16 @@ def get_state_db_session_message_keys_before_timestamp(
     before_timestamp,
     *,
     profile=None,
+    require_no_null_timestamps=False,
 ) -> list[tuple] | None:
     """Return visible-identity keys before ``before_timestamp`` in DB order.
 
-    Missing timestamps are intentionally excluded because the bounded reader
-    keeps them with ``timestamp IS NULL OR timestamp >= ?``.  The caller uses
-    this as a conservative prefix-identity guard before taking the optimized
-    tail-read path, so schemas that cannot prove the merge-visible identity
-    force a full read.
+    Missing timestamps are excluded by default because the bounded reader keeps
+    them with ``timestamp IS NULL OR timestamp >= ?``.  Compression fast-path
+    callers can require their absence: a NULL-timestamp row cannot be proven
+    disjoint from an omitted parent using only the direct child sidecar.  The
+    caller uses this as a conservative prefix-identity guard, so schemas or rows
+    that cannot prove the merge-visible identity force a full read.
     """
     try:
         import sqlite3
@@ -7850,6 +7926,14 @@ def get_state_db_session_message_keys_before_timestamp(
             available = {str(row['name']) for row in cur.fetchall()}
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
+            if require_no_null_timestamps:
+                cur.execute(
+                    "SELECT 1 FROM messages "
+                    "WHERE session_id = ? AND timestamp IS NULL LIMIT 1",
+                    (str(sid),),
+                )
+                if cur.fetchone() is not None:
+                    return None
             cur.execute(
                 """
                 SELECT
@@ -7971,6 +8055,42 @@ def _session_message_merge_key(msg: dict):
         str(msg.get("tool_name") or msg.get("name") or ""),
         _tc_key,
     )
+
+
+def _compression_child_message_semantic_key(msg):
+    """Return the canonical fields that can change a child's display identity."""
+    if not isinstance(msg, dict):
+        return {"non_dict": repr(msg)}
+    return {
+        "id": msg.get("id"),
+        "message_id": msg.get("message_id"),
+        "role": msg.get("role"),
+        "content": msg.get("content"),
+        # Keep the exact persisted timestamp. The display merge can reorder a
+        # same-id row after even a sub-second rewrite.
+        "timestamp": msg.get("timestamp"),
+        "tool_call_id": msg.get("tool_call_id"),
+        "tool_name": msg.get("tool_name"),
+        "name": msg.get("name"),
+        "tool_calls": msg.get("tool_calls"),
+        "function_call": msg.get("function_call"),
+    }
+
+
+def _compression_child_messages_digest(messages) -> str:
+    """Return a semantic digest binding a disjoint-parent proof to one child array."""
+    semantic_messages = [
+        _compression_child_message_semantic_key(msg)
+        for msg in list(messages or [])
+    ]
+    encoded = json.dumps(
+        semantic_messages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _session_messages_have_prefix(messages, prefix) -> bool:
