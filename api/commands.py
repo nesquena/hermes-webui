@@ -7,6 +7,9 @@ so the frontend can still load with WEBUI_ONLY commands.
 from __future__ import annotations
 from contextlib import nullcontext
 import logging
+import shlex
+import subprocess
+import sys
 import threading
 from typing import Any
 
@@ -24,11 +27,25 @@ _NEVER_EXPOSE: frozenset[str] = frozenset({
 
 # Narrow agent-side execution allowlist for /api/commands/exec.
 _AGENT_COMMAND_ALIASES = {
+    'bp': 'blueprint',
     'reload_mcp': 'reload-mcp',
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
+    'suggest': 'suggestions',
+    'tasks': 'agents',
+    'v': 'version',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits'})
+# NB: which commands seed an agent turn is NOT a static list — a handler opts in
+# purely by returning a ``{"output": ..., "message": ...}`` dict (``message`` is
+# the agent seed). The frontend (static/messages.js) branches on
+# ``_agentResult.message`` to fall through to the send pipeline. Add the behavior
+# to the handler's return value; there is no parallel registry to keep in sync.
+_ALLOWED_AGENT_COMMANDS = frozenset({
+    'agents', 'blueprint', 'bundles', 'codex-runtime', 'credits', 'curator',
+    'debug', 'fast', 'footer', 'insights', 'kanban', 'learn', 'memory', 'profile',
+    'reload-mcp', 'reload-skills', 'resume', 'rollback', 'sessions',
+    'subgoal', 'suggestions', 'version', 'whoami',
+})
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
@@ -72,6 +89,26 @@ def _normalize_agent_command_name(command: str) -> str:
 
     canonical, _arg_string = _parse_agent_command(command)
     return canonical
+
+
+def _shellish_args(command: str) -> list[str]:
+    try:
+        return shlex.split(command)[1:]
+    except ValueError:
+        return str(command or "").split()[1:]
+
+
+def _tokenize_args(arg_string: str) -> list[str]:
+    """Tokenize a command's ARG string (already stripped of the leading /command)."""
+    try:
+        return shlex.split(arg_string or "")
+    except ValueError:
+        return str(arg_string or "").split()
+
+
+def _text_or_no_output(value: Any) -> str:
+    text = str(value or "").strip()
+    return text or "(no output)"
 
 
 def list_commands(_registry=None) -> list[dict[str, Any]]:
@@ -204,8 +241,8 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
     }
 
 
-def execute_agent_command(command: str) -> str:
-    """Execute a narrow allowlist of agent-side runtime commands."""
+def execute_agent_command(command: str) -> str | dict[str, Any]:
+    """Execute a narrow allowlist of WebUI-safe agent-side runtime commands."""
 
     canonical, arg_string = _parse_agent_command(command)
     if canonical not in _ALLOWED_AGENT_COMMANDS:
@@ -219,6 +256,42 @@ def execute_agent_command(command: str) -> str:
         return _run_codex_runtime_command(arg_string)
     if canonical == 'credits':
         return _run_credits_command()
+    if canonical == 'learn':
+        return _resolve_learn_command(arg_string)
+    if canonical == 'blueprint':
+        return _run_blueprint_command(arg_string)
+    if canonical == 'bundles':
+        return _run_bundles_command()
+    if canonical == 'curator':
+        return _run_curator_command(command)
+    if canonical == 'kanban':
+        return _run_kanban_command(arg_string)
+    if canonical == 'memory':
+        return _run_memory_command(command)
+    if canonical == 'suggestions':
+        return _run_suggestions_command(arg_string)
+    if canonical == 'version':
+        return _run_version_command()
+    if canonical in {'profile', 'whoami'}:
+        return _run_profile_command()
+    if canonical == 'agents':
+        return _run_agents_command()
+    if canonical == 'sessions':
+        return _run_sessions_command(arg_string)
+    if canonical == 'resume':
+        return _run_resume_command(arg_string)
+    if canonical == 'insights':
+        return _run_insights_command(arg_string)
+    if canonical == 'fast':
+        return _run_fast_command(arg_string)
+    if canonical == 'footer':
+        return _run_footer_command(arg_string)
+    if canonical == 'rollback':
+        return _run_rollback_command(arg_string)
+    if canonical == 'subgoal':
+        return _run_subgoal_command(arg_string)
+    if canonical == 'debug':
+        return _run_debug_command(arg_string)
 
     raise KeyError(canonical)
 
@@ -383,6 +456,331 @@ def _run_credits_command() -> str:
         lines.append(f"Top up: {topup_url}")
         lines.append("Complete your top-up in the browser; credits will appear in /credits shortly.")
     return "\n".join(lines)
+
+
+def _resolve_learn_command(arg_string: str) -> dict[str, Any]:
+    user_request = str(arg_string or "").strip()
+    try:
+        from agent.learn_prompt import build_learn_prompt
+        message = build_learn_prompt(user_request)
+    except Exception:
+        message = _build_webui_learn_prompt(user_request)
+
+    lead = "Learning a skill from what you described." if user_request else "Learning a skill from this conversation."
+    return {"output": f"⚡ {lead}", "message": message}
+
+
+def _build_webui_learn_prompt(user_request: str) -> str:
+    request = user_request or "what we just did in this conversation"
+    return (
+        "[/learn] The user wants you to learn a reusable skill from the request below, and save it.\n\n"
+        f"THE REQUEST:\n{request}\n\n"
+        "Use the skill system governance rules: inspect the relevant material, distill the reusable procedure, "
+        "write or patch a focused skill with triggers, steps, pitfalls, and verification, then briefly report what changed."
+    )
+
+
+def _run_blueprint_command(arg_string: str) -> dict[str, Any] | str:
+    # WebUI-safe: block the deterministic direct-create shortcut
+    # (``/blueprint <name> slot=value …``), which fills the blueprint and calls
+    # ``create_job()`` to materialize a cron job non-interactively. ``/blueprint``
+    # (catalog listing) and ``/blueprint <name>`` (seed the agent to gather the
+    # slots through a normal, approval-gated turn) stay allowed.
+    if any("=" in _tok for _tok in _tokenize_args(arg_string)):
+        raise RuntimeError(
+            "Creating a blueprint job directly (`/blueprint <name> slot=value`) is not "
+            "available from the WebUI — it would materialize a cron job without review. Use "
+            "`/blueprint <name>` to have the agent walk you through the slots, or the terminal."
+        )
+    try:
+        from hermes_cli.blueprint_cmd import handle_blueprint_command
+    except Exception as exc:
+        logger.warning("Blueprint command runtime unavailable", exc_info=True)
+        raise RuntimeError("Blueprint command unavailable") from exc
+
+    try:
+        result = handle_blueprint_command(arg_string or "")
+    except Exception as exc:
+        logger.warning("Blueprint command failed", exc_info=True)
+        raise RuntimeError("Blueprint command failed") from exc
+
+    text = _text_or_no_output(getattr(result, "text", ""))
+    seed = getattr(result, "agent_seed", None)
+    if seed:
+        return {"output": text, "message": str(seed)}
+    return text
+
+
+def _run_bundles_command() -> str:
+    try:
+        from agent.skill_bundles import list_bundles
+    except Exception as exc:
+        logger.warning("Bundle runtime unavailable", exc_info=True)
+        raise RuntimeError("Bundle command unavailable") from exc
+
+    bundles = list_bundles() or []
+    if not bundles:
+        return "No skill bundles installed."
+    lines = [f"▣ Skill Bundles ({len(bundles)} installed):"]
+    for info in bundles:
+        slug = str(info.get("slug") or "").strip()
+        skills = list(info.get("skills") or [])
+        desc = str(info.get("description") or f"Load {len(skills)} skills").strip()
+        lines.append(f"/{slug} — {desc} ({len(skills)} skills)")
+        for skill in skills:
+            lines.append(f"  · {skill}")
+    lines.append("Invoke a bundle with /<slug>.")
+    return "\n".join(lines)
+
+
+# WebUI-safe curator surface: only read-only subcommands may be invoked from the
+# browser. The curator CLI also exposes state-changing / destructive operations
+# (run, prune, archive, restore, pin/unpin, pause/resume, backup) that archive or
+# consolidate skills on disk — those must stay terminal-only, not one slash
+# command away for any WebUI user. Gate on the subcommand (first token) so args
+# to the allowed read-only subcommands (e.g. `usage --json`) still pass through.
+_CURATOR_WEBUI_ALLOWED_SUBCOMMANDS = frozenset({"status", "usage", "list-archived"})
+
+
+def _run_curator_command(command: str) -> str:
+    tokens = _shellish_args(command) or ["status"]
+    _subcommand = tokens[0]
+    if _subcommand not in _CURATOR_WEBUI_ALLOWED_SUBCOMMANDS:
+        raise RuntimeError(
+            f"'/curator {_subcommand}' is not available from the WebUI. Only read-only "
+            f"curator subcommands are allowed here: "
+            f"{', '.join(sorted(_CURATOR_WEBUI_ALLOWED_SUBCOMMANDS))}. Use the terminal "
+            f"for state-changing operations (run, prune, archive, restore, pin, ...)."
+        )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "hermes_cli.main", "curator", *tokens],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("Curator command failed", exc_info=True)
+        raise RuntimeError("Curator command failed") from exc
+    output = "\n".join(
+        part for part in (proc.stdout.strip(), proc.stderr.strip()) if part
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(output or "Curator command failed")
+    return _text_or_no_output(output)
+
+
+# WebUI-safe kanban: only read-only subcommands. run_slash() otherwise mutates
+# the board (create/assign/edit/complete/block/archive/link/comment/…), spawns
+# workers (dispatch/swarm), or blocks the request thread (tail/daemon) — those
+# stay terminal-only. ``boards`` is a nested group; only ``boards list`` is read-only.
+_KANBAN_WEBUI_READONLY_SUBCOMMANDS = frozenset({"list", "ls", "show"})
+
+
+def _run_kanban_command(arg_string: str) -> str:
+    _tokens = _tokenize_args(arg_string)
+    _sub = _tokens[0] if _tokens else ""
+    _readonly = (
+        _sub == ""  # bare /kanban lists tasks
+        or _sub in _KANBAN_WEBUI_READONLY_SUBCOMMANDS
+        or (_sub == "boards" and (len(_tokens) < 2 or _tokens[1] in {"list", "ls"}))
+    )
+    if not _readonly:
+        raise RuntimeError(
+            f"'/kanban {_sub}' is not available from the WebUI. Only read-only kanban "
+            f"subcommands are allowed here (list, show, boards list). Creating/assigning/"
+            f"completing/archiving tasks, dispatch and swarm (spawn workers), and "
+            f"tail/daemon (block the request) stay terminal-only."
+        )
+    try:
+        from hermes_cli.kanban import run_slash
+        return _text_or_no_output(run_slash(arg_string or ""))
+    except Exception as exc:
+        logger.warning("Kanban command failed", exc_info=True)
+        raise RuntimeError("Kanban command failed") from exc
+
+
+def _run_memory_command(command: str) -> str:
+    args = _shellish_args(command)
+    # WebUI-safe: `/memory approval on|off` (also spelled `/memory mode on|off`)
+    # writes memory.write_approval to the
+    # SHARED Hermes config (set_config_value), silently changing write-approval for
+    # every CLI session under the same HERMES_HOME — a persistent cross-boundary
+    # mutation. Block that toggle; `pending`/`approve`/`reject` act on in-session
+    # pending writes and stay allowed, and bare `approval`/`mode` just report status.
+    if args and args[0] in {"approval", "mode"} and len(args) > 1:
+        raise RuntimeError(
+            "`/memory approval|mode on|off` is not available from the WebUI — it changes "
+            "write-approval in the shared Hermes config, affecting every CLI session under "
+            "the same HERMES_HOME. Use `/memory pending`, `approve`, or `reject` here; "
+            "toggle the persistent setting from the terminal."
+        )
+    try:
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        from tools.memory_tool import load_on_disk_store
+    except Exception as exc:
+        logger.warning("Memory command runtime unavailable", exc_info=True)
+        raise RuntimeError("Memory command unavailable") from exc
+
+    def _set_memory_approval(enabled: bool) -> None:
+        from hermes_cli.config import set_config_value
+        set_config_value("memory.write_approval", "true" if enabled else "false")
+
+    try:
+        out = handle_pending_subcommand(
+            wa.MEMORY,
+            args,
+            memory_store=load_on_disk_store(),
+            set_mode_fn=_set_memory_approval,
+        )
+    except Exception as exc:
+        logger.warning("Memory command failed", exc_info=True)
+        raise RuntimeError("Memory command failed") from exc
+    return _text_or_no_output(
+        out
+        or "Unknown /memory subcommand. Use here: pending, approve <id>, reject <id>, "
+        "or approval (status only). Toggle approval mode from the terminal."
+    )
+
+
+def _run_suggestions_command(arg_string: str) -> str:
+    # WebUI-safe: only the bare read-only listing. Subcommands mutate state —
+    # accept/add/schedule create cron jobs, dismiss/reject latch state, clear
+    # deletes records — so they stay terminal-only.
+    if _tokenize_args(arg_string):
+        raise RuntimeError(
+            "Subcommands of `/suggestions` (accept, add, schedule, dismiss, reject, clear) "
+            "are not available from the WebUI — they change state (accept/add/schedule "
+            "create cron jobs, clear deletes records). Only the bare read-only listing is; "
+            "use the terminal for the rest."
+        )
+    try:
+        from hermes_cli.suggestions_cmd import handle_suggestions_command
+        return _text_or_no_output(handle_suggestions_command(arg_string or "", origin={"platform": "webui"}))
+    except Exception as exc:
+        logger.warning("Suggestions command failed", exc_info=True)
+        raise RuntimeError("Suggestions command failed") from exc
+
+
+def _run_version_command() -> str:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except Exception:  # pragma: no cover - importlib.metadata is stdlib on supported Python
+        PackageNotFoundError = Exception  # type: ignore[assignment]
+        version = None  # type: ignore[assignment]
+    if version is not None:
+        for package in ("hermes-agent", "hermes_agent"):
+            try:
+                return f"Hermes Agent {version(package)}"
+            except PackageNotFoundError:
+                continue
+    try:
+        from hermes_cli import __version__
+        return f"Hermes Agent {__version__}"
+    except Exception:
+        return "Hermes Agent version unavailable"
+
+
+def _run_profile_command() -> str:
+    try:
+        from hermes_cli.config import get_hermes_home
+        home = get_hermes_home()
+    except Exception:
+        home = None
+    try:
+        from api.profiles import get_active_profile_name
+        profile = get_active_profile_name() or "default"
+    except Exception:
+        profile = "default"
+    lines = [f"Active profile: {profile}"]
+    if home:
+        lines.append(f"Hermes home: {home}")
+    return "\n".join(lines)
+
+
+def _run_agents_command() -> str:
+    try:
+        from tools.process_registry import process_registry
+        processes = process_registry.list_processes()
+    except Exception:
+        logger.warning("Agents/process registry unavailable", exc_info=True)
+        return "No background agents or tracked processes are currently visible."
+    if not processes:
+        return "No background agents or tracked processes are currently running."
+    lines = [f"Tracked processes ({len(processes)}):"]
+    for proc in processes[:20]:
+        pid = proc.get("pid") or proc.get("process_id") or "?"
+        status = proc.get("status") or proc.get("state") or "unknown"
+        label = proc.get("label") or proc.get("command") or proc.get("name") or "process"
+        lines.append(f"- {label} — {status} (pid {pid})")
+    if len(processes) > 20:
+        lines.append(f"… {len(processes) - 20} more")
+    return "\n".join(lines)
+
+
+def _run_sessions_command(arg_string: str) -> str:
+    try:
+        from hermes_state import SessionDB
+    except Exception as exc:
+        logger.warning("Session DB runtime unavailable", exc_info=True)
+        raise RuntimeError("Session command unavailable") from exc
+    try:
+        limit = int((arg_string or "").strip() or "10")
+    except ValueError:
+        limit = 10
+    limit = max(1, min(limit, 25))
+    db = SessionDB()
+    sessions = db.list_sessions(limit=limit) or []
+    if not sessions:
+        return "No sessions found."
+    lines = [f"Recent sessions ({len(sessions)}):"]
+    for row in sessions:
+        sid = row.get("id") or row.get("session_id") or "?"
+        title = row.get("title") or "Untitled"
+        updated = row.get("updated_at") or row.get("last_updated") or ""
+        suffix = f" — {updated}" if updated else ""
+        lines.append(f"- {sid}: {title}{suffix}")
+    return "\n".join(lines)
+
+
+def _run_resume_command(arg_string: str) -> str:
+    target = str(arg_string or "").strip()
+    if not target:
+        return _run_sessions_command("10") + "\n\nUse the session picker/sidebar in WebUI to resume, or run /resume <session-id> in Hermes CLI."
+    return (
+        "WebUI cannot switch the active browser session through /resume yet. "
+        "Use the sessions sidebar/session picker to open "
+        f"{target!r}, or run `hermes chat --resume {target}` in the CLI."
+    )
+
+
+def _run_insights_command(arg_string: str) -> str:
+    try:
+        from hermes_cli.insights import build_insights_report
+        return _text_or_no_output(build_insights_report(days_arg=arg_string or None))
+    except Exception:
+        return "Usage insights are unavailable in this WebUI runtime. Try `/usage` or run `/insights` in Hermes CLI."
+
+
+def _run_fast_command(arg_string: str) -> str:
+    return "Fast mode is controlled by the active model/runtime in WebUI; use the model picker or Hermes CLI `/fast` for CLI-session toggling."
+
+
+def _run_footer_command(arg_string: str) -> str:
+    return "The CLI footer/status bar is not part of the WebUI. Use WebUI Settings/Control Center for browser UI controls."
+
+
+def _run_rollback_command(arg_string: str) -> str:
+    return "Rollback is CLI-session specific and is not available as a WebUI slash command. Use WebUI undo/session controls or run `/rollback` in Hermes CLI."
+
+
+def _run_subgoal_command(arg_string: str) -> str:
+    return "Subgoals attach to an active Hermes goal loop. WebUI does not expose goal-loop mutation through /subgoal yet; use `/goal`/CLI goal mode for this session."
+
+
+def _run_debug_command(arg_string: str) -> str:
+    return "Debug report upload is intentionally not run from WebUI slash commands. Run `/debug local` or `/debug nous` in Hermes CLI to review and upload logs explicitly."
 
 
 def _load_config_for_moa_resolution() -> dict:

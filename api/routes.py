@@ -15504,7 +15504,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "command is required")
 
         try:
-            return j(handler, {"output": execute_agent_command(command)})
+            result = execute_agent_command(command)
+            if isinstance(result, dict):
+                payload = dict(result)
+                payload.setdefault("output", "")
+                return j(handler, payload)
+            return j(handler, {"output": result})
         except KeyError:
             pass
         except ValueError as e:

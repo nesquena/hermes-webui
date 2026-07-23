@@ -1131,9 +1131,14 @@ let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
 // Agent commands that are safe to execute directly in the WebUI even though
 // their canonical command is registered on the backend (for example
-// /reload-mcp). Keep this intentionally narrow and include underscore variants
-// observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits']);
+// Agent-side commands the WebUI can execute safely through /api/commands/exec.
+// Keep CLI-only/TUI/clipboard/gateway lifecycle commands out of this set.
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
+  'agents','blueprint','bundles','codex-runtime','codex_runtime','credits','curator',
+  'debug','fast','footer','insights','kanban','learn','memory','profile',
+  'reload-mcp','reload_mcp','reload-skills','reload_skills','resume','rollback',
+  'sessions','subgoal','suggestions','version','whoami'
+]);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -1418,6 +1423,11 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  // Set when an agent-command path has ALREADY pushed the user bubble locally
+  // (e.g. to show the command + its immediate output before seeding the turn).
+  // The regular send pipeline below then skips its own user-bubble push so the
+  // originating command isn't rendered twice.
+  let _userTurnAlreadyRendered=false;
   let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
@@ -1486,19 +1496,39 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        let _agentOutput='(no output)';
+        let _agentResult=null;
         try{
-          _agentOutput=typeof executeAgentCommand==='function'
+          _agentResult=typeof executeAgentCommand==='function'
             ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
             : 'Agent command runtime unavailable in WebUI.';
         }catch(e){
-          _agentOutput=`Agent command error: ${e&&e.message||e}`;
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:`Agent command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
         }
-        S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
-        renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        if(_agentResult&&typeof _agentResult==='object'&&typeof _agentResult.message==='string'&&_agentResult.message.trim()){
+          const _agentOutput=typeof _agentResult.output==='string'?_agentResult.output.trim():'';
+          if(_agentOutput){
+            if(!S.session){await newSession();await renderSessionList();}
+            S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+            S.messages.push({role:'assistant',content:_agentOutput,_ts:Date.now()/1000});
+            renderMessages();
+            // The user command + its output are now shown; don't let the send
+            // pipeline push the command a second time (it seeds the turn from
+            // _agentResult.message but displays the original command via override).
+            _userTurnAlreadyRendered=true;
+          }
+          _slashDisplayTextOverride=text;
+          text=_agentResult.message.trim();
+        }else{
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:String(_agentResult||'(no output)'),_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession();await renderSessionList();}
@@ -1643,7 +1673,8 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    if(_userTurnAlreadyRendered){renderMessages();setBusy(true);}
+    else{S.messages.push(userMsg);renderMessages();setBusy(true);}
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
