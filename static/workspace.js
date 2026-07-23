@@ -1522,3 +1522,24 @@ if (typeof document !== 'undefined') {
     _wsUploadInit();
   }
 }
+
+
+/* Workdir navigation bar (#5932) */
+window._goToDir = function(path) {
+    path = path.trim();
+    if (!path) return;
+    if (!window.S) return;
+    // Update the workspace root path
+    S.workspaceRoot = path;
+    // Reload file tree
+    if (typeof _fetchWorkspaceEntries === 'function') {
+        _fetchWorkspaceEntries();
+    }
+    localStorage.setItem('hermes-webui-cwd', path);
+};
+
+// Toggle workdir bar visibility
+window._toggleWorkdirBar = function() {
+    var bar = document.getElementById('workdir-bar');
+    if (bar) bar.style.display = bar.style.display === 'none' ? '' : 'none';
+};

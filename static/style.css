@@ -7276,3 +7276,19 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+
+.workdir-bar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px; background: var(--bg-surface, #f5f5f5);
+    border-bottom: 1px solid var(--border-subtle, #ddd);
+}
+.workdir-bar input {
+    flex: 1; padding: 4px 8px; border: 1px solid var(--border-input, #ccc);
+    border-radius: 4px; font-size: 13px;
+}
+.workdir-bar button {
+    padding: 4px 12px; border: 1px solid var(--border-input, #ccc);
+    border-radius: 4px; background: var(--bg-button, #fff); cursor: pointer;
+}
+.workdir-bar button:hover { background: var(--bg-hover, #eee); }
