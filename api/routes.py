@@ -13468,6 +13468,23 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/stream":
         return _handle_clarify_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/session/queue/steer-capability":
+        return j(
+            handler,
+            {"ok": True, "queue_item_steer": True, "protocol": 1},
+            extra_headers={"Cache-Control": "no-store"},
+        )
+
+    if parsed.path == "/api/session/queue":
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0]
+        try:
+            get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        from api.session_queue import list_queue
+        return j(handler, {"ok": True, "session_id": sid, "items": list_queue(sid)})
+
     if parsed.path == "/api/session/stream":
         return _handle_session_sse_stream(handler, parsed)
 
@@ -15322,6 +15339,15 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/bg-task-complete-ack":
         return _handle_bg_task_complete_ack(handler, body)
+
+    if parsed.path == "/api/session/queue":
+        return _handle_session_queue_enqueue(handler, body)
+
+    if parsed.path == "/api/session/queue/update":
+        return _handle_session_queue_update(handler, body)
+
+    if parsed.path == "/api/session/queue/delete":
+        return _handle_session_queue_delete(handler, body)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
@@ -21489,6 +21515,10 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    attachments=None,
+    requested_model=None,
+    requested_provider=None,
+    queue_item_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -21538,8 +21568,13 @@ def start_session_turn(
     except ValueError as e:
         return {"error": str(e), "_status": 400}
 
-    requested_model = s.model
-    requested_provider = getattr(s, "model_provider", None)
+    requested_model = requested_model if requested_model not in (None, "") else s.model
+    requested_provider = (
+        requested_provider
+        if requested_provider not in (None, "")
+        else getattr(s, "model_provider", None)
+    )
+    turn_attachments = attachments or []
     # Server-initiated wakeup (Option Z): resolve persisted model via the
     # standard helper in cache-only mode so wakeups never trigger a cold
     # catalog rebuild. Thread the session's PROFILE model defaults through too
@@ -21671,7 +21706,7 @@ def start_session_turn(
     resp = _start_run(
         s,
         msg=msg,
-        attachments=[],
+        attachments=turn_attachments,
         workspace=workspace,
         model=model,
         model_provider=model_provider,
@@ -21710,6 +21745,7 @@ def start_session_turn(
                         "stream_id": str(stream_id),
                         "pending_started_at": (resp or {}).get("pending_started_at"),
                         "source": source,
+                        **({"queue_item_id": str(queue_item_id)} if queue_item_id else {}),
                     },
                 )
     except Exception:
@@ -21717,6 +21753,66 @@ def start_session_turn(
             "server_turn_started fan-out failed for session %s", session_id, exc_info=True
         )
     return resp
+
+
+def _handle_session_queue_enqueue(handler, body):
+    """Acknowledge a backend-owned queued follow-up turn for a session."""
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    from api.session_queue import drain_for_session, enqueue, list_queue
+
+    try:
+        item = enqueue(sid, body)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    drain_for_session(sid)
+    return j(handler, {"ok": True, "session_id": sid, "item": item, "items": list_queue(sid)})
+
+
+def _handle_session_queue_update(handler, body):
+    try:
+        require(body, "session_id")
+        require(body, "id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    from api.session_queue import list_queue, update_item
+
+    item = update_item(sid, str(body.get("id") or ""), body)
+    if item is None:
+        return bad(handler, "Queued item not found", 404)
+    return j(handler, {"ok": True, "session_id": sid, "item": item, "items": list_queue(sid)})
+
+
+def _handle_session_queue_delete(handler, body):
+    try:
+        require(body, "session_id")
+        require(body, "id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    from api.session_queue import delete_item, list_queue
+
+    deleted = delete_item(sid, str(body.get("id") or ""))
+    if not deleted:
+        return bad(handler, "Queued item not found", 404)
+    return j(handler, {"ok": True, "session_id": sid, "deleted": True, "items": list_queue(sid)})
+
 
 
 def _handle_bg_task_complete_ack(handler, body):
