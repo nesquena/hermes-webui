@@ -486,6 +486,29 @@ function _artifactCandidatesFromToolCall(tc){
   return out;
 }
 
+// Session artifact discovery is intentionally broad. The final-answer list is
+// stricter: it only accepts successful, structured write-tool evidence owned
+// by this turn.
+function turnArtifactReferencesFromToolCall(tc){
+  if(!tc||tc.is_error) return [];
+  const name=String(tc.name||'').replace(/^functions\./,'');
+  if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
+  const args=tc.arguments||tc.args||tc.input||{};
+  if(!args||typeof args!=='object') return [];
+  const seen=new Set();
+  const out=[];
+  const add=candidate=>{
+    const path=_normalizeArtifactPath(candidate);
+    if(!path||seen.has(path)) return;
+    seen.add(path);
+    out.push({path,source:name});
+  };
+  for(const key of ['path','file_path','source','destination']) add(args[key]);
+  if(Array.isArray(args.paths)) args.paths.forEach(add);
+  if(Array.isArray(args.edits)) args.edits.forEach(edit=>add(edit&&edit.path));
+  return out;
+}
+
 const _turnMutatedPreviewPaths = new Set();
 
 function resetTurnWorkspaceMutations(){

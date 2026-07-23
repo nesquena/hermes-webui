@@ -13614,6 +13614,60 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   group.removeAttribute('data-worklog-rows-deferred');
   return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
 }
+function _turnArtifactWorkspacePath(path){
+  let value=String(path||'').trim().replace(/^(?:\.\/)+/,'');
+  if(!value||value.length>512||value.includes('://')||/[\\\0]/.test(value)||/^[A-Za-z]:/.test(value)) return '';
+  const workspace=String(S&&S.session&&S.session.workspace||'').replace(/\/+$/,'');
+  if(value.startsWith('/')){
+    if(!workspace||!value.startsWith(`${workspace}/`)) return '';
+    value=value.slice(workspace.length+1);
+  }
+  const parts=value.split('/');
+  if(parts.some(part=>!part||part==='.'||part==='..')) return '';
+  return value;
+}
+function _turnArtifactEntriesFromScene(scene){
+  const artifacts=scene&&Array.isArray(scene.artifacts)?scene.artifacts:[];
+  const seen=new Set();
+  const entries=[];
+  for(const artifact of artifacts){
+    const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
+    const path=_turnArtifactWorkspacePath(payload.path);
+    if(!path||seen.has(path)) continue;
+    seen.add(path);
+    entries.push({path});
+  }
+  return entries;
+}
+function _renderTurnArtifactListForMessage(message, segment){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  segment.querySelectorAll(':scope > [data-turn-artifact-list="1"]').forEach(node=>node.remove());
+  const entries=_turnArtifactEntriesFromScene(message._anchor_activity_scene);
+  if(!entries.length) return false;
+  const list=document.createElement('div');
+  list.className='turn-artifact-list';
+  list.setAttribute('data-turn-artifact-list','1');
+  for(const entry of entries){
+    const item=document.createElement('button');
+    item.type='button';
+    item.className='turn-artifact-item';
+    item.title=entry.path;
+    const icon=document.createElement('span');
+    icon.className='turn-artifact-icon';
+    icon.setAttribute('aria-hidden','true');
+    icon.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><path d="M8 13h8"></path><path d="M8 17h8"></path></svg>';
+    const label=document.createElement('span');
+    label.className='turn-artifact-path';
+    label.textContent=entry.path;
+    item.append(icon,label);
+    item.addEventListener('click',()=>{
+      if(typeof openArtifactPath==='function') openArtifactPath(entry.path);
+    });
+    list.appendChild(item);
+  }
+  segment.appendChild(list);
+  return true;
+}
 function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
   if(S.activeStreamId&&isLiveAnchorActivitySceneOwner(S.activeStreamId)) return;
   // Worklog reason-mirroring (folding intermediate prose into a top Worklog rail
@@ -16836,6 +16890,7 @@ function renderMessages(options){
     const msg=S.messages[rawIdx];
     if(msg&&msg._anchor_activity_scene){
       _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
+      _renderTurnArtifactListForMessage(msg, seg);
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);

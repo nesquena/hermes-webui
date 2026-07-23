@@ -2767,6 +2767,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const cursor=Number(_runJournalReplayAfterSeq&&_runJournalReplayAfterSeq());
     return (Number.isFinite(cursor)?cursor:0)+_anchorLocalSeq;
   }
+  function _anchorHasArtifactReference(localId){
+    const artifacts=_anchorRegistry&&_anchorRegistry.anchor&&_anchorRegistry.anchor.artifacts;
+    return Array.isArray(artifacts)&&artifacts.some(event=>
+      event&&event.source_event_type==='artifact_reference'&&event.local_id===localId
+    );
+  }
+  function _attachTurnArtifactsFromToolCall(tc){
+    if(!tc||tc.is_error||typeof turnArtifactReferencesFromToolCall!=='function') return;
+    const toolId=String(tc.tid||tc.id||tc.tool_call_id||'tool');
+    for(const [index,artifact] of turnArtifactReferencesFromToolCall(tc).entries()){
+      const path=String(artifact&&artifact.path||'').trim();
+      if(!path) continue;
+      const localId=`artifact:${toolId}:${index}:${path}`;
+      if(_anchorHasArtifactReference(localId)) continue;
+      // A distinct anchor event must not reuse the tool_complete SSE event id.
+      _applyToAnchor('artifact_reference',{
+        local_id:localId,
+        seq:_nextAnchorLocalSeq(),
+        path,
+        source:String(artifact.source||tc.name||'tool'),
+        tool_call_id:toolId,
+      },null,null,{render:false});
+    }
+  }
   function _anchorSegmentSeq(){
     const seq=Number(_assistantSegmentSeq||_currentLiveSegmentSeq||0);
     return Number.isFinite(seq)&&seq>0?seq:1;
@@ -5551,6 +5575,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
       if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true});
       _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
+      _attachTurnArtifactsFromToolCall(tc);
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;

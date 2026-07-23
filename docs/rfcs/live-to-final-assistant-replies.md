@@ -440,6 +440,11 @@ Expected behavior:
   replacing the final answer.
 - If a turn creates or edits workspace artifacts, the settled reply should not
   hide the fact that those artifacts exist or make them impossible to find.
+- A compact, untitled file list may appear beneath the settled final answer
+  only when that turn has successful, structured write-tool evidence. It must
+  not infer files from the final-answer prose, read-only calls, or earlier
+  turns. Selecting a row uses the existing Workspace preview and its path and
+  existence checks.
 - Reconnect, replay, session switching, cancel, interruption, and no-final
   terminal paths should preserve enough tool/artifact metadata to rebuild the
   same artifact handoff.
