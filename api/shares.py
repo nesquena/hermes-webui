@@ -22,7 +22,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from api.config import STATE_DIR
+from api.config import HOST, PORT, STATE_DIR
 from api.helpers import redact_session_data
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
@@ -37,7 +37,8 @@ SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
 _LOCAL_ATTACHMENT_PLACEHOLDER = "[Local attachment omitted from public share]"
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)]+)")
+_BRACKETED_MEDIA_TOKEN_RE = re.compile(r"\[MEDIA:([^\s\)\]]+)\]")
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
 _MARKDOWN_FILE_URI_RE = re.compile(
     r"!?\[[^\]\n]*\]\(\s*file://[^\s\)]+\s*\)",
     re.IGNORECASE,
@@ -45,6 +46,17 @@ _MARKDOWN_FILE_URI_RE = re.compile(
 _ANGLE_FILE_URI_RE = re.compile(r"<file://[^\s>]+>", re.IGNORECASE)
 _FILE_URI_RE = re.compile(r"file://[^\s<>'\"\)\]]+", re.IGNORECASE)
 _API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
+_RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
+_FENCED_CODE_REGION_RE = re.compile(
+    r"(^|\n)[ ]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n[\s\S]*?\n[ ]{0,3}(?P=fence)[ \t]*(?=\n|$)"
+)
+_INLINE_CODE_REGION_RE = re.compile(r"`[^`\n]*`")
+_DATA_IMAGE_RE = re.compile(
+    r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
+    re.IGNORECASE,
+)
+_DATA_IMAGE_SVG_RE = re.compile(r"^data:image/svg\+xml;base64,[a-z0-9+/=]+$", re.IGNORECASE)
+_DATA_IMAGE_MAX_LEN = 2 * 1024 * 1024
 _EMBEDDED_IPV4_RE = re.compile(
     r"(?<!\d)(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?!\d)"
 )
@@ -190,6 +202,14 @@ def _browser_normalized_hostname(hostname: str) -> str:
         raise ValueError("invalid hostname") from exc
 
 
+def _is_safe_data_image_uri(raw_ref: str) -> bool:
+    value = str(raw_ref or "")
+    return len(value) <= _DATA_IMAGE_MAX_LEN and (
+        _DATA_IMAGE_RE.fullmatch(value) is not None
+        or _DATA_IMAGE_SVG_RE.fullmatch(value) is not None
+    )
+
+
 def _media_url_path_for_boundary_check(path: str) -> str:
     decoded = str(path or "")
     for _ in range(4):
@@ -206,6 +226,82 @@ def _media_url_path_for_boundary_check(path: str) -> str:
     return normalized
 
 
+def _url_port(parsed) -> int | None:
+    try:
+        return parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid port") from exc
+
+
+def _default_origin_port(scheme: str) -> int:
+    return 443 if str(scheme or "").lower() == "https" else 80
+
+
+def _origin_ports_match(scheme: str, left: int | None, right: int | None) -> bool:
+    if left == right:
+        return True
+    default = _default_origin_port(scheme)
+    return (left is None and right == default) or (right is None and left == default)
+
+
+def _trusted_webui_origin_parts() -> set[tuple[str, str, int | None]]:
+    origins: set[tuple[str, str, int | None]] = set()
+
+    def add_origin(raw_origin: str) -> None:
+        raw = str(raw_origin or "").strip().rstrip("/")
+        if not raw:
+            return
+        try:
+            parsed = urlsplit(raw)
+            scheme = parsed.scheme.lower()
+            hostname = _browser_normalized_hostname(parsed.hostname or "")
+            port = _url_port(parsed)
+        except ValueError:
+            return
+        if scheme in {"http", "https"} and hostname:
+            origins.add((scheme, hostname, port))
+
+    for value in os.getenv("HERMES_WEBUI_ALLOWED_ORIGINS", "").split(","):
+        add_origin(value)
+
+    configured_host = str(HOST or "").strip()
+    if configured_host and configured_host not in {"0.0.0.0", "::"}:
+        if ":" in configured_host and not configured_host.startswith("["):
+            configured_host = f"[{configured_host}]"
+        add_origin(f"http://{configured_host}:{int(PORT)}")
+
+    return origins
+
+
+def _is_trusted_webui_origin(parsed, hostname: str) -> bool:
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not hostname:
+        return False
+    port = _url_port(parsed)
+    for allowed_scheme, allowed_host, allowed_port in _trusted_webui_origin_parts():
+        if (
+            scheme == allowed_scheme
+            and hostname == allowed_host
+            and _origin_ports_match(scheme, port, allowed_port)
+        ):
+            return True
+    return False
+
+
+def _has_invalid_bracketed_authority(parsed) -> bool:
+    netloc = str(parsed.netloc or "").rsplit("@", 1)[-1]
+    if not netloc.startswith("["):
+        return False
+    end = netloc.find("]")
+    if end <= 1:
+        return True
+    try:
+        ipaddress.ip_address(_browser_normalized_hostname(netloc[1:end]))
+    except ValueError:
+        return True
+    return False
+
+
 def _is_public_media_url(raw_ref: str) -> bool:
     try:
         parsed = urlsplit(str(raw_ref or "").replace("\\", "/"))
@@ -213,6 +309,8 @@ def _is_public_media_url(raw_ref: str) -> bool:
     except ValueError:
         return False
     if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return False
+    if _has_invalid_bracketed_authority(parsed):
         return False
     try:
         ip = ipaddress.ip_address(hostname)
@@ -229,30 +327,71 @@ def _is_public_media_url(raw_ref: str) -> bool:
             or _hostname_has_non_global_embedded_ip(hostname)
         ):
             return False
-    return not _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path))
+    if _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path)):
+        return not _is_trusted_webui_origin(parsed, hostname)
+    return True
 
 
-def _omit_local_media_references(text: str) -> str:
+def _is_public_media_reference(raw_ref: str) -> bool:
+    return _is_safe_data_image_uri(raw_ref) or _is_public_media_url(raw_ref)
+
+
+def _stash_share_code_regions(text: str):
+    stashed: list[str] = []
+    stash_prefix = f"\x00SHARE_CODE_{secrets.token_hex(8)}_"
+
+    def stash(match: re.Match) -> str:
+        stashed.append(match.group(0))
+        return f"{stash_prefix}{len(stashed) - 1}\x00"
+
+    protected = _RAW_PRE_REGION_RE.sub(stash, text)
+    protected = _FENCED_CODE_REGION_RE.sub(stash, protected)
+    protected = _INLINE_CODE_REGION_RE.sub(stash, protected)
+
+    def restore(value: str) -> str:
+        for index, original in enumerate(stashed):
+            value = value.replace(f"{stash_prefix}{index}\x00", original)
+        return value
+
+    return protected, restore
+
+
+def _omit_local_media_references(text: str, *, protect_code_regions: bool = True) -> str:
     """Replace refs that the public renderer would route through /api/media."""
     if not isinstance(text, str) or not text:
         return text
 
     public_media_tokens: list[str] = []
     stash_prefix = f"\x00SHARE_MEDIA_{secrets.token_hex(8)}_"
+    restore_code_regions = None
+    if protect_code_regions:
+        text, restore_code_regions = _stash_share_code_regions(text)
+
+    def stash_public_token(token: str) -> str:
+        public_media_tokens.append(token)
+        return f"{stash_prefix}{len(public_media_tokens) - 1}\x00"
+
+    def replace_bracketed_media_token(match: re.Match) -> str:
+        raw_ref = match.group(1)
+        if _is_public_media_reference(raw_ref):
+            return stash_public_token(match.group(0))
+        return _LOCAL_ATTACHMENT_PLACEHOLDER
 
     def replace_media_token(match: re.Match) -> str:
         raw_ref = match.group(1)
-        if _is_public_media_url(raw_ref):
-            public_media_tokens.append(match.group(0))
-            return f"{stash_prefix}{len(public_media_tokens) - 1}\x00"
+        if _is_public_media_reference(raw_ref):
+            return stash_public_token(match.group(0))
         return _LOCAL_ATTACHMENT_PLACEHOLDER
 
-    sanitized = _MEDIA_TOKEN_RE.sub(replace_media_token, text)
+    sanitized = _BRACKETED_MEDIA_TOKEN_RE.sub(replace_bracketed_media_token, text)
+    sanitized = _MEDIA_TOKEN_RE.sub(replace_media_token, sanitized)
     sanitized = _MARKDOWN_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
     sanitized = _ANGLE_FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
     sanitized = _FILE_URI_RE.sub(_LOCAL_ATTACHMENT_PLACEHOLDER, sanitized)
     for index, token in enumerate(public_media_tokens):
         sanitized = sanitized.replace(f"{stash_prefix}{index}\x00", token)
+    if restore_code_regions is not None:
+        sanitized = restore_code_regions(sanitized)
     return sanitized
 
 
@@ -336,7 +475,7 @@ def build_share_snapshot(session) -> dict:
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
     title = _force_redact_credentials(_raw_title or "Untitled")
-    title = _omit_local_media_references(title)
+    title = _omit_local_media_references(title, protect_code_regions=False)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {
         "title": title,

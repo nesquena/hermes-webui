@@ -1,14 +1,21 @@
 """Regression coverage for public-share local media isolation (#6126)."""
 
 from io import BytesIO
+import shutil
+import subprocess
 from types import SimpleNamespace
+
+import pytest
 
 
 OMITTED_ATTACHMENT = "[Local attachment omitted from public share]"
+PNG_DATA_URI = "data:image/png;base64,iVBORw0KGgo="
 
 
-def test_public_share_snapshot_omits_local_media_references():
+def test_public_share_snapshot_omits_local_media_references(monkeypatch):
     import api.shares as shares
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOWED_ORIGINS", "https://hermes.example.test")
 
     class Session:
         pass
@@ -59,8 +66,10 @@ def test_public_share_snapshot_omits_local_media_references():
     assert "MEDIA:https://cdn.example.test/image.png" in content
 
 
-def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
+def test_public_share_snapshot_omits_browser_normalized_private_media_urls(monkeypatch):
     import api.shares as shares
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOWED_ORIGINS", "https://hermes.example.test")
 
     class Session:
         pass
@@ -75,6 +84,7 @@ def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
         ("ipv6 loopback", "http://[::1]/private.png"),
         ("ipv4-mapped private ipv6", "http://[::ffff:192.168.1.1]/private.png"),
         ("ipv4-mapped loopback ipv6", "http://[::ffff:127.0.0.1]/private.png"),
+        ("invalid bracketed host", "http://[v1.1]/private.png"),
         ("percent encoded loopback host", "http://%31%32%37.0.0.1/private.png"),
         ("invalid percent encoded host", "http://%ff/private.png"),
         ("fullwidth loopback host", "http://１２７.０.０.１/private.png"),
@@ -114,9 +124,151 @@ def test_public_share_snapshot_omits_browser_normalized_private_media_urls():
     assert "[::1]" not in content
     assert "::ffff:192.168.1.1" not in content
     assert "::ffff:127.0.0.1" not in content
+    assert "[v1.1]" not in content
     assert "\\api\\media" not in content
     assert "/api/foo/../media" not in content
     assert "%2561pi" not in content
+
+
+def test_public_share_snapshot_preserves_inert_file_uri_code_regions():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Code literal share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "Inline `file:///tmp/example.txt` stays code.\n"
+                    "```text\n"
+                    "file:///tmp/fenced.txt\n"
+                    "```\n"
+                    "<pre>file:///tmp/raw-pre.txt</pre>\n"
+                    "Bare file:///tmp/bare.txt"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert "`file:///tmp/example.txt`" in content
+    assert "```text\nfile:///tmp/fenced.txt\n```" in content
+    assert "<pre>file:///tmp/raw-pre.txt</pre>" in content
+    assert "Bare [Local attachment omitted from public share]" in content
+    assert content.count(OMITTED_ATTACHMENT) == 1
+
+
+def test_public_share_snapshot_preserves_safe_data_images_only():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Data image share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    f"Safe MEDIA:{PNG_DATA_URI}\n"
+                    "Unsafe MEDIA:data:text/html;base64,PHNjcmlwdD48L3NjcmlwdD4="
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert f"MEDIA:{PNG_DATA_URI}" in content
+    assert "data:text/html" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 1
+
+
+def test_public_share_snapshot_scopes_api_media_path_to_trusted_same_origin(monkeypatch):
+    import api.shares as shares
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOWED_ORIGINS", "https://hermes.example.test")
+
+    session = SimpleNamespace(
+        title="API media path share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "External MEDIA:https://cdn.example.test/api/media/image.png\n"
+                    "Same-origin MEDIA:https://hermes.example.test/api/media?path=/tmp/private.png\n"
+                    "Relative MEDIA:/api/media?path=/tmp/private.png"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert "MEDIA:https://cdn.example.test/api/media/image.png" in content
+    assert "hermes.example.test/api/media" not in content
+    assert "MEDIA:/api/media" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 2
+
+
+def test_public_share_snapshot_bracketed_local_media_has_clean_placeholder():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Bracket media share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "[MEDIA:/tmp/private.png]\n"
+                    "[MEDIA:file:///tmp/private.png]\n"
+                    "Public [MEDIA:https://cdn.example.test/image.png]"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+    lines = content.splitlines()
+
+    assert lines[0] == OMITTED_ATTACHMENT
+    assert lines[1] == OMITTED_ATTACHMENT
+    assert "Public [MEDIA:https://cdn.example.test/image.png]" in content
+    assert "[[" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 2
+
+
+def test_public_media_url_rejects_browser_invalid_bracketed_hosts_like_node():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for WHATWG URL parity coverage")
+
+    import api.shares as shares
+
+    refs = [
+        "http://[v1.1]/x.png",
+        "http://user@[v1.1]/x.png",
+        "http://[garbage]/x.png",
+    ]
+    result = subprocess.run(
+        [
+            node,
+            "-e",
+            (
+                "for (const ref of process.argv.slice(1)) {"
+                "try { new URL(ref); console.log('ok'); }"
+                "catch (_) { console.log('error'); }"
+                "}"
+            ),
+            *refs,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["error", "error", "error"]
+    for ref in refs:
+        assert shares._is_public_media_url(ref) is False
 
 
 def test_public_share_snapshot_sanitizes_title_media_references():
