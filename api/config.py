@@ -1290,6 +1290,26 @@ def _get_anthropic_fallback_env_vars() -> tuple[str, ...]:
         return fallback
 
 
+_AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER = {
+    "anthropic": _get_anthropic_fallback_env_vars(),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "gmi": ("GMI_API_KEY",),
+    "lmstudio": ("LM_API_KEY", "LMSTUDIO_API_KEY"),
+    "minimax": ("MINIMAX_API_KEY",),
+    "mistralai": ("MISTRAL_API_KEY",),
+    "nvidia": ("NVIDIA_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "openai-api": ("OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "stepfun": ("STEPFUN_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+    "zai": ("ZAI_API_KEY", "GLM_API_KEY"),
+}
+
+_AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS = frozenset({"copilot", "copilot-acp", "nous"})
+
+
 def _resolve_provider_alias(name: str) -> str:
     """Return the canonical provider slug for *name*.
 
@@ -3686,15 +3706,34 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """urllib redirect handler that refuses to follow any redirect.
 
-    Used by the LM Studio reasoning probe so a 3xx from the probe URL can never
-    forward the ``Authorization`` header (the configured LM Studio key) to a
-    redirected, possibly attacker-controlled host. ``redirect_request``
-    returning ``None`` makes urllib raise the original 3xx as an ``HTTPError``,
-    which the probe swallows. (#3837 security review)
+    Used by credentialed model probes so a 3xx from the probe URL can never
+    forward the ``Authorization`` header to a redirected, possibly
+    attacker-controlled host. ``redirect_request`` returning ``None`` makes
+    urllib raise the original 3xx as an ``HTTPError``, which callers swallow and
+    treat as an unavailable live catalog. (#3837 security review)
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def _credentialed_json_get_no_redirect(
+    url: str,
+    headers: dict[str, str],
+    *,
+    timeout: float,
+):
+    """Fetch credentialed model-discovery JSON without following redirects.
+
+    ``urllib.request.urlopen`` follows redirects and can re-send request headers
+    such as ``Authorization`` to the redirect target. All WebUI-owned model
+    discovery paths that attach provider credentials should use this helper so a
+    3xx fails closed while preserving urllib's default proxy handling.
+    """
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    opener = urllib.request.build_opener(_NoRedirectHandler)
+    with opener.open(request, timeout=timeout) as response:  # nosec B310
+        return json.loads(response.read().decode("utf-8", errors="replace"))
 
 
 def _get_lmstudio_reasoning_probe_api_key() -> str | None:
@@ -6365,6 +6404,35 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
+def _configured_provider_api_key_for_live_probe(provider_id: str) -> str:
+    """Return a visible provider credential that would make live probes credentialed."""
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    if not provider:
+        return ""
+
+    provider_cfg = _get_provider_cfg(provider)
+    key = str(provider_cfg.get("api_key") or "").strip()
+    if key:
+        return key
+
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, dict):
+        active_provider = _resolve_provider_alias(str(model_cfg.get("provider") or "").strip().lower())
+        if active_provider == provider:
+            key = str(model_cfg.get("api_key") or "").strip()
+            if key:
+                return key
+
+    for env_name in _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER.get(
+        provider,
+        (),
+    ):  # pragma: no branch - tiny tuple
+        key = str(os.getenv(env_name) or "").strip()
+        if key:
+            return key
+    return ""
+
+
 def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     """Return live model IDs from Hermes CLI for a provider, or [] on failure.
 
@@ -6377,6 +6445,16 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     """
     pid = str(provider_id or "").strip()
     if not pid:
+        return []
+    resolved_pid = _resolve_provider_alias(pid)
+    if (
+        resolved_pid in _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS
+        or _configured_provider_api_key_for_live_probe(resolved_pid)
+    ):
+        # Credentialed provider_model_ids() calls live endpoints inside
+        # hermes_cli, where WebUI cannot enforce no-redirect transport. Fall
+        # back to WebUI-owned static/direct discovery unless the probe is known
+        # to be keyless.
         return []
     try:
         from hermes_cli.models import provider_model_ids as _provider_model_ids
@@ -7069,7 +7147,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             try:
                 import ipaddress
                 import urllib.error
-                import urllib.request
                 import socket
 
                 endpoint_url = _models_endpoint_for_base_url(base)
@@ -7108,12 +7185,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except socket.gaierror:
                         pass
 
-                req = urllib.request.Request(endpoint_url, method="GET")
-                req.add_header("User-Agent", "OpenAI/Python 1.0")
-                for k, v in headers.items():
-                    req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
-                    data = json.loads(response.read().decode("utf-8"))
+                headers = {"User-Agent": "OpenAI/Python 1.0", **headers}
+                data = _credentialed_json_get_no_redirect(
+                    endpoint_url,
+                    headers,
+                    timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
+                )
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
                 error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
@@ -7724,10 +7801,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 headers["Authorization"] = f"Bearer {lm_api_key}"
                             endpoint = (lm_base_url + "/models").rstrip("/")
                             try:
-                                import urllib.request as _urlreq
-                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
-                                    lm_data = json.loads(resp.read().decode())
+                                lm_data = _credentialed_json_get_no_redirect(endpoint, headers, timeout=5)
                                 for m in (lm_data.get("data") or []):
                                     if isinstance(m, dict):
                                         mid = str(m.get("id") or "").strip()

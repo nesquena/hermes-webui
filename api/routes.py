@@ -19768,6 +19768,90 @@ def _handle_clarify_inject(handler, parsed):
     return j(handler, {"error": "session_id required"}, status=400)
 
 
+def _credentialed_json_get_no_redirect(url: str, headers: dict[str, str], *, timeout: float):
+    """Fetch JSON for credentialed provider probes without following redirects.
+
+    ``urllib.request.urlopen`` preserves request headers across redirects.  Model
+    discovery attaches provider credentials, so a 3xx from the configured models
+    endpoint must fail closed instead of forwarding ``Authorization`` to the
+    redirect target.
+    """
+
+    class _NoRedirectProviderProbeHandler(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    req = Request(url, headers=headers)
+    opener = build_opener(_NoRedirectProviderProbeHandler())
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _configured_provider_api_key_for_live_probe(provider: str, cfg: dict) -> str:
+    """Return a configured key for provider live discovery, if WebUI can see one."""
+    providers_cfg = cfg.get("providers") or {}
+    provider_cfg = providers_cfg.get(provider, {}) if isinstance(providers_cfg, dict) else {}
+    if isinstance(provider_cfg, dict):
+        key = str(provider_cfg.get("api_key") or "").strip()
+        if key:
+            return key
+
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        try:
+            from api.config import _resolve_provider_alias as _resolve_live_provider_alias
+
+            active_provider = _resolve_live_provider_alias(str(model_cfg.get("provider") or "").strip().lower())
+        except Exception:
+            active_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if active_provider == provider:
+            key = str(model_cfg.get("api_key") or "").strip()
+            if key:
+                return key
+
+    try:
+        from api.config import _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER
+    except Exception:
+        _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER = {
+            "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+            "deepseek": ("DEEPSEEK_API_KEY",),
+            "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+            "gmi": ("GMI_API_KEY",),
+            "lmstudio": ("LM_API_KEY", "LMSTUDIO_API_KEY"),
+            "minimax": ("MINIMAX_API_KEY",),
+            "mistralai": ("MISTRAL_API_KEY",),
+            "nvidia": ("NVIDIA_API_KEY",),
+            "openai": ("OPENAI_API_KEY",),
+            "openai-api": ("OPENAI_API_KEY",),
+            "openrouter": ("OPENROUTER_API_KEY",),
+            "stepfun": ("STEPFUN_API_KEY",),
+            "xai": ("XAI_API_KEY",),
+            "zai": ("ZAI_API_KEY", "GLM_API_KEY"),
+        }
+    for env_name in _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER.get(
+        provider,
+        (),
+    ):  # pragma: no branch - tiny tuple
+        key = str(os.getenv(env_name) or "").strip()
+        if key:
+            return key
+    return ""
+
+
+def _should_skip_agent_provider_model_ids(provider: str, cfg: dict) -> bool:
+    """Avoid agent live probes when they may attach credentials we cannot redirect-harden."""
+    try:
+        from api.config import _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS
+    except Exception:
+        _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS = frozenset({"copilot", "copilot-acp", "nous"})
+    if provider in _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS:
+        # These providers can resolve OAuth/token-pool credentials inside
+        # hermes_cli; WebUI cannot wrap those urllib calls with a no-redirect
+        # opener, so fall back locally.
+        return True
+    return bool(_configured_provider_api_key_for_live_probe(provider, cfg))
+
+
 def _handle_live_models(handler, parsed):
     """Return the live model list for a provider.
 
@@ -19818,19 +19902,20 @@ def _handle_live_models(handler, parsed):
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
         # the static _PROVIDER_MODELS list — it never raises.
-        try:
-            import sys as _sys
-            import os as _os
-            _agent_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                                       "..", "..", ".hermes", "hermes-agent")
-            _agent_dir = _os.path.normpath(_agent_dir)
-            if _agent_dir not in _sys.path:
-                _sys.path.insert(0, _agent_dir)
-            from hermes_cli.models import provider_model_ids as _pmi
-            ids = _pmi(provider)
-        except Exception as _import_err:
-            logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
-            ids = []
+        ids = []
+        if not _should_skip_agent_provider_model_ids(provider, cfg):
+            try:
+                import sys as _sys
+                import os as _os
+                _agent_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                                           "..", "..", ".hermes", "hermes-agent")
+                _agent_dir = _os.path.normpath(_agent_dir)
+                if _agent_dir not in _sys.path:
+                    _sys.path.insert(0, _agent_dir)
+                from hermes_cli.models import provider_model_ids as _pmi
+                ids = _pmi(provider)
+            except Exception as _import_err:
+                logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
 
         if not ids:
             custom_provider_entry = None
@@ -19949,13 +20034,11 @@ def _handle_live_models(handler, parsed):
                         else:
                             _models_url = f"{_ep}/v1/models"
                         
-                        _req = urllib.request.Request(
+                        _body = _credentialed_json_get_no_redirect(
                             _models_url,
-                            headers={"Authorization": f"Bearer {_api_key}"},
+                            {"Authorization": f"Bearer {_api_key}"},
+                            timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
                         )
-                        
-                        with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
-                            _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
                         if isinstance(_body, dict):
@@ -20015,12 +20098,11 @@ def _handle_live_models(handler, parsed):
                             if _active_provider == provider:
                                 _key = _model_cfg.get("api_key")
                     if _key:
-                        _req = urllib.request.Request(
+                        _body = _credentialed_json_get_no_redirect(
                             f"{_ep}/models",
-                            headers={"Authorization": f"Bearer {_key}"},
+                            {"Authorization": f"Bearer {_key}"},
+                            timeout=8,
                         )
-                        with urllib.request.urlopen(_req, timeout=8) as _resp:
-                            _body = json.loads(_resp.read())
                         ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
                         logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
                 except Exception as _fetch_err:
