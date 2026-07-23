@@ -9131,7 +9131,16 @@ async function loadSettingsPanel(){
       modelSel.innerHTML='';
       let models=null;
       try{
+        const modelCatalogContext=typeof _modelCatalogContextSnapshot==='function'
+          ? _modelCatalogContextSnapshot()
+          : null;
         models=await api('/api/models');
+        const modelsStillCurrent=!modelCatalogContext
+          || typeof _modelCatalogContextStillCurrent!=='function'
+          || _modelCatalogContextStillCurrent(modelCatalogContext);
+        if(!modelsStillCurrent){
+          models=null;
+        }
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
@@ -9150,8 +9159,8 @@ async function loadSettingsPanel(){
         }
         // Append live-fetched models for the active provider, same as the
         // chat-header dropdown does via _fetchLiveModels() (#872).
-        if(models.active_provider && typeof _fetchLiveModels==='function'){
-          _fetchLiveModels(models.active_provider, modelSel);
+        if(models&&models.active_provider && typeof _fetchLiveModels==='function'){
+          _fetchLiveModels(models.active_provider, modelSel, null, modelCatalogContext);
         }
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';

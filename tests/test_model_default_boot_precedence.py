@@ -342,7 +342,9 @@ _PROFILE_SWITCH_RACE_DRIVER_SRC = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
 const panels = fs.readFileSync(process.argv[3], 'utf8');
-const args = JSON.parse(process.argv[4]);
+const sessions = fs.readFileSync(process.argv[4], 'utf8');
+const args = JSON.parse(process.argv[5]);
+console.debug = () => {};
 
 function extractFuncFrom(src, name) {
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
@@ -491,6 +493,7 @@ const window = {
 let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
+let _liveModelFetchSeq = 0;
 let _modelCatalogContextEpoch = 0;
 var _profileSwitchGeneration = 0;
 var _modelDropdownRequestSeq = 0;
@@ -533,7 +536,6 @@ function renderModelDropdown() {}
 function _positionModelDropdown() {}
 function _redirectIfUnauth() { return false; }
 function _refreshOpenModelDropdown() {}
-function _fetchLiveModels() {}
 function startGatewaySSE() {}
 function applyBotName() {}
 function animateNextSessionListRefresh() {}
@@ -556,10 +558,13 @@ async function renderSessionList() {
 }
 
 const modelRequests = [];
+const liveRequests = [];
 fetch = function(url) {
   const href = String(url);
   if (href.includes('api/models/live')) {
-    return Promise.resolve({json: async () => ({models: []})});
+    const d = deferred();
+    liveRequests.push({href, resolve: d.resolve, reject: d.reject});
+    return d.promise;
   }
   if (href.includes('api/models')) {
     const d = deferred();
@@ -598,15 +603,20 @@ for (const name of [
   '_modelCatalogContextProfile', '_modelCatalogContextGeneration',
   '_modelCatalogContextSnapshot', '_modelCatalogContextStillCurrent',
   '_modelCatalogRequestStillCurrent', '_invalidateModelCatalogContext',
+  '_clearLiveModelCatalogState', '_modelCatalogLiveCacheKey',
+  '_liveModelFetchPendingForProvider',
   '_resetModelCatalogSurfacesForProfileSwitch',
 ]) {
   try { eval(extractFuncFrom(ui, name)); } catch (_e) {}
 }
+eval(extractFuncFrom(ui, '_addLiveModelsToSelect'));
+eval(extractFuncFrom(ui, '_fetchLiveModels'));
 eval(extractFuncFrom(ui, 'populateModelDropdown'));
 eval(extractFuncFrom(panels, '_refreshProfileSwitchBackground'));
 eval(extractFuncFrom(panels, '_advanceBootSettingsDefaultModelStateForProfileSwitch'));
 eval(extractFuncFrom(panels, '_profileSwitchPanelLoad'));
 eval(extractFuncFrom(panels, 'switchToProfile'));
+eval(extractFuncFrom(sessions, '_switchProfileForSessionLoad'));
 window._ensureModelDropdownReady = () => {
   calls.refreshes++;
   return populateModelDropdown({preferProfileDefaultOnFreshBoot: true});
@@ -641,6 +651,13 @@ function snapshot() {
     badgeKeys: Object.keys(window._configuredModelBadges || {}),
     bootSettingsDefaultModelState: window._bootSettingsDefaultModelState || null,
     calls: Object.assign({}, calls),
+    modelRequestCount: modelRequests.length,
+    liveRequestCount: liveRequests.length,
+    liveCacheModelIds: Object.values(_liveModelCache)
+      .flat()
+      .map(model => model && model.id)
+      .filter(Boolean),
+    livePendingKeys: Array.from(_liveModelFetchPending),
   };
 }
 
@@ -677,10 +694,76 @@ async function rapidBetaThenGamma() {
   return {afterStaleBeta, final: snapshot()};
 }
 
+async function ownerlessLiveSameProviderCacheLeak() {
+  modelSelect = makeSelect(
+    [{provider: 'shared-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+    'custom/profile-a-model',
+  );
+  S.activeProfile = 'alpha';
+  _profileSwitchGeneration = 0;
+  _modelDropdownRequestSeq = 0;
+  _modelCatalogContextEpoch = 0;
+  window._defaultModel = 'custom/profile-a-model';
+  window._activeProvider = 'shared-provider';
+  window._configuredModelBadges = {
+    'custom/profile-a-model': {role: 'primary', label: 'Primary', provider: 'shared-provider'},
+  };
+
+  const alphaLive = _fetchLiveModels('shared-provider', modelSelect);
+  await waitFor('alpha live request', () => liveRequests.length === 1);
+  const betaGen = ++_profileSwitchGeneration;
+  S.activeProfile = 'beta';
+  _resetModelCatalogSurfacesForProfileSwitch({
+    active: 'beta',
+    default_model: 'custom/profile-b-model',
+    default_model_provider: 'shared-provider',
+  }, betaGen);
+  _advanceBootSettingsDefaultModelStateForProfileSwitch({
+    active: 'beta',
+    default_model: 'custom/profile-b-model',
+    default_model_provider: 'shared-provider',
+    default_model_has_explicit_source: true,
+  }, betaGen);
+  liveRequests[0].resolve(responseFor({
+    models: [{id: 'custom/profile-a-live', label: 'Profile A live model'}],
+  }));
+  await alphaLive;
+  await tick(12);
+  return {final: snapshot()};
+}
+
+async function sessionMismatchSwitchFailedRefresh() {
+  profilePayloads.beta = {
+    active: 'beta',
+    is_default: false,
+    default_model: 'custom/profile-b-model',
+    default_model_provider: 'shared-provider',
+  };
+  modelSelect = makeSelect(
+    [{provider: 'shared-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+    'custom/profile-a-model',
+  );
+  S.activeProfile = 'alpha';
+  _profileSwitchGeneration = 0;
+  _modelDropdownRequestSeq = 0;
+  _modelCatalogContextEpoch = 0;
+  window._defaultModel = 'custom/profile-a-model';
+  window._activeProvider = 'shared-provider';
+  await _switchProfileForSessionLoad('beta');
+  await tick(12);
+  if (modelRequests.length) {
+    modelRequests[0].reject(new Error('beta catalog unavailable'));
+    await tick(12);
+  }
+  return {final: snapshot()};
+}
+
 (async () => {
-  const result = args.scenario === 'rapid-beta-gamma'
-    ? await rapidBetaThenGamma()
-    : await staleAlphaThenFailedBeta();
+  let result;
+  if (args.scenario === 'rapid-beta-gamma') result = await rapidBetaThenGamma();
+  else if (args.scenario === 'ownerless-live-same-provider') result = await ownerlessLiveSameProviderCacheLeak();
+  else if (args.scenario === 'session-mismatch-failed-refresh') result = await sessionMismatchSwitchFailedRefresh();
+  else result = await staleAlphaThenFailedBeta();
   process.stdout.write(JSON.stringify(result));
 })().catch(err => {
   console.error(err && err.stack || err);
@@ -1267,6 +1350,64 @@ def test_rapid_profile_switch_rejects_superseded_model_catalog_response(
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_ownerless_live_model_fetch_rejects_previous_profile_same_provider_cache(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="ownerless-live-same-provider",
+        render_plan=[],
+    )
+
+    snapshot = got["final"]
+    assert snapshot["profile"] == "beta"
+    assert snapshot["generation"] == 1
+    assert snapshot["defaultModel"] == "custom/profile-b-model"
+    assert snapshot["activeProvider"] == "shared-provider"
+    assert snapshot["selectedState"] == {
+        "model": "custom/profile-b-model",
+        "model_provider": "shared-provider",
+    }
+    assert snapshot["selectValue"] == "custom/profile-b-model"
+    assert "custom/profile-a-model" not in snapshot["optionValues"]
+    assert not any("profile-a-live" in value for value in snapshot["optionValues"])
+    assert snapshot["liveCacheModelIds"] == []
+    assert snapshot["livePendingKeys"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_profile_mismatch_switch_owns_model_catalog_refresh_when_refresh_fails(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="session-mismatch-failed-refresh",
+        render_plan=[],
+    )
+
+    snapshot = got["final"]
+    assert snapshot["profile"] == "beta"
+    assert snapshot["generation"] == 1
+    assert snapshot["defaultModel"] == "custom/profile-b-model"
+    assert snapshot["activeProvider"] == "shared-provider"
+    assert snapshot["selectedState"] == {
+        "model": "custom/profile-b-model",
+        "model_provider": "shared-provider",
+    }
+    assert snapshot["selectValue"] == "custom/profile-b-model"
+    assert "custom/profile-a-model" not in snapshot["optionValues"]
+    assert snapshot["modelRequestCount"] == 1
+    assert snapshot["calls"]["refreshes"] == 1
+    assert snapshot["bootSettingsDefaultModelState"] == {
+        "model": "custom/profile-b-model",
+        "model_provider": "shared-provider",
+        "default_model_has_explicit_source": True,
+        "profile": "beta",
+        "profile_switch_generation": 1,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_settings_boot_then_model_refresh_does_not_recreate_nonexplicit_provider_fallback(
     populate_driver_path,
 ):
@@ -1569,7 +1710,14 @@ def _run_profile_switch_race_driver(
         "renderPlan": render_plan,
     }
     result = subprocess.run(
-        [NODE, driver_path, str(REPO / "static" / "ui.js"), str(REPO / "static" / "panels.js"), json.dumps(payload)],
+        [
+            NODE,
+            driver_path,
+            str(REPO / "static" / "ui.js"),
+            str(REPO / "static" / "panels.js"),
+            str(REPO / "static" / "sessions.js"),
+            json.dumps(payload),
+        ],
         capture_output=True,
         text=True,
         timeout=30,

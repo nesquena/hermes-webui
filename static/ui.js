@@ -3469,6 +3469,7 @@ function _invalidateModelCatalogContext(){
   _modelDropdownRequestSeq++;
   _modelCatalogContextEpoch++;
   _modelCatalogFallbackRetried=false;
+  if(typeof _clearLiveModelCatalogState==='function') _clearLiveModelCatalogState();
 }
 
 function _resetModelCatalogSurfacesForProfileSwitch(data,gen){
@@ -3697,6 +3698,35 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+let _liveModelFetchSeq=0;
+
+function _clearLiveModelCatalogState(){
+  for(const key of Object.keys(_liveModelCache)) delete _liveModelCache[key];
+  _liveModelFetchPending.clear();
+}
+
+function _modelCatalogLiveCacheKey(provider,context){
+  const providerId=String(provider||'').trim();
+  if(!providerId||!context) return '';
+  return JSON.stringify([
+    String(context.epoch),
+    String(context.profile||'default'),
+    String(context.profile_switch_generation),
+    providerId,
+  ]);
+}
+
+function _liveModelFetchPendingForProvider(provider){
+  const context=typeof _modelCatalogContextSnapshot==='function'
+    ? _modelCatalogContextSnapshot()
+    : null;
+  const cacheKey=_modelCatalogLiveCacheKey(provider,context);
+  if(!cacheKey) return false;
+  for(const pendingKey of _liveModelFetchPending){
+    if(String(pendingKey).startsWith(cacheKey+'|')) return true;
+  }
+  return false;
+}
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -3798,26 +3828,36 @@ function _addLiveModelsToSelect(provider, models, sel){
 }
 
 async function _fetchLiveModels(provider, sel, requestSeq=null, requestContext=null){
+  provider=String(provider||'').trim();
   if(!provider||!sel) return;
+  const ownerContext=requestContext||(
+    typeof _modelCatalogContextSnapshot==='function'
+      ? _modelCatalogContextSnapshot()
+      : null
+  );
+  const cacheKey=typeof _modelCatalogLiveCacheKey==='function'
+    ? _modelCatalogLiveCacheKey(provider,ownerContext)
+    : '';
   const requestStillCurrent=()=>{
+    if(!ownerContext) return false;
     if(requestSeq===null){
-      return !requestContext
-        || typeof _modelCatalogContextStillCurrent!=='function'
-        || _modelCatalogContextStillCurrent(requestContext);
+      return typeof _modelCatalogContextStillCurrent==='function'
+        && _modelCatalogContextStillCurrent(ownerContext);
     }
     return typeof _modelCatalogRequestStillCurrent==='function'
-      ? _modelCatalogRequestStillCurrent(requestSeq,requestContext)
+      ? _modelCatalogRequestStillCurrent(requestSeq,ownerContext)
       : requestSeq===_modelDropdownRequestSeq;
   };
-  if(!requestStillCurrent()) return;
+  if(!cacheKey||!requestStillCurrent()) return;
   // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
+  if(_liveModelCache[cacheKey]){
     if(!requestStillCurrent()) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[cacheKey],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
-  _liveModelFetchPending.add(provider);
+  const pendingKey=cacheKey+'|'+(++_liveModelFetchSeq);
+  _liveModelFetchPending.add(pendingKey);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
@@ -3826,10 +3866,15 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, requestContext=n
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(!requestStillCurrent()) return;
-    if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
+    const models=Array.isArray(data.models)?data.models:[];
+    if(!models.length) return;
     if(!requestStillCurrent()) return;
-    const added=_addLiveModelsToSelect(provider,data.models,sel);
+    _liveModelCache[cacheKey]=models;
+    if(!requestStillCurrent()){
+      delete _liveModelCache[cacheKey];
+      return;
+    }
+    const added=_addLiveModelsToSelect(provider,models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
@@ -3837,7 +3882,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, requestContext=n
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    _liveModelFetchPending.delete(pendingKey);
   }
 }
 
@@ -10694,7 +10739,11 @@ function syncTopbar(){
         // Also defer if a live model fetch is still in flight — the model may be
         // in the list once the fetch completes. Persisting now would corrupt the
         // session with the wrong model before live models arrive (#1169).
-        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        const liveStillPending=window._activeProvider&&(
+          typeof _liveModelFetchPendingForProvider==='function'
+            ? _liveModelFetchPendingForProvider(window._activeProvider)
+            : _liveModelFetchPending.has(window._activeProvider)
+        );
         if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).

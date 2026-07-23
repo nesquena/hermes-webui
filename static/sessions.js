@@ -1634,6 +1634,9 @@ async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
+  const profileSwitchGen=typeof _profileSwitchGeneration==='number'
+    ? ++_profileSwitchGeneration
+    : null;
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
@@ -1646,10 +1649,31 @@ async function _switchProfileForSessionLoad(profile){
     }
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
-    if(data.default_model) window._defaultModel=data.default_model;
-    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    const profileSwitchModelAuthority=typeof _resetModelCatalogSurfacesForProfileSwitch==='function'
+      ? _resetModelCatalogSurfacesForProfileSwitch(data,profileSwitchGen)
+      : null;
+    if(!profileSwitchModelAuthority){
+      if(typeof _invalidateModelCatalogContext==='function') _invalidateModelCatalogContext();
+      if(data.default_model) window._defaultModel=data.default_model;
+      if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    }
+    if(typeof _advanceBootSettingsDefaultModelStateForProfileSwitch==='function'){
+      _advanceBootSettingsDefaultModelStateForProfileSwitch(data,profileSwitchGen);
+    }
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
+    }
+    if(typeof window!=='undefined'){
+      window._modelDropdownReady=null;
+      let modelRefreshPromise=null;
+      if(typeof window._ensureModelDropdownReady==='function'){
+        modelRefreshPromise=Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+      }else if(typeof populateModelDropdown==='function'){
+        modelRefreshPromise=Promise.resolve(populateModelDropdown({preferProfileDefaultOnFreshBoot:true})).catch(()=>{});
+      }
+      if(modelRefreshPromise) window._modelDropdownReady=modelRefreshPromise;
+    }else if(typeof populateModelDropdown==='function'){
+      Promise.resolve(populateModelDropdown({preferProfileDefaultOnFreshBoot:true})).catch(()=>{});
     }
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();
