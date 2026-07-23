@@ -9662,7 +9662,7 @@ from api.streaming import (
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
 )
-from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.gateway_chat import _run_gateway_chat_streaming, gateway_accepts_plugin_mentions, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
@@ -13290,6 +13290,9 @@ def handle_get(handler, parsed) -> bool:
             "is_git": True,
         }
         return j(handler, {"git": info})
+
+    if parsed.path == "/api/codex/plugins":
+        return _handle_codex_plugins(handler)
 
     if parsed.path == "/api/commands":
         from api.commands import list_commands
@@ -21072,12 +21075,19 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    plugin_mentions=None,
     external_runtime_owned: bool | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
+    if backend_is_gateway and plugin_mentions and not gateway_accepts_plugin_mentions(get_config()):
+        return {
+            "error": "The connected Hermes gateway does not advertise plugin mention support. Your draft and selected plugins were kept.",
+            "type": "plugin_mentions_gateway_unsupported",
+            "_status": 409,
+        }
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -21204,6 +21214,8 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if plugin_mentions:
+        worker_kwargs["plugin_mentions"] = plugin_mentions
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -21293,6 +21305,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    plugin_mentions=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21334,6 +21347,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                plugin_mentions=plugin_mentions,
             )
 
         def _legacy_adapter_factory():
@@ -21356,7 +21370,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={"route": route, **({"plugin_mentions": plugin_mentions} if plugin_mentions else {})},
                 )
             )
         except NotImplementedError as exc:
@@ -21375,6 +21389,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        plugin_mentions=plugin_mentions,
     )
 
 
@@ -21967,6 +21982,10 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        try:
+            plugin_mentions = _normalize_codex_plugin_mentions(body.get("plugin_mentions"))
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.
@@ -22188,6 +22207,7 @@ def _handle_chat_start(handler, body, diag=None):
             "route": "/api/chat/start",
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
+            "plugin_mentions": plugin_mentions,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -22252,6 +22272,98 @@ def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     except Exception:
         pass
     return fallback
+
+
+_CODEX_PLUGIN_MENTION_LIMIT = 20
+_CODEX_PLUGIN_NAME_LIMIT = 128
+_CODEX_PLUGIN_PATH_LIMIT = 1024
+
+
+def _normalize_codex_plugin_mentions(raw_mentions):
+    """Validate and order-dedupe the optional browser plugin selection."""
+    if raw_mentions is None:
+        return []
+    if not isinstance(raw_mentions, list):
+        raise ValueError("plugin_mentions must be a list")
+    if len(raw_mentions) > _CODEX_PLUGIN_MENTION_LIMIT:
+        raise ValueError(f"plugin_mentions must contain at most {_CODEX_PLUGIN_MENTION_LIMIT} items")
+
+    normalized = []
+    seen = set()
+    for item in raw_mentions:
+        if not isinstance(item, dict) or set(item) != {"name", "path"}:
+            raise ValueError("each plugin mention must contain only name and path")
+        name = item.get("name")
+        path = item.get("path")
+        if not isinstance(name, str) or not name.strip() or len(name) > _CODEX_PLUGIN_NAME_LIMIT:
+            raise ValueError("plugin mention name is invalid")
+        if not isinstance(path, str) or not path.strip() or len(path) > _CODEX_PLUGIN_PATH_LIMIT:
+            raise ValueError("plugin mention path is invalid")
+        name = name.strip()
+        path = path.strip()
+        parsed = urlsplit(path)
+        if (
+            parsed.scheme != "plugin"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(part in (".", "..") for part in parsed.path.split("/"))
+            or any(ch.isspace() for ch in path)
+        ):
+            raise ValueError("plugin mention path must be a valid plugin:// path")
+        key = (name, path)
+        if key not in seen:
+            seen.add(key)
+            normalized.append({"name": name, "path": path})
+    return normalized
+
+
+def _handle_codex_plugins(handler):
+    """Return the sanitized Codex app-server plugin inventory, when supported."""
+    try:
+        from agent.codex_runtime import list_codex_plugins
+    except (ImportError, AttributeError):
+        return j(handler, {"plugins": [], "available": False})
+
+    try:
+        inventory = list_codex_plugins()
+    except Exception:
+        logger.warning("Codex plugin inventory is unavailable", exc_info=True)
+        return j(handler, {"plugins": [], "available": False})
+
+    raw_plugins = inventory.get("plugins", []) if isinstance(inventory, dict) else inventory
+    if not isinstance(raw_plugins, list):
+        return j(handler, {"plugins": [], "available": False})
+    if len(raw_plugins) > _CODEX_PLUGIN_MENTION_LIMIT:
+        logger.warning("Codex plugin inventory exceeds the WebUI limit; truncating")
+        raw_plugins = raw_plugins[:_CODEX_PLUGIN_MENTION_LIMIT]
+    plugins = []
+    for raw in raw_plugins:
+        if not isinstance(raw, dict):
+            continue
+        item = {}
+        valid = True
+        for key, limit in (("name", 128), ("path", 1024), ("description", 4096)):
+            value = raw.get(key, "")
+            if not isinstance(value, str) or len(value) > limit or (key in {"name", "path"} and not value.strip()):
+                valid = False
+                break
+            item[key] = value.strip() if key in {"name", "path"} else value
+        keywords = raw.get("keywords", [])
+        if not valid or not isinstance(keywords, list) or len(keywords) > 100:
+            continue
+        if not all(isinstance(value, str) and len(value) <= 128 for value in keywords):
+            continue
+        try:
+            identity = _normalize_codex_plugin_mentions([{"name": item["name"], "path": item["path"]}])[0]
+        except (ValueError, IndexError):
+            continue
+        item.update(identity)
+        item["keywords"] = keywords
+        plugins.append(item)
+    return j(handler, {"plugins": plugins, "available": True})
 
 
 def _normalize_chat_attachments(raw_attachments):

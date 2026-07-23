@@ -2235,7 +2235,7 @@ $('modelSelect').onchange=async()=>{
     if(warn&&typeof showToast==='function') showToast(warn,4000);
   }
 };
-$('msg').addEventListener('input',()=>{
+$('msg').addEventListener('input',(event)=>{
   updateSendBtn();
   scheduleComposerAutoResize();
   // Persist composer draft to server (debounced in _saveComposerDraft).
@@ -2244,6 +2244,7 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  if(typeof updatePluginMentionAutocomplete==='function') updatePluginMentionAutocomplete(event);
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
   if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
@@ -2327,6 +2328,7 @@ function _isNumpadEnter(e){
   return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
 }
 $('msg').addEventListener('keydown',e=>{
+  if(typeof handlePluginMentionKeydown==='function'&&handlePluginMentionKeydown(e)) return;
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
   const dropdownOpen=dd&&dd.classList.contains('open');
