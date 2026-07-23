@@ -803,3 +803,179 @@ class TestBareFileUrlMediaRendering:
         # Labeled anchors keep the normal link path (routed to /api/media as a link,
         # not auto-loaded as an <img>).
         assert "<img" not in out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-boundary regression: _strip_media_references → renderMd()
+# PR #6285 review: assert sanitized public-share messages never emit
+# api/media?path= when rendered through the ACTUAL renderer.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ruff: noqa: E501 — allow long markdown test strings
+
+
+class TestPublicShareSanitizerThroughRenderer:
+    """Drive _strip_media_references() output through the real renderMd().
+
+    Every message in a public share passes through _strip_media_references()
+    before being stored / served.  If the sanitizer misses any form that the
+    renderer would turn into an api/media?path= link, an anonymous recipient
+    sees a broken auth-gated resource.
+
+    Each test case:
+      1. Takes a raw LLM-like message that contains MEDIA: / file:// refs
+      2. Passes it through _strip_media_references()
+      3. Passes the sanitized text through the real renderMd() via node
+      4. Asserts NO api/media?path= appears in the final HTML
+    """
+
+    @staticmethod
+    def _sanitized_render(driver_path, markdown: str) -> str:
+        """Apply _strip_media_references then renderMd()."""
+        from api.shares import _strip_media_references
+        sanitized = _strip_media_references(markdown)
+        return _render(driver_path, sanitized)
+
+    # ── Prose / bare-url forms (must be replaced) ──────────────────────
+
+    def test_bare_file_url_does_not_survive_sanitizer(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "Data at file:///home/alice/secret.txt",
+        )
+        assert "api/media?path=" not in html, (
+            f"Bare file:// URL survived sanitizer: {html!r}"
+        )
+
+    def test_markdown_link_file_url_does_not_survive(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "[secret](file:///home/alice/secret.txt)",
+        )
+        assert "api/media?path=" not in html, (
+            f"Markdown [label](file://...) survived sanitizer: {html!r}"
+        )
+
+    def test_markdown_image_file_url_does_not_survive(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "![chart](file:///tmp/chart.png)",
+        )
+        assert "api/media?path=" not in html, (
+            f"Markdown ![alt](file://...) survived sanitizer: {html!r}"
+        )
+
+    def test_media_token_does_not_survive(self, driver_path):
+        html = self._sanitized_render(
+            driver_path,
+            "Here: MEDIA:/workspace/output.png",
+        )
+        assert "api/media?path=" not in html, (
+            f"MEDIA: token survived sanitizer: {html!r}"
+        )
+
+    # ── Balanced fenced & inline code (file:// must be preserved) ──────
+
+    def test_balanced_fence_preserves_file_url_literal(self, driver_path):
+        from api.shares import _strip_media_references
+        src = "```\nconst p = 'file:///etc/passwd';\n```"
+        sanitized = _strip_media_references(src)
+        assert "file:///etc/passwd" in sanitized, (
+            f"file:// inside balanced fence must be preserved: {sanitized!r}"
+        )
+        html = _render(driver_path, sanitized)
+        assert "api/media?path=" not in html, (
+            f"Sanitised balanced fence must not emit api/media: {html!r}"
+        )
+
+    def test_inline_code_preserves_file_url_literal(self, driver_path):
+        from api.shares import _strip_media_references
+        src = "run `file:///tmp/data.csv` locally"
+        sanitized = _strip_media_references(src)
+        assert "file:///tmp/data.csv" in sanitized, (
+            f"file:// inside inline code must be preserved: {sanitized!r}"
+        )
+        html = _render(driver_path, sanitized)
+        assert "api/media?path=" not in html
+
+    # ── Unmatched fence (opener without close — must NOT stash) ────────
+
+    def test_unmatched_fence_opener_does_not_stash_file_url(self, driver_path):
+        """An opener-like line with no closing fence must stay as active prose,
+        and the file:// ref after it must be replaced by the sanitizer."""
+        html = self._sanitized_render(
+            driver_path,
+            "```\n[secret](file:///home/alice/secret.txt)",
+        )
+        assert "api/media?path=" not in html, (
+            f"Unmatched fence allowed file:// to reach renderer: {html!r}"
+        )
+
+    # ── CRLF blocks (must normalise so close-fence regex matches) ──────
+
+    def test_crlf_fenced_block_does_not_swallow_post_fence_file_url(self, driver_path):
+        """CRLF-terminated fenced block must close properly so a prose
+        file:// after the fence is still sanitised."""
+        html = self._sanitized_render(
+            driver_path,
+            "```\r\ncode line\r\n```\r\nfile:///tmp/leak.csv outside",
+        )
+        assert "api/media?path=" not in html, (
+            f"CRLF fence didn't close; file:// survived: {html!r}"
+        )
+
+    # ── MEDIA: inside code regions (renderer processes first) ─────────
+
+    def test_media_token_inside_fenced_code_is_replaced(self, driver_path):
+        """MEDIA: inside a fence must be replaced because the renderer
+        processes MEDIA: before code stashing."""
+        html = self._sanitized_render(
+            driver_path,
+            "```\nMEDIA:/workspace/secret.png\n```",
+        )
+        assert "api/media?path=" not in html, (
+            f"MEDIA: inside fenced code survived sanitizer: {html!r}"
+        )
+        # The placeholder text should appear (it's prose after sanitization)
+        assert "[Local attachment omitted" in html
+
+    def test_media_token_inside_inline_code_is_replaced(self, driver_path):
+        """MEDIA: inside inline backticks must be replaced."""
+        html = self._sanitized_render(
+            driver_path,
+            "Check `MEDIA:/workspace/secret.png` for details",
+        )
+        assert "api/media?path=" not in html, (
+            f"MEDIA: inside inline code survived sanitizer: {html!r}"
+        )
+
+    # ── Multiple blocks / mixed content ────────────────────────────────
+
+    def test_mixed_content_nothing_leaks(self, driver_path):
+        """A realistic multi-block message with various forms."""
+        src = (
+            "Here is the data:\n\n"
+            "```\n"
+            "const path = 'file:///etc/hosts';\n"
+            "```\n\n"
+            "![chart](file:///tmp/chart.png)\n\n"
+            "Bare file:///tmp/data.csv reference\n\n"
+            "MEDIA:/workspace/photo.png\n\n"
+            "Check `file:///etc/hostname` inline\n\n"
+            "> ```\n"
+            "> file:///blockquote/leak.txt\n"
+            "> ```\n\n"
+            "Done."
+        )
+        html = self._sanitized_render(driver_path, src)
+        assert "api/media?path=" not in html, (
+            f"Mixed content still leaks api/media: {html!r}"
+        )
+        # file:// inside balanced fence and inline code must survive
+        # (renderer keeps them inert)
+        assert "file:///etc/hosts" in html, (
+            "file:// inside balanced fence must survive in HTML"
+        )
+        assert "file:///etc/hostname" in html, (
+            "file:// inside inline code must survive in HTML"
+        )

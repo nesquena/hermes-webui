@@ -97,6 +97,119 @@ def _share_message_text(message: dict) -> str:
     return ""
 
 
+def _strip_media_references(text: str) -> str:
+    """Replace local MEDIA: tokens and file:// URLs with inert placeholders.
+
+    Public shares must not emit links to the authenticated /api/media endpoint.
+    MEDIA:<path> sentinel values and file:// URLs that renderMd() would
+    convert into /api/media?path=... URLs are replaced with a non-clickable
+    placeholder so anonymous recipients never see broken auth-gated media links.
+
+    Covers every renderer-recognized file:// form (issue #6285 review):
+      - Bare file:// URLs (whitespace-delimited)
+      - Markdown links: [label](file://...)
+      - Markdown images: ![alt](file://...)
+      - file:path (no slashes), file:/path (single slash)
+      - file://localhost/path, file://127.0.0.1/path
+      - URL-encoded file:// variants (e.g. file://%2Ftmp%2Ffile)
+    while preserving fenced and inline-code regions byte-for-byte (the
+    renderer keeps file:// inert inside code/preformatted content).
+
+    Process order matches the real renderer's (ui.js) pipeline:
+      1. CRLF normalisation (renderer normalises before any parsing)
+      2. MEDIA: replacement (renderer converts MEDIA: to media tokens
+         before fenced/inline code processing, so MEDIA: inside code
+         regions is also rendered — matching that here means MEDIA:
+         never survives into a public payload)
+      3. Fenced code stashing (only complete balanced fences — an
+         unmatched opener stays as active prose for sanitisation)
+      4. Inline code stashing
+      5. file:// URL replacement (bare + markdown forms)
+      6. Code restoration
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    # (1) Normalise CRLF / bare CR to LF — renderMd() does this first
+    # so the close-fence regex does not miss \r\n-terminated lines.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    placeholder = "[Local attachment omitted from public share]"
+
+    # (2) Replace MEDIA: EVERYWHERE before code stashing — the renderer
+    # converts MEDIA: to media-stash tokens before fenced/inline code
+    # processing, so MEDIA: inside code regions would also be rendered
+    # as /api/media links.
+    text = re.sub(r"MEDIA:\S+", placeholder, text)
+
+    # (3) Stash fenced code blocks.  Match the renderer's line-anchored
+    # variable-length fence grammar exactly.  Only stash a COMPLETE
+    # balanced fence — an unmatched opener (no valid closing fence) stays
+    # as active prose for sanitisation (review #6285 issue 1).
+    # Opening fence: ^[ ]{0,3}(`{3,})([^`]*)$
+    # Closing fence: ^[ ]{0,3}(`{3,})[ \t]*$  (length >= opening length)
+    _fenced: list[str] = []
+    _lines = text.split("\n")
+    _fence_parts: list[str] = []
+    _i = 0
+    while _i < len(_lines):
+        _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _lines[_i])
+        if _om:
+            _open_len = len(_om.group(1))
+            _start = _i
+            _i += 1
+            _found_close = False
+            while _i < len(_lines):
+                _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_i])
+                if _cm and len(_cm.group(1)) >= _open_len:
+                    _i += 1
+                    _found_close = True
+                    break
+                _i += 1
+            if _found_close:
+                _block = "\n".join(_lines[_start:_i])
+                _fenced.append(_block)
+                _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+            else:
+                # No matching close — treat opener and subsequent lines
+                # as active prose (matching renderMd() behaviour).
+                for _j in range(_start, _i):
+                    _fence_parts.append(_lines[_j])
+        else:
+            _fence_parts.append(_lines[_i])
+            _i += 1
+    text = "\n".join(_fence_parts)
+
+    # (4) Stash inline code spans (`...`) so file:// inside them is preserved.
+    _inline: list[str] = []
+    text = re.sub(
+        r"`[^`\n]+`",
+        lambda m: _inline.append(m.group(0)) or f"\x00I{len(_inline) - 1}\x00",
+        text,
+    )
+
+    # (5) file:// URL replacement
+    # Markdown images: ![alt](file:(?://)?...) → placeholder
+    text = re.sub(r"!\[[^\]]*\]\(file:(?://)?[^\s)]+\)", placeholder, text)
+
+    # Markdown links: [label](file:(?://)?...) → placeholder
+    text = re.sub(r"\[[^\]]+\]\(file:(?://)?[^\s)]+\)", placeholder, text)
+
+    # Bare file:(?://)? URLs – preserve the leading delimiter instead of
+    # consuming whitespace and unconditionally inserting a space (review
+    # feedback). The file:(?://)? pattern also catches file:path and
+    # file:/path forms in addition to standard file:// and file:/// variants.
+    text = re.sub(r"(^|\s)file:(?://)?[^\s<>\"')\]]+", r"\1" + placeholder, text)
+
+    # (6) Restore stashed code regions.
+    for i, s in enumerate(_fenced):
+        text = text.replace(f"\x00F{i}\x00", s)
+    for i, s in enumerate(_inline):
+        text = text.replace(f"\x00I{i}\x00", s)
+
+    return text
+
+
 def _redact_share_paths(text: str, extra_paths) -> str:
     """Strip known local session/workspace/home paths out of public-share text.
 
@@ -360,6 +473,9 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     # URIs — or a static placeholder if the path is outside the allowed roots.
     text = _embed_share_media(text, allowed_roots=allowed_roots)
     text = _redact_share_paths(text, redact_paths)
+    # Strip MEDIA: / file:// references so the public share never renders
+    # links to the authenticated /api/media endpoint (issue #6126).
+    text = _strip_media_references(text)
     if not text.strip():
         return None
     sanitized = {
@@ -376,10 +492,24 @@ def _public_share_payload(payload: dict) -> dict:
     messages = payload.get("messages")
     if not isinstance(messages, list):
         messages = []
+    # Sanitize each message on read so legacy snapshots stored before the
+    # write-time sanitizer was introduced also have MEDIA:/file:// stripped
+    # (issue #6285 review – "close the legacy-snapshot path").
+    safe_messages = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            content = _strip_media_references(content)
+            if content.strip():
+                safe_messages.append({**msg, "content": content})
+        else:
+            safe_messages.append(msg)
     public = {
         "title": str(payload.get("title") or "Untitled"),
-        "messages": messages,
-        "message_count": int(payload.get("message_count") or len(messages)),
+        "messages": safe_messages,
+        "message_count": int(payload.get("message_count") or len(safe_messages)),
     }
     created_at = payload.get("created_at")
     updated_at = payload.get("updated_at")
