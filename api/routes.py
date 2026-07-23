@@ -3463,7 +3463,7 @@ def _run_journal_outcome_event(
     raw_stable_run_id_value = event.get("stable_run_id")
     raw_stable_run_id = _bounded_journal_outcome_string(
         raw_stable_run_id_value,
-        limit=512,
+        limit=STABLE_RUN_ID_MAX_CHARS,
     )
     if raw_stable_run_id_value not in (None, "") and raw_stable_run_id is None:
         return None
@@ -3471,7 +3471,10 @@ def _run_journal_outcome_event(
         return None
 
     raw_run_id_value = event.get("run_id")
-    raw_run_id = _bounded_journal_outcome_string(raw_run_id_value, limit=512)
+    raw_run_id = _bounded_journal_outcome_string(
+        raw_run_id_value,
+        limit=STABLE_RUN_ID_MAX_CHARS,
+    )
     if raw_run_id_value not in (None, "") and raw_run_id is None:
         return None
 
@@ -3481,7 +3484,7 @@ def _run_journal_outcome_event(
             return None
         event_id_run_id = _bounded_journal_outcome_string(
             raw_event_id.rsplit(":", 1)[0],
-            limit=512,
+            limit=STABLE_RUN_ID_MAX_CHARS,
         )
         if not event_id_run_id:
             return None
@@ -3637,9 +3640,12 @@ def _run_journal_summary_stable_run_id(summary: dict, stream_id: str) -> str | N
         return None
     stable_run_id = _bounded_journal_outcome_string(
         summary.get("stable_run_id"),
-        limit=512,
+        limit=STABLE_RUN_ID_MAX_CHARS,
     )
-    summary_run_id = _bounded_journal_outcome_string(summary.get("run_id"), limit=512)
+    summary_run_id = _bounded_journal_outcome_string(
+        summary.get("run_id"),
+        limit=STABLE_RUN_ID_MAX_CHARS,
+    )
     if stable_run_id and summary_run_id and stable_run_id != summary_run_id:
         return None
     return stable_run_id or summary_run_id
@@ -10235,6 +10241,7 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    STABLE_RUN_ID_MAX_CHARS,
     bound_run_journal_snapshot_args,
     find_run_summary,
     read_run_events,

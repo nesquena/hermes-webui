@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from api.run_journal import (
     RunJournalWriter,
     append_run_event,
@@ -52,6 +54,39 @@ def test_run_journal_summary_returns_persisted_stable_identity_from_writer(tmp_p
     assert found is not None
     assert found["run_id"] == "run_stable_1"
     assert found["stream_id"] == "stream_transport_1"
+
+
+def test_run_journal_stable_identity_bound_is_enforced_at_ingest(tmp_path):
+    stable_512 = "r" * 512
+    stable_513 = "r" * 513
+
+    writer = RunJournalWriter(
+        "session_1",
+        "stream_transport_bound",
+        stable_run_id=stable_512,
+        session_dir=tmp_path,
+    )
+    event = writer.append_sse_event("token", {"text": "hello"})
+    summary = latest_run_summary("session_1", "stream_transport_bound", session_dir=tmp_path)
+
+    assert event["stable_run_id"] == stable_512
+    assert summary["stable_run_id_status"] == "ok"
+    assert summary["run_id"] == stable_512
+    with pytest.raises(ValueError):
+        RunJournalWriter(
+            "session_1",
+            "stream_transport_overlong",
+            stable_run_id=stable_513,
+            session_dir=tmp_path,
+        )
+    unset_writer = RunJournalWriter(
+        "session_1",
+        "stream_transport_unset",
+        stable_run_id=None,
+        session_dir=tmp_path,
+    )
+    with pytest.raises(ValueError):
+        unset_writer.set_stable_run_id(stable_513)
 
 
 def test_run_journal_reads_bounded_replay_window(tmp_path):

@@ -34,7 +34,11 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
-from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.run_journal import (
+    RunJournalWriter,
+    bound_run_journal_snapshot_args,
+    validate_stable_run_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -561,9 +565,10 @@ def _run_gateway_runs_api_streaming(
         update_active_run(stream_id, phase="gateway-request")
         with urllib.request.urlopen(req, timeout=30) as resp:
             run_data = json.loads(resp.read(65536))
-        run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
-        if not run_id:
+        raw_run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
+        if not raw_run_id:
             raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+        run_id = validate_stable_run_id(raw_run_id)
     except Exception:
         _finish_gateway_run_starting(stream_id)
         raise
@@ -846,11 +851,7 @@ def _run_gateway_chat_streaming(
         provider=model_provider,
         backend="gateway",
     )
-    try:
-        run_journal = RunJournalWriter(session_id, stream_id, stable_run_id=None)
-    except Exception:
-        run_journal = None
-        logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
+    run_journal = None
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
@@ -917,6 +918,19 @@ def _run_gateway_chat_streaming(
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False
+        try:
+            run_journal = RunJournalWriter(
+                session_id,
+                stream_id,
+                stable_run_id=None if _use_runs_api else stream_id,
+            )
+        except Exception:
+            run_journal = None
+            logger.debug(
+                "Failed to initialize gateway run journal for stream %s",
+                stream_id,
+                exc_info=True,
+            )
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
@@ -1082,11 +1096,6 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
-                                _persist_gateway_stable_run_id(
-                                    getattr(run_journal, "set_stable_run_id", None),
-                                    stream_id,
-                                    _approval_run_id,
-                                )
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror
                                 head, total = submit_gateway_pending_mirror(session_id, approval_data)

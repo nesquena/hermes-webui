@@ -41,6 +41,7 @@ _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _STABLE_RUN_ID_DEFAULT = object()
+STABLE_RUN_ID_MAX_CHARS = 512
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
@@ -64,6 +65,13 @@ def _validate_id(value: str, field: str) -> str:
     return cleaned
 
 
+def validate_stable_run_id(value: str) -> str:
+    cleaned = _validate_id(value, "stable_run_id")
+    if len(cleaned) > STABLE_RUN_ID_MAX_CHARS:
+        raise ValueError("invalid stable_run_id")
+    return cleaned
+
+
 def _optional_stable_run_id(value, *, default_run_id: str | None = None) -> str | None:
     if value is _STABLE_RUN_ID_DEFAULT:
         value = default_run_id
@@ -71,7 +79,7 @@ def _optional_stable_run_id(value, *, default_run_id: str | None = None) -> str 
         return None
     if not isinstance(value, str):
         raise ValueError("invalid stable_run_id")
-    return _validate_id(value, "stable_run_id")
+    return validate_stable_run_id(value)
 
 
 def _run_path(session_id: str, run_id: str, session_dir: Path | None = None) -> Path:

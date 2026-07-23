@@ -27,6 +27,74 @@ def _reset_gateway_run_start_state(stream_id: str) -> None:
         lifecycle.pop(stream_id, None)
 
 
+class _GatewayJsonResponse:
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def read(self, _limit=None):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+class _GatewaySseResponse:
+    def __init__(self, lines):
+        self._lines = lines
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+def _install_gateway_journal_session(monkeypatch, tmp_path, session_id: str, stream_id: str):
+    from collections import OrderedDict
+
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    session = models.Session(
+        session_id=session_id,
+        workspace="/tmp",
+        model="test",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=stream_id,
+        pending_user_message="hi",
+        pending_attachments=[],
+        pending_started_at=1.0,
+        pending_user_source="webui",
+        profile=None,
+    )
+    models.SESSIONS[session_id] = session
+    return session_dir, session
+
+
+def _assert_gateway_snapshot_identity(stream_id: str, run_id: str):
+    from api import routes
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    assert snapshot is not None
+    assert snapshot["last_event_id"].startswith(f"{stream_id}:")
+    scene = snapshot["anchor_activity_scene"]
+    assert scene["identity"]["stream_id"] == stream_id
+    assert scene["identity"]["run_id"] == run_id
+    return snapshot
+
+
 def _invoke_gateway_approval_response(results: dict, key: str, session, body: dict) -> None:
     handler = MagicMock()
     handler.wfile = io.BytesIO()
@@ -488,6 +556,47 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert events[2] == ("token", {"text": "Hello"})
     import api.route_approvals as approvals
     assert approvals.gateway_pending_mirror("sess1", run_id="run-abc") is None
+
+
+def test_gateway_runs_api_rejects_overlong_remote_run_id_before_events():
+    from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
+    from api.gateway_chat import _run_gateway_runs_api_streaming
+
+    stream_id = "sid-overlong-runs"
+    overlong_run_id = "r" * 513
+    requests = []
+    STREAM_PARTIAL_TEXT[stream_id] = ""
+    STREAM_REASONING_TEXT[stream_id] = ""
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req.full_url)
+        assert req.full_url.endswith("/v1/runs")
+        return _GatewayJsonResponse({"run_id": overlong_run_id})
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with pytest.raises(ValueError):
+                _run_gateway_runs_api_streaming(
+                    session_id="sess-overlong-runs",
+                    msg_text="hi",
+                    model="test-model",
+                    workspace="/tmp",
+                    stream_id=stream_id,
+                    base_url="http://gw:8642",
+                    api_key="",
+                    prefill_messages=[],
+                    body_extras={},
+                    put_gateway_event=lambda *_args: None,
+                    cancel_event=threading.Event(),
+                    on_run_id=lambda _run_id: (_ for _ in ()).throw(
+                        AssertionError("overlong run id was published")
+                    ),
+                )
+    finally:
+        STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        STREAM_REASONING_TEXT.pop(stream_id, None)
+
+    assert requests == ["http://gw:8642/v1/runs"]
 
 
 def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
@@ -3543,3 +3652,227 @@ def test_gateway_chat_completions_path_unchanged():
     assert not apperrors, f"No apperror expected for a normal response, got: {apperrors}"
     tokens = [e for e in events if isinstance(e, tuple) and e[0] == "token"]
     assert tokens, "Expected at least one token event"
+
+
+def test_gateway_legacy_journal_snapshot_uses_stream_authority_without_approval(
+    tmp_path,
+    monkeypatch,
+):
+    from api import run_journal
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    session_id = "sess_gateway_legacy_plain"
+    stream_id = "stream_gateway_legacy_plain"
+    session_dir, _session = _install_gateway_journal_session(
+        monkeypatch,
+        tmp_path,
+        session_id,
+        stream_id,
+    )
+    events = []
+    q = SimpleNamespace(put_nowait=events.append)
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    def fake_urlopen(req, *, timeout=None):
+        assert "/v1/chat/completions" in req.full_url
+        return _GatewaySseResponse([
+            b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
+            b"\n",
+            b"data: [DONE]\n",
+            b"\n",
+        ])
+
+    try:
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}, clear=True), \
+             patch("api.config.get_config", return_value={}), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value=None), \
+             patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=False), \
+             patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("api.gateway_chat.gateway_approval_unavailable_reason", return_value=None), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id=session_id,
+                msg_text="hi",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
+    assert summary is not None
+    assert summary["stable_run_id_status"] == "ok"
+    assert summary["run_id"] == stream_id
+    assert summary["stable_run_id"] == stream_id
+    assert summary["stream_id"] == stream_id
+    assert summary["last_event_id"].startswith(f"{stream_id}:")
+    journal = run_journal.read_run_events(session_id, stream_id, session_dir=session_dir)
+    assert journal["events"]
+    assert {event.get("stable_run_id") for event in journal["events"]} == {stream_id}
+    _assert_gateway_snapshot_identity(stream_id, stream_id)
+
+
+def test_gateway_legacy_late_approval_keeps_stream_scene_authority(
+    tmp_path,
+    monkeypatch,
+):
+    from api import gateway_chat, run_journal
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    session_id = "sess_gateway_legacy_approval"
+    stream_id = "stream_gateway_legacy_approval"
+    remote_run_id = "run_gateway_legacy_control"
+    session_dir, _session = _install_gateway_journal_session(
+        monkeypatch,
+        tmp_path,
+        session_id,
+        stream_id,
+    )
+    events = []
+    run_id_at_approval = {}
+
+    def record_event(item):
+        events.append(item)
+        if isinstance(item, tuple) and item[0] == "approval":
+            run_id_at_approval["value"] = gateway_chat._STREAM_RUN_IDS.get(stream_id)
+
+    q = SimpleNamespace(put_nowait=record_event)
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    approval_payload = json.dumps({
+        "command": "rm -rf /tmp/test",
+        "description": "Delete temporary files",
+        "pattern_key": "dangerous_command",
+        "pattern_keys": ["dangerous_command"],
+        "approval_id": "appr-legacy-authority",
+        "run_id": remote_run_id,
+        "choices": ["once", "session", "always", "deny"],
+    })
+
+    def fake_urlopen(req, *, timeout=None):
+        assert "/v1/chat/completions" in req.full_url
+        return _GatewaySseResponse([
+            b"event: approval.request\n",
+            f"data: {approval_payload}\n".encode("utf-8"),
+            b"\n",
+            b'data: {"choices":[{"delta":{"content":"Done"}}]}\n',
+            b"\n",
+            b"data: [DONE]\n",
+            b"\n",
+        ])
+
+    try:
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}, clear=True), \
+             patch("api.config.get_config", return_value={}), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value=None), \
+             patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=False), \
+             patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("api.gateway_chat.gateway_approval_unavailable_reason", return_value=None), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id=session_id,
+                msg_text="hi",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert run_id_at_approval["value"] == remote_run_id
+    summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
+    assert summary is not None
+    assert summary["stable_run_id_status"] == "ok"
+    assert summary["run_id"] == stream_id
+    journal = run_journal.read_run_events(session_id, stream_id, session_dir=session_dir)
+    assert journal["events"]
+    assert {event.get("stable_run_id") for event in journal["events"]} == {stream_id}
+    assert remote_run_id not in {event.get("stable_run_id") for event in journal["events"]}
+    _assert_gateway_snapshot_identity(stream_id, stream_id)
+
+
+def test_gateway_runs_api_journal_snapshot_late_binds_remote_run_authority(
+    tmp_path,
+    monkeypatch,
+):
+    from api import run_journal
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    session_id = "sess_gateway_runs_authority"
+    stream_id = "stream_gateway_runs_authority"
+    remote_run_id = "run_gateway_runs_authority"
+    session_dir, _session = _install_gateway_journal_session(
+        monkeypatch,
+        tmp_path,
+        session_id,
+        stream_id,
+    )
+    requests = []
+    events = []
+    q = SimpleNamespace(put_nowait=events.append)
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req.full_url)
+        if req.full_url.endswith("/v1/runs"):
+            return _GatewayJsonResponse({"run_id": remote_run_id})
+        assert req.full_url.endswith(f"/v1/runs/{remote_run_id}/events")
+        return _GatewaySseResponse([
+            b'data: {"event":"message.delta","delta":"Hello"}\n',
+            b"\n",
+            b'data: {"event":"run.completed","output":"Hello"}\n',
+            b"\n",
+        ])
+
+    try:
+        with patch.dict("os.environ", {
+            "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        }, clear=True), \
+             patch("api.config.get_config", return_value={}), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value=None), \
+             patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=True), \
+             patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id=session_id,
+                msg_text="hi",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    assert requests == [
+        "http://gw:8642/v1/runs",
+        f"http://gw:8642/v1/runs/{remote_run_id}/events",
+    ]
+    summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
+    assert summary is not None
+    assert summary["stable_run_id_status"] == "ok"
+    assert summary["run_id"] == remote_run_id
+    assert summary["stable_run_id"] == remote_run_id
+    assert summary["stream_id"] == stream_id
+    journal = run_journal.read_run_events(session_id, stream_id, session_dir=session_dir)
+    assert journal["events"][0]["event"] == "context_status"
+    assert "stable_run_id" not in journal["events"][0]
+    assert remote_run_id in {event.get("stable_run_id") for event in journal["events"][1:]}
+    _assert_gateway_snapshot_identity(stream_id, remote_run_id)
