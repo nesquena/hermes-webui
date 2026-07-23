@@ -1191,6 +1191,8 @@ const LOCALES = {
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    settings_label_vu_style: 'Dictation VU meter style',
+    settings_desc_vu_style: 'Visual style for the live mic level indicator that appears while dictating. URL hash #vu=fill or #vu=bars overrides this for the current session.',
     voice_send_raw: 'Send raw audio',
     voice_raw_attached: 'Audio attached. Press Send or type more.',
     settings_label_tts_voice: 'Voice',
