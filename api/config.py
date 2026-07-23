@@ -782,7 +782,8 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
+    _paths._atomic_write_text(
+        config_path,
         _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -1054,6 +1055,10 @@ MIME_MAP = {
     ".m4v": "video/mp4",
     ".webm": "video/webm",
     ".ogv": "video/ogg",
+    # TypeScript source files — served as text/plain to avoid XSS from
+    # same-origin inline execution in _handle_file_raw.
+    ".ts": "text/plain",
+    ".tsx": "text/plain",
 }
 
 # ── Toolsets (from config.yaml or hardcoded default) ─────────────────────────
@@ -2978,7 +2983,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # branch (#3872).
         _cp_lower_cross = (config_provider or "").strip().lower()
         _is_custom_cross = _cp_lower_cross == "custom" or _cp_lower_cross.startswith("custom:")
-        if prefix in _PROVIDER_MODELS and prefix != config_provider and not _is_custom_cross:
+        _canon_prefix = _canonicalise_provider_id(prefix)
+        _canon_config_provider = _canonicalise_provider_id(config_provider)
+        if (
+            _canon_prefix in _PROVIDER_MODELS
+            and _canon_prefix != _canon_config_provider
+            and not _is_custom_cross
+        ):
             return model_id, "openrouter", None
 
     return model_id, config_provider, config_base_url
@@ -3887,6 +3898,33 @@ def resolve_model_reasoning_efforts(
     return filtered
 
 
+def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
+    """Return model-level then provider-level effort lists from config."""
+    if not isinstance(provider_entry, dict):
+        return []
+
+    configured_lists = []
+    models = provider_entry.get("models")
+    if isinstance(models, dict):
+        model_key = str(model_id or "").strip().lower()
+        model_entry = models.get(model_id)
+        if not isinstance(model_entry, dict) and model_key:
+            model_entry = next(
+                (
+                    metadata
+                    for configured_id, metadata in models.items()
+                    if str(configured_id).strip().lower() == model_key
+                    and isinstance(metadata, dict)
+                ),
+                None,
+            )
+        if isinstance(model_entry, dict):
+            configured_lists.append(model_entry.get("reasoning_efforts"))
+
+    configured_lists.append(provider_entry.get("reasoning_efforts"))
+    return configured_lists
+
+
 def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -3920,29 +3958,32 @@ def _resolve_model_reasoning_efforts_impl(
     if _nested_route_reasoning_denied(hinted_model):
         return []
 
-    # 0. Provider config: providers.<name>.reasoning_efforts or named
-    # custom_providers[].reasoning_efforts. When the user has explicitly listed
-    # valid efforts for a provider, return that list directly — no heuristics,
-    # no models.dev lookup.
-    # Only short-circuits when the filtered list is non-empty; an all-invalid
-    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
-    _re_list = None
+    # 0. Model/provider config: a models.<model>.reasoning_efforts list takes
+    # precedence over its provider-level reasoning_efforts list. Explicit valid
+    # config is authoritative — no heuristics or models.dev lookup. Invalid or
+    # empty model metadata falls through to the provider list, then heuristics.
+    _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
-                    _re_list = _entry.get("reasoning_efforts")
+                    _re_lists = _configured_reasoning_effort_lists(
+                        _entry, hinted_model
+                    )
                     break
         elif provider:
             _prov_entry = (cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
-                _re_list = _prov_entry.get("reasoning_efforts")
-        if isinstance(_re_list, list) and _re_list:
-            _filtered = [str(x).strip().lower() for x in _re_list
-                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
-            _filtered = list(dict.fromkeys(_filtered))
-            if _filtered:
-                return _filtered
+                _re_lists = _configured_reasoning_effort_lists(
+                    _prov_entry, hinted_model
+                )
+        for _re_list in _re_lists:
+            if isinstance(_re_list, list) and _re_list:
+                _filtered = [str(x).strip().lower() for x in _re_list
+                             if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+                _filtered = list(dict.fromkeys(_filtered))
+                if _filtered:
+                    return _filtered
     except Exception:
         pass
 
@@ -8858,6 +8899,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
     caps = {
         "approval_events": False,
         "run_approval_response": False,
+        "approval_identity_v1": False,
         "capabilities_reachable": False,
         "probe_error": None,
         "fetched_at": 0.0,
@@ -8875,6 +8917,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
             features = {}
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
+        caps["approval_identity_v1"] = bool(features.get("approval_identity_v1"))
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"
@@ -8912,6 +8955,11 @@ def gateway_supports_approval(base_url: str, api_key: str = "") -> bool:
     """True only when the gateway advertises both approval_events and run_approval_response."""
     caps = get_gateway_caps(base_url, api_key)
     return bool(caps.get("approval_events") and caps.get("run_approval_response"))
+
+
+def gateway_supports_approval_identity_v1(base_url: str, api_key: str = "") -> bool:
+    """True only when Gateway advertises authoritative approval identities."""
+    return bool(get_gateway_caps(base_url, api_key).get("approval_identity_v1"))
 
 
 def invalidate_gateway_caps(base_url: str | None = None) -> None:

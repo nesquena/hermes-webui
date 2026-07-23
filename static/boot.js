@@ -17,7 +17,7 @@
 async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
-  if(!streamId) return;
+  if(!streamId) return false;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
   // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
@@ -30,8 +30,10 @@ async function cancelStream(reason){
     console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
   }
   let respBody=null;
+  let respOk=false;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
     if(typeof console !== 'undefined' && console.warn){
@@ -50,7 +52,7 @@ async function cancelStream(reason){
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
-  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+  if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -59,20 +61,24 @@ async function cancelStream(reason){
     // distinguish reasons — keep the toast generic and short.
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
+  return respOk;
 }
 
 async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
-  if(!streamId||!sid) return;
+  if(!streamId||!sid) return false;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
   if(typeof console !== 'undefined' && console.info){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
+  let respOk=false;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
+  if(!respOk) return false;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -94,6 +100,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
+  return true;
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){

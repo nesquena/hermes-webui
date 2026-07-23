@@ -941,6 +941,127 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
+    def test_ts_artifact_served_as_text_plain_with_attachment(self):
+        """.ts file via /api/media must have text/plain Content-Type,
+        Content-Disposition: attachment, and X-Content-Type-Options: nosniff.
+        Regression for PR #6372 — ensures narrow MIME_MAP fix is live."""
+        ts_bytes = b"const x: number = 42;\nconsole.log(x);\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".ts", prefix="hermes_test_", dir=_media_fixture_dir(), delete=False
+        ) as f:
+            f.write(ts_bytes)
+            tmp_path = f.name
+        try:
+            body, status, headers = self._get(
+                f"/api/media?path={urllib.parse.quote(tmp_path)}"
+            )
+            self.assertEqual(status, 200)
+            ct = headers.get("Content-Type", "")
+            self.assertIn(
+                "text/plain", ct,
+                f"Expected text/plain Content-Type for .ts, got {ct}",
+            )
+            self.assertNotIn(
+                "text/javascript", ct,
+                f".ts must NOT be served as text/javascript, got {ct}",
+            )
+            disp = headers.get("Content-Disposition", "")
+            self.assertIn(
+                "attachment", disp,
+                f"Expected attachment Content-Disposition for .ts, got {disp}",
+            )
+            self.assertEqual(
+                headers.get("X-Content-Type-Options"),
+                "nosniff",
+                "X-Content-Type-Options: nosniff must be set on media responses",
+            )
+            self.assertEqual(body, ts_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_tsx_artifact_served_as_text_plain_with_attachment(self):
+        """.tsx file via /api/media must also have text/plain Content-Type
+        and attachment disposition. Regression for PR #6372."""
+        tsx_bytes = b"const App: React.FC = () => <div>Hello</div>;\n"
+        with tempfile.NamedTemporaryFile(
+            suffix=".tsx", prefix="hermes_test_", dir=_media_fixture_dir(), delete=False
+        ) as f:
+            f.write(tsx_bytes)
+            tmp_path = f.name
+        try:
+            body, status, headers = self._get(
+                f"/api/media?path={urllib.parse.quote(tmp_path)}"
+            )
+            self.assertEqual(status, 200)
+            ct = headers.get("Content-Type", "")
+            self.assertIn(
+                "text/plain", ct,
+                f"Expected text/plain Content-Type for .tsx, got {ct}",
+            )
+            self.assertNotIn(
+                "text/javascript", ct,
+                f".tsx must NOT be served as text/javascript, got {ct}",
+            )
+            disp = headers.get("Content-Disposition", "")
+            self.assertIn(
+                "attachment", disp,
+                f"Expected attachment Content-Disposition for .tsx, got {disp}",
+            )
+            self.assertEqual(
+                headers.get("X-Content-Type-Options"),
+                "nosniff",
+            )
+            self.assertEqual(body, tsx_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_file_raw_js_not_served_as_inline_executable(self):
+        """.js files served via /api/file/raw must NOT get text/javascript
+        Content-Type — they should fall through to application/octet-stream
+        since MIME_MAP intentionally omits .js. Regression for PR #6372."""
+        # Create a session so we can use /api/file/raw
+        try:
+            req = urllib.request.Request(
+                BASE + "/api/session/new",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                sess_data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            sess_data = json.loads(e.read())
+            self.fail(f"Cannot create test session: {sess_data}")
+        sid = sess_data.get("session_id") or sess_data.get("session", {}).get("session_id", "")
+        self.assertTrue(sid, f"No session_id in response: {sess_data}")
+        ws = pathlib.Path(
+            sess_data.get("workspace") or sess_data.get("session", {}).get("workspace", "")
+        )
+        self.assertTrue(str(ws), f"No workspace in response: {sess_data}")
+
+        js_bytes = b"const x = 1;\n"
+        js_file = ws / "exploit_test.js"
+        try:
+            js_file.write_bytes(js_bytes)
+
+            encoded = urllib.parse.quote("exploit_test.js")
+            body, status, headers = self._get(
+                f"/api/file/raw?session_id={sid}&path={encoded}"
+            )
+            self.assertEqual(status, 200)
+            ct = headers.get("Content-Type", "")
+            self.assertNotIn(
+                "text/javascript", ct,
+                f".js via /api/file/raw must NOT be text/javascript, got {ct}",
+            )
+            # Without a .js MIME_MAP entry, it falls back to application/octet-stream
+            self.assertEqual(
+                ct, "application/octet-stream",
+                f"Expected application/octet-stream for unmapped .js, got {ct}",
+            )
+            self.assertEqual(body, js_bytes)
+        finally:
+            js_file.unlink(missing_ok=True)
+
     def test_health_check_still_works(self):
         """Sanity: server is up and /health works."""
         body, status, _ = self._get("/health")

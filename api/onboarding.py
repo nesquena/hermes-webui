@@ -28,6 +28,7 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from api.paths import _atomic_write_text
 from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
 
@@ -251,7 +252,8 @@ def _save_yaml_config(config_path: Path, config: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
+    _atomic_write_text(
+        config_path,
         _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )

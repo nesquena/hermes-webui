@@ -1213,7 +1213,10 @@ async function cmdPersonality(args){
 async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
-  if(typeof cancelStream==='function'){await cancelStream('slash-stop');showToast(t('stream_stopped'));}
+  if(typeof cancelStream==='function'){
+    if(await cancelStream('slash-stop')) showToast(t('stream_stopped'));
+    else showToast(t('cancel_failed'),null,'error');
+  }
   else showToast(t('cancel_unavailable'));
 }
 
@@ -1319,8 +1322,10 @@ async function cmdInterrupt(args){
   updateQueueBadge(S.session.session_id);
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){await cancelStream('slash-interrupt');}
-  showToast(t('cmd_interrupt_confirm'),2000);
+  if(typeof cancelStream==='function'){
+    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
+    else showToast(t('cancel_failed'),null,'error');
+  }
 }
 
 /**

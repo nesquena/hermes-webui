@@ -7,6 +7,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -6501,6 +6502,22 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     return True
 
 
+def _terminal_turn_duration(session, *, now: float | None = None) -> float | None:
+    """Freeze a valid turn timer before terminal cleanup clears its origin."""
+    started_at = getattr(session, 'pending_started_at', None)
+    try:
+        started = float(started_at)
+        ended = float(time.time() if now is None else now)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(started) or not math.isfinite(ended) or started <= 0:
+        return None
+    elapsed = ended - started
+    if elapsed < 0:
+        return None
+    return round(elapsed, 3)
+
+
 def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | None:
     """Build a _partial assistant message from raw streaming buffers.
 
@@ -7791,14 +7808,10 @@ def _run_agent_streaming(
             try:
                 from api.route_approvals import (
                     submit_gateway_pending_mirror as _submit_pending_for_polling,
-                    reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
-                    _approval_sse_notify_locked as _approval_sse_notify_locked,
-                    _lock as _approval_lock,
+                    retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
-                    with _approval_lock:
-                        head, total, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
-                        _approval_sse_notify_locked(session_id, head, total)
+                    _retire_gateway_pending_mirror(session_id)
             except ImportError:
                 _submit_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
@@ -7809,7 +7822,8 @@ def _run_agent_streaming(
             def _approval_notify_cb(approval_data):
                 if _submit_pending_for_polling is not None:
                     try:
-                        _submit_pending_for_polling(session_id, approval_data)
+                        head, total = _submit_pending_for_polling(session_id, approval_data)
+                        approval_data = {**(head or approval_data), "pending_count": total}
                     except Exception:
                         logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
@@ -8224,20 +8238,9 @@ def _run_agent_streaming(
                         if _has_blocking_approval(session_id):
                             p = None
                             with _approval_lock:
-                                _reconcile_gateway_pending_mirror_locked(session_id)
-                                queue = _approval_pending.get(session_id)
-                                if isinstance(queue, list):
-                                    p = dict(queue[0]) if queue else None
-                                elif queue:
-                                    p = dict(queue)
-                                if p is None:
-                                    gw_queue = _approval_gateway_queues.get(session_id) or []
-                                    if gw_queue:
-                                        raw = getattr(gw_queue[0], 'data', None) or {}
-                                        if raw:
-                                            p = dict(raw)
-                                        else:
-                                            logger.warning("Gateway queue entry for %s has no .data attribute", session_id)
+                                p, pending_count, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
+                                if p:
+                                    p = {**p, "pending_count": pending_count}
                             if p:
                                 put('approval', p)
                     except ImportError:
@@ -9640,14 +9643,7 @@ def _run_agent_streaming(
                                     + 'send a message, switch the model/provider, or fix the credentials.'
                                 )
                                 _error_payload['hint'] = _err_hint
-                        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
-                        _turn_duration_seconds = 0.0
-                        try:
-                            _pending_ts = getattr(s, 'pending_started_at', None)
-                            if _pending_ts:
-                                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
-                        except Exception:
-                            pass
+                        _turn_duration = _terminal_turn_duration(s)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
@@ -9667,8 +9663,9 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
-                            '_turnDuration': round(_turn_duration_seconds, 3),
                         }
+                        if _turn_duration is not None:
+                            _error_message['_turnDuration'] = _turn_duration
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
                                 s,
@@ -9920,6 +9917,11 @@ def _run_agent_streaming(
                     requested_model=resolved_model or model,
                     requested_provider=resolved_provider,
                 )
+                # #6068: the served model must be read AFTER agent.run — the agent
+                # mutates agent.model when a fallback fires, so the pre-run
+                # resolved_model would mis-attribute exactly the turns where
+                # attribution matters most.
+                _used_model = getattr(agent, 'model', None) or resolved_model or model
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -9936,6 +9938,8 @@ def _run_agent_streaming(
                             _ttft_ms = meter().get_ttft_ms(stream_id)
                             if _ttft_ms is not None:
                                 _dm['_firstTokenMs'] = _ttft_ms
+                            if _used_model:
+                                _dm['_usedModel'] = _used_model
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -10323,6 +10327,8 @@ def _run_agent_streaming(
             _ttft_ms = meter().get_ttft_ms(stream_id)
             if _ttft_ms is not None:
                 usage['ttft_ms'] = _ttft_ms
+            if _used_model:
+                usage['used_model'] = _used_model
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
@@ -10873,14 +10879,7 @@ def _run_agent_streaming(
                             + 'send a message, switch the model/provider, or fix the credentials.'
                         )
                         _error_payload['hint'] = _exc_hint
-                # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
-                _turn_duration_seconds = 0.0
-                try:
-                    _pending_ts = getattr(s, 'pending_started_at', None)
-                    if _pending_ts:
-                        _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
-                except Exception:
-                    pass
+                _turn_duration = _terminal_turn_duration(s)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -10896,8 +10895,9 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
-                    '_turnDuration': round(_turn_duration_seconds, 3),
                 }
+                if _turn_duration is not None:
+                    _error_message['_turnDuration'] = _turn_duration
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(
                         s,
@@ -10996,6 +10996,9 @@ def _run_agent_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
             unregister_active_run(stream_id)
+            # Clean up the stream-owner registry so stale stream_id→session_id
+            # mappings do not accumulate over thousands of completed streams (#6351).
+            unregister_stream_owner(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`
