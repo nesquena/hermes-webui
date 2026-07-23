@@ -956,6 +956,117 @@ def _message_timestamp(message):
         return None
 
 
+def _current_turn_has_final_assistant(
+    messages,
+    pending_text,
+    *,
+    pending_started_at=None,
+    pending_source=None,
+    pending_attachments=None,
+) -> bool:
+    """Return True when the pending user turn already has a committed
+    non-partial, non-error assistant response in the transcript.
+
+    Prevents stale cancel recovery from appending a duplicate user +
+    partial + error round after a final answer for the same logical turn
+    was already committed by a subsequent stream.
+
+    To distinguish a genuine re-send of the same prompt text from a stale
+    pending reference to an already-answered turn, this checks both text
+    match *and* checkpoint identity (timestamp, source, attachments).
+
+    Returns True only when:
+      - the last user message matches *pending_text*,
+      - that user message has the exact same checkpoint identity
+        (timestamp, source, attachments) as the pending turn,
+      - the next non-tool, non-compaction-marker message after it is a
+        non-partial, non-error assistant response with visible text.
+    """
+    if not pending_text or not isinstance(messages, list):
+        return False
+    # Find the last non-tool user message.
+    last_user = None
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get('role')
+        if role in ('tool', 'tool_calls'):
+            continue
+        if role == 'user':
+            last_user = msg
+            last_user_idx = i
+            break
+    if last_user is None:
+        return False
+    # Text must match.
+    if not _message_matches_pending_text(last_user, pending_text):
+        return False
+    # Checkpoint identity must match — confirms it's the same turn,
+    # not a re-send of the same prompt with different metadata.
+    try:
+        _recovered_ts = int(pending_started_at or 0)
+    except (TypeError, ValueError):
+        _recovered_ts = 0
+    if not _message_matches_pending_checkpoint(
+        last_user,
+        pending_text,
+        _recovered_ts,
+        pending_source,
+        pending_attachments,
+    ):
+        return False
+    # Scan forward from the user turn to find a committed final assistant answer.
+    # - Skip tool/tool_calls messages (belong to the same turn).
+    # - Skip context compaction markers (not a real answer).
+    # - Must find an assistant message that:
+    #     1. Has no tool_calls (unfinished tool turn)
+    #     2. Is not _partial or _error
+    #     3. Has visible text content
+    for j in range(last_user_idx + 1, len(messages)):
+        next_msg = messages[j]
+        if not isinstance(next_msg, dict):
+            continue
+        role = next_msg.get('role')
+        if role in ('tool', 'tool_calls'):
+            continue
+        if is_context_compression_marker(next_msg):
+            continue
+        if role == 'assistant':
+            # Skip past assistant tool-call rows — keep scanning for final answer
+            if next_msg.get('tool_calls'):
+                continue
+            # Reject partial or error rows
+            if next_msg.get('_partial') or next_msg.get('_error'):
+                return False
+            # Must have visible text content
+            content = next_msg.get('content', '')
+            if isinstance(content, str):
+                if content.strip():
+                    return True
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        if str(part or '').strip():
+                            return True
+                        continue
+                    ptype = str(part.get('type') or '').lower()
+                    if ptype in ('', 'text', 'input_text', 'output_text'):
+                        text = str(
+                            part.get('text')
+                            or part.get('content')
+                            or part.get('input_text')
+                            or part.get('output_text')
+                            or ''
+                        )
+                        if text.strip():
+                            return True
+            return False
+        break  # Any other role means no assistant answer
+    return False
+
+
 def _is_empty_partial_activity_message(message):
     """Return True for cancelled/recovered activity rows with no reply text."""
     if not isinstance(message, dict):
@@ -3132,6 +3243,32 @@ def _apply_core_sync_or_error_marker(
             return False
         if require_stream_dead and session.active_stream_id in _active_stream_ids():
             return False
+
+    # ── Stale-turn guard (#6366): if the pending user message already has a
+    # committed non-partial, non-error assistant response, clear stale state
+    # without appending any recovered rows. Without this check, a stale cancel
+    # recovery for a cancelled stream can append a duplicate user → _partial →
+    # error tail after a final answer for the same turn was already committed
+    # by a subsequent completed stream.
+    if _current_turn_has_final_assistant(
+        session.messages,
+        session.pending_user_message,
+        pending_started_at=session.pending_started_at,
+        pending_source=session.pending_user_source,
+        pending_attachments=session.pending_attachments,
+    ):
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        session.save(touch_updated_at=touch_updated_at)
+        logger.info(
+            "Session %s: pending turn already has final assistant answer, "
+            "cleared stale state without recovery append",
+            sid,
+        )
+        return True
 
     # When messages is already non-empty, do not overwrite history from any core
     # transcript. The pending user turn may still be the only durable copy of a
