@@ -5,6 +5,7 @@ import pathlib
 import urllib.error
 import urllib.request
 
+from api import config as webui_config
 from tests._pytest_port import BASE
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -40,6 +41,16 @@ def make_session(created, title):
     sid = d["session"]["session_id"]
     created.append(sid)
     return sid
+
+
+def test_settings_file_path_can_be_scoped_per_instance(tmp_path, monkeypatch):
+    default_state_dir = tmp_path / "default-state"
+    monkeypatch.delenv("HERMES_WEBUI_SETTINGS_FILE", raising=False)
+    assert webui_config._resolve_settings_file(default_state_dir) == default_state_dir / "settings.json"
+
+    staging_settings = tmp_path / "staging" / "settings.json"
+    monkeypatch.setenv("HERMES_WEBUI_SETTINGS_FILE", str(staging_settings))
+    assert webui_config._resolve_settings_file(default_state_dir) == staging_settings.resolve()
 
 
 def test_pin_limit_setting_is_exposed_and_wired_through_ui():
