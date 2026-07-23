@@ -8114,7 +8114,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         # Reload config if changed
         if _cfg_changed:
-            reload_config()
+            reload_config_if_stale()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
             _available_models_live_rebuild_ts = 0.0

@@ -156,3 +156,54 @@ def test_stale_model_readers_collapse_to_single_reload_when_models_are_requested
         f"expected one config refresh for concurrent model reads, got {calls['n']} "
         "(base would re-enter refresh work per stale reader)"
     )
+
+
+def test_stale_model_reader_preserves_in_memory_config_override(tmp_path, monkeypatch):
+    import api.config as config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  provider: openai\n  default: disk-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    with config._yaml_file_cache_lock:
+        config._yaml_file_cache.clear()
+    config.invalidate_models_cache()
+
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_pkg.__path__ = []
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models._PROVIDER_ALIASES = {}
+    fake_models.list_available_providers = lambda: []
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda provider_id: {"logged_in": False, "key_source": ""}
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(config, "_load_stale_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(config, "_save_models_cache_to_disk", lambda _data: None)
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config": "test"})
+
+    config.reload_config()
+    old_mtime = config._cfg_mtime
+    config.cfg["model"]["default"] = "override-model"
+    config_path.write_text(
+        "model:\n  provider: openai\n  default: stale-disk-model\n",
+        encoding="utf-8",
+    )
+    config._cfg_mtime = old_mtime - 1.0
+    config.invalidate_models_cache()
+
+    def _unexpected_reload():
+        raise AssertionError(
+            "stale model readers should route through reload_config_if_stale() "
+            "instead of forced reload_config()"
+        )
+
+    monkeypatch.setattr(config, "reload_config", _unexpected_reload)
+
+    result = config.get_available_models()
+
+    assert result.get("default_model") == "override-model"
