@@ -150,7 +150,18 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
   const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
   if(eventName === activeName) return true;
-  return eventName === 'default' && !!S.activeProfileIsDefault;
+  // default/renamed-root equivalence — SYMMETRIC, mirroring the server's
+  // _profiles_match (#5510 re-gate). Two shapes both resolve to the root:
+  //   (a) event names the literal 'default' alias + the active profile IS the root;
+  //   (b) event names the renamed root (roster is_default) + the active profile
+  //       reports the literal 'default' alias (S.activeProfileIsDefault).
+  // Without (b), a valid same-profile project tagged with the renamed root name
+  // was wrongly rejected when the active surface showed the 'default' alias.
+  if(eventName === 'default' && !!S.activeProfileIsDefault) return true;
+  if(!!S.activeProfileIsDefault
+    && typeof _cronProfileNameIsRootAlias === 'function'
+    && _cronProfileNameIsRootAlias(eventName)) return true;
+  return false;
 }
 
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
