@@ -3789,7 +3789,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const rawSceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromScene(base);
-    const sceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromTranscript(rawSceneFinalAnswerHint,base)||rawSceneFinalAnswerHint;
+    const sceneFinalAnswerHint=sceneMode==='transparent_stream'
+      ? rawSceneFinalAnswerHint
+      : (_anchorSceneFinalAnswerHintFromTranscript(rawSceneFinalAnswerHint,base)||rawSceneFinalAnswerHint);
     const finalAnswerHint=sceneFinalAnswerHint;
     const optionFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint;
     const transcriptFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer;

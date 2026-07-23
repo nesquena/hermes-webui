@@ -140,6 +140,7 @@ def test_done_owner_pane_false_pending_cleanup_is_delete_only():
         "session_switch",
         "completed_session_switch",
         "stream_just_finished_timer_owner_rotation",
+        "stream_just_finished_replacement_without_done",
     ],
 )
 def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
@@ -239,7 +240,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._resetStreamScrollFollow = () => {};
         global._suspendSessionStreamForLiveChat = () => {};
         global._bindStreamHiddenTracker = () => {};
-        global._shouldUseLiveProseFade = () => scenario !== 'stream_just_finished_timer_owner_rotation';
+        global._shouldUseLiveProseFade = () => !scenario.startsWith('stream_just_finished_');
         global._shouldUseTransparentStreamFade = () => false;
         global._isDocumentVisibleAndFocused = () => true;
         global._isSessionActivelyViewed = sid => S.session && S.session.session_id === sid;
@@ -254,9 +255,21 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._renderMessagesWithScrollSnapshot = () => { renderCount += 1; };
         global.renderMessages = () => { renderCount += 1; };
         global.syncTopbar = () => { calls.syncTopbar += 1; };
+        const orderLog = [];
         global.api = (_url, opts) => {
           if(opts && opts.body){
-            try{ calls.anchorPersist.push(JSON.parse(opts.body)); }catch(_){}
+            try{
+              const entry = JSON.parse(opts.body);
+              calls.anchorPersist.push(entry);
+              const scene = entry && entry.scene;
+              const terminalPersisted = !!(scene && scene.lifecycle && scene.lifecycle.terminal_state === 'completed');
+              orderLog.push({
+                type: terminalPersisted ? 'anchorPersistTerminal' : 'anchorPersist',
+                ownerInflightPresent: INFLIGHT['sid-1'] !== undefined,
+                approvalPresent: global._approvalPendingBySession.has('sid-1'),
+                clarifyPresent: global._clarifyPendingBySession.has('sid-1'),
+              });
+            }catch(_){}
           }
           return Promise.resolve({});
         };
@@ -264,7 +277,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global.setBusy = value => { calls.setBusy.push(value); S.busy = !!value; };
         global.setComposerStatus = value => { calls.composerStatus.push(value); };
         global.setStatus = value => { calls.status.push(value); };
-        global.clearInflightState = sid => { calls.clearInflightState.push(sid); };
+        global.clearInflightState = sid => { calls.clearInflightState.push(sid); orderLog.push({type:'clearInflightState', sid}); };
         global.clearInflight = () => { calls.clearInflight += 1; };
         global._resumeSessionStreamAfterLiveChat = () => {};
         global.clearLiveToolCards = () => {};
@@ -339,6 +352,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           activeStreamId: 'stream-old',
           busy: true,
         };
+        const originalSession = S.session;
+        const originalMessages = S.messages;
         const INFLIGHT = global.INFLIGHT = {};
         const LIVE_STREAMS = global.LIVE_STREAMS = {};
         global._STREAM_WAS_HIDDEN = {};
@@ -400,7 +415,19 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           constructor(){ this.listeners = {}; this.readyState = 1; FakeEventSource.instances.push(this); }
           addEventListener(name, fn){ (this.listeners[name] ||= []).push(fn); }
           emit(name, data){ for(const fn of this.listeners[name] || []) fn({data:JSON.stringify(data), lastEventId:`stream-old:2`}); }
-          close(){ this.readyState = 2; }
+          close(){
+            this.readyState = 2;
+            orderLog.push({
+              type:'sourceClose',
+              ownerInflightPresent: INFLIGHT['sid-1'] !== undefined,
+              approvalPresent: global._approvalPendingBySession.has('sid-1'),
+              clarifyPresent: global._clarifyPendingBySession.has('sid-1'),
+              terminalPersisted: calls.anchorPersist.some(entry => {
+                const scene = entry && entry.scene;
+                return !!(scene && scene.lifecycle && scene.lifecycle.terminal_state === 'completed');
+              }),
+            });
+          }
         }
         global.EventSource = FakeEventSource;
 
@@ -507,7 +534,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           },
           usage:{duration_seconds:1},
         });
-        if(scenario === 'stream_just_finished_timer_owner_rotation'){
+        if(scenario === 'stream_just_finished_timer_owner_rotation' || scenario === 'stream_just_finished_replacement_without_done'){
           assert.strictEqual(window._streamJustFinished, true, 'active done should arm the external-refresh cooldown');
           const oldOwnerKey = window._streamJustFinishedOwner;
           assert.ok(oldOwnerKey, 'active done should record the cooldown owner key');
@@ -516,6 +543,13 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           S.activeStreamId = 'stream-new';
           attachLiveStream('sid-1', 'stream-new');
           assert.strictEqual(window._streamJustFinished, true, 'new owner attach must not clear the old cooldown synchronously');
+          if(scenario === 'stream_just_finished_replacement_without_done'){
+            oldDoneTimer();
+            assert.strictEqual(window._streamJustFinished, false, 'old cooldown timer must eventually clear its own grace when the replacement has no DONE');
+            assert.strictEqual(window._streamJustFinishedOwner, undefined, 'old cooldown owner token should be retired when no newer DONE supersedes it');
+            process.stdout.write(JSON.stringify({streamJustFinished:window._streamJustFinished}));
+            process.exit(0);
+          }
           const newerSource = FakeEventSource.instances[FakeEventSource.instances.length - 1];
           newerSource.emit('done', {
             session: {
@@ -575,6 +609,22 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
             .map(entry => entry && entry.scene)
             .find(scene => scene && scene.lifecycle && scene.lifecycle.terminal_state === 'completed');
           assert.ok(persistedTerminal, 'loading-only old done must persist a terminal Anchor lifecycle for the owner session');
+          assert.strictEqual(S.activeStreamId, 'stream-old', 'loading-only old done must not clear the original active stream before successor attach');
+          assert.strictEqual(S.session, originalSession, 'loading-only old done must not replace the original session object before successor attach');
+          assert.strictEqual(S.messages, originalMessages, 'loading-only old done must not replace the original messages array before successor attach');
+          const cleanupIndex = orderLog.findIndex(entry => entry.type === 'clearInflightState' && entry.sid === 'sid-1');
+          const persistIndex = orderLog.findIndex(entry => entry.type === 'anchorPersistTerminal');
+          const closeIndex = orderLog.findIndex(entry => entry.type === 'sourceClose');
+          assert.notStrictEqual(cleanupIndex, -1, 'loading-only old done must record owner inflight cleanup');
+          assert.notStrictEqual(persistIndex, -1, 'loading-only old done must record terminal Anchor persistence');
+          assert.notStrictEqual(closeIndex, -1, 'loading-only old done must close the owner source');
+          assert.ok(cleanupIndex < closeIndex, 'owner inflight cleanup must happen before owner source close');
+          assert.ok(persistIndex < closeIndex, 'terminal Anchor persistence must happen before owner source close');
+          const closeEntry = orderLog[closeIndex];
+          assert.strictEqual(closeEntry.ownerInflightPresent, false, 'owner INFLIGHT must already be absent at source close');
+          assert.strictEqual(closeEntry.approvalPresent, false, 'owner approval pending state must already be absent at source close');
+          assert.strictEqual(closeEntry.clarifyPresent, false, 'owner clarify pending state must already be absent at source close');
+          assert.strictEqual(closeEntry.terminalPersisted, true, 'terminal persistence request must already exist at source close');
           S.session = {session_id:'sid-2', message_count:1, pending_started_at:1};
           S.messages = [{role:'user', content:'next question'}];
           S.activeStreamId = 'stream-new';
