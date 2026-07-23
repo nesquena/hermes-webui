@@ -1524,6 +1524,16 @@
   .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important;}
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
+  /* iPad / tablet keyboard reflow guard (#6368): same GPU-promotion transform
+     that _forceMobileViewportReflow() toggles via html.viewport-reflow to force
+     a repaint after visualViewport/keyboard geometry changes on tablets too.
+     overflow-x:clip (NOT hidden) suppresses any horizontal offset WebKit can
+     leave after keyboard dismiss without coercing overflow-y into a scroll
+     container — same #4856 lesson applied to .layout.  body.keyboard-visible
+     prevents iPad horizontal shift when the keyboard is shown. */
+  html.viewport-reflow .layout{transform:translateZ(0);}
+  .layout{overflow-x:clip;}
+  body.keyboard-visible{overflow-x:hidden;position:relative;}
   .app-titlebar{display:flex;align-items:center;justify-content:center;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:var(--app-titlebar-safe-top);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;-webkit-app-region:drag;position:relative;z-index:20;}
   .app-titlebar-left{display:flex;align-items:center;gap:4px;}
   .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;}
@@ -3040,13 +3050,6 @@
   }
 
   @media(max-width:640px){
-    /* Mobile PWA reflow guard (#3976): a one-frame GPU-promotion transform that
-       _forceMobileViewportReflow() toggles via html.viewport-reflow to force a
-       repaint after visualViewport/keyboard geometry changes. overflow-x:clip
-       (NOT hidden) suppresses any horizontal overflow without coercing
-       overflow-y into a scroll container — same #4856 lesson applied to .layout. */
-    html.viewport-reflow .layout{transform:translateZ(0);}
-    .layout{overflow-x:clip;}
     /* Viewport-phone rules handle app chrome and touch sizing; they intentionally
        overlap the container compact rules for actual phones. */
     /* ── Sidebar: slide-in overlay instead of hidden ── */

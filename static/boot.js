@@ -188,19 +188,22 @@ function _syncKeyboardBottomInset(){
   }
 }
 
-// Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
+// Mobile PWA / tablet viewport reflow guard. When the on-screen keyboard / browser
 // chrome shows or hides, visualViewport (or a plain resize on browsers without
 // it) changes height without a layout invalidation, leaving the phone layout
-// painted against stale geometry. Toggling a one-frame `viewport-reflow` class
-// (which applies a cheap GPU-promotion transform under the @media(max-width:640px)
-// rule) forces a repaint, then we resync the workspace panel + sidebar aria.
+// painted against stale geometry. On wider touch-keyboard viewports (iPad),
+// the keyboard dismiss can leave a horizontal offset; scrollTo restores it.
+// Toggling a one-frame `viewport-reflow` class (which applies a cheap
+// GPU-promotion transform under the global .layout rule) forces a repaint,
+// then we resync the workspace panel + sidebar aria.
 function _forceMobileViewportReflow(){
   _syncKeyboardBottomInset();
-  if(!_isPhoneWidthViewport()) return;
+  if(!_isPhoneWidthViewport() && !_isTouchKeyboardViewport()) return;
   const layout=document.querySelector('.layout');
   if(!layout) return;
   document.documentElement.classList.add('viewport-reflow');
   void layout.offsetWidth;
+  window.scrollTo(0, window.scrollY);
   requestAnimationFrame(()=>{
     document.documentElement.classList.remove('viewport-reflow');
     try{ syncWorkspacePanelState(); }catch(_){ }
