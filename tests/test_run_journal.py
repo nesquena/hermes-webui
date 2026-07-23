@@ -28,6 +28,32 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
     assert [event["event"] for event in journal["events"]] == ["done"]
 
 
+def test_run_journal_summary_returns_persisted_stable_identity_from_writer(tmp_path):
+    writer = RunJournalWriter(
+        "session_1",
+        "stream_transport_1",
+        stable_run_id="run_stable_1",
+        session_dir=tmp_path,
+    )
+
+    event = writer.append_sse_event("token", {"text": "hello"})
+    summary = latest_run_summary("session_1", "stream_transport_1", session_dir=tmp_path)
+    found = find_run_summary("stream_transport_1", session_dir=tmp_path)
+
+    assert event["event_id"] == "stream_transport_1:1"
+    assert event["run_id"] == "stream_transport_1"
+    assert event["stream_id"] == "stream_transport_1"
+    assert event["stable_run_id"] == "run_stable_1"
+    assert summary["run_id"] == "run_stable_1"
+    assert summary["stable_run_id"] == "run_stable_1"
+    assert summary["stable_run_id_status"] == "ok"
+    assert summary["stream_id"] == "stream_transport_1"
+    assert summary["transport_run_id"] == "stream_transport_1"
+    assert found is not None
+    assert found["run_id"] == "run_stable_1"
+    assert found["stream_id"] == "stream_transport_1"
+
+
 def test_run_journal_reads_bounded_replay_window(tmp_path):
     writer = RunJournalWriter("session_1", "run_1", session_dir=tmp_path)
 

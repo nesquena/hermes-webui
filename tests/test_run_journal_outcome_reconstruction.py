@@ -250,6 +250,9 @@ def test_snapshot_reconstructs_bounded_outcome_envelopes_without_activity_rows(m
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 10,
             "last_event_id": f"{stream_id}:10",
         },
@@ -344,8 +347,11 @@ def _stable_outcome_scene(monkeypatch):
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": run_id,
+            "stable_run_id": run_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 5,
-            "last_event_id": f"{run_id}:5",
+            "last_event_id": f"{stream_id}:5",
         },
     )
     monkeypatch.setattr(
@@ -355,6 +361,13 @@ def _stable_outcome_scene(monkeypatch):
     )
 
     return routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]
+
+
+def _use_tmp_run_journal(monkeypatch, tmp_path):
+    from api import run_journal
+
+    monkeypatch.setattr(run_journal, "_default_session_dir", lambda: tmp_path)
+    return run_journal
 
 
 def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
@@ -377,56 +390,54 @@ def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
     assert scene["side_effects"] == []
 
 
-def test_snapshot_accepts_mixed_stream_envelopes_with_stable_outcomes(monkeypatch):
+def test_snapshot_accepts_real_mixed_stream_envelopes_with_persisted_stable_outcomes(
+    monkeypatch,
+    tmp_path,
+):
     from api import routes
 
+    run_journal = _use_tmp_run_journal(monkeypatch, tmp_path)
     stream_id = "stream_transport_mixed"
     run_id = "run_stable_mixed"
     session_id = "session_mixed"
-    events = [
+
+    writer = run_journal.RunJournalWriter(
+        session_id,
+        stream_id,
+        stable_run_id=None,
+    )
+    writer.append_sse_event("token", {"text": "visible progress"})
+    writer.set_stable_run_id(run_id)
+    artifact = writer.append_sse_event(
+        "artifact_reference",
+        {"kind": "workspace_file", "path": "reports/final.md"},
+    )
+    journal_path = run_journal._run_path(session_id, stream_id, session_dir=tmp_path)
+    with journal_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(artifact, ensure_ascii=False, separators=(",", ":")) + "\n")
+    writer.append_sse_event(
+        "state_saved",
         {
-            "seq": 1,
-            "event": "token",
-            "event_id": f"{stream_id}:1",
-            "run_id": stream_id,
-            "payload": {"text": "visible progress"},
-        },
-        {
-            "seq": 2,
-            "event": "artifact_reference",
-            "event_id": f"{run_id}:2",
-            "run_id": run_id,
-            "stream_id": stream_id,
-            "payload": {"kind": "workspace_file", "path": "reports/final.md"},
-        },
-        {
-            "seq": 3,
-            "event": "state_saved",
-            "event_id": "foreign-run:3",
-            "run_id": "foreign-run",
-            "stream_id": stream_id,
-            "payload": {
-                "session_id": session_id,
-                "kind": "memory",
-                "action": "saved",
-            },
-        },
-    ]
-    monkeypatch.setattr(
-        routes,
-        "find_run_summary",
-        lambda _stream_id: {
             "session_id": session_id,
-            "run_id": run_id,
-            "last_seq": 3,
-            "last_event_id": f"{run_id}:3",
+            "kind": "memory",
+            "action": "saved",
         },
     )
-    monkeypatch.setattr(
-        routes,
-        "read_run_events",
-        lambda _session_id, _run_id: {"events": events},
-    )
+
+    summary = run_journal.find_run_summary(stream_id, session_dir=tmp_path)
+    assert summary is not None
+    assert summary["run_id"] == run_id
+    assert summary["stable_run_id"] == run_id
+    assert summary["stream_id"] == stream_id
+    with monkeypatch.context() as cached:
+        cached.setattr(
+            run_journal,
+            "_read_jsonl",
+            lambda _path: (_ for _ in ()).throw(
+                AssertionError("unchanged summary was reparsed")
+            ),
+        )
+        assert run_journal.find_run_summary(stream_id, session_dir=tmp_path)["run_id"] == run_id
 
     scene = routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]
 
@@ -434,7 +445,122 @@ def test_snapshot_accepts_mixed_stream_envelopes_with_stable_outcomes(monkeypatc
     assert scene["identity"]["stream_id"] == stream_id
     assert [event["event_id"] for event in scene["artifacts"]] == [f"{run_id}:2"]
     assert scene["artifacts"][0]["run_id"] == run_id
-    assert scene["side_effects"] == []
+    assert [event["event_id"] for event in scene["side_effects"]] == [f"{run_id}:3"]
+    assert scene["side_effects"][0]["run_id"] == run_id
+    snapshot_last_event_id = routes._run_journal_live_snapshot(stream_id)["last_event_id"]
+    assert snapshot_last_event_id == f"{stream_id}:3"
+
+
+@pytest.mark.parametrize(
+    ("rows", "status"),
+    [
+        (
+            [
+                {
+                    "version": 1,
+                    "event_id": "stream_bad_stable:1",
+                    "seq": 1,
+                    "run_id": "stream_bad_stable",
+                    "session_id": "session_bad_stable",
+                    "stable_run_id": {"bad": "id"},
+                    "event": "token",
+                    "type": "token",
+                    "payload": {"text": "bad"},
+                }
+            ],
+            "malformed",
+        ),
+        (
+            [
+                {
+                    "version": 1,
+                    "event_id": "stream_bad_stable:1",
+                    "seq": 1,
+                    "run_id": "stream_bad_stable",
+                    "session_id": "session_bad_stable",
+                    "stable_run_id": "run_stable_one",
+                    "event": "token",
+                    "type": "token",
+                    "payload": {"text": "one"},
+                },
+                {
+                    "version": 1,
+                    "event_id": "stream_bad_stable:2",
+                    "seq": 2,
+                    "run_id": "stream_bad_stable",
+                    "session_id": "session_bad_stable",
+                    "stable_run_id": "run_stable_two",
+                    "event": "token",
+                    "type": "token",
+                    "payload": {"text": "two"},
+                },
+            ],
+            "conflicting",
+        ),
+        (
+            [
+                {
+                    "version": 1,
+                    "event_id": "foreign_stream:1",
+                    "seq": 1,
+                    "run_id": "stream_bad_stable",
+                    "session_id": "session_bad_stable",
+                    "stable_run_id": "run_stable_one",
+                    "event": "token",
+                    "type": "token",
+                    "payload": {"text": "foreign cursor"},
+                }
+            ],
+            "conflicting",
+        ),
+    ],
+)
+def test_snapshot_fails_closed_on_malformed_or_conflicting_stable_authority(
+    monkeypatch,
+    tmp_path,
+    rows,
+    status,
+):
+    from api import routes
+
+    run_journal = _use_tmp_run_journal(monkeypatch, tmp_path)
+    journal_path = run_journal._run_path(
+        "session_bad_stable",
+        "stream_bad_stable",
+        session_dir=tmp_path,
+    )
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    journal_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    summary = run_journal.find_run_summary("stream_bad_stable", session_dir=tmp_path)
+
+    assert summary is not None
+    assert summary["stable_run_id_status"] == status
+    assert routes._run_journal_live_snapshot("stream_bad_stable") is None
+
+
+def test_snapshot_fails_closed_without_persisted_stable_authority(
+    monkeypatch,
+    tmp_path,
+):
+    from api import routes
+
+    run_journal = _use_tmp_run_journal(monkeypatch, tmp_path)
+    writer = run_journal.RunJournalWriter(
+        "session_no_authority",
+        "stream_no_authority",
+        stable_run_id=None,
+    )
+    writer.append_sse_event("token", {"text": "legacy only"})
+
+    summary = run_journal.find_run_summary("stream_no_authority", session_dir=tmp_path)
+
+    assert summary is not None
+    assert summary["stable_run_id_status"] == "absent"
+    assert routes._run_journal_live_snapshot("stream_no_authority") is None
 
 
 def test_snapshot_rejects_outcomes_that_would_steer_scene_owner(monkeypatch):
@@ -477,6 +603,9 @@ def test_snapshot_rejects_outcomes_that_would_steer_scene_owner(monkeypatch):
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 5,
             "last_event_id": f"{stream_id}:5",
         },
@@ -522,6 +651,9 @@ def test_snapshot_caps_reconstructed_outcomes_by_count(monkeypatch):
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 5,
             "last_event_id": f"{stream_id}:5",
         },
@@ -584,6 +716,9 @@ def test_snapshot_caps_mixed_reconstructed_outcomes_by_shared_count(monkeypatch)
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 3,
             "last_event_id": f"{stream_id}:3",
         },
@@ -652,6 +787,9 @@ def test_snapshot_caps_reconstructed_outcomes_by_encoded_bytes(monkeypatch):
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 2,
             "last_event_id": f"{stream_id}:2",
         },
@@ -707,6 +845,9 @@ def test_snapshot_caps_reconstructed_outcomes_by_whole_scene_bytes(monkeypatch):
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 7,
             "last_event_id": f"{stream_id}:7",
         },
@@ -760,6 +901,9 @@ def test_snapshot_returns_bounded_degraded_scene_when_base_scene_exceeds_limit(m
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 2,
             "last_event_id": f"{stream_id}:2",
         },
@@ -806,6 +950,9 @@ def test_snapshot_caps_high_volume_outcomes_under_production_scene_limit(monkeyp
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 5_000,
             "last_event_id": f"{stream_id}:5000",
         },
@@ -1186,6 +1333,9 @@ def test_snapshot_rejects_legacy_outcome_prefix_that_conflicts_with_authoritativ
         lambda _stream_id: {
             "session_id": session_id,
             "run_id": run_id,
+            "stable_run_id": run_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 5,
             "last_event_id": f"{stream_id}:5",
         },

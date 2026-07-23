@@ -1270,6 +1270,9 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
         lambda sid: {
             "session_id": "session-1",
             "run_id": sid,
+            "stable_run_id": sid,
+            "stable_run_id_status": "ok",
+            "stream_id": sid,
             "last_seq": 5,
             "last_event_id": f"{sid}:5",
         }

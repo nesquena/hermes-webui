@@ -3460,6 +3460,16 @@ def _run_journal_outcome_event(
     if raw_stream_id and raw_stream_id != stream_id:
         return None
 
+    raw_stable_run_id_value = event.get("stable_run_id")
+    raw_stable_run_id = _bounded_journal_outcome_string(
+        raw_stable_run_id_value,
+        limit=512,
+    )
+    if raw_stable_run_id_value not in (None, "") and raw_stable_run_id is None:
+        return None
+    if raw_stable_run_id and raw_stable_run_id != fallback_run_id:
+        return None
+
     raw_run_id_value = event.get("run_id")
     raw_run_id = _bounded_journal_outcome_string(raw_run_id_value, limit=512)
     if raw_run_id_value not in (None, "") and raw_run_id is None:
@@ -3481,19 +3491,26 @@ def _run_journal_outcome_event(
             return None
         if event_id_seq != seq:
             return None
-    if raw_run_id and event_id_run_id and raw_run_id != event_id_run_id:
-        return None
     expected_run_id = fallback_run_id or stream_id
-    if raw_run_id and expected_run_id and raw_run_id != expected_run_id:
+    allowed_run_ids = {stream_id}
+    if expected_run_id:
+        allowed_run_ids.add(expected_run_id)
+    if raw_run_id and raw_run_id not in allowed_run_ids:
         return None
-    if event_id_run_id and expected_run_id and event_id_run_id != expected_run_id:
+    if event_id_run_id and event_id_run_id not in allowed_run_ids:
+        return None
+    if (
+        expected_run_id
+        and expected_run_id != stream_id
+        and raw_stable_run_id != expected_run_id
+        and raw_run_id != expected_run_id
+        and event_id_run_id != expected_run_id
+    ):
         return None
     run_id = raw_run_id or expected_run_id
-    if event_id_run_id and event_id_run_id != run_id:
-        return None
+    if run_id == stream_id and expected_run_id:
+        run_id = expected_run_id
     event_id = f"{run_id}:{seq}"
-    if raw_event_id and raw_event_id != event_id:
-        return None
 
     if event_name == "artifact_reference":
         kind = _bounded_journal_outcome_string(payload.get("kind"), limit=128)
@@ -3609,6 +3626,25 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
+def _run_journal_summary_stable_run_id(summary: dict, stream_id: str) -> str | None:
+    status = str(summary.get("stable_run_id_status") or "").strip().lower()
+    if status != "ok":
+        return None
+    summary_stream_id = str(
+        summary.get("stream_id") or summary.get("transport_run_id") or ""
+    ).strip()
+    if summary_stream_id and summary_stream_id != stream_id:
+        return None
+    stable_run_id = _bounded_journal_outcome_string(
+        summary.get("stable_run_id"),
+        limit=512,
+    )
+    summary_run_id = _bounded_journal_outcome_string(summary.get("run_id"), limit=512)
+    if stable_run_id and summary_run_id and stable_run_id != summary_run_id:
+        return None
+    return stable_run_id or summary_run_id
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3625,36 +3661,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     session_id = str(summary.get("session_id") or "")
     if not session_id:
         return None
-    fallback_run_id = str(summary.get("run_id") or stream_id).strip() or stream_id
+    run_id = _run_journal_summary_stable_run_id(summary, stream_id)
+    if not run_id:
+        return None
     journal = read_run_events(session_id, stream_id)
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
-    event_run_ids: set[str] = set()
-    malformed_envelope_run_id = False
-    for event in events:
-        event_name = str(event.get("event") or event.get("type") or "")
-        if event_name in _RUN_JOURNAL_OUTCOME_EVENTS:
-            continue
-        event_run_id, event_run_id_malformed = _run_journal_envelope_run_id_result(event)
-        if event_run_id is not None:
-            event_run_ids.add(event_run_id)
-        if event_run_id_malformed:
-            malformed_envelope_run_id = True
-    # The event envelope is the durable identity authority when it carries a
-    # real run identity. Mixed-era journals can still have token/tool envelopes
-    # keyed by the transport stream while the summary and outcome envelopes use
-    # the stable run id, so treat that exact stream-id-only case as fallback
-    # authority without letting outcomes choose the scene owner.
-    if not malformed_envelope_run_id and len(event_run_ids) == 1:
-        event_run_id = next(iter(event_run_ids))
-        run_id = (
-            fallback_run_id
-            if fallback_run_id != stream_id and event_run_id == stream_id
-            else event_run_id
-        )
-    else:
-        run_id = fallback_run_id
 
     assistant_text = ""
     reasoning_text = ""
@@ -4172,7 +4185,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         last_seq = event_last_seq
         last_event_id = _run_journal_snapshot_event_id_for_run(
             events[-1],
-            run_id,
+            stream_id,
             event_last_seq,
         ) or summary.get("last_event_id")
     else:

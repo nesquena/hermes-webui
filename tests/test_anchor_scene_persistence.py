@@ -2490,6 +2490,10 @@ def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatc
         "find_run_summary",
         lambda sid: {
             "session_id": "session-live-scene",
+            "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 6,
             "last_event_id": f"{stream_id}:6",
         },
@@ -2542,6 +2546,10 @@ def test_runtime_journal_snapshot_dedupes_reasoning_interim_progress_echo(monkey
         "find_run_summary",
         lambda sid: {
             "session_id": "session-live-reasoning-interim-echo",
+            "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 2,
             "last_event_id": f"{stream_id}:2",
         },
@@ -2570,6 +2578,10 @@ def test_runtime_journal_snapshot_has_running_anchor_row_before_first_token(monk
         "find_run_summary",
         lambda sid: {
             "session_id": "session-live-empty",
+            "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
+            "stream_id": stream_id,
             "last_seq": 1,
             "last_event_id": f"{stream_id}:1",
         },

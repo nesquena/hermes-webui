@@ -396,6 +396,7 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
 
     events = []
     requests = []
+    accepted_run_ids = []
     stream_id = "sid-real-runs"
     STREAM_PARTIAL_TEXT[stream_id] = ""
     STREAM_REASONING_TEXT[stream_id] = ""
@@ -458,6 +459,7 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
                 body_extras={"provider": "anthropic"},
                 put_gateway_event=lambda event, data: events.append((event, data)),
                 cancel_event=threading.Event(),
+                on_run_id=accepted_run_ids.append,
             )
     finally:
         STREAM_PARTIAL_TEXT.pop(stream_id, None)
@@ -478,6 +480,7 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert final_text == "Hello"
     assert usage["input_tokens"] == 3
     assert usage["output_tokens"] == 1
+    assert accepted_run_ids == ["run-abc"]
     assert events[0][0] == "approval"
     assert events[0][1]["description"] == "Dangerous command approval"
     assert events[0][1]["approval_id"] == "appr-1"

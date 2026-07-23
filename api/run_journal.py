@@ -40,6 +40,7 @@ _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
+_STABLE_RUN_ID_DEFAULT = object()
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
@@ -61,6 +62,16 @@ def _validate_id(value: str, field: str) -> str:
     if not cleaned or "/" in cleaned or "\\" in cleaned or not _SAFE_ID_RE.fullmatch(cleaned):
         raise ValueError(f"invalid {field}")
     return cleaned
+
+
+def _optional_stable_run_id(value, *, default_run_id: str | None = None) -> str | None:
+    if value is _STABLE_RUN_ID_DEFAULT:
+        value = default_run_id
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValueError("invalid stable_run_id")
+    return _validate_id(value, "stable_run_id")
 
 
 def _run_path(session_id: str, run_id: str, session_dir: Path | None = None) -> Path:
@@ -386,9 +397,11 @@ def append_run_event(
     session_dir: Path | None = None,
     seq: int | None = None,
     created_at: float | None = None,
+    stable_run_id=_STABLE_RUN_ID_DEFAULT,
 ) -> dict:
     """Append one durable run event and fsync it according to the journal policy."""
     path = _run_path(session_id, run_id, session_dir=session_dir)
+    stable_run_id = _optional_stable_run_id(stable_run_id, default_run_id=str(run_id))
     payload = payload if payload is not None else {}
     event_name = str(event_name or "").strip()
     if not event_name:
@@ -405,6 +418,7 @@ def append_run_event(
             "event_id": f"{run_id}:{assigned_seq}",
             "seq": assigned_seq,
             "run_id": str(run_id),
+            "stream_id": str(run_id),
             "session_id": str(session_id),
             "event": event_name,
             "type": event_name,
@@ -413,6 +427,8 @@ def append_run_event(
             "terminal_state": terminal_state,
             "payload": payload,
         }
+        if stable_run_id:
+            event["stable_run_id"] = stable_run_id
         path.parent.mkdir(parents=True, exist_ok=True)
         created_file = not path.exists()
         line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -431,12 +447,31 @@ def append_run_event(
 class RunJournalWriter:
     """Stateful writer for one WebUI stream/run."""
 
-    def __init__(self, session_id: str, run_id: str, *, session_dir: Path | None = None):
+    def __init__(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        stable_run_id=_STABLE_RUN_ID_DEFAULT,
+        session_dir: Path | None = None,
+    ):
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
+        self.stable_run_id = _optional_stable_run_id(
+            stable_run_id,
+            default_run_id=self.run_id,
+        )
         self.session_dir = Path(session_dir) if session_dir is not None else None
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
+
+    def set_stable_run_id(self, stable_run_id: str) -> None:
+        stable_run_id = _optional_stable_run_id(stable_run_id)
+        if not stable_run_id:
+            raise ValueError("invalid stable_run_id")
+        if self.stable_run_id and self.stable_run_id != stable_run_id:
+            raise ValueError("conflicting stable_run_id")
+        self.stable_run_id = stable_run_id
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
         # Draw from the shared module-level seq cache under the per-path lock so
@@ -451,6 +486,7 @@ class RunJournalWriter:
             payload or {},
             session_dir=self.session_dir,
             seq=seq,
+            stable_run_id=self.stable_run_id,
         )
 
 
@@ -476,6 +512,63 @@ def read_run_events(
     }
 
 
+def _event_stable_run_id(event: dict) -> tuple[str | None, str]:
+    if "stable_run_id" not in event or event.get("stable_run_id") in (None, ""):
+        return None, "absent"
+    try:
+        return _optional_stable_run_id(event.get("stable_run_id")), "ok"
+    except ValueError:
+        return None, "malformed"
+
+
+def _event_matches_transport_identity(event: dict, session_id: str, run_id: str) -> bool:
+    event_session_id = event.get("session_id")
+    if not isinstance(event_session_id, str) or event_session_id != str(session_id):
+        return False
+    event_run_id = event.get("run_id")
+    if not isinstance(event_run_id, str) or event_run_id != str(run_id):
+        return False
+    event_stream_id = event.get("stream_id")
+    if event_stream_id not in (None, "") and (
+        not isinstance(event_stream_id, str) or event_stream_id != str(run_id)
+    ):
+        return False
+    event_id = event.get("event_id")
+    if event_id in (None, ""):
+        return False
+    if not isinstance(event_id, str):
+        return False
+    event_id_run_id, event_id_seq = _parse_run_journal_event_id(event_id)
+    if event_id_run_id != str(run_id):
+        return False
+    try:
+        event_seq = int(event.get("seq"))
+    except (TypeError, ValueError):
+        return False
+    return event_id_seq == event_seq
+
+
+def _summary_stable_run_id(session_id: str, run_id: str, ordered: list[dict]) -> tuple[str | None, str]:
+    stable_run_ids: set[str] = set()
+    saw_malformed = False
+    saw_transport_conflict = False
+    for event in ordered:
+        if not _event_matches_transport_identity(event, session_id, run_id):
+            saw_transport_conflict = True
+        stable_run_id, status = _event_stable_run_id(event)
+        if status == "malformed":
+            saw_malformed = True
+        elif status == "ok" and stable_run_id:
+            stable_run_ids.add(stable_run_id)
+    if saw_malformed:
+        return None, "malformed"
+    if saw_transport_conflict or len(stable_run_ids) > 1:
+        return None, "conflicting"
+    if stable_run_ids:
+        return next(iter(stable_run_ids)), "ok"
+    return None, "absent"
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
@@ -485,10 +578,14 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
         terminal_events[-1] if terminal_events else None,
     )
     status = terminal.get("terminal_state") if terminal else ("running" if ordered else "unknown")
+    stable_run_id, stable_run_id_status = _summary_stable_run_id(session_id, run_id, ordered)
     return {
         "session_id": str(session_id),
-        "run_id": str(run_id),
+        "run_id": stable_run_id,
+        "stable_run_id": stable_run_id,
+        "stable_run_id_status": stable_run_id_status,
         "stream_id": str(run_id),
+        "transport_run_id": str(run_id),
         "event_count": len(ordered),
         "last_seq": int((last or {}).get("seq") or 0),
         "last_event_id": (last or {}).get("event_id"),

@@ -473,7 +473,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, on_run_id=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     try:
@@ -556,6 +556,16 @@ def _run_gateway_runs_api_streaming(
 
     usage: dict = {}
     _publish_gateway_run_id(stream_id, run_id)
+    if on_run_id is not None:
+        try:
+            on_run_id(run_id)
+        except Exception:
+            logger.debug(
+                "Failed to persist stable gateway run id %s for stream %s",
+                run_id,
+                stream_id,
+                exc_info=True,
+            )
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
     headers_sse = dict(headers)
@@ -832,7 +842,7 @@ def _run_gateway_chat_streaming(
         backend="gateway",
     )
     try:
-        run_journal = RunJournalWriter(session_id, stream_id)
+        run_journal = RunJournalWriter(session_id, stream_id, stable_run_id=None)
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
@@ -957,6 +967,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    on_run_id=getattr(run_journal, "set_stable_run_id", None),
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
@@ -1065,6 +1076,21 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                                set_journal_stable_run_id = getattr(
+                                    run_journal,
+                                    "set_stable_run_id",
+                                    None,
+                                )
+                                if set_journal_stable_run_id is not None:
+                                    try:
+                                        set_journal_stable_run_id(_approval_run_id)
+                                    except Exception:
+                                        logger.debug(
+                                            "Failed to persist legacy gateway run id %s for stream %s",
+                                            _approval_run_id,
+                                            stream_id,
+                                            exc_info=True,
+                                        )
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror
                                 head, total = submit_gateway_pending_mirror(session_id, approval_data)

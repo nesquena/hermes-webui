@@ -60,12 +60,12 @@ def test_runtime_journal_snapshot_preserves_run_id_separately_from_stream_id(
         "find_run_summary",
         lambda lookup_id: {
             "session_id": session_id,
-            # The current summary is keyed by the legacy lookup id, while the
-            # durable event envelope already carries the stable run identity.
-            "run_id": stream_id,
+            "run_id": run_id,
+            "stable_run_id": run_id,
+            "stable_run_id_status": "ok",
             "stream_id": stream_id,
             "last_seq": 4,
-            "last_event_id": f"{run_id}:4",
+            "last_event_id": f"{stream_id}:4",
         },
     )
     monkeypatch.setattr(
@@ -111,10 +111,12 @@ def test_runtime_journal_lifecycle_shell_preserves_stable_run_id(monkeypatch):
         "find_run_summary",
         lambda lookup_id: {
             "session_id": "session-stable-lifecycle",
-            "run_id": stream_id,
+            "run_id": run_id,
+            "stable_run_id": run_id,
+            "stable_run_id_status": "ok",
             "stream_id": stream_id,
             "last_seq": 1,
-            "last_event_id": f"{run_id}:1",
+            "last_event_id": f"{stream_id}:1",
         },
     )
     monkeypatch.setattr(
@@ -164,6 +166,8 @@ def test_runtime_journal_malformed_envelope_run_id_falls_back_to_transport_curso
         lambda lookup_id: {
             "session_id": "session-malformed-envelope",
             "run_id": stream_id,
+            "stable_run_id": stream_id,
+            "stable_run_id_status": "ok",
             "stream_id": stream_id,
             "last_seq": 1,
             "last_event_id": f"{stream_id}:1",
