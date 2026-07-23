@@ -2032,19 +2032,6 @@ async function loadSession(sid){
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
-
-  function _mergePendingSessionMessage(session,messages){
-    if(!Array.isArray(messages)) return false;
-    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
-    if(!pendingMsg) return false;
-    const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
-    const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
-    if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
-    if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
-    else messages.push(pendingMsg);
-    return true;
-  }
-
   // Phase 2a: If session is streaming, restore the persisted transcript first,
   // then merge the local INFLIGHT live tail. INFLIGHT is a recovery tail, not a
   // complete transcript; treating it as the full source makes long sessions look
@@ -3596,6 +3583,25 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
     if(!duplicate) merged.push(candidate);
   }
   return merged;
+}
+
+// Insert the pending (submitted-but-not-yet-settled) user message into a
+// transcript array at the right position: immediately BEFORE the live
+// assistant turn it started, falling back to the end only when no live turn is
+// present. Shared by every recovery re-render path (loadSession reattach and
+// refreshSession soft-recovery, #6419) so the initiating user row stays above
+// the streaming worklog it triggered (run-state-consistency invariants 2 & 3).
+// Returns true when a row was inserted.
+function _mergePendingSessionMessage(session,messages){
+  if(!Array.isArray(messages)) return false;
+  const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
+  if(!pendingMsg) return false;
+  const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+  const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
+  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
+  else messages.push(pendingMsg);
+  return true;
 }
 
 // Load older messages when the user scrolls to the top of the conversation.
