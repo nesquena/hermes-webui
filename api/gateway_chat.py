@@ -909,6 +909,7 @@ def _run_gateway_chat_streaming(
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
                 _webui_ephemeral_system_prompt,
+                _webui_project_surface_context,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -924,6 +925,7 @@ def _run_gateway_chat_streaming(
                     "session_id": session_id,
                     "profile": getattr(s, "profile", None),
                     "workspace": s.workspace if s is not None else str(workspace),
+                    **_webui_project_surface_context(s),
                 },
                 config_data=cfg,
             )

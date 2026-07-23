@@ -22439,11 +22439,19 @@ def _handle_chat_sync(handler, body):
                 _sanitize_messages_for_api,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
+                _webui_project_surface_context,
                 _workspace_context_prefix,
             )
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            project_context = _webui_project_surface_context(s)
+            project_system_msg = "".join(
+                f"WebUI project {label}: {project_context[key]}\n"
+                for key, label in (("project_id", "ID"), ("project_name", "name"))
+                if key in project_context
+            )
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
+                f"{project_system_msg}"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
                 "workspace the user has selected in the web UI at the time they sent that message. "
                 "This tag is the single authoritative source of the active workspace and updates "
