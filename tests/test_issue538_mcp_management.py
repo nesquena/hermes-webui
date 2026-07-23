@@ -177,6 +177,57 @@ class TestMcpList:
         assert 'new-srv' in saved['mcp_servers']
         assert 'new-srv' not in active_home_saved['mcp_servers']
 
+    def test_bridge_mode_fallsback_to_legacy_when_hermes_config_path_diverges(self, monkeypatch, tmp_path):
+        """When bridge mode is active but HERMES_CONFIG_PATH points outside the
+        agent's default <home>/config.yaml, _mcp_bridge_or_legacy returns legacy
+        so GET and mutation stay in sync on the same external file."""
+        from api import config, profiles, routes
+
+        active_home = tmp_path / 'active-home'
+        override_path = tmp_path / 'override-dir' / 'config.yaml'
+        active_home.mkdir()
+        override_path.parent.mkdir()
+        active_home.joinpath('config.yaml').write_text(
+            yaml.safe_dump({'mcp_servers': {'home-srv': {'command': 'home'}}}, sort_keys=False),
+            encoding='utf-8',
+        )
+        override_path.write_text(
+            yaml.safe_dump({'mcp_servers': {'ext-srv': {'command': 'ext'}}}, sort_keys=False),
+            encoding='utf-8',
+        )
+        monkeypatch.setenv('HERMES_CONFIG_PATH', str(override_path))
+        monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, '_mcp_runtime_status_by_name', lambda: {})
+
+        from api import agent_config_bridge as _bridge
+        # Pretend bridge is available
+        monkeypatch.setattr(_bridge, 'bridge_available', lambda: True)
+        monkeypatch.setattr(_bridge, 'agent_dir_configured', lambda: True)
+        # Ensure _import_state is "ok" so require_bridge also thinks bridge
+        # is available
+        monkeypatch.setattr(_bridge, '_probe_import', lambda: "ok")
+        config.reload_config()
+
+        # GET reads from the external override
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert [srv['name'] for srv in payload['servers']] == ['ext-srv'], \
+            "GET must read from HERMES_CONFIG_PATH, not active home"
+
+        # PUT should write to same external file (falls back to legacy writer),
+        # leaving the active-home file untouched
+        h = _make_handler()
+        h.command = 'PUT'
+        _handle_mcp_server_update(h, 'added-srv', {'command': 'added'})
+        saved = yaml.safe_load(override_path.read_text(encoding='utf-8'))
+        home_saved = yaml.safe_load(active_home.joinpath('config.yaml').read_text(encoding='utf-8'))
+        assert 'added-srv' in saved.get('mcp_servers', {}), \
+            "External config must contain the new server (bridge fallback to legacy)"
+        assert 'added-srv' not in home_saved.get('mcp_servers', {}), \
+            "Active-home config must NOT contain the new server"
+
 
 class TestMcpSave:
     """PUT /api/mcp/servers/<name> — add or update."""
