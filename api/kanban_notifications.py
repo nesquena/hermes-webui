@@ -1359,6 +1359,7 @@ def _candidate_rows(
     sql = (
         f"SELECT s.task_id AS s_task_id, "
         f"       s.chat_id AS s_chat_id, "
+        f"       COALESCE(s.thread_id, '') AS s_thread_id, "
         f"       s.last_event_id AS s_last_event_id, "
         f"       {profile_select} AS s_profile, "
         f"       e.id AS e_id, "
@@ -1386,6 +1387,10 @@ def _candidate_rows(
             except (KeyError, TypeError):
                 continue
             try:
+                thread_id = str(row["s_thread_id"] or "").strip()
+            except (KeyError, TypeError):
+                thread_id = ""
+            try:
                 eid = int(row["e_id"])
             except (KeyError, TypeError, ValueError):
                 continue
@@ -1403,6 +1408,7 @@ def _candidate_rows(
                 {
                     "task_id": task_id,
                     "chat_id": chat_id,
+                    "thread_id": thread_id,
                     "profile": profile,
                     "profile_column": profile_col,
                     "last_event_id": last_event_id,
