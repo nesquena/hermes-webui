@@ -6566,6 +6566,14 @@ function _mergeUsageForCtxIndicator(latest, fallback){
   return merged;
 }
 
+function _resetCtxIndicatorForEmptyComposer(){
+  // Context usage belongs to one conversation. An empty composer has no
+  // conversation yet, so never carry the previous session's transient usage
+  // cache or its visible ring across a new-chat / blank-page boundary.
+  if(typeof S!=='undefined') S.lastUsage={};
+  _syncCtxIndicator({});
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
