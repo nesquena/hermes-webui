@@ -2814,6 +2814,27 @@ function _syncSkinPicker(active){
   });
 }
 
+function _normalizeIconTint(color){
+  return /^#[0-9a-f]{6}$/i.test(color||'')?color.toUpperCase():'#08EBF1';
+}
+
+function _applyIconTint(color){
+  const tint=_normalizeIconTint(color).slice(1);
+  document.querySelectorAll('link[rel~="icon"],link[rel="apple-touch-icon"]').forEach(link=>{
+    link.href=`static/favicon.svg?tint=${tint}`;
+    link.type='image/svg+xml';
+  });
+}
+
+function _pickIconTint(color){
+  const tint=_normalizeIconTint(color);
+  localStorage.setItem('hermes-icon-tint',tint);
+  const input=$('settingsIconTint');
+  if(input) input.value=tint;
+  _applyIconTint(tint);
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+}
+
 function _applyFontSize(size){
   if(size&&size!=='default'){
     document.documentElement.dataset.fontSize=size;
