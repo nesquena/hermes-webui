@@ -70,6 +70,7 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/spaces.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -780,6 +781,15 @@
       </div>
     </div>
     </div><!-- /#mainChat -->
+    <div id="mainCapySpaces" class="main-view" aria-label="Capy Spaces">
+      <div class="main-view-header">
+        <div class="main-view-title">Capy Spaces</div>
+      </div>
+      <div class="capy-spaces-shell">
+        <div id="capySpacesRecovery" class="capy-spaces-card capy-spaces-recovery">Loading safe recovery…</div>
+        <div id="capySpacesRoot" class="capy-spaces-card">Loading Capy Spaces…</div>
+      </div>
+    </div>
     <div id="mainSkills" class="main-view">
       <div class="main-view-header">
         <div class="main-view-title" id="skillDetailTitle"></div>
@@ -1771,6 +1781,7 @@
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/spaces.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
