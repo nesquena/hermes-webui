@@ -4905,6 +4905,7 @@ body.resizing .sidebar{transition:none!important;}
 .main-view{flex:1;min-height:0;min-width:0;display:flex;flex-direction:column;background:var(--bg);}
 main.main > #mainChat,
 main.main > #mainSettings,
+main.main > #mainCapySpaces,
 main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
@@ -4913,8 +4914,9 @@ main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-capy-spaces):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
+main.main.showing-capy-spaces > #mainCapySpaces{display:flex;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
