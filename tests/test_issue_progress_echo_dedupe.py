@@ -537,3 +537,233 @@ def test_final_answer_prefix_reasoning_echo_is_not_journaled_or_merged(cleanup_t
     assert assistant_messages[-1]["content"] == final_answer
     assert leaked_prefix not in str(assistant_messages[-1].get("reasoning") or "")
     assert leaked_prefix not in str(assistant_messages[-1].get("reasoning_content") or "")
+
+
+def test_redaction_tolerant_match_treats_only_mask_runs_as_wildcards():
+    """Unit: `***` mask runs are wildcards; every other char must match literally.
+
+    The live token stream keeps the real secret; the interim progress echo is
+    credential-redacted. `_redaction_tolerant_match` treats the `***` mask run as
+    a bounded wildcard over the original value, so a redaction-only difference
+    matches — while a genuinely different (non-credential) value still fails,
+    including non-credential *string* values (the false-positive boundary).
+    """
+    import api.streaming as streaming
+
+    match = streaming._redaction_tolerant_match
+
+    streamed = 'seed with `{"username":"sam","password":"koreader1","status":"pending"}`'
+    redacted = 'seed with `{"username":"sam","password":"***","status":"pending"}`'
+    # Redaction-only difference must be recognized as an echo (suffix + substring).
+    assert match(redacted, streamed, anchor_end=True), "redaction-only diff must match as tail echo"
+    assert match(redacted, streamed, anchor_end=False), "redaction-only diff must match as substring"
+
+    # A non-credential STRING value that differs alongside the credential must NOT
+    # match — otherwise a real status update would be silently dropped (P2 boundary).
+    streamed_started = 'seed with `{"password":"koreader1","status":"started"}`'
+    redacted_completed = 'seed with `{"password":"***","status":"completed"}`'
+    assert not match(redacted_completed, streamed_started, anchor_end=True), (
+        "a differing non-credential string value must NOT be masked away"
+    )
+    assert not match(redacted_completed, streamed_started, anchor_end=False)
+
+    # A mask-free candidate never engages the relaxed path (strict compare owns it).
+    assert not match(streamed, streamed, anchor_end=True)
+
+    # The strict comparator must still see the redacted vs. unredacted text as different.
+    assert streaming._compact_for_echo_compare(streamed) != streaming._compact_for_echo_compare(redacted)
+
+
+def test_redacted_interim_progress_echo_marks_already_streamed(cleanup_test_sessions):
+    """Regression: a credential-redacted interim echo must be flagged already_streamed.
+
+    Reproduces the "repetition on navigate-back" bug: the assistant streams a
+    progress sentence containing a secret as normal tokens (unredacted), then
+    reports the same sentence through interim_assistant (credential-redacted).
+    Because the redaction rewrote the secret, the strict echo check missed the
+    match and flagged already_streamed=False, so run-journal replay appended the
+    paragraph a second time. With the redaction-tolerant echo check the interim
+    must be flagged already_streamed=True, and replaying the run journal must
+    yield exactly one copy of the sentence.
+    """
+    import api.streaming as streaming
+    from api.models import _append_journaled_partial_output
+
+    secret = "koreader1"
+    sentence_streamed = (
+        'There\'s a legacy plaintext `password` fallback field, so I can seed '
+        'with `{"username":"sam","password":"' + secret + '","serverUrl":"...",'
+        '"matchMethod":1}` and it\'ll load. Let me build the simulator and seed the file.'
+    )
+    sentence_interim = sentence_streamed.replace(secret, "***")
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "issue_redacted_interim_echo"
+            self.title = "Redacted interim echo"
+            self.workspace = "/tmp"
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.cache_read_tokens = 0
+            self.cache_write_tokens = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = ""
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+
+        def save(self, *args, **kwargs):
+            pass
+
+        def compact(self):
+            return {
+                "session_id": self.session_id,
+                "title": self.title,
+                "workspace": self.workspace,
+                "model": self.model,
+                "created_at": 0,
+                "updated_at": 0,
+                "pinned": False,
+                "archived": False,
+                "project_id": None,
+                "profile": self.profile,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "estimated_cost": self.estimated_cost,
+                "cache_read_tokens": self.cache_read_tokens,
+                "cache_write_tokens": self.cache_write_tokens,
+                "personality": self.personality,
+            }
+
+    class RedactedInterimAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            prefill_messages=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            interim_assistant_callback=None,
+            **_kwargs,
+        ):
+            self.stream_delta_callback = cast(Callable[[str], None], stream_delta_callback)
+            self.reasoning_callback = cast(Callable[[str], None], reasoning_callback)
+            self.tool_progress_callback = cast(Callable[..., None], tool_progress_callback)
+            self.interim_assistant_callback = cast(Callable[..., None], interim_assistant_callback)
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            # Live prose streams the real secret through tokens...
+            self.stream_delta_callback(sentence_streamed)
+            # ...then the same sentence is reported as an interim progress echo,
+            # but credential-redacted. The runtime does NOT pre-set
+            # already_streamed here (default False); the SSE bridge must infer it.
+            self.interim_assistant_callback(sentence_interim)
+            history = kwargs.get("conversation_history", [])
+            return {"messages": history + [
+                {"role": "user", "content": kwargs["persist_user_message"]},
+                {"role": "assistant", "content": sentence_streamed},
+            ]}
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = "stream_issue_redacted_interim_echo"
+    fake_session.active_stream_id = fake_stream_id
+    fake_queue = queue.Queue()
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_payload = {
+        "provider": "openai",
+        "base_url": None,
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+    runtime_payload["api_" + "key"] = "***"
+    fake_runtime_module.__dict__["resolve_runtime_provider"] = mock.Mock(return_value=runtime_payload)
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__dict__["runtime_provider"] = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.__dict__["SessionDB"] = mock.Mock(return_value=None)
+    injected = {
+        "hermes_cli": fake_hermes_cli,
+        "hermes_cli.runtime_provider": fake_runtime_module,
+        "hermes_state": fake_hermes_state,
+    }
+    saved = {k: sys.modules.get(k, _MISSING) for k in injected}
+    sys.modules.update(injected)
+    try:
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=RedactedInterimAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-test", "openai", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id=fake_session.session_id,
+                msg_text="seed creds",
+                model="gpt-test",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+        for k, prev in saved.items():
+            if prev is _MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = cast(types.ModuleType, prev)
+
+    events = list(fake_queue.queue)
+    interim = [payload for event, payload in events if event == "interim_assistant"]
+    assert interim, "interim_assistant event must be emitted"
+    assert interim[-1].get("already_streamed") is True, (
+        "a credential-redacted interim echo of already-streamed tokens must be "
+        "flagged already_streamed so it is not appended a second time"
+    )
+
+    # Replaying the run journal must yield exactly ONE copy of the sentence — the
+    # navigate-back reconstruction path (api.models._append_journaled_partial_output).
+    replay_session = FakeSession()
+    _append_journaled_partial_output(replay_session, fake_stream_id)
+    replay_text = "\n".join(
+        str(m.get("content") or "")
+        for m in replay_session.messages
+        if m.get("role") == "assistant"
+    )
+    assert replay_text.count("legacy plaintext") == 1, (
+        "run-journal replay must not duplicate the redacted progress sentence; "
+        f"found {replay_text.count('legacy plaintext')} copies"
+    )

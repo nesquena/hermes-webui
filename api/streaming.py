@@ -99,6 +99,47 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
+# A credential redaction mask run (three or more '*'). Only these placeholders
+# are treated as wildcards during echo comparison; every other character must
+# still match literally (see _redaction_tolerant_match).
+_ECHO_REDACTION_MASK_RE = re.compile(r'\*{3,}')
+
+
+def _redaction_tolerant_match(candidate_text: str, visible_text: str, *, anchor_end: bool) -> bool:
+    """Match a credential-redacted echo against its unredacted live-streamed twin.
+
+    The interim-assistant progress echo is credential-redacted before it is
+    journaled/queued (`"password":"***"`), while the live token stream is not
+    (`"password":"hunter2"`). A strict whitespace-only compare therefore treats
+    them as different text, so the echo is flagged NOT-already-streamed and the
+    same sentence is appended a second time on live render and on run-journal
+    replay (the "repetition on navigate-back" bug).
+
+    This turns each redaction mask run (`***`) in the candidate into a bounded
+    wildcard (`[^"]*`) that matches the original value up to the closing quote,
+    while every OTHER character must still match literally. That neutralizes a
+    redaction-only difference WITHOUT masking genuinely different values: two
+    interims that share JSON structure but differ in a non-credential field —
+    e.g. `"action":"started"` vs `"action":"completed"` — still fail to match,
+    so a real status update is never silently suppressed as already-streamed.
+
+    ``anchor_end`` selects a suffix (tail-echo) match vs. a substring match.
+    """
+    cand = _compact_for_echo_compare(candidate_text)
+    # Only engage this relaxed path when the candidate actually carries a
+    # redaction mask; a mask-free candidate is fully handled by the strict path.
+    if not cand or not _ECHO_REDACTION_MASK_RE.search(cand):
+        return False
+    vis = _compact_for_echo_compare(visible_text)
+    if not vis:
+        return False
+    parts = _ECHO_REDACTION_MASK_RE.split(cand)
+    pattern = '[^"]*'.join(re.escape(part) for part in parts)
+    if anchor_end:
+        pattern += r'\Z'
+    return re.search(pattern, vis) is not None
+
+
 def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
     """Remove ``suffix`` from ``value`` when they match after whitespace folding."""
     raw = str(value or '')
@@ -7938,10 +7979,19 @@ def _run_agent_streaming(
                 if not candidate:
                     return False
                 visible_output = STREAM_PARTIAL_TEXT.get(stream_id, '')
-                visible_tail = _compact_for_echo_compare(
-                    visible_output[-max(len(str(text)) * 2, 512):]
-                )
+                visible_window = visible_output[-max(len(str(text)) * 2, 512):]
+                visible_tail = _compact_for_echo_compare(visible_window)
                 if visible_tail and visible_tail.endswith(candidate):
+                    return True
+                # Credential redaction divergence (#repetition-on-navigate-back):
+                # the interim progress echo is redacted (`"password":"***"`) while
+                # the live token stream is not (`"password":"hunter2"`). A strict
+                # compare then misses the echo, so the same sentence is appended a
+                # second time on live render and on run-journal replay. Retry the
+                # suffix match treating only the `***` mask runs as wildcards, so a
+                # redaction-only difference still counts as already-streamed while
+                # a genuinely different (non-credential) value still fails to match.
+                if _redaction_tolerant_match(text, visible_window, anchor_end=True):
                     return True
                 # Some runtimes can report a prefix of the already-streamed final
                 # answer through reasoning after visible output has completed. That
@@ -7952,7 +8002,9 @@ def _run_agent_streaming(
                 if len(candidate) < 80:
                     return False
                 visible_compact = _compact_for_echo_compare(visible_output)
-                return bool(visible_compact and candidate in visible_compact)
+                if visible_compact and candidate in visible_compact:
+                    return True
+                return _redaction_tolerant_match(text, visible_output, anchor_end=False)
 
             def _strip_reasoning_output_echo(text: str) -> bool:
                 nonlocal _reasoning_segments
