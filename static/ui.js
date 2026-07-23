@@ -9272,7 +9272,33 @@ function snapshotLiveTurnHtmlForSession(sid){
   const turn=$('liveAssistantTurn');
   if(!turn) return;
   if(turn.dataset&&turn.dataset.sessionId&&turn.dataset.sessionId!==sid) return;
-  INFLIGHT[sid].liveTurnHtml=turn.outerHTML;
+  let snapshotTurn=turn;
+  const sourceControls=turn.querySelectorAll
+    ? Array.from(turn.querySelectorAll('.transparent-event-copy,.thinking-copy-btn'))
+    : [];
+  if(sourceControls.some(control=>!!control._transparentCopiedFeedbackNormal)){
+    // Copy-success feedback is transient, while its normal presentation lives
+    // only on element properties. Sanitize an independent clone so switching
+    // sessions cannot persist the check/Copied/accent presentation, without
+    // mutating the visible control or disturbing its active feedback timer.
+    snapshotTurn=turn.cloneNode(true);
+    const clonedControls=Array.from(snapshotTurn.querySelectorAll('.transparent-event-copy,.thinking-copy-btn'));
+    sourceControls.forEach((source,index)=>{
+      const normal=source._transparentCopiedFeedbackNormal;
+      const clone=clonedControls[index];
+      if(!normal||!clone) return;
+      clone.innerHTML=normal.innerHTML;
+      if(clone.style){
+        if(normal.styleCssText!==null) clone.style.cssText=normal.styleCssText;
+        else clone.style.color=normal.color||'';
+      }
+      if(normal.titleAttr===null) clone.removeAttribute('title');
+      else clone.setAttribute('title',normal.titleAttr);
+      if(normal.ariaLabel===null) clone.removeAttribute('aria-label');
+      else clone.setAttribute('aria-label',normal.ariaLabel);
+    });
+  }
+  INFLIGHT[sid].liveTurnHtml=snapshotTurn.outerHTML;
 }
 
 function _liveAssistantSegmentTextLength(seg){
@@ -11076,7 +11102,124 @@ function _transparentToolSummary(tc){
   if(target) return target;
   return '';
 }
-function _copyEventToClipboard(row){
+function _showTransparentCopiedFeedback(control,row,opts){
+  if(!control&&!row) return;
+  opts=opts||{};
+  // A live-row refresh may replace a header's copy control with new markup.
+  // Keep the lifetime on the persistent row, then resolve the currently visible
+  // control for every render/expiry rather than retaining a detached button.
+  const feedbackRow=row||(control&&control.closest?control.closest('.transparent-event-row'):null);
+  const owner=feedbackRow||control;
+  if(!owner) return;
+  const currentControl=()=>{
+    if(feedbackRow&&feedbackRow.querySelector){
+      return feedbackRow.querySelector('.transparent-event-copy,.thinking-copy-btn');
+    }
+    return control||null;
+  };
+  const connectedControl=()=>{
+    const target=currentControl();
+    if(!target||target.isConnected!==true) return null;
+    if(feedbackRow&&feedbackRow.isConnected!==true) return null;
+    return target;
+  };
+  const clearFeedbackState=(state)=>{
+    if(state&&state.timer){
+      clearTimeout(state.timer);
+      state.timer=null;
+    }
+    if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
+  };
+  const restoreControl=(target)=>{
+    if(!target) return;
+    const normal=target._transparentCopiedFeedbackNormal;
+    if(!normal) return;
+    target.innerHTML=normal.innerHTML;
+    if(target.style){
+      if(normal.styleCssText!==null) target.style.cssText=normal.styleCssText;
+      else target.style.color=normal.color||'';
+    }
+    if(normal.titleAttr===null){
+      if(target.removeAttribute) target.removeAttribute('title');
+    }else if(target.setAttribute){
+      target.setAttribute('title',normal.titleAttr);
+    }
+    if(normal.ariaLabel===null){
+      if(target.removeAttribute) target.removeAttribute('aria-label');
+    }else if(target.setAttribute){
+      target.setAttribute('aria-label',normal.ariaLabel);
+    }
+    delete target._transparentCopiedFeedbackNormal;
+  };
+  const renderCopiedControl=(target)=>{
+    if(!target) return;
+    if(!target._transparentCopiedFeedbackNormal){
+      target._transparentCopiedFeedbackNormal={
+        innerHTML:target.innerHTML,
+        color:target.style?target.style.color:undefined,
+        styleCssText:target.style&&typeof target.style.cssText==='string'?target.style.cssText:null,
+        titleAttr:target.getAttribute?target.getAttribute('title'):null,
+        ariaLabel:target.getAttribute?target.getAttribute('aria-label'):null,
+      };
+    }
+    const copiedLabel=t('copied')||'Copied';
+    target.innerHTML=typeof li==='function'?li('check',11):'✓';
+    if(target.style){
+      target.style.color='var(--accent)';
+      target.style.opacity='1';
+    }
+    if(target.setAttribute) target.setAttribute('title',copiedLabel);
+    else target.title=copiedLabel;
+    if(target.setAttribute) target.setAttribute('aria-label',copiedLabel);
+  };
+  const now=Date.now();
+  let state=owner._transparentCopiedFeedback;
+  if(opts.rehydrate){
+    if(!state) return;
+    const target=connectedControl();
+    if(!target){
+      clearFeedbackState(state);
+      return;
+    }
+    if(!state.expiresAt||state.expiresAt<=now){
+      if(state.timer) clearTimeout(state.timer);
+      state.timer=null;
+      restoreControl(target);
+      if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
+      return;
+    }
+    renderCopiedControl(target);
+    return;
+  }
+  const target=connectedControl();
+  if(!target){
+    if(state) clearFeedbackState(state);
+    return;
+  }
+  if(!state){
+    state={timer:null,generation:0,expiresAt:0};
+    owner._transparentCopiedFeedback=state;
+  }else if(state.timer){
+    clearTimeout(state.timer);
+  }
+  state.generation+=1;
+  const generation=state.generation;
+  state.expiresAt=now+1500;
+  renderCopiedControl(target);
+  state.timer=setTimeout(()=>{
+    if(owner._transparentCopiedFeedback!==state||state.generation!==generation) return;
+    const expiryTarget=connectedControl();
+    if(!expiryTarget){
+      state.timer=null;
+      delete owner._transparentCopiedFeedback;
+      return;
+    }
+    state.timer=null;
+    restoreControl(expiryTarget);
+    delete owner._transparentCopiedFeedback;
+  },1500);
+}
+function _copyEventToClipboard(row,control){
   if(!row) return;
   const type=row.getAttribute('data-event-type');
   let text='';
@@ -11119,9 +11262,12 @@ function _copyEventToClipboard(row){
   }else{
     text=row.textContent||'';
   }
+  if(!text) return;
+  const copied=()=>_showTransparentCopiedFeedback(control,row);
   const fallback=()=>{
+    let ta=null;
     try{
-      const ta=document.createElement('textarea');
+      ta=document.createElement('textarea');
       ta.value=text;
       ta.setAttribute('readonly','');
       ta.style.position='absolute';
@@ -11129,14 +11275,17 @@ function _copyEventToClipboard(row){
       document.body.appendChild(ta);
       ta.select();
       const ok=document.execCommand('copy');
-      document.body.removeChild(ta);
+      if(ok) copied();
       if(typeof showToast==='function') showToast(ok?(t('copied')||'Copied'):(t('copy_failed')||'Copy failed'),1600);
     }catch(_){
       if(typeof showToast==='function') showToast(t('copy_failed')||'Copy failed',2000,'error');
+    }finally{
+      if(ta&&ta.parentNode) ta.parentNode.removeChild(ta);
     }
   };
   if(navigator&&navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>{
+      copied();
       if(typeof showToast==='function') showToast(`${t('copied')||'Copied'} ${label}`,1600);
     }).catch(fallback);
   }else{
@@ -11147,21 +11296,29 @@ function _attachCopyButton(header){
   if(!header) return null;
   const bindCopyButton=(btn)=>{
     if(!btn) return null;
+    const row=header.closest?header.closest('.transparent-event-row'):null;
+    const feedbackState=row&&row._transparentCopiedFeedback;
+    const feedbackActive=!!(feedbackState&&Number(feedbackState.expiresAt)>Date.now());
     btn.classList.add('transparent-event-copy');
     btn.setAttribute('role','button');
     btn.setAttribute('tabindex','0');
-    btn.setAttribute('aria-label',t('copy')||'Copy');
     btn.setAttribute('data-transparent-copy','1');
-    btn.title=t('copy')||'Copy';
+    if(!btn._transparentCopiedFeedback&&!feedbackActive){
+      btn.setAttribute('aria-label',t('copy')||'Copy');
+      btn.title=t('copy')||'Copy';
+    }
     const handler=function(ev){
       ev.stopPropagation();
       ev.preventDefault();
-      _copyEventToClipboard(header.closest('.transparent-event-row'));
+      _copyEventToClipboard(header.closest('.transparent-event-row'),btn);
     };
     btn.onclick=handler;
     btn.onkeydown=function(ev){
       if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
     };
+    if(btn.parentNode&&typeof _showTransparentCopiedFeedback==='function'){
+      _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
+    }
     return btn;
   };
   // Reuse ANY existing copy button (handles both .transparent-event-copy
@@ -11184,6 +11341,8 @@ function _attachCopyButton(header){
   const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
   if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
   else header.appendChild(btn);
+  const row=header.closest?header.closest('.transparent-event-row'):null;
+  if(typeof _showTransparentCopiedFeedback==='function') _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
   return btn;
 }
 function _transparentEventCountLabel(toolCount){

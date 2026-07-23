@@ -726,6 +726,7 @@ global.document = { createElement:(tag)=>new FakeElement(tag), body:new FakeElem
 global.t = (key)=>key === 'copy' ? 'Copy' : key;
 global.showToast = ()=>{};
 
+eval(extractFunc('_showTransparentCopiedFeedback'));
 eval(extractFunc('_copyEventToClipboard'));
 eval(extractFunc('_attachCopyButton'));
 eval(extractFunc('_setTransparentCardOpen'));
@@ -1821,3 +1822,813 @@ process.stdout.write(JSON.stringify({
     assert data["scrollTopPreserved"] is True
     assert data["innerHTMLSetCount"] == 0
     assert data["cardOpen"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_transparent_rebound_copy_controls_report_only_confirmed_success():
+    script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.env.UI_JS_PATH, 'utf8');
+function extractFunc(name){
+  const marker = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(marker);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start) + 1;
+  let depth = 1;
+  while(depth > 0 && i < src.length){
+    if(src[i] === '{') depth += 1;
+    else if(src[i] === '}') depth -= 1;
+    i += 1;
+  }
+  return src.slice(start, i);
+}
+const htmlRegistry = new Map();
+const snapshotRegistry = new Map();
+class FakeElement {
+  constructor(tag='div'){
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.attributes = Object.create(null);
+    this.dataset = Object.create(null);
+    this._styleValues = Object.create(null);
+    this.style = {};
+    const self = this;
+    Object.defineProperty(this.style, 'color', {
+      get(){ return self._styleValues.color || ''; },
+      set(value){ self._recordWrite('style'); self._styleValues.color=String(value ?? ''); },
+    });
+    Object.defineProperty(this.style, 'opacity', {
+      get(){ return self._styleValues.opacity || ''; },
+      set(value){ self._recordWrite('style'); self._styleValues.opacity=String(value ?? ''); },
+    });
+    Object.defineProperty(this.style, 'cssText', {
+      get(){ return Object.entries(self._styleValues).filter(([,value])=>value !== '').map(([name,value])=>`${name}: ${value};`).join(' '); },
+      set(value){
+        self._recordWrite('style');
+        self._styleValues = Object.create(null);
+        String(value ?? '').split(';').forEach(part=>{
+          const index=part.indexOf(':');
+          if(index < 0) return;
+          const name=part.slice(0,index).trim();
+          const item=part.slice(index+1).trim();
+          if(name) self._styleValues[name]=item;
+        });
+      },
+    });
+    this._title = '';
+    this.onclick = null;
+    this.onkeydown = null;
+    this._innerHTML = '';
+    this._textContent = '';
+    this._classes = new Set();
+    this.id = '';
+    this.content = this.tagName === 'TEMPLATE' ? { firstElementChild:null } : null;
+    this.classList = {
+      add(...names){ names.forEach(name=>self._classes.add(name)); },
+      remove(...names){ names.forEach(name=>self._classes.delete(name)); },
+      contains(name){ return self._classes.has(name); },
+      toggle(name, force){
+        const next = force === undefined ? !self._classes.has(name) : !!force;
+        if(next) self._classes.add(name);
+        else self._classes.delete(name);
+        return next;
+      },
+    };
+  }
+  get parentElement(){ return this.parentNode; }
+  cloneNode(deep){
+    const clone=new FakeElement(this.tagName);
+    clone.className=this.className;
+    clone._innerHTML=this._innerHTML;
+    clone._textContent=this._textContent;
+    clone.style.cssText=this.style.cssText;
+    Object.entries(this.attributes).forEach(([name,value])=>clone.setAttribute(name,value));
+    if(deep) this.children.forEach(child=>clone.appendChild(child.cloneNode(true)));
+    return clone;
+  }
+  get isConnected(){
+    let node = this;
+    while(node){
+      if(global.document&&node===global.document.body) return true;
+      node = node.parentNode;
+    }
+    return false;
+  }
+  get title(){ return this._title; }
+  set title(value){ this._recordWrite('title'); this._title=String(value ?? ''); }
+  get className(){ return Array.from(this._classes).join(' '); }
+  set className(value){ this._classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
+  get innerHTML(){
+    if(this.tagName === 'TEMPLATE') return this._templateHtml || '';
+    return this._innerHTML;
+  }
+  set innerHTML(value){
+    if(this.tagName === 'TEMPLATE'){
+      this._templateHtml=String(value ?? '');
+      const stored=snapshotRegistry.get(this._templateHtml);
+      this.content.firstElementChild=stored ? stored.cloneNode(true) : null;
+      return;
+    }
+    this._recordWrite('innerHTML');
+    this.children.forEach(child=>{ child.parentNode=null; });
+    this._innerHTML = String(value ?? '');
+    this._textContent = this._innerHTML;
+    this.children = [];
+    const factory = htmlRegistry.get(this._innerHTML);
+    if(factory){
+      this._textContent = '';
+      factory().forEach(child=>this.appendChild(child));
+    }
+  }
+  get textContent(){ return this.children.length ? this.children.map(child=>child.textContent).join('') : this._textContent; }
+  set textContent(value){
+    this._recordWrite('textContent');
+    this.children.forEach(child=>{ child.parentNode=null; });
+    this._textContent = String(value ?? '');
+    this._innerHTML = this._textContent;
+    this.children = [];
+  }
+  _recordWrite(kind){
+    if(this._trackDetachedWrites&& !this.isConnected) this._trackDetachedWrites.push(kind);
+  }
+  setAttribute(name, value){
+    this._recordWrite(name === 'aria-label' ? 'aria-label' : `attribute:${name}`);
+    this.attributes[String(name)] = String(value);
+    if(name === 'title') this.title = String(value);
+    if(name === 'id') this.id = String(value);
+    if(String(name).startsWith('data-')){
+      const key=String(name).slice(5).replace(/-([a-z])/g,(_,char)=>char.toUpperCase());
+      this.dataset[key]=String(value);
+    }
+  }
+  getAttribute(name){ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
+  getAttributeNames(){ return Object.keys(this.attributes); }
+  removeAttribute(name){
+    this._recordWrite(name === 'aria-label' ? 'aria-label' : `attribute:${name}`);
+    delete this.attributes[name];
+    if(name === 'title') this.title = '';
+    if(name === 'id') this.id = '';
+    if(String(name).startsWith('data-')){
+      const key=String(name).slice(5).replace(/-([a-z])/g,(_,char)=>char.toUpperCase());
+      delete this.dataset[key];
+    }
+  }
+  appendChild(child){ if(child.parentNode) child.remove(); child.parentNode = this; this.children.push(child); return child; }
+  insertBefore(child, ref){
+    if(child.parentNode) child.remove();
+    const index = this.children.indexOf(ref);
+    child.parentNode = this;
+    if(index < 0) this.children.push(child);
+    else this.children.splice(index, 0, child);
+    return child;
+  }
+  removeChild(child){ child.remove(); return child; }
+  remove(){
+    if(!this.parentNode) return;
+    const siblings = this.parentNode.children;
+    const index = siblings.indexOf(this);
+    if(index >= 0) siblings.splice(index, 1);
+    this.parentNode = null;
+  }
+  replaceWith(replacement){
+    if(!this.parentNode) return;
+    const siblings=this.parentNode.children;
+    const index=siblings.indexOf(this);
+    if(replacement.parentNode) replacement.remove();
+    if(index >= 0){
+      siblings[index]=replacement;
+      replacement.parentNode=this.parentNode;
+      this.parentNode=null;
+    }
+  }
+  _serialize(){
+    const attrs=Object.entries(this.attributes);
+    if(this.id&&!Object.prototype.hasOwnProperty.call(this.attributes,'id')) attrs.push(['id',this.id]);
+    if(this.className&&!Object.prototype.hasOwnProperty.call(this.attributes,'class')) attrs.push(['class',this.className]);
+    if(this.style.cssText) attrs.push(['style',this.style.cssText]);
+    const attrText=attrs.map(([name,value])=>` ${name}="${String(value)}"`).join('');
+    const content=this.children.length ? this.children.map(child=>child._serialize()).join('') : this.innerHTML;
+    return `<${this.tagName.toLowerCase()}${attrText}>${content}</${this.tagName.toLowerCase()}>`;
+  }
+  get outerHTML(){
+    const html=this._serialize();
+    snapshotRegistry.set(html,this.cloneNode(true));
+    return html;
+  }
+  select(){}
+  querySelector(selector){ return this.querySelectorAll(selector)[0] || null; }
+  querySelectorAll(selector){
+    const found = [];
+    const walk = node=>{
+      node.children.forEach(child=>{
+        if(matches(child, selector)) found.push(child);
+        walk(child);
+      });
+    };
+    walk(this);
+    return found;
+  }
+  closest(selector){
+    let node = this;
+    while(node){ if(matches(node, selector)) return node; node = node.parentNode; }
+    return null;
+  }
+}
+function matches(node, selector){
+  return String(selector||'').split(',').map(part=>part.trim()).filter(Boolean).some(part=>{
+    const classes = part.match(/\.([A-Za-z0-9_-]+)/g) || [];
+    if(classes.some(cls=>!node.classList.contains(cls.slice(1)))) return false;
+    const attrs = part.match(/\[([^=\]]+)(?:="([^"]*)")?\]/g) || [];
+    if(attrs.some(raw=>{
+      const match = raw.match(/\[([^=\]]+)(?:="([^"]*)")?\]/);
+      const value = node.getAttribute(match[1]);
+      return value === null || (match[2] !== undefined && value !== match[2]);
+    })) return false;
+    return classes.length > 0 || attrs.length > 0;
+  });
+}
+function element(tag, classes){
+  const node = new FakeElement(tag);
+  node.className = classes || '';
+  return node;
+}
+function toolRow(){
+  const row = element('div', 'transparent-event-row');
+  row.setAttribute('data-event-type', 'tool');
+  row.setAttribute('data-expanded', '0');
+  row._tcData = { name:'shell', args:{ command:'echo secret-token' }, snippet:'tool output' };
+  const card = element('div', 'tool-card');
+  const header = element('div', 'tool-card-header');
+  const copy = element('span', 'transparent-event-copy');
+  copy.innerHTML = '<svg data-original="tool-copy"></svg>';
+  const toggle = element('span', 'tool-card-toggle');
+  header.appendChild(copy);
+  header.appendChild(toggle);
+  card.appendChild(header);
+  row.appendChild(card);
+  return { row, card, header, copy };
+}
+let reconcileTemplateId = 0;
+function reconcileToolRow(version, original){
+  const token = `__reconcile_tool_${version}_${++reconcileTemplateId}__`;
+  htmlRegistry.set(token, ()=>{
+    const card = element('div', 'tool-card');
+    const header = element('div', 'tool-card-header');
+    const copy = element('span', 'transparent-event-copy');
+    copy.innerHTML = original.html;
+    copy.style.color = original.color;
+    copy.style.opacity = original.opacity || '';
+    copy.setAttribute('title', original.title);
+    copy.setAttribute('aria-label', original.aria);
+    const toggle = element('span', 'tool-card-toggle');
+    header.appendChild(copy);
+    header.appendChild(toggle);
+    card.appendChild(header);
+    return [card];
+  });
+  const row = element('div', 'transparent-event-row');
+  row.setAttribute('data-event-type', 'tool');
+  row.setAttribute('data-anchor-row-id', 'copy-race');
+  row.setAttribute('data-anchor-row-role', 'tool');
+  row.setAttribute('data-anchor-source-event-type', 'process_tool');
+  row.setAttribute('data-expanded', '0');
+  row._tcData = { name:'shell', args:{ command:`echo ${version}` }, snippet:`${version} output` };
+  row.innerHTML = token;
+  return {
+    row,
+    card:row.querySelector('.tool-card'),
+    header:row.querySelector('.tool-card-header'),
+    copy:row.querySelector('.transparent-event-copy'),
+  };
+}
+function thinkingRow(text){
+  const row = element('div', 'transparent-event-row transparent-thinking-event');
+  row.setAttribute('data-event-type', 'thinking');
+  row.setAttribute('data-expanded', '0');
+  const card = element('div', 'thinking-card');
+  const header = element('div', 'thinking-card-header');
+  const copy = element('button', 'thinking-copy-btn');
+  copy.innerHTML = '<svg data-original="thinking-copy"></svg>';
+  const toggle = element('span', 'thinking-card-toggle');
+  const body = element('div', 'thinking-card-body');
+  const pre = element('pre', '');
+  pre.textContent = text;
+  header.appendChild(copy);
+  header.appendChild(toggle);
+  body.appendChild(pre);
+  card.appendChild(header);
+  card.appendChild(body);
+  row.appendChild(card);
+  return { row, card, header, copy };
+}
+
+let nextTimer = 1;
+const timers = new Map();
+const clearedTimers = [];
+global.setTimeout = (fn, ms)=>{ const id=nextTimer++; timers.set(id,{ fn, ms }); return id; };
+global.clearTimeout = (id)=>{ clearedTimers.push(id); timers.delete(id); };
+function runTimer(id){ const timer=timers.get(id); timers.delete(id); timer.fn(); }
+let clipboardMode = 'success';
+let deferredClipboardResolve = null;
+let fallbackResult = true;
+const writes = [];
+const toasts = [];
+Object.defineProperty(global, 'navigator', {
+  configurable:true,
+  value:{ clipboard:{ writeText:(text)=>{
+    writes.push(text);
+    if(clipboardMode === 'deferred'){
+      return new Promise(resolve=>{ deferredClipboardResolve=resolve; });
+    }
+    return clipboardMode === 'success' ? Promise.resolve() : Promise.reject(new Error('denied'));
+  } } },
+});
+global.document = {
+  body:new FakeElement('body'),
+  createElement:(tag)=>new FakeElement(tag),
+  execCommand:()=>fallbackResult,
+};
+global.t = key=>({ copy:'Copy', copied:'Copied', copy_failed:'Copy failed' })[key] || key;
+global.li = (name, size)=>`<svg data-icon="${name}" data-size="${size}"></svg>`;
+global.showToast = (message, duration, type)=>toasts.push({ message, duration, type:type||'' });
+global._redactToolTargetLabel = value=>String(value).replace(/secret-token/g, '[REDACTED]');
+global._wireTransparentHeaderToggle = ()=>{};
+global._setTransparentCardOpen = (card, open)=>card.classList.toggle('open', !!open);
+global.INFLIGHT = Object.create(null);
+global.S = { session:{ session_id:'snapshot-session' } };
+global.requestAnimationFrame = (fn)=>fn();
+global._rehydrateTransparentStreamDom = ()=>{};
+global.normalizeLiveActivityGroupPlacement = ()=>{};
+global._dedupeLiveProcessedWorklogAnchors = ()=>{};
+global.placeLiveToolCardsHost = ()=>{};
+global._postProcessWithAnchorSuppression = ()=>{};
+global.$ = (id)=>document.body.querySelector(`[id="${id}"]`);
+
+eval(extractFunc('snapshotLiveTurnHtmlForSession'));
+eval(extractFunc('_liveAssistantSegmentTextLength'));
+eval(extractFunc('_mergeRestoredLiveAssistantSegment'));
+eval(extractFunc('restoreLiveTurnHtmlForSession'));
+eval(extractFunc('_showTransparentCopiedFeedback'));
+eval(extractFunc('_copyEventToClipboard'));
+eval(extractFunc('_attachCopyButton'));
+eval(extractFunc('_transparentLiveRowAttributePairs'));
+eval(extractFunc('_transparentLiveRowInteractiveState'));
+eval(extractFunc('_rehydrateTransparentLiveRow'));
+eval(extractFunc('_refreshTransparentThinkingLiveRow'));
+eval(extractFunc('_refreshTransparentLiveRow'));
+
+function eventProbe(){
+  return {
+    stopped:false,
+    prevented:false,
+    stopPropagation(){ this.stopped=true; },
+    preventDefault(){ this.prevented=true; },
+  };
+}
+async function settle(){ await Promise.resolve(); await Promise.resolve(); }
+function replaceCopyControl(header, oldCopy, classes, original){
+  const replacement = element('button', classes);
+  replacement.innerHTML = original.html;
+  replacement.style.color = original.color;
+  replacement.style.opacity = original.opacity || '';
+  replacement.setAttribute('title', original.title);
+  replacement.setAttribute('aria-label', original.aria);
+  oldCopy.remove();
+  const toggle = header.querySelector('.tool-card-toggle,.thinking-card-toggle');
+  if(toggle&&toggle.parentNode===header) header.insertBefore(replacement,toggle);
+  else header.appendChild(replacement);
+  _attachCopyButton(header);
+  return replacement;
+}
+
+(async()=>{
+  const tool = toolRow();
+  document.body.appendChild(tool.row);
+  _attachCopyButton(tool.header);
+  tool.copy.innerHTML = '<svg data-original="tool-copy"></svg>';
+  tool.copy.style.color = 'rgb(1, 2, 3)';
+  tool.copy.style.opacity = '0.28';
+  tool.copy.setAttribute('title', 'Original tool title');
+  tool.copy.setAttribute('aria-label', 'Original tool aria');
+  const original = {
+    html:tool.copy.innerHTML,
+    color:tool.copy.style.color,
+    opacity:tool.copy.style.opacity,
+    styleCssText:tool.copy.style.cssText,
+    title:tool.copy.title,
+    titleAttr:tool.copy.getAttribute('title'),
+    aria:tool.copy.getAttribute('aria-label'),
+  };
+  const firstEvent = eventProbe();
+  tool.copy.onclick(firstEvent);
+  await settle();
+  const firstTimerId = Array.from(timers.keys())[0];
+  const firstTimer = timers.get(firstTimerId);
+  const firstState = {
+    check:tool.copy.innerHTML.includes('data-icon="check"'),
+    title:tool.copy.title,
+    aria:tool.copy.getAttribute('aria-label'),
+    opacity:tool.copy.style.opacity,
+    duration:firstTimer.ms,
+    stopped:firstEvent.stopped,
+    prevented:firstEvent.prevented,
+    rowExpanded:tool.row.getAttribute('data-expanded'),
+    cardOpen:tool.card.classList.contains('open'),
+  };
+  const staleCallback = firstTimer.fn;
+  tool.copy.onclick(eventProbe());
+  await settle();
+  const secondTimerId = Array.from(timers.keys())[0];
+  staleCallback();
+  const staleTimerIgnored = tool.copy.innerHTML.includes('data-icon="check"');
+  runTimer(secondTimerId);
+  const restored = {
+    html:tool.copy.innerHTML,
+    color:tool.copy.style.color,
+    opacity:tool.copy.style.opacity,
+    styleCssText:tool.copy.style.cssText,
+    title:tool.copy.title,
+    titleAttr:tool.copy.getAttribute('title'),
+    aria:tool.copy.getAttribute('aria-label'),
+  };
+
+  const thinking = thinkingRow('transparent reasoning');
+  document.body.appendChild(thinking.row);
+  const candidate = thinkingRow('candidate reasoning');
+  _rehydrateTransparentLiveRow(thinking.row, candidate.row, { expanded:false });
+  const thinkingControls = thinking.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn');
+  thinking.copy.style.opacity = '0.4';
+  const thinkingOriginalStyle = thinking.copy.style.cssText;
+  thinking.copy.onclick(eventProbe());
+  await settle();
+  const thinkingState = {
+    count:thinkingControls.length,
+    bound:typeof thinking.copy.onclick === 'function' && typeof thinking.copy.onkeydown === 'function',
+    check:thinking.copy.innerHTML.includes('data-icon="check"'),
+    opacity:thinking.copy.style.opacity,
+    copied:writes[writes.length - 1],
+  };
+  runTimer(Array.from(timers.keys())[0]);
+  const thinkingRestoredStyle = thinking.copy.style.cssText;
+
+  clipboardMode = 'failure';
+  fallbackResult = true;
+  tool.copy.onclick(eventProbe());
+  await settle();
+  const fallbackSuccess = {
+    check:tool.copy.innerHTML.includes('data-icon="check"'),
+    toast:toasts[toasts.length - 1].message,
+  };
+  runTimer(Array.from(timers.keys())[0]);
+
+  fallbackResult = false;
+  const toastCountBeforeFailure = toasts.length;
+  tool.copy.onclick(eventProbe());
+  await settle();
+  const failure = {
+    check:tool.copy.innerHTML.includes('data-icon="check"'),
+    feedbackState:!!tool.row._transparentCopiedFeedback,
+    toasts:toasts.slice(toastCountBeforeFailure).map(item=>item.message),
+  };
+
+  const empty = thinkingRow('');
+  document.body.appendChild(empty.row);
+  _attachCopyButton(empty.header);
+  const writesBeforeEmpty = writes.length;
+  empty.copy.onclick(eventProbe());
+  await settle();
+  const emptyCopySkipped = writes.length === writesBeforeEmpty && !empty.row._transparentCopiedFeedback;
+
+  // Copy success can settle after the real live-row reconciler has replaced the
+  // activated control. The stable row owns the feedback lifetime, so the current
+  // visible replacement receives the check.
+  clipboardMode = 'deferred';
+  const race = reconcileToolRow('existing', {
+    html:'<svg data-original="existing"></svg>',
+    color:'rgb(3, 4, 5)',
+    title:'Existing title',
+    aria:'Existing aria',
+    opacity:'0.28',
+  });
+  document.body.appendChild(race.row);
+  _attachCopyButton(race.header);
+  let headerToggleCount = 0;
+  race.header.onclick = ()=>{ headerToggleCount += 1; };
+  const beforeSuccess = eventProbe();
+  const activatedCopy = race.copy;
+  race.copy.onclick(beforeSuccess);
+  const candidateBeforeSuccess = reconcileToolRow('replacement-before-success', {
+    html:'<svg data-original="replacement-before-success"></svg>',
+    color:'rgb(7, 8, 9)',
+    title:'Replacement before success title',
+    aria:'Replacement before success aria',
+    opacity:'0.31',
+  });
+  _refreshTransparentLiveRow(race.row, candidateBeforeSuccess.row);
+  race.card = race.row.querySelector('.tool-card');
+  race.header = race.row.querySelector('.tool-card-header');
+  race.copy = race.row.querySelector('.transparent-event-copy');
+  // Binding supplies the normal Copy label. Set distinct presentation after
+  // reconciliation so the feedback snapshot proves which control is current.
+  race.copy.innerHTML = '<svg data-original="replacement-before-success"></svg>';
+  race.copy.style.color = 'rgb(7, 8, 9)';
+  race.copy.setAttribute('title', 'Replacement before success title');
+  race.copy.setAttribute('aria-label', 'Replacement before success aria');
+  const activatedControlDetached = !activatedCopy.isConnected;
+  const beforeResolutionCheck = race.copy.innerHTML.includes('data-icon="check"');
+  deferredClipboardResolve();
+  await settle();
+  const firstRaceTimerId = race.row._transparentCopiedFeedback.timer;
+  const staleRaceTimer = timers.get(firstRaceTimerId).fn;
+  const replacementAfterSuccess = {
+    check:race.copy.innerHTML.includes('data-icon="check"'),
+    title:race.copy.title,
+    aria:race.copy.getAttribute('aria-label'),
+    opacity:race.copy.style.opacity,
+  };
+  const candidateDuringFeedback = reconcileToolRow('replacement-during-feedback', {
+    html:'<svg data-original="replacement-during-feedback"></svg>',
+    color:'rgb(11, 12, 13)',
+    title:'Replacement during feedback title',
+    aria:'Replacement during feedback aria',
+    opacity:'0.33',
+  });
+  _refreshTransparentLiveRow(race.row, candidateDuringFeedback.row);
+  race.card = race.row.querySelector('.tool-card');
+  race.header = race.row.querySelector('.tool-card-header');
+  race.copy = race.row.querySelector('.transparent-event-copy');
+  const inheritedDuringFeedback = {
+    check:race.copy.innerHTML.includes('data-icon="check"'),
+    title:race.copy.title,
+    aria:race.copy.getAttribute('aria-label'),
+    opacity:race.copy.style.opacity,
+  };
+  clipboardMode = 'success';
+  race.copy.onclick(eventProbe());
+  await settle();
+  const latestRaceTimerId = race.row._transparentCopiedFeedback.timer;
+  const latestRaceTimerDuration = timers.get(latestRaceTimerId).ms;
+  staleRaceTimer();
+  const staleTimerDidNotClearLatest = race.copy.innerHTML.includes('data-icon="check"');
+  race.row.remove();
+  const detachedWrites = [];
+  race.row._trackDetachedWrites = detachedWrites;
+  race.copy._trackDetachedWrites = detachedWrites;
+  let expiryThrew = false;
+  try{ runTimer(latestRaceTimerId); }catch(_){ expiryThrew = true; }
+  const detachedExpiry = {
+    rowConnected:race.row.isConnected,
+    controlConnected:race.copy.isConnected,
+    feedbackState:!!race.row._transparentCopiedFeedback,
+    writes:detachedWrites,
+    threw:expiryThrew,
+    html:race.copy.innerHTML,
+    color:race.copy.style.color,
+    title:race.copy.title,
+    aria:race.copy.getAttribute('aria-label'),
+  };
+
+  clipboardMode = 'deferred';
+  const thinkingRace = thinkingRow('rebound transparent reasoning');
+  document.body.appendChild(thinkingRace.row);
+  _attachCopyButton(thinkingRace.header);
+  thinkingRace.copy.onclick(eventProbe());
+  thinkingRace.copy = replaceCopyControl(thinkingRace.header, thinkingRace.copy, 'thinking-copy-btn', {
+    html:'<svg data-original="thinking-replacement"></svg>',
+    color:'rgb(14, 15, 16)',
+    title:'Thinking replacement title',
+    aria:'Thinking replacement aria',
+    opacity:'0.36',
+  });
+  deferredClipboardResolve();
+  await settle();
+  const thinkingRaceCheck = {
+    count:thinkingRace.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn').length,
+    bound:typeof thinkingRace.copy.onclick === 'function' && typeof thinkingRace.copy.onkeydown === 'function',
+    check:thinkingRace.copy.innerHTML.includes('data-icon="check"'),
+    opacity:thinkingRace.copy.style.opacity,
+  };
+  runTimer(thinkingRace.row._transparentCopiedFeedback.timer);
+
+  // Real snapshot/restore lifecycle with two simultaneous feedback controls.
+  const msgInner = element('div', 'msg-inner');
+  msgInner.setAttribute('id', 'msgInner');
+  const liveTurn = element('div', 'assistant-turn');
+  liveTurn.setAttribute('id', 'liveAssistantTurn');
+  liveTurn.setAttribute('data-session-id', 'snapshot-session');
+  const snapshotTool = toolRow();
+  const snapshotThinking = thinkingRow('snapshot reasoning');
+  liveTurn.appendChild(snapshotTool.row);
+  liveTurn.appendChild(snapshotThinking.row);
+  msgInner.appendChild(liveTurn);
+  document.body.appendChild(msgInner);
+  _attachCopyButton(snapshotTool.header);
+  _attachCopyButton(snapshotThinking.header);
+  snapshotTool.copy.innerHTML = '<svg data-original="snapshot-tool-copy"></svg>';
+  snapshotTool.copy.style.cssText = 'color: rgb(21, 22, 23); opacity: 0.28; border-width: 2px;';
+  snapshotTool.copy.setAttribute('title', 'Snapshot tool title');
+  snapshotTool.copy.setAttribute('aria-label', 'Snapshot tool aria');
+  snapshotThinking.copy.innerHTML = '<svg data-original="snapshot-thinking-copy"></svg>';
+  snapshotThinking.copy.style.cssText = 'opacity: 0.42; padding-left: 3px;';
+  snapshotThinking.copy.removeAttribute('title');
+  snapshotThinking.copy.removeAttribute('aria-label');
+  const snapshotToolNormalStyle = snapshotTool.copy.style.cssText;
+  const snapshotThinkingNormalStyle = snapshotThinking.copy.style.cssText;
+  _showTransparentCopiedFeedback(snapshotTool.copy, snapshotTool.row);
+  _showTransparentCopiedFeedback(snapshotThinking.copy, snapshotThinking.row);
+  const snapshotToolTimer = snapshotTool.row._transparentCopiedFeedback.timer;
+  const snapshotThinkingTimer = snapshotThinking.row._transparentCopiedFeedback.timer;
+  INFLIGHT['snapshot-session'] = {};
+  snapshotLiveTurnHtmlForSession('snapshot-session');
+  const storedSnapshot = INFLIGHT['snapshot-session'].liveTurnHtml;
+  const liveAfterSnapshot = {
+    toolCheck:snapshotTool.copy.innerHTML.includes('data-icon="check"'),
+    thinkingCheck:snapshotThinking.copy.innerHTML.includes('data-icon="check"'),
+    toolTitle:snapshotTool.copy.getAttribute('title'),
+    toolAria:snapshotTool.copy.getAttribute('aria-label'),
+    toolOpacity:snapshotTool.copy.style.opacity,
+    thinkingOpacity:snapshotThinking.copy.style.opacity,
+    toolFeedback:!!snapshotTool.row._transparentCopiedFeedback,
+    thinkingFeedback:!!snapshotThinking.row._transparentCopiedFeedback,
+    toolNormalSaved:!!snapshotTool.copy._transparentCopiedFeedbackNormal,
+    thinkingNormalSaved:!!snapshotThinking.copy._transparentCopiedFeedbackNormal,
+  };
+  const restoreResult = restoreLiveTurnHtmlForSession('snapshot-session');
+  const restoredTurn = $('liveAssistantTurn');
+  const restoredControls = restoredTurn.querySelectorAll('.transparent-event-copy,.thinking-copy-btn');
+  const restoredSnapshotState = {
+    count:restoredControls.length,
+    toolHtml:restoredControls[0].innerHTML,
+    toolStyle:restoredControls[0].style.cssText,
+    toolTitle:restoredControls[0].getAttribute('title'),
+    toolAria:restoredControls[0].getAttribute('aria-label'),
+    thinkingHtml:restoredControls[1].innerHTML,
+    thinkingStyle:restoredControls[1].style.cssText,
+    thinkingTitle:restoredControls[1].getAttribute('title'),
+    thinkingAria:restoredControls[1].getAttribute('aria-label'),
+  };
+  const expiryDetachedWrites = [];
+  snapshotTool.copy._trackDetachedWrites = expiryDetachedWrites;
+  snapshotThinking.copy._trackDetachedWrites = expiryDetachedWrites;
+  let snapshotExpiryThrew = false;
+  try{
+    runTimer(snapshotToolTimer);
+    runTimer(snapshotThinkingTimer);
+  }catch(_){ snapshotExpiryThrew = true; }
+  const afterSnapshotExpiry = {
+    toolFeedback:!!snapshotTool.row._transparentCopiedFeedback,
+    thinkingFeedback:!!snapshotThinking.row._transparentCopiedFeedback,
+    detachedWrites:expiryDetachedWrites,
+    threw:snapshotExpiryThrew,
+    restoredStillNormal:restoredControls[0].innerHTML.includes('snapshot-tool-copy') && restoredControls[1].innerHTML.includes('snapshot-thinking-copy'),
+  };
+
+  process.stdout.write(JSON.stringify({
+    firstState,
+    original,
+    restored,
+    firstTimerReplaced:clearedTimers.includes(firstTimerId) && secondTimerId !== firstTimerId,
+    staleTimerIgnored,
+    payload:writes[0],
+    thinkingState,
+    thinkingOriginalStyle,
+    thinkingRestoredStyle,
+    fallbackSuccess,
+    failure,
+    emptyCopySkipped,
+    replacementRace:{
+      activatedControlDetached,
+      beforeResolutionCheck,
+      replacementAfterSuccess,
+      inheritedDuringFeedback,
+      latestRaceTimerDuration,
+      staleTimerDidNotClearLatest,
+      detachedExpiry,
+      oneFunctionalControl:race.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn').length === 1 && typeof race.copy.onclick === 'function',
+      activationDidNotToggle:beforeSuccess.stopped && beforeSuccess.prevented && headerToggleCount === 0,
+    },
+    thinkingReplacementRace:thinkingRaceCheck,
+    snapshotLifecycle:{
+      storedSnapshot,
+      snapshotToolNormalStyle,
+      snapshotThinkingNormalStyle,
+      liveAfterSnapshot,
+      restoreResult,
+      restoredSnapshotState,
+      afterSnapshotExpiry,
+    },
+  }));
+})().catch(error=>{ console.error(error); process.exit(1); });
+"""
+    data = _run_node_script(script, str(ROOT / "static" / "ui.js"))
+    assert data["firstState"] == {
+        "check": True,
+        "title": "Copied",
+        "aria": "Copied",
+        "opacity": "1",
+        "duration": 1500,
+        "stopped": True,
+        "prevented": True,
+        "rowExpanded": "0",
+        "cardOpen": False,
+    }
+    assert data["firstTimerReplaced"] is True
+    assert data["staleTimerIgnored"] is True
+    assert data["restored"] == data["original"]
+    assert "tool: shell" in data["payload"]
+    assert "[REDACTED]" in data["payload"]
+    assert "secret-token" not in data["payload"]
+    assert "tool output" in data["payload"]
+    assert data["thinkingState"] == {
+        "count": 1,
+        "bound": True,
+        "check": True,
+        "opacity": "1",
+        "copied": "transparent reasoning",
+    }
+    assert data["thinkingRestoredStyle"] == data["thinkingOriginalStyle"]
+    assert data["fallbackSuccess"] == {"check": True, "toast": "Copied"}
+    assert data["failure"] == {
+        "check": False,
+        "feedbackState": False,
+        "toasts": ["Copy failed"],
+    }
+    assert data["emptyCopySkipped"] is True
+    assert data["replacementRace"] == {
+        "activatedControlDetached": True,
+        "beforeResolutionCheck": False,
+        "replacementAfterSuccess": {
+            "check": True,
+            "title": "Copied",
+            "aria": "Copied",
+            "opacity": "1",
+        },
+        "inheritedDuringFeedback": {
+            "check": True,
+            "title": "Copied",
+            "aria": "Copied",
+            "opacity": "1",
+        },
+        "latestRaceTimerDuration": 1500,
+        "staleTimerDidNotClearLatest": True,
+        "detachedExpiry": {
+            "rowConnected": False,
+            "controlConnected": False,
+            "feedbackState": False,
+            "writes": [],
+            "threw": False,
+            "html": '<svg data-icon="check" data-size="11"></svg>',
+            "color": "var(--accent)",
+            "title": "Copied",
+            "aria": "Copied",
+        },
+        "oneFunctionalControl": True,
+        "activationDidNotToggle": True,
+    }
+    assert data["thinkingReplacementRace"] == {
+        "count": 1,
+        "bound": True,
+        "check": True,
+        "opacity": "1",
+    }
+    snapshot = data["snapshotLifecycle"]
+    assert "snapshot-tool-copy" in snapshot["storedSnapshot"]
+    assert "snapshot-thinking-copy" in snapshot["storedSnapshot"]
+    assert 'title="Snapshot tool title"' in snapshot["storedSnapshot"]
+    assert 'aria-label="Snapshot tool aria"' in snapshot["storedSnapshot"]
+    assert "Copied" not in snapshot["storedSnapshot"]
+    assert 'data-icon="check"' not in snapshot["storedSnapshot"]
+    assert "var(--accent)" not in snapshot["storedSnapshot"]
+    assert "opacity: 1" not in snapshot["storedSnapshot"]
+    assert snapshot["liveAfterSnapshot"] == {
+        "toolCheck": True,
+        "thinkingCheck": True,
+        "toolTitle": "Copied",
+        "toolAria": "Copied",
+        "toolOpacity": "1",
+        "thinkingOpacity": "1",
+        "toolFeedback": True,
+        "thinkingFeedback": True,
+        "toolNormalSaved": True,
+        "thinkingNormalSaved": True,
+    }
+    assert snapshot["restoreResult"] is True
+    assert snapshot["restoredSnapshotState"] == {
+        "count": 2,
+        "toolHtml": '<svg data-original="snapshot-tool-copy"></svg>',
+        "toolStyle": snapshot["snapshotToolNormalStyle"],
+        "toolTitle": "Snapshot tool title",
+        "toolAria": "Snapshot tool aria",
+        "thinkingHtml": '<svg data-original="snapshot-thinking-copy"></svg>',
+        "thinkingStyle": snapshot["snapshotThinkingNormalStyle"],
+        "thinkingTitle": None,
+        "thinkingAria": None,
+    }
+    assert snapshot["afterSnapshotExpiry"] == {
+        "toolFeedback": False,
+        "thinkingFeedback": False,
+        "detachedWrites": [],
+        "threw": False,
+        "restoredStillNormal": True,
+    }
