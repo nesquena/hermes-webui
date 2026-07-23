@@ -197,7 +197,7 @@ def test_voice_mode_speakresponse_guards_against_session_switch():
     assert "_voiceModeThinkingSid" in speak_body, (
         "_speakResponse must consult _voiceModeThinkingSid"
     )
-    assert "_startListening()" in speak_body, (
+    assert "_startListening(_generation)" in speak_body, (
         "_speakResponse mismatch path must drop back to listening, not silently exit"
     )
 

@@ -39,7 +39,7 @@ def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
     assert "_voiceModeState!=='speaking'" in arm_body
     assert "_browserTtsSuppressNextErrorRearm=true;" in arm_body
     assert "speechSynthesis.cancel()" in arm_body
-    assert "_startListening();" in arm_body
+    assert "_scheduleVoiceModeRestart(0,_generation);" in arm_body
     assert "_browserTtsKeepAlive=setInterval" in arm_body
     assert "speechSynthesis.pause();" in arm_body
     assert "speechSynthesis.resume();" in arm_body

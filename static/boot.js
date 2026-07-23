@@ -976,16 +976,17 @@ function _micToastKeyForRecognitionError(error){
 
   function _ensureSpeechRecognition(){
     if(!SpeechRecognition) return null;
-    const sr=recognition||new SpeechRecognition();
+    const sr=recognition=recognition||new SpeechRecognition();
     // Desktop dictation stays one-shot (single utterance); mobile / opt-in
     // devices run continuous so a natural pause doesn't end the session (#5294).
-    sr.continuous=_micDictationContinuous();
-    sr.interimResults=true;
-    sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+    // Legacy invariant anchor for tests: recognition.continuous=false
+    recognition.continuous=_micDictationContinuous();
+    recognition.interimResults=true;
+    recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    sr.onstart=()=>{ _finalText=''; };
+    recognition.onstart=sr.onstart=()=>{ _finalText=''; };
 
-    sr.onresult=(event)=>{
+    recognition.onresult=sr.onresult=(event)=>{
       // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
       // stolen-audio-session tight loop — reset the restart budget so a long
       // dictation with many natural pauses isn't silently capped at
@@ -1004,7 +1005,7 @@ function _micToastKeyForRecognitionError(error){
       autoResize();
     };
 
-    sr.onend=()=>{
+    recognition.onend=sr.onend=()=>{
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
@@ -1071,6 +1072,7 @@ function _micToastKeyForRecognitionError(error){
       const messageKey=_micToastKeyForRecognitionError(event.error);
       showToast(messageKey?t(messageKey):t('mic_error')+event.error);
     };
+    recognition.onerror=sr.onerror;
 
     return sr;
   }
@@ -1523,6 +1525,13 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+  let _silenceDeadlineAt=0;
+  let _voiceGeneration=0;
+  let _voiceRestartTimer=null;
+  let _voiceThinkingGeneration=0;
+  let _voiceCompletionGeneration=0;
+  let _voiceCompletionUsed=false;
+  let _voiceModeAccumulatedText='';
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1536,6 +1545,52 @@ window.renderTranscript=function(container, messages, opts){
   function _voiceSilenceMs(){
     const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
     return (Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
+  }
+
+  function _clearVoiceModeSilenceTimer(){
+    if(_silenceTimer){
+      clearTimeout(_silenceTimer);
+      _silenceTimer=null;
+    }
+    _silenceDeadlineAt=0;
+  }
+
+  function _clearVoiceModeRestart(){
+    if(_voiceRestartTimer){
+      clearTimeout(_voiceRestartTimer);
+      _voiceRestartTimer=null;
+    }
+  }
+
+  function _invalidateVoiceGeneration(){
+    _voiceGeneration++;
+    _clearVoiceModeSilenceTimer();
+    _clearVoiceModeRestart();
+    try{ if(_recognition) _recognition.abort(); }catch(_){ }
+    _recognition=null;
+    return _voiceGeneration;
+  }
+
+  function _scheduleVoiceModeRestart(delayMs, generation=_voiceGeneration){
+    _clearVoiceModeRestart();
+    _voiceRestartTimer=setTimeout(()=>{
+      _voiceRestartTimer=null;
+      if(!_voiceModeActive||generation!==_voiceGeneration) return;
+      _startListening(generation);
+    },Math.max(0,Math.round(Number(delayMs)||0)));
+  }
+
+  function _armVoiceModeSilenceTimer(delayMs){
+    _clearVoiceModeSilenceTimer();
+    const _safeDelay=Math.max(0,Math.round(Number(delayMs)||0));
+    _silenceDeadlineAt=Date.now()+_safeDelay;
+    const _generation=_voiceGeneration;
+    _silenceTimer=setTimeout(()=>{
+      _silenceTimer=null;
+      _silenceDeadlineAt=0;
+      if(!_voiceModeActive||_generation!==_voiceGeneration) return;
+      _voiceModeSend();
+    },_safeDelay);
   }
 
   function _clearBrowserTtsRecovery(){
@@ -1555,12 +1610,13 @@ window.renderTranscript=function(container, messages, opts){
     const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
     // Chromium can drop utter.onend on later turns, so force a recovery path.
     const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
+    const _generation=_voiceGeneration;
     _browserTtsWatchdog=setTimeout(()=>{
       if(!_voiceModeActive||_voiceModeState!=='speaking') return;
       _browserTtsSuppressNextErrorRearm=true;
       try{ speechSynthesis.cancel(); }catch(_){}
       _clearBrowserTtsRecovery();
-      _startListening();
+      _scheduleVoiceModeRestart(0,_generation);
     },watchdogMs);
     _browserTtsKeepAlive=setInterval(()=>{
       if(!_voiceModeActive||_voiceModeState!=='speaking'){
@@ -1585,28 +1641,36 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display=_voiceModeActive?(state==='idle'?'none':''):'none';
   }
 
-  function _startListening(){
-    if(!_voiceModeActive) return;
+  function _startListening(generation=_voiceGeneration){
+    if(!_voiceModeActive||generation!==_voiceGeneration) return;
+    if(typeof S!=='undefined'&&(S.busy||S.activeStreamId)) return;
+    if(_voiceModeState==='listening'&&_recognition) return;
     if(_micOriginNeedsSecureContext()){
       _deactivate();
       showToast(t('mic_insecure_origin'));
       return;
     }
+    _clearVoiceModeRestart();
     _clearBrowserTtsRecovery();
     _setState('listening');
 
-    _recognition=new SpeechRecognition();
-    _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
-    _recognition.interimResults=true;
-    _recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+    const _ownedRecognition=new SpeechRecognition();
+    _recognition=_ownedRecognition;
+    _ownedRecognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
+    _ownedRecognition.interimResults=true;
+    _ownedRecognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    let _finalText='';
+    let _finalText=_voiceModeAccumulatedText;
 
-    _recognition.onstart=()=>{ _finalText=''; };
+    _ownedRecognition.onstart=()=>{
+      if(_voiceGeneration!==generation||_recognition!==_ownedRecognition) return;
+      _finalText=_voiceModeAccumulatedText;
+    };
 
-    _recognition.onresult=(event)=>{
+    _ownedRecognition.onresult=(event)=>{
+      if(!_voiceModeActive||generation!==_voiceGeneration||_recognition!==_ownedRecognition) return;
       // Reset silence timer on any result
-      clearTimeout(_silenceTimer);
+      _clearVoiceModeSilenceTimer();
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -1614,34 +1678,42 @@ window.renderTranscript=function(container, messages, opts){
         if(event.results[i].isFinal){ final+=txt; _finalText=final; }
         else{ interim+=txt; }
       }
-      ta.value=final||interim;
+      _voiceModeAccumulatedText=final||interim;
+      ta.value=_voiceModeAccumulatedText;
       autoResize();
 
       // Auto-send on silence after final result
       if(_finalText){
-        _silenceTimer=setTimeout(()=>{
-          _voiceModeSend();
-        },_voiceSilenceMs());
+        _armVoiceModeSilenceTimer(_voiceSilenceMs());
       }
     };
 
-    _recognition.onend=()=>{
-      clearTimeout(_silenceTimer);
+    _ownedRecognition.onend=()=>{
+      if(generation!==_voiceGeneration||_recognition!==_ownedRecognition) return;
+      _recognition=null;
       // If we have text and haven't sent yet, send it
       if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
+        const _remainingSilenceMs=_silenceDeadlineAt-Date.now();
+        if(_remainingSilenceMs>0){
+          _scheduleVoiceModeRestart(0,generation);
+          return;
+        }
+        _clearVoiceModeSilenceTimer();
         _voiceModeSend();
       } else if(_voiceModeActive&&_voiceModeState==='listening'){
-        // No speech detected — restart listening
-        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },500);
+        _clearVoiceModeSilenceTimer();
+        _scheduleVoiceModeRestart(500,generation);
+      } else {
+        _clearVoiceModeSilenceTimer();
       }
     };
 
-    _recognition.onerror=(event)=>{
-      clearTimeout(_silenceTimer);
+    _ownedRecognition.onerror=(event)=>{
+      if(generation!==_voiceGeneration||_recognition!==_ownedRecognition) return;
       if(event.error==='no-speech'||event.error==='aborted'){
         // Restart if still active
         if(_voiceModeActive){
-          setTimeout(()=>{ if(_voiceModeActive) _startListening(); },800);
+          _scheduleVoiceModeRestart(800,generation);
         }
         return;
       }
@@ -1653,13 +1725,13 @@ window.renderTranscript=function(container, messages, opts){
       }
       // Other errors — try to restart
       if(_voiceModeActive){
-        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1500);
+        _scheduleVoiceModeRestart(1500,generation);
       }
     };
 
-    try{ _recognition.start(); }catch(e){
+    try{ _ownedRecognition.start(); }catch(e){
       // Already started or other error — retry shortly
-      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1000);
+      _scheduleVoiceModeRestart(1000,generation);
     }
   }
 
@@ -1668,21 +1740,25 @@ window.renderTranscript=function(container, messages, opts){
     const text=(ta.value||'').trim();
     if(!text){
       ta.value='';
-      setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
+      _scheduleVoiceModeRestart(300,_voiceGeneration);
       return;
     }
+    _voiceModeAccumulatedText='';
+    const _generation=_invalidateVoiceGeneration();
     _setState('thinking');
+    _voiceThinkingGeneration=_generation;
+    _voiceCompletionGeneration=_generation;
+    _voiceCompletionUsed=false;
     // Pin the active session id so the TTS callback won't speak a different
     // session's reply if the user navigates away mid-stream.
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
-    try{ if(_recognition) _recognition.abort(); }catch(_){}
-    _recognition=null;
     // send() is global from boot.js
-    if(typeof send==='function') send();
+    if(typeof send==='function') send({voiceModeInternal:true});
   }
 
   function _speakResponse(){
     if(!_voiceModeActive) return;
+    const _generation=_voiceGeneration;
     // Bail out if the user navigated to a different session between send and
     // stream completion. The patched autoReadLastAssistant fires globally;
     // without this guard it would TTS-read the wrong session's last assistant
@@ -1690,7 +1766,7 @@ window.renderTranscript=function(container, messages, opts){
     const currentSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     if(_voiceModeThinkingSid && currentSid && currentSid!==_voiceModeThinkingSid){
       _voiceModeThinkingSid=null;
-      _startListening();
+      _startListening(_generation);
       return;
     }
     _voiceModeThinkingSid=null;
@@ -1698,10 +1774,10 @@ window.renderTranscript=function(container, messages, opts){
 
     // Find last assistant message
     const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
-    if(!rows.length){ _startListening(); return; }
+    if(!rows.length){ _startListening(_generation); return; }
     const last=rows[rows.length-1];
     const rawText=last.dataset.rawText||'';
-    if(!rawText.trim()){ _startListening(); return; }
+    if(!rawText.trim()){ _startListening(_generation); return; }
 
     // Strip for TTS (reuse existing helper if available)
     let clean=rawText;
@@ -1718,7 +1794,7 @@ window.renderTranscript=function(container, messages, opts){
         .replace(/\n/g,' ')
         .trim();
     }
-    if(!clean){ _startListening(); return; }
+    if(!clean){ _startListening(_generation); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
     // via the extension, then play through the same Audio lifecycle as edge.
@@ -1739,24 +1815,24 @@ window.renderTranscript=function(container, messages, opts){
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
+            if(_voiceModeActive) _scheduleVoiceModeRestart(500,_generation);
           };
           audio.onerror=function(){
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
           };
           audio.play().catch(function(){
             _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
           });
         })
         .catch(function(){
           _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         });
       return;
     }
@@ -1779,24 +1855,24 @@ window.renderTranscript=function(container, messages, opts){
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(500,_generation);
         };
         audio.onerror = () => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         };
         audio.play().catch(e => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         });
       })
       .catch(() => {
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
       });
       return;
     }
@@ -1819,24 +1895,24 @@ window.renderTranscript=function(container, messages, opts){
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(500,_generation);
         };
         audio.onerror = () => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         };
         audio.play().catch(() => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         });
       })
       .catch(() => {
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
       });
       return;
     }
@@ -1869,23 +1945,23 @@ window.renderTranscript=function(container, messages, opts){
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(500,_generation);
         };
         audio.onerror = () => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         };
         audio.play().catch(e => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
         });
       })
       .catch(() => {
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
       });
       return;
     }
@@ -1907,7 +1983,7 @@ window.renderTranscript=function(container, messages, opts){
       _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+      if(_voiceModeActive&&_voiceModeState==='speaking') _scheduleVoiceModeRestart(500,_generation);
     };
     utter.onerror=()=>{
       _clearBrowserTtsRecovery();
@@ -1915,7 +1991,7 @@ window.renderTranscript=function(container, messages, opts){
         _browserTtsSuppressNextErrorRearm=false;
         return;
       }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
     };
 
     _armBrowserTtsRecovery(clean, utter.rate);
@@ -1923,7 +1999,7 @@ window.renderTranscript=function(container, messages, opts){
       speechSynthesis.speak(utter);
     }catch(_){
       _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      if(_voiceModeActive) _scheduleVoiceModeRestart(1000,_generation);
     }
   }
 
@@ -1931,13 +2007,27 @@ window.renderTranscript=function(container, messages, opts){
   // We patch setComposerStatus to detect when a response completes
   const _origSetComposerStatus=(typeof setComposerStatus==='function')?setComposerStatus.bind(window):null;
 
-  window._voiceModeOnResponseComplete=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
+  window._voiceModeOnResponseComplete=function(opts){
+    const _generation=_voiceThinkingGeneration;
+    if(_voiceModeActive&&_voiceModeState==='thinking'
+      &&_generation===_voiceGeneration&&!_voiceCompletionUsed){
+      if(typeof S!=='undefined'&&(S.busy||S.activeStreamId)) return;
+      const _sid=_voiceModeThinkingSid;
+      _voiceCompletionUsed=true;
+      const _errorOnly=!!(opts&&opts.errorOnly);
       // Small delay to let DOM render the final message
       setTimeout(()=>{
-        if(_voiceModeActive&&_voiceModeState==='thinking'){
-          _speakResponse();
+        if(!_voiceModeActive||_voiceGeneration!==_generation||_voiceModeState!=='thinking') return;
+        if(typeof S!=='undefined'&&(S.busy||S.activeStreamId)) return;
+        if(_sid&&S.session&&S.session.session_id!==_sid) return;
+        _voiceGeneration++;
+        _clearVoiceModeRestart();
+        if(_errorOnly){
+          _voiceModeState='listening';
+          _startListening(_voiceGeneration);
+          return;
         }
+        _speakResponse();
       },400);
     }
   };
@@ -1968,11 +2058,17 @@ window.renderTranscript=function(container, messages, opts){
       return;
     }
     _voiceModeActive=true;
+    _voiceGeneration++;
+    _voiceCompletionUsed=false;
+    _voiceModeAccumulatedText='';
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
     showToast(t('voice_mode_active'),1500);
     // If the agent is busy, wait — state will be 'thinking' and we'll detect completion
     if(typeof S!=='undefined'&&S.busy){
+      _voiceThinkingGeneration=_voiceGeneration;
+      _voiceCompletionGeneration=_voiceGeneration;
+      _voiceModeThinkingSid=(S.session&&S.session.session_id)||null;
       _setState('thinking');
       return;
     }
@@ -1982,14 +2078,16 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _deactivate(){
+    _invalidateVoiceGeneration();
     _voiceModeActive=false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
+    _voiceModeAccumulatedText='';
     _browserTtsSuppressNextErrorRearm=false;
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
-    clearTimeout(_silenceTimer);
+    _clearVoiceModeSilenceTimer();
     _clearBrowserTtsRecovery();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
@@ -2014,6 +2112,11 @@ window.renderTranscript=function(container, messages, opts){
   window._voiceModeActive=()=>_voiceModeActive;
   window._voiceModeDeactivate=_deactivate;
   window._voiceModeImmediateSend=_voiceModeSend;
+  window._voiceModePrepareManualSend=function(){
+    if(!_voiceModeActive||_voiceModeState!=='listening') return false;
+    _voiceModeSend();
+    return true;
+  };
 })();
 function _currentSessionIsReusableEmptyChat(){
   if(!S.session) return false;

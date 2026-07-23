@@ -1297,6 +1297,10 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  const options=arguments[0]||{};
+  if(!options.voiceModeInternal
+    &&typeof window._voiceModePrepareManualSend==='function'
+    &&window._voiceModePrepareManualSend()) return;
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1321,7 +1325,6 @@ async function send(){
   }
   _sendInProgress = true;
   try{
-  const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
   let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
@@ -6222,11 +6225,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           new_session_id:d.new_session_id||d.continuation_session_id||null,
         },e);
       }
+      let isRecoveryControlMessage=false;
       if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
         _scheduleAnchorRegistryCleanup();
         clearLiveToolCards();if(!assistantText)removeThinking();
-        let isRecoveryControlMessage=false;
         try{
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
@@ -6283,6 +6286,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
       _setActivePaneIdleIfOwner();
+      if(eventMatchesCurrent&&!isRecoveryControlMessage&&typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
@@ -6515,6 +6519,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
       renderSessionList();
       _setActivePaneIdleIfOwner();
+      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -6742,6 +6747,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
+    if(S.session&&S.session.session_id===activeSid&&typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});
   }
 
   (async()=>{

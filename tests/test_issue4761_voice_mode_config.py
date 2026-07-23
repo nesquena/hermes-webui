@@ -44,9 +44,19 @@ class TestVoiceModeSilenceMsConfig:
 
     def test_silence_ms_read_at_timeout_use_time(self):
         src = _boot_src()
+        compact = "".join(src.split())
         assert "_voiceSilenceMs()" in src, "The silence timeout must be read when scheduling auto-send."
-        assert re.search(r"setTimeout\s*\(\s*\(\)\s*=>\s*\{\s*_voiceModeSend\(\);\s*\}\s*,\s*_voiceSilenceMs\(\)\s*\)", src, re.S), (
-            "Voice mode must call _voiceSilenceMs() inside the setTimeout path so mirrored server settings apply without reload."
+        assert (
+            "_armVoiceModeSilenceTimer(_voiceSilenceMs());" in compact
+            or re.search(
+                r"setTimeout\s*\(\s*\(\)\s*=>\s*\{\s*_voiceModeSend\(\);\s*\}\s*,\s*_voiceSilenceMs\(\)\s*\)",
+                src,
+                re.S,
+            )
+        ), (
+            "Voice mode must read _voiceSilenceMs() at schedule time, either "
+            "through the shared silence helper or the inline timer path, so "
+            "mirrored server settings apply without reload."
         )
 
 
@@ -56,7 +66,7 @@ class TestVoiceModeContinuousConfig:
     def test_continuous_reads_local_storage(self):
         src = _boot_src()
         assert (
-            "_recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'"
+            "_ownedRecognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'"
             in src
         ), (
             "_recognition.continuous must read from localStorage key "
@@ -83,7 +93,7 @@ class TestBootJsVoiceSectionIntegrity:
 
     def test_voice_mode_declares_recognition(self):
         src = _boot_src()
-        assert "_recognition=new SpeechRecognition()" in src
+        assert "const _ownedRecognition=new SpeechRecognition()" in src
 
     def test_voice_mode_state_machine_present(self):
         src = _boot_src()
