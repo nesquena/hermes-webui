@@ -10845,6 +10845,7 @@ from api.streaming import (
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+    _session_payload_with_full_messages,
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
@@ -18356,6 +18357,38 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
+def _hydrate_replayed_terminal_payload(session_id: str, payload):
+    if not isinstance(payload, dict):
+        return payload
+    session_payload = payload.get("session")
+    if not isinstance(session_payload, dict):
+        return payload
+    if isinstance(session_payload.get("messages"), list):
+        return payload
+    payload_session_id = str(session_payload.get("session_id") or session_id or "").strip()
+    if not payload_session_id or payload_session_id != str(session_id or "").strip():
+        return payload
+    try:
+        session = get_session(payload_session_id, metadata_only=False)
+        hydrated = redact_session_data(
+            _session_payload_with_full_messages(
+                session,
+                tool_calls=getattr(session, "tool_calls", None),
+            )
+        )
+    except Exception:
+        logger.debug(
+            "Failed to hydrate compact terminal journal payload for session %s",
+            payload_session_id,
+            exc_info=True,
+        )
+        return payload
+    merged = dict(payload)
+    merged["session"] = hydrated
+    merged.setdefault("session_id", payload_session_id)
+    return merged
+
+
 def _replay_run_journal(
     handler,
     stream_id: str,
@@ -18379,10 +18412,14 @@ def _replay_run_journal(
     for entry in journal.get("events") or []:
         if not isinstance(entry, dict):
             continue
+        event_name = entry.get("event") or entry.get("type") or "message"
+        payload = entry.get("payload")
+        if entry.get("terminal"):
+            payload = _hydrate_replayed_terminal_payload(session_id, payload)
         _sse_with_id(
             handler,
-            entry.get("event") or entry.get("type") or "message",
-            entry.get("payload"),
+            event_name,
+            payload,
             entry.get("event_id"),
         )
     if include_stale and not summary.get("terminal"):

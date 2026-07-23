@@ -2700,6 +2700,90 @@ def test_terminal_journal_materialization_keeps_cursor_pending_for_incomplete_pa
     assert stream_id not in progress["recent_stream_ids"]
 
 
+def test_terminal_journal_materialization_advances_across_compacted_oversized_terminal(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.run_journal import RunJournalWriter, _RUN_EVENTS_MAX_BYTES
+
+    class SessionStub(SimpleNamespace):
+        def save(self, **kwargs):
+            self.save_calls += 1
+            self.save_kwargs = kwargs
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    session_id = "session-oversized-terminal-reconcile"
+    huge_context = "x" * (_RUN_EVENTS_MAX_BYTES + 10_000)
+    messages = [
+        {"role": "user", "content": huge_context, "timestamp": 1.0},
+        {"role": "assistant", "content": "old answer", "_ts": 2.0},
+        {"role": "user", "content": "middle prompt", "timestamp": 3.0},
+        {"role": "assistant", "content": "middle answer", "_ts": 4.0},
+        {"role": "user", "content": "new prompt", "timestamp": 5.0},
+        {"role": "assistant", "content": "new answer", "_ts": 6.0},
+    ]
+
+    def append_terminal_run(run_id: str, message_index: int) -> None:
+        writer = RunJournalWriter(session_id, run_id, session_dir=session_dir)
+        writer.append_sse_event("reasoning", {"text": f"checking {run_id}"})
+        writer.append_sse_event("token", {"text": messages[message_index]["content"]})
+        writer.append_sse_event(
+            "done",
+            {
+                "session": {
+                    "session_id": session_id,
+                    "message_count": message_index + 1,
+                    "messages": messages[: message_index + 1],
+                }
+            },
+        )
+
+    append_terminal_run("run_old_oversized_terminal", 1)
+    append_terminal_run("run_middle_oversized_terminal", 3)
+    append_terminal_run("run_new_oversized_terminal", 5)
+    middle_path = (
+        session_dir
+        / "_run_journal"
+        / session_id
+        / "run_middle_oversized_terminal.jsonl"
+    )
+    assert middle_path.stat().st_size < _RUN_EVENTS_MAX_BYTES
+
+    session = SessionStub(
+        session_id=session_id,
+        tool_calls=[],
+        anchor_activity_scenes={},
+        save_calls=0,
+    )
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(session, messages) is True
+
+    assert session.save_calls == 1
+    assert session.save_kwargs == {"touch_updated_at": False, "skip_index": True}
+    records = sorted(
+        session.anchor_activity_scenes.values(),
+        key=lambda record: record["message_index"],
+    )
+    assert [record["message_index"] for record in records] == [1, 3, 5]
+    assert [record["stream_id"] for record in records] == [
+        "run_old_oversized_terminal",
+        "run_middle_oversized_terminal",
+        "run_new_oversized_terminal",
+    ]
+    assert [record["scene"]["final_answer"] for record in records] == [
+        "old answer",
+        "middle answer",
+        "new answer",
+    ]
+    assert "index_cursor" in session.terminal_anchor_reconciliation
+
+
 def test_terminal_journal_materialization_fails_closed_without_message_ref(monkeypatch):
     from api import routes
 

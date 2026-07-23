@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -26,6 +27,16 @@ def _terminal_page_cursor(page):
         "generation": page["index_generation"],
         "end_offset": page["next_index_end_offset"],
     }
+
+
+def _message_ref(message):
+    payload = {
+        "role": str(message.get("role") or ""),
+        "content": " ".join(str(message.get("content") or "").split()),
+        "timestamp": message.get("_ts") or message.get("timestamp") or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
@@ -77,6 +88,52 @@ def test_run_journal_reads_suffix_after_default_row_cap(tmp_path):
     assert journal["malformed"] == []
     assert [event["seq"] for event in journal["events"]] == [2049, 2050]
     assert [event["event"] for event in journal["events"]] == ["token", "done"]
+
+
+def test_run_journal_compacts_oversized_terminal_session_payload(tmp_path):
+    session_id = "session_huge_terminal"
+    run_id = "run_huge_terminal"
+    huge_context = "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    assistant = {"role": "assistant", "content": "final answer", "_ts": 10.0}
+    payload = {
+        "session": {
+            "session_id": session_id,
+            "title": huge_context,
+            "messages": [
+                {"role": "user", "content": huge_context, "timestamp": 1.0},
+                assistant,
+            ],
+            "message_count": 2,
+            "tool_calls": [{"name": "terminal", "args": {"blob": huge_context}}],
+            "runtime_journal_snapshot": {"blob": huge_context},
+        },
+        "details": huge_context,
+        "usage": {"output_tokens": 3, "blob": huge_context},
+    }
+
+    append_run_event(session_id, run_id, "done", payload, session_dir=tmp_path)
+
+    path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+    assert path.stat().st_size < run_journal._RUN_EVENTS_MAX_BYTES
+    assert "messages" in payload["session"]
+    journal = read_run_events(session_id, run_id, session_dir=tmp_path)
+    assert journal["complete"] is True
+    assert journal["malformed"] == []
+    event_payload = journal["events"][0]["payload"]
+    compact_session = event_payload["session"]
+    assert "messages" not in compact_session
+    assert "tool_calls" not in compact_session
+    assert compact_session["messages_omitted"]["version"] == "terminal_session_payload_omitted_v1"
+    assert compact_session["tool_calls_omitted"]["version"] == "terminal_session_payload_omitted_v1"
+    assert compact_session["runtime_journal_snapshot_omitted"]["version"] == "terminal_session_payload_omitted_v1"
+    assert event_payload["terminal_message_target"] == {
+        "version": "terminal_message_target_v1",
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "message_index": 1,
+        "message_ref": _message_ref(assistant),
+    }
 
 
 def test_run_journal_fails_closed_on_physical_seq_reorder(tmp_path):

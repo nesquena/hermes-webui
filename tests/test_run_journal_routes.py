@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -535,6 +536,73 @@ def test_replay_run_journal_honors_after_seq_cursor(monkeypatch):
     body = handler.wfile.getvalue().decode("utf-8")
     assert "id: run_1:4\n" in body
     assert "event: done\n" in body
+
+
+def test_replay_run_journal_hydrates_compacted_terminal_session(tmp_path, monkeypatch):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session_id = "session_replay_huge_terminal"
+    run_id = "run_replay_huge_terminal"
+    huge_context = "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    session = Session(
+        session_id=session_id,
+        title="Replay hydrate",
+        messages=[
+            {"role": "user", "content": huge_context, "timestamp": 1.0},
+            {"role": "assistant", "content": "final answer", "_ts": 2.0},
+        ],
+    )
+    session.save(skip_index=True)
+    run_journal.append_run_event(
+        session_id,
+        run_id,
+        "done",
+        {
+            "session": session.compact()
+            | {"messages": list(session.messages), "message_count": len(session.messages)}
+        },
+        session_dir=session_dir,
+    )
+    compact = run_journal.read_run_events(session_id, run_id, session_dir=session_dir)
+    assert "messages" not in compact["events"][0]["payload"]["session"]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is True
+
+    data_line = next(
+        line for line in handler.wfile.getvalue().decode("utf-8").splitlines() if line.startswith("data: ")
+    )
+    data = json.loads(data_line.removeprefix("data: "))
+    assert data["session"]["session_id"] == session_id
+    assert data["session"]["messages"][0]["content"] == huge_context
+    assert data["session"]["messages"][1]["content"] == "final answer"
 
 
 def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):

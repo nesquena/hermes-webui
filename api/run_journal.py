@@ -62,6 +62,8 @@ _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
 _RUN_EVENTS_MAX_BYTES = 2 * 1024 * 1024
 _RUN_EVENTS_MAX_ROWS = 2048
+_TERMINAL_PAYLOAD_MAX_CHARS = 64 * 1024
+_TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION = "terminal_session_payload_omitted_v1"
 _TERMINAL_INDEX_MAX_BYTES = 512 * 1024
 _TERMINAL_INDEX_MAX_ROWS = 1024
 _TERMINAL_INDEX_COMPACT_TRIGGER_BYTES = _TERMINAL_INDEX_MAX_BYTES * 2
@@ -407,6 +409,183 @@ def _terminal_state_for_event(event_name: str, payload) -> str | None:
             return "interrupted-by-crash"
         return "errored"
     return None
+
+
+def _message_ref_payload(message: dict) -> dict:
+    content = message.get("content")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or ""))
+            else:
+                parts.append(str(part or ""))
+        content_text = "\n".join(parts)
+    else:
+        content_text = str(content or "")
+    return {
+        "role": str(message.get("role") or ""),
+        "content": " ".join(content_text.split()),
+        "timestamp": message.get("_ts") or message.get("timestamp") or "",
+    }
+
+
+def _message_ref_digest(message: dict) -> str:
+    raw = json.dumps(_message_ref_payload(message), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _terminal_message_target_from_session_payload(
+    session_id: str,
+    run_id: str,
+    session_payload: dict,
+) -> dict | None:
+    if not isinstance(session_payload, dict):
+        return None
+    target_session_id = str(session_payload.get("session_id") or "").strip()
+    if target_session_id != str(session_id or "").strip():
+        return None
+    messages = session_payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+    message_count = session_payload.get("message_count")
+    if not isinstance(message_count, int) or isinstance(message_count, bool) or message_count <= 0:
+        message_count = len(messages)
+    message_index = int(message_count) - 1
+    if message_index < 0 or message_index >= len(messages):
+        return None
+    message = messages[message_index]
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    message_ref = _message_ref_digest(message)
+    if not message_ref:
+        return None
+    stream_id = str(run_id or "").strip()
+    if not stream_id:
+        return None
+    return {
+        "version": "terminal_message_target_v1",
+        "session_id": target_session_id,
+        "run_id": stream_id,
+        "stream_id": stream_id,
+        "message_index": message_index,
+        "message_ref": message_ref,
+    }
+
+
+_TERMINAL_SESSION_METADATA_KEYS = {
+    "session_id",
+    "title",
+    "workspace",
+    "model",
+    "model_provider",
+    "message_count",
+    "actual_message_count",
+    "created_at",
+    "updated_at",
+    "last_message_at",
+    "pinned",
+    "archived",
+    "project_id",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cache_hit_percent",
+    "personality",
+    "context_length",
+    "threshold_tokens",
+    "last_prompt_tokens",
+    "post_compression_context_tokens_estimate",
+    "active_stream_id",
+    "pending_user_message",
+    "pending_started_at",
+    "source_tag",
+    "raw_source",
+    "session_source",
+    "source_label",
+    "is_cli_session",
+    "read_only",
+    "_messages_truncated",
+    "_messages_offset",
+    "_msg_limit_max",
+}
+
+
+def _compact_terminal_session_payload(session_payload: dict) -> dict:
+    compact: dict[str, Any] = {}
+    budget = {"remaining": _TERMINAL_PAYLOAD_MAX_CHARS // 2}
+    for key, value in session_payload.items():
+        if key not in _TERMINAL_SESSION_METADATA_KEYS:
+            continue
+        compact[key] = _bound_run_journal_snapshot_value(value, budget, 0)
+    messages = session_payload.get("messages")
+    if isinstance(messages, list):
+        message_count = session_payload.get("message_count")
+        if not isinstance(message_count, int) or isinstance(message_count, bool):
+            message_count = len(messages)
+        compact["message_count"] = int(message_count)
+        compact["messages_omitted"] = {
+            "version": _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION,
+            "reason": "terminal_session_transcript_persisted",
+            "message_count": int(message_count),
+        }
+    if "tool_calls" in session_payload:
+        compact["tool_calls_omitted"] = {
+            "version": _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION,
+            "reason": "terminal_session_tool_calls_persisted",
+        }
+    if "runtime_journal_snapshot" in session_payload:
+        compact["runtime_journal_snapshot_omitted"] = {
+            "version": _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION,
+            "reason": "terminal_session_runtime_snapshot_persisted",
+        }
+    return compact
+
+
+def _compact_terminal_payload_for_journal(
+    session_id: str,
+    run_id: str,
+    payload,
+    terminal_state: str | None,
+):
+    if not terminal_state or not isinstance(payload, dict):
+        return payload
+    compact: dict[str, Any] = {}
+    budget = {"remaining": _TERMINAL_PAYLOAD_MAX_CHARS}
+    derived_target: dict | None = None
+    explicit_target = "terminal_message_target" in payload
+    for key, value in payload.items():
+        key_str = str(key)
+        if key_str == "session" and isinstance(value, dict):
+            derived_target = _terminal_message_target_from_session_payload(
+                session_id,
+                run_id,
+                value,
+            )
+            compact_session = _compact_terminal_session_payload(value)
+            compact_session["session_id"] = str(session_id)
+            compact[key_str] = compact_session
+            continue
+        if key_str in {"terminal_message_target", "terminal_disposition"}:
+            compact[key_str] = _bound_run_journal_snapshot_value(
+                value,
+                {"remaining": 4096},
+                0,
+            )
+            continue
+        compact_key = _bound_snapshot_args_string(key_str, budget)
+        if not compact_key:
+            continue
+        compact[compact_key] = _bound_run_journal_snapshot_value(value, budget, 0)
+    if derived_target is not None and not explicit_target:
+        compact["terminal_message_target"] = derived_target
+    compact.setdefault("session_id", str(session_id))
+    compact.setdefault("stream_id", str(run_id))
+    compact.setdefault("terminal_state", terminal_state)
+    return compact
 
 
 def _run_journal_fsync_mode() -> str:
@@ -898,6 +1077,12 @@ def append_run_event(
         else:
             assigned_seq = _reserve_next_seq(path)
         terminal_state = _terminal_state_for_event(event_name, payload)
+        payload = _compact_terminal_payload_for_journal(
+            session_id,
+            run_id,
+            payload,
+            terminal_state,
+        )
         event = {
             "version": 1,
             "event_id": f"{run_id}:{assigned_seq}",
