@@ -4298,8 +4298,97 @@ def _should_strip_reasoning_content(
     return False
 
 
-def _compact_image_parts_for_persistence(messages) -> int:
-    """Replace persisted image parts with text placeholders after a completed turn.
+def _is_inline_base64_image_leaf(part: dict) -> bool:
+    """Check if this specific dict IS an inline base64 image (leaf, not wrapper).
+
+    Returns True only for actual image-containing leaves. Does NOT recurse into
+    nested ``content`` lists — the caller handles projection of those wrappers
+    recursively. Preserves HTTP(S), file:, artifact, handle, and path references.
+    """
+    part_type = part.get('type')
+    if not isinstance(part_type, str):
+        return False
+    if part_type not in ('image', 'image_url', 'input_image'):
+        return False
+    # Direct data URL: data:image/...;base64,...
+    url = None
+    if isinstance(part.get('image_url'), dict):
+        url = part['image_url'].get('url')
+    elif isinstance(part.get('image_url'), str):
+        url = part['image_url']
+    if url is None and 'url' in part:
+        url = part['url']
+    if isinstance(url, str) and re.match(r'data:image/[^,;]+;base64,', url):
+        return True
+    # Direct string source
+    source = part.get('source', part.get('url', ''))
+    if isinstance(source, str) and re.match(r'data:image/[^,;]+;base64,', source):
+        return True
+    # Anthropic-style source: {type: "base64", media_type: "image/...", ...}
+    if isinstance(part.get('source'), dict):
+        src = part['source']
+        if src.get('type') == 'base64':
+            media = src.get('media_type', '')
+            if isinstance(media, str) and 'image' in media:
+                return True
+            # No media_type specified but type indicates an image part
+            if not media:
+                return True
+    return False
+
+
+def _project_image_parts(part: dict) -> dict:
+    """Return a recursively-projected copy with inline base64 image leaves replaced.
+
+    Only inline base64 image data is replaced with a ``[screenshot]`` text
+    placeholder. HTTP(S), file:, artifact, handle, and path references are
+    preserved. Nested ``_multimodal`` envelopes, ``tool_result.content``,
+    Anthropic-style ``source: {type: 'base64', ...}``, and mixed wrappers
+    (containing both base64 and non-base64 children) are handled correctly
+    by recursing into ``content`` lists and replacing only actual leaves.
+    """
+    if not isinstance(part, dict):
+        return part
+    projected = dict(part)
+    changed = False
+    # Recursively project nested content lists
+    if isinstance(projected.get('content'), list):
+        new_content = []
+        for sub in projected['content']:
+            if isinstance(sub, dict):
+                projected_sub = _project_image_parts(sub)
+                new_content.append(projected_sub)
+                if projected_sub is not sub:
+                    changed = True
+            else:
+                new_content.append(sub)
+        if changed:
+            projected['content'] = new_content
+    # Check if THIS part (after any inner projection) is a base64 image leaf
+    if _is_inline_base64_image_leaf(projected):
+        return {'type': 'text', 'text': '[screenshot]'}
+    return projected if changed else part
+
+
+def _project_live_tool_args(args) -> dict:
+    """Return a copy of tool args with inline base64 data URLs replaced.
+
+    Recursively walks the args dict/list structure and replaces any
+    ``data:image/...;base64,...`` string values with ``[base64 image]``.
+    Preserves HTTP(S), file:, artifact, handle, and path references.
+    """
+    if isinstance(args, str):
+        return _strip_base64_data_urls(args)
+    if isinstance(args, dict):
+        return {k: _project_live_tool_args(v) for k, v in args.items()}
+    if isinstance(args, (list, tuple)):
+        projected = [_project_live_tool_args(v) for v in args]
+        return tuple(projected) if isinstance(args, tuple) else projected
+    return args
+
+
+def _compact_image_parts_for_persistence(messages) -> tuple[list, int]:
+    """Return (compacted_copy, changed_count). Does not mutate inputs.
 
     The active model receives native image parts while a tool call is running. Once
     the turn has completed, retaining base64 data URLs in both the visible
@@ -4310,12 +4399,14 @@ def _compact_image_parts_for_persistence(messages) -> int:
     future turns retain the conversational record and can re-open the original
     image from the preceding tool-call arguments when needed.
 
-    This intentionally mutates the owned session message rows in place. It is
-    called only after ``run_conversation()`` has returned, so it never removes
-    image parts that the current model invocation still needs.
+    Only inline base64 image data is compacted — http/file image references are
+    preserved as-is so the image can be re-fetched on replay.
     """
+    if not messages:
+        return list(messages or ()), 0
     changed = 0
-    for message in messages or ():
+    messages_copy = copy.deepcopy(messages)  # owned copy
+    for message in messages_copy:
         # Mirror Hermes Agent's durable-session policy: native *tool* results
         # are transient input for the current model call. User attachments are
         # a separate product contract and must remain intact here.
@@ -4334,31 +4425,31 @@ def _compact_image_parts_for_persistence(messages) -> int:
                 # the structured result during durable-session compaction.
                 compacted_content.append(part)
                 continue
-            part_type = part.get('type')
-            # Guard the set-membership with an isinstance check: a JSON-valid
-            # part can carry an unhashable ``type`` (e.g. a list), and
-            # ``unhashable in {...}`` raises TypeError — which would turn an
-            # otherwise-complete streaming send into the error path before the
-            # session is saved. Only the three string image types are compacted;
-            # every other part (including non-string ``type`` values) is preserved.
-            if isinstance(part_type, str) and part_type in {'image', 'image_url', 'input_image'}:
-                compacted_content.append({'type': 'text', 'text': '[screenshot]'})
+            # Project: recursively replace inline base64 image leaves while
+            # preserving non-base64 references (HTTP, file, artifact, handle,
+            # path) and unrelated fields/order exactly.
+            projected = _project_image_parts(part)
+            compacted_content.append(projected)
+            if projected is not part:
                 image_parts += 1
-            else:
-                compacted_content.append(part)
 
         if image_parts:
             message['content'] = compacted_content
             changed += image_parts
-    return changed
+    return messages_copy, changed
 
 
 def _compact_session_image_parts_for_persistence(session) -> int:
     """Compact completed native-vision tool results in both durable histories."""
-    changed = (
-        _compact_image_parts_for_persistence(getattr(session, 'context_messages', None))
-        + _compact_image_parts_for_persistence(getattr(session, 'messages', None))
-    )
+    changed = 0
+    copied_ctx, c1 = _compact_image_parts_for_persistence(getattr(session, 'context_messages', None))
+    if c1:
+        session.context_messages = copied_ctx
+        changed += c1
+    copied_msgs, c2 = _compact_image_parts_for_persistence(getattr(session, 'messages', None))
+    if c2:
+        session.messages = copied_msgs
+        changed += c2
     if changed:
         logger.info(
             "Compacted %d completed image message part(s) for session %s",
@@ -4366,6 +4457,22 @@ def _compact_session_image_parts_for_persistence(session) -> int:
             getattr(session, 'session_id', None),
         )
     return changed
+
+
+def _strip_base64_data_urls(text: str) -> str:
+    """Replace inline base64 data URIs with a placeholder.
+
+    Vision models send ``data:image/<type>;base64,<payload>`` as tool-call
+    arguments or tool results.  When these are dumped into the live-prompt
+    estimate the full payload bytes inflate every streaming frame.  Strip
+    them to a fixed marker so the client still sees *that* an image was
+    involved without the wire cost of the base64 blob.
+    """
+    return re.sub(
+        r'data:image/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+',
+        '[base64 image]',
+        text,
+    )
 
 
 def _sanitize_messages_for_api(
@@ -6219,6 +6326,7 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
             text = str(preview)
     except Exception:
         pass
+    text = _strip_base64_data_urls(text)
     return text[:limit]
 
 
@@ -8116,7 +8224,7 @@ def _run_agent_streaming(
                     'type': 'function',
                     'function': {
                         'name': str(name or ''),
-                        'arguments': json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False, sort_keys=True),
+                        'arguments': _strip_base64_data_urls(json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False, sort_keys=True)),
                     },
                 }
                 _bump_live_prompt_estimate([{
@@ -8129,7 +8237,7 @@ def _run_agent_streaming(
             def _record_live_tool_complete(tool_call_id, name, function_result):
                 if not tool_call_id:
                     return False
-                _result_text = _tool_result_snippet(function_result)
+                _result_text = _strip_base64_data_urls(_tool_result_snippet(function_result))
                 _bump_live_prompt_estimate([{
                     'role': 'tool',
                     'name': str(name or ''),
@@ -8203,14 +8311,14 @@ def _run_agent_streaming(
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
-                        'args': args if isinstance(args, dict) else {},
+                        'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                     })
                     # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
                     # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
                         STREAM_LIVE_TOOL_CALLS[stream_id].append({
                             'name': name,
-                            'args': args if isinstance(args, dict) else {},
+                            'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                             'done': False,
                         })
                     put('tool', {
@@ -8273,7 +8381,7 @@ def _run_agent_streaming(
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
-                        'preview': preview,
+                        'preview': _strip_base64_data_urls(preview) if isinstance(preview, str) else preview,
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
@@ -8320,7 +8428,7 @@ def _run_agent_streaming(
                         _live_tool_event_start_ids.add(tool_call_id)
                         _live_tool_calls.append({
                             'name': name,
-                            'args': args if isinstance(args, dict) else {},
+                            'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                             'tid': tool_call_id,
                         })
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
@@ -8328,7 +8436,7 @@ def _run_agent_streaming(
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                 'name': name,
-                                'args': args if isinstance(args, dict) else {},
+                                'args': _project_live_tool_args(args) if isinstance(args, dict) else {},
                                 'done': False,
                                 'tid': tool_call_id,
                             })
@@ -8352,6 +8460,7 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
+                        result_snippet = _strip_base64_data_urls(result_snippet)
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
@@ -9574,6 +9683,7 @@ def _run_agent_streaming(
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
+                                # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
