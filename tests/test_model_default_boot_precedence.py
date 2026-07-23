@@ -158,6 +158,7 @@ let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 window._provisionalBootModelSelection = null;
+window._bootSettingsDefaultModelState = null;
 
 function settingsDefaultModelHasExplicitSourceForTest(s) {
   if (!s || !Object.prototype.hasOwnProperty.call(s, 'default_model_has_explicit_source')) return true;
@@ -172,6 +173,11 @@ function hydrateBootDefaultModelFromSettingsForTest(s) {
   window._defaultModel = defaultModel;
   window._defaultModelHasExplicitSource = hasExplicitSource;
   window._defaultModelEligibleForFreshBoot = hasExplicitSource;
+  window._bootSettingsDefaultModelState = {
+    model: defaultModel,
+    model_provider: s.default_model_provider || null,
+    default_model_has_explicit_source: hasExplicitSource,
+  };
   const sel = $('modelSelect');
   if (!hasExplicitSource) {
     let selectedState = null;
@@ -221,6 +227,7 @@ function hydrateBootDefaultModelFromSettingsForTest(s) {
 
 for (const name of [
   '_modelCatalogHasRealProviderModels', '_shouldApplyModelPayloadDefault',
+  '_currentBootSettingsDefaultOverride', '_applyBootSettingsDefaultOverrideToModelPayload',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_captureModelDropdownSelection', '_modelStateMatches',
   '_readPersistedModelState', '_writePersistedModelState', '_clearPersistedModelState',
@@ -383,6 +390,7 @@ def test_load_settings_exposes_default_model_explicit_source(
 ):
     monkeypatch.setattr(config_api, "DEFAULT_MODEL", webui_default_model, raising=False)
     monkeypatch.setattr(config_api, "cfg", dict(config_data), raising=False)
+    monkeypatch.setattr(config_api, "get_config", lambda: dict(config_data))
     monkeypatch.setattr(config_api, "_read_raw_settings_file", lambda: {})
     for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
         monkeypatch.delenv(key, raising=False)
@@ -406,6 +414,11 @@ def test_load_settings_marks_webui_default_model_env_source_explicit(monkeypatch
         "cfg",
         {"model": {"provider": "safe"}, "providers": {}, "fallback_providers": []},
         raising=False,
+    )
+    monkeypatch.setattr(
+        config_api,
+        "get_config",
+        lambda: {"model": {"provider": "safe"}, "providers": {}, "fallback_providers": []},
     )
     monkeypatch.setattr(config_api, "_read_raw_settings_file", lambda: {})
     for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
@@ -556,6 +569,7 @@ def test_save_settings_drops_derived_default_model_metadata(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(config_api, "SETTINGS_FILE", settings_file)
     monkeypatch.setattr(config_api, "cfg", {"model": "legacy-explicit-model"}, raising=False)
+    monkeypatch.setattr(config_api, "get_config", lambda: {"model": "legacy-explicit-model"})
     for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
         monkeypatch.delenv(key, raising=False)
 
@@ -581,6 +595,7 @@ def test_save_settings_drops_derived_default_model_metadata(monkeypatch, tmp_pat
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "let previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
     assert "const rawProvisionalBootSelection=window._provisionalBootModelSelection||null;" in UI_JS
+    assert "data=_applyBootSettingsDefaultOverrideToModelPayload(data,opts);" in UI_JS
     assert "const persistedState=(typeof _readPersistedModelState==='function')?_readPersistedModelState():null;" in UI_JS
     assert "window._provisionalBootModelSelection=null;" in UI_JS
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
@@ -698,6 +713,48 @@ def test_boot_model_refresh_applies_explicit_env_default_when_catalog_has_models
     assert got["selectedProvider"] == "safe"
     assert env_default in got["selectValue"]
     assert "@expensive:gpt-5.5" in got["localStorage"]["hermes-webui-model"]
+    assert got["defaultModelHasExplicitSource"] is True
+    assert got["defaultModelEligibleForFreshBoot"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_boot_model_refresh_keeps_current_settings_default_over_stale_cached_models_payload(
+    populate_driver_path,
+):
+    current_settings_default = "custom/env-model-b"
+    stale_cached_default = "custom/env-model-a"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value="@expensive:gpt-5.5",
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        settings={
+            "default_model": current_settings_default,
+            "default_model_provider": "safe",
+            "default_model_has_explicit_source": True,
+        },
+        api_default_model=stale_cached_default,
+        api_default_model_has_explicit_source=True,
+        api_active_provider="safe",
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
+            {"provider": "Stale", "provider_id": "safe", "models": [{"id": stale_cached_default, "label": stale_cached_default}]},
+        ],
+        initial_options=[
+            {"provider": "expensive", "value": "@expensive:gpt-5.5", "label": "GPT-5.5"},
+        ],
+        local_storage=_persisted_model_storage("@expensive:gpt-5.5", "expensive"),
+        apply_boot_saved_state=True,
+    )
+
+    assert got["selectedState"] == {
+        "model": current_settings_default,
+        "model_provider": "safe",
+    }
+    assert got["defaultModel"] == current_settings_default
+    assert got["selectedProvider"] == "safe"
+    assert current_settings_default in got["selectValue"]
+    assert stale_cached_default not in got["selectedState"]["model"]
     assert got["defaultModelHasExplicitSource"] is True
     assert got["defaultModelEligibleForFreshBoot"] is True
 

@@ -3231,6 +3231,11 @@ function _hydrateBootDefaultModelFromSettings(s){
   window._defaultModel=defaultModel;
   window._defaultModelHasExplicitSource=hasExplicitSource;
   window._defaultModelEligibleForFreshBoot=hasExplicitSource;
+  window._bootSettingsDefaultModelState={
+    model:defaultModel,
+    model_provider:s.default_model_provider||null,
+    default_model_has_explicit_source:hasExplicitSource,
+  };
   const sel=$('modelSelect');
   if(!hasExplicitSource){
     let selectedState=null;

@@ -2815,6 +2815,7 @@ window._configuredModelBadges=window._configuredModelBadges||{};
 window._defaultModelHasExplicitSource=!!window._defaultModelHasExplicitSource;
 window._defaultModelEligibleForFreshBoot=window._defaultModelEligibleForFreshBoot!==false;
 window._provisionalBootModelSelection=window._provisionalBootModelSelection||null;
+window._bootSettingsDefaultModelState=window._bootSettingsDefaultModelState||null;
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
@@ -2836,6 +2837,37 @@ function _shouldApplyModelPayloadDefault(data){
   if(!data||!data.default_model) return false;
   if(data.default_model_has_explicit_source===true) return true;
   return !_modelCatalogHasRealProviderModels(data);
+}
+function _currentBootSettingsDefaultOverride(data,opts){
+  if(!(opts&&opts.preferProfileDefaultOnFreshBoot)) return null;
+  const state=window._bootSettingsDefaultModelState||null;
+  if(!state||state.default_model_has_explicit_source!==true) return null;
+  const model=String(state.model||'').trim();
+  if(!model) return null;
+  const payloadModel=String(data&&data.default_model||'').trim();
+  if(!payloadModel||payloadModel===model) return null;
+  return {
+    model,
+    model_provider:state.model_provider?String(state.model_provider):null,
+  };
+}
+function _applyBootSettingsDefaultOverrideToModelPayload(data,opts){
+  const override=_currentBootSettingsDefaultOverride(data,opts);
+  if(!override) return data;
+  const next={...(data||{})};
+  next.default_model=override.model;
+  next.default_model_has_explicit_source=true;
+  if(override.model_provider) next.active_provider=override.model_provider;
+  const provider=override.model_provider||next.active_provider||null;
+  if(provider){
+    next.configured_model_badges={...(next.configured_model_badges||{})};
+    next.configured_model_badges[override.model]={
+      role:'primary',
+      label:'Primary',
+      provider,
+    };
+  }
+  return next;
 }
 
 // ── Smart model resolver ────────────────────────────────────────────────────
@@ -3429,7 +3461,8 @@ async function populateModelDropdown(opts={}){
       if(customRedirectIfUnauth(_modelsRes)) return;
     }else if(_redirectIfUnauth(_modelsRes)) return;
     // `_activeProvider` is populated from the /api/models payload below.
-    const data=await _modelsRes.json();
+    let data=await _modelsRes.json();
+    data=_applyBootSettingsDefaultOverrideToModelPayload(data,opts);
     if(requestSeq!==_modelDropdownRequestSeq) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;

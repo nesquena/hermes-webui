@@ -257,6 +257,8 @@ def _run(driver_path, scenario):
         [
             _extract_function_source("_modelCatalogHasRealProviderModels"),
             _extract_function_source("_shouldApplyModelPayloadDefault"),
+            _extract_function_source("_currentBootSettingsDefaultOverride"),
+            _extract_function_source("_applyBootSettingsDefaultOverrideToModelPayload"),
             _extract_function_source("populateModelDropdown"),
         ]
     )

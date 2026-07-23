@@ -5877,6 +5877,24 @@ def _models_cache_catalog_fingerprint() -> dict:
     }
 
 
+def _models_cache_default_env_fingerprint() -> dict:
+    """Return normalized default-model env authority for /api/models cache keys.
+
+    ``default_model`` and Primary badges are embedded in the cached payload, so
+    every environment source that can change ``get_effective_default_model()``
+    must participate in the cache identity. ``DEFAULT_MODEL`` is the import-time
+    value of ``HERMES_WEBUI_DEFAULT_MODEL``; the other model env vars are read
+    live so tests and request scopes that mutate them invalidate both memory and
+    disk caches without waiting for TTL expiry.
+    """
+    return {
+        "HERMES_WEBUI_DEFAULT_MODEL": str(DEFAULT_MODEL or "").strip(),
+        "HERMES_MODEL": str(os.getenv("HERMES_MODEL") or "").strip(),
+        "OPENAI_MODEL": str(os.getenv("OPENAI_MODEL") or "").strip(),
+        "LLM_MODEL": str(os.getenv("LLM_MODEL") or "").strip(),
+    }
+
+
 # Credential-rotation fields inside auth.json that churn on a ~14-minute
 # period (credential-pool / OAuth token refresh rewrites the whole file) but
 # DO NOT change the set of available providers or models that /api/models
@@ -6003,6 +6021,7 @@ def _models_cache_source_fingerprint() -> dict:
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
         "catalog": _models_cache_catalog_fingerprint(),
+        "model_default_env": _models_cache_default_env_fingerprint(),
     }
 
 

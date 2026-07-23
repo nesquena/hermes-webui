@@ -20,6 +20,8 @@ def _reset_memory_cache() -> None:
         config._available_models_cache_ts = 0.0
         if hasattr(config, "_available_models_cache_source_fingerprint"):
             config._available_models_cache_source_fingerprint = None
+        if hasattr(config, "_sync_models_cache_provenance"):
+            config._sync_models_cache_provenance()
         config._cache_build_in_progress = False
         config._cache_build_cv.notify_all()
 
@@ -50,7 +52,33 @@ def _write_auth_store(hermes_home, provider_id: str) -> None:
     )
 
 
-def _configure_isolated_sources(tmp_path, monkeypatch, provider_id: str) -> None:
+def _catalog_model_ids(data: dict) -> set[str]:
+    ids: set[str] = set()
+    for group in data.get("groups", []):
+        for bucket in ("models", "extra_models"):
+            for model in group.get(bucket, []) or []:
+                model_id = str(model.get("id") or "").strip()
+                if model_id:
+                    ids.add(model_id)
+    return ids
+
+
+def _primary_badge_for(data: dict, model_id: str, provider: str) -> dict | None:
+    badges = data.get("configured_model_badges", {}) or {}
+    for key in (model_id, f"{provider}/{model_id}", f"@{provider}:{model_id}"):
+        badge = badges.get(key)
+        if badge:
+            return badge
+    return None
+
+
+def _configure_isolated_sources(
+    tmp_path,
+    monkeypatch,
+    provider_id: str,
+    *,
+    config_text: str = "model:\n  default: glm-5.1\n",
+) -> None:
     hermes_home = tmp_path / "hermes-home"
     state_dir = tmp_path / "state"
     cache_path = state_dir / "models_cache.json"
@@ -58,9 +86,11 @@ def _configure_isolated_sources(tmp_path, monkeypatch, provider_id: str) -> None
 
     hermes_home.mkdir(parents=True, exist_ok=True)
     config_path = hermes_home / "config.yaml"
-    # Leave model.provider unset so get_available_models() must honor the auth
-    # store's active_provider fallback, matching CLI setup/auth-store drift.
-    config_path.write_text("model:\n  default: glm-5.1\n", encoding="utf-8")
+    # Leave model.provider unset in the default fixture so get_available_models()
+    # must honor the auth store's active_provider fallback, matching CLI
+    # setup/auth-store drift. Callers can pass a provider-only config when the
+    # default-model env should be the authority under test.
+    config_path.write_text(config_text, encoding="utf-8")
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
 
     import api.profiles as profiles
@@ -181,3 +211,82 @@ def test_disk_models_cache_invalidates_when_static_catalog_changes(tmp_path, mon
     assert result != stale_opencode
     opencode_group = next(g for g in result["groups"] if g.get("provider_id") == "opencode-go")
     assert any(m.get("id") == "new-disk-catalog-model" for m in opencode_group["models"])
+
+
+def test_disk_models_cache_invalidates_when_webui_default_model_env_changes(
+    tmp_path,
+    monkeypatch,
+):
+    provider_id = "opencode-go"
+    model_a = "provider/model-a"
+    model_b = "provider/model-b"
+    _configure_isolated_sources(
+        tmp_path,
+        monkeypatch,
+        provider_id,
+        config_text=f"model:\n  provider: {provider_id}\n",
+    )
+    monkeypatch.setattr(config, "DEFAULT_MODEL", model_a)
+    cached_a = _valid_models_cache(provider_id, model_a)
+    config._save_models_cache_to_disk(cached_a)
+    assert config._models_cache_path.exists()
+
+    monkeypatch.setattr(config, "DEFAULT_MODEL", model_b)
+    _reset_memory_cache()
+
+    assert config._load_models_cache_from_disk() is None
+
+    result = config.get_available_models()
+
+    assert result["default_model"] == model_b
+    assert result["default_model_has_explicit_source"] is True
+    assert model_b in _catalog_model_ids(result) or f"@{provider_id}:{model_b}" in _catalog_model_ids(result)
+    assert _primary_badge_for(result, model_b, provider_id) == {
+        "role": "primary",
+        "label": "Primary",
+        "provider": provider_id,
+    }
+
+
+def test_memory_models_cache_invalidates_when_model_env_override_changes(
+    tmp_path,
+    monkeypatch,
+):
+    provider_id = "opencode-go"
+    model_a = "env/model-a"
+    model_b = "env/model-b"
+    _configure_isolated_sources(
+        tmp_path,
+        monkeypatch,
+        provider_id,
+        config_text=f"model:\n  provider: {provider_id}\n",
+    )
+    monkeypatch.setattr(config, "DEFAULT_MODEL", "webui/default")
+    monkeypatch.setenv("HERMES_MODEL", model_a)
+    cached_a = _valid_models_cache(provider_id, model_a)
+    with config._available_models_cache_lock:
+        config._available_models_cache = cached_a
+        config._available_models_cache_ts = time.monotonic()
+        config._available_models_cache_source_fingerprint = (
+            config._models_cache_source_fingerprint()
+        )
+        config._sync_models_cache_provenance()
+
+    monkeypatch.setenv("HERMES_MODEL", model_b)
+
+    result = config.get_available_models()
+
+    assert result["default_model"] == model_b
+    assert result["default_model_has_explicit_source"] is True
+    assert not any(
+        str(model.get("id") or "") == model_a
+        for group in result.get("groups", [])
+        for bucket in ("models", "extra_models")
+        for model in group.get(bucket, []) or []
+    )
+    assert model_b in _catalog_model_ids(result) or f"@{provider_id}:{model_b}" in _catalog_model_ids(result)
+    assert _primary_badge_for(result, model_b, provider_id) == {
+        "role": "primary",
+        "label": "Primary",
+        "provider": provider_id,
+    }
