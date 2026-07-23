@@ -16,6 +16,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import concurrent.futures
 import threading
 import time
@@ -1231,6 +1232,40 @@ def rename_anchored(root: Path, source: Path, dest: Path) -> None:
         os.close(src_parent_fd)
 
 
+def _birthtime_ns(lst) -> int | None:
+    """Return creation time in ns, or None when the platform lacks birthtime."""
+    value = getattr(lst, 'st_birthtime_ns', None)
+    if value is not None:
+        return value
+    value = getattr(lst, 'st_birthtime', None)
+    if value is not None:
+        return int(value * 1_000_000_000)
+    if sys.platform == 'win32':
+        return getattr(lst, 'st_ctime_ns', None)
+    return None
+
+
+def _browser_timestamp_ns(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def serialize_workspace_entries_for_browser(entries: list[dict] | None) -> list[dict]:
+    payload = []
+    for entry in entries or []:
+        item = dict(entry or {})
+        if 'mtime_ns' in item:
+            item['mtime_ns'] = _browser_timestamp_ns(item.get('mtime_ns'))
+        if 'birthtime_ns' in item:
+            item['birthtime_ns'] = _browser_timestamp_ns(item.get('birthtime_ns'))
+        payload.append(item)
+    return payload
+
+
 def list_dir(workspace: Path, rel: str='.'):
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
@@ -1295,6 +1330,7 @@ def list_dir(workspace: Path, rel: str='.'):
                     'is_dir': False,
                     'target_outside_workspace': True,
                     'mtime_ns': mtime_ns,
+                    'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
                 }
                 entries.append(entry)
             else:
@@ -1307,6 +1343,7 @@ def list_dir(workspace: Path, rel: str='.'):
                     'is_dir': is_dir,
                     'target_outside_workspace': False,
                     'mtime_ns': mtime_ns,
+                    'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
                 }
                 if not is_dir:
                     try:
@@ -1333,6 +1370,7 @@ def list_dir(workspace: Path, rel: str='.'):
                 'type': 'dir' if is_dir_entry else 'file',
                 'size': size,
                 'mtime_ns': mtime_ns,
+                'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
             })
 
     if _DIR_FD_OK:

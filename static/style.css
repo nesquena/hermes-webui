@@ -2877,6 +2877,13 @@
   .workspace-prefs-item .workspace-prefs-copy{display:flex;flex-direction:column;gap:2px;min-width:0;}
   .workspace-prefs-item .workspace-prefs-name{font-weight:500;}
   .workspace-prefs-item .workspace-prefs-meta{font-size:11px;color:var(--muted);line-height:1.35;opacity:.85;}
+  .workspace-prefs-group{padding:8px 0 4px;}
+  .workspace-prefs-grouplabel{padding:0 14px 4px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;}
+  .workspace-prefs-item--radio{padding:6px 14px;}
+  .workspace-prefs-item.is-disabled{opacity:.55;cursor:default;}
+  .workspace-prefs-item.is-disabled:hover{background:none;}
+  .workspace-prefs-item.is-disabled input{cursor:default;}
+  .workspace-prefs-sep{height:1px;margin:4px 0;background:var(--border2);}
   .breadcrumb-seg{padding:1px 3px;border-radius:3px;}
   .breadcrumb-link{color:var(--muted);cursor:pointer;transition:color .12s;}
   .breadcrumb-link:hover{color:var(--text);background:var(--hover-bg);}
