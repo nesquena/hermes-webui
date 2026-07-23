@@ -1182,6 +1182,97 @@ def test_replay_run_journal_emits_overcap_unpersisted_continuation_recovery_cont
     assert data["terminal_disposition"]["continuation_session_id"] == continuation_session_id
 
 
+def test_replay_run_journal_completes_writer_overcap_unpersisted_terminal_events(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "save_failure_origin_writer_replay"
+    continuation_session_id = "save_failure_continuation_writer_replay"
+    cases = [
+        ("done", {}, "completed"),
+        ("apperror", {"type": "tool_limit_reached"}, "tool_limit_reached"),
+        ("cancel", {"message": "Cancelled by user"}, "interrupted-by-user"),
+    ]
+    huge_answer = "终" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000)
+    run_ids = []
+    for event_name, extra_payload, _expected_terminal_state in cases:
+        run_id = f"run_save_failure_writer_replay_{event_name}"
+        run_ids.append(run_id)
+        writer = run_journal.RunJournalWriter(origin_session_id, run_id, session_dir=session_dir)
+        writer.append_sse_event("token", {"text": "partial answer"})
+        payload = {
+            "terminal_session_persisted": False,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "session": {
+                "session_id": continuation_session_id,
+                "parent_session_id": origin_session_id,
+                "messages": [
+                    {"role": "user", "content": "please recover", "timestamp": 7.0},
+                    {"role": "assistant", "content": huge_answer, "_ts": 8.0},
+                ],
+                "message_count": 2,
+            },
+        }
+        payload.update(extra_payload)
+        writer.append_sse_event(event_name, payload)
+        path = session_dir / "_run_journal" / origin_session_id / f"{run_id}.jsonl"
+        assert path.stat().st_size < run_journal._RUN_EVENTS_MAX_BYTES
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+
+    for (event_name, _extra_payload, expected_terminal_state), run_id in zip(cases, run_ids, strict=True):
+        handler = SimpleNamespace(wfile=io.BytesIO())
+
+        assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is True
+
+        body = handler.wfile.getvalue().decode("utf-8")
+        assert f"event: {event_name}\n" in body
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in body.splitlines()
+            if line.startswith("data: ")
+        ]
+        data = frames[-1]
+        assert data["session"]["session_id"] == continuation_session_id
+        assert data["session"]["parent_session_id"] == origin_session_id
+        assert "messages" not in data["session"]
+        assert data["terminal_recovery_control"]["session_id"] == origin_session_id
+        assert data["terminal_recovery_control"]["target_session_id"] == continuation_session_id
+        assert data["terminal_recovery_control"]["terminal_state"] == expected_terminal_state
+        assert data["terminal_disposition"]["session_id"] == origin_session_id
+        assert data["terminal_disposition"]["target_session_id"] == continuation_session_id
+
+
 def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):
     import api.run_journal as run_journal
     import api.routes as routes
