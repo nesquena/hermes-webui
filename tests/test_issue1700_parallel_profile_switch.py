@@ -98,3 +98,29 @@ def test_frontend_treats_active_or_pending_session_as_in_progress():
     assert "S.session.active_stream_id" in session_block
     assert "S.session.pending_user_message" in session_block
     assert "S.messages.length > 0" in session_block
+
+
+def test_frontend_skips_nested_new_session_when_caller_owns_replacement():
+    fn = _extract_switch_to_profile()
+
+    assert "_profileSwitchCallerOwnsNewSession" in fn
+    branch_idx = fn.find("sessionInProgress && _callerOwnsNewSession")
+    nested_new_session_idx = fn.find("await newSession(false")
+    assert branch_idx != -1, "caller-owned replacement branch not found in switchToProfile()"
+    assert nested_new_session_idx != -1, "nested newSession() call not found in switchToProfile()"
+    assert branch_idx < nested_new_session_idx, (
+        "switchToProfile() must check the caller-owned replacement path before it awaits nested newSession()"
+    )
+
+
+def test_frontend_caller_owned_profile_switch_keeps_existing_one_shot_workspace():
+    fn = _extract_switch_to_profile()
+
+    guard_idx = fn.find("if (!_callerOwnsNewSession) {")
+    assign_idx = fn.find("S._profileSwitchWorkspace = data.default_workspace;")
+
+    assert guard_idx != -1, "switchToProfile() must guard profile default one-shot assignment"
+    assert assign_idx != -1, "profile-switch workspace assignment not found"
+    assert guard_idx < assign_idx, (
+        "caller-owned profile switches must not overwrite an existing one-shot workspace with the destination profile default"
+    )

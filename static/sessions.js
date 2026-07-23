@@ -1377,6 +1377,33 @@ function _setNewSessionPending(pending){
   }
 }
 
+function _resolveProjectForNewSession(options){
+  let pid;
+  if(Object.prototype.hasOwnProperty.call(options,'project_id')){
+    pid=options.project_id;
+  }else if(typeof _activeProject!=='undefined'&&_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+    pid=_activeProject;
+  }
+  if(!pid) return null;
+  const _projects=typeof _allProjects!=='undefined'?_allProjects:[];
+  return _projects.find(p=>p.project_id===pid)||null;
+}
+
+async function _ensureProjectProfileForNewSession(project){
+  const targetProfile=project&&typeof project.profile==='string'?project.profile.trim():'';
+  if(!_showAllProfiles||!targetProfile) return false;
+  const activeProfile=S.activeProfile||'default';
+  if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return true;
+  if(typeof switchToProfile!=='function') return false;
+  _profileSwitchCallerOwnsNewSession=true;
+  try{
+    await switchToProfile(targetProfile);
+  }finally{
+    _profileSwitchCallerOwnsNewSession=false;
+  }
+  return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
+}
+
 async function newSession(flash, options={}){
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
@@ -1394,14 +1421,25 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace wins first; otherwise prefer the profile default.
+    const _newSessionProj=_resolveProjectForNewSession(options);
+    if(_newSessionProj&&!await _ensureProjectProfileForNewSession(_newSessionProj)){
+      const targetProfile=_newSessionProj&&typeof _newSessionProj.profile==='string'?_newSessionProj.profile.trim():'';
+      if(targetProfile&&!_profileMatchesActiveProfile(targetProfile,S.activeProfile||'default')){
+        throw new Error('Switch to '+targetProfile+' before opening a new chat in this project');
+      }
+    }
+    const hasProjectTarget=Object.prototype.hasOwnProperty.call(options,'project_id')
+      ? !!options.project_id
+      : !!(_activeProject&&_activeProject!==NO_PROJECT_FILTER);
+    // Keep explicit workspace ownership on the server for project-targeted chats.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
-    const reqBody={
-      workspace:inheritWs,
-      profile:S.activeProfile||'default',
-    };
+    const explicitWs=switchWs||null;
+    const fallbackWs=explicitWs?null:((S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null));
+    const reqBody={ profile:S.activeProfile||'default' };
+    if(explicitWs) reqBody.workspace=explicitWs;
+    else if(hasProjectTarget) reqBody.fallback_workspace=fallbackWs;
+    else reqBody.workspace=fallbackWs;
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
@@ -1437,35 +1475,17 @@ async function newSession(flash, options={}){
       newModelState=_readPersistedModelState();
     }
     if(newModelState&&newModelState.model){
+      // Keep #2518's provider fast path even when project-targeted chats let
+      // the server pick project-default vs inherited workspace.
       reqBody.model=newModelState.model;
-      // Cold-start / picker-without-provider fallback: when the dropdown option's
-      // data-provider is empty/'default' or the persisted state predates provider
-      // tracking, newModelState.model_provider is null. POST /api/session/new's
-      // fast path in _resolve_compatible_session_model_state requires both model
-      // and a truthy model_provider; without it, the request falls into
-      // get_available_models() and a 3-4s cold catalog rebuild. window._activeProvider
-      // is hydrated at boot (ui.js) and on config refresh (panels.js), so it's a
-      // safe default that matches the user's configured route. S.session.model_provider
-      // is the previous-session fallback when the dropdown is unhydrated.
-      //
-      // Guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
-      // @provider:model string already carries a foreign provider namespace from
-      // a previous session that was served by a different backend. Attaching
-      // the current _activeProvider to such a slug would let the server's fast
-      // path pass it through without consulting the catalog, silently
-      // re-pointing the new session at the wrong backend (the very case the
-      // slow-path normalization in _resolve_compatible_session_model_state is
-      // designed to fix — see routes.py docstring around line 1891-1894). For
-      // those models we leave the wire shape with model_provider=null so the
-      // slow path's cross-provider repair still runs. Closes the open
-      // follow-up from #2518.
+      // newModelState.model_provider wins; fallback order stays
+      // window._activeProvider, then S.session&&S.session.model_provider, to
+      // keep /api/session/new on the fast path from #2518.
+      // Slash and @-qualified models keep model_provider null so the server's
+      // slow-path repair still owns foreign-provider normalization.
       const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
-      // Second guard (#3410-followup): even a bare model can carry a known
-      // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
-      // family maps to a DIFFERENT provider than the fallback we'd attach, the
-      // server fast path passes the pair through verbatim (no validation) and
-      // silently routes to the wrong backend — so leave model_provider=null and
-      // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
+      // #3410 follow-up: bare models whose family disagrees with the fallback
+      // provider also stay null so the server repairs them.
       const _fallbackProvider=_bareModel
         ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
         : '';
@@ -3883,6 +3903,7 @@ let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FI
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
+let _profileSwitchCallerOwnsNewSession = false;  // true while project-targeted newSession() owns the post-switch replacement
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested
@@ -9264,6 +9285,63 @@ function _startProjectRename(proj, chip){
   setTimeout(()=>{inp.focus();inp.select();},10);
 }
 
+function _projectWorkspaceDisplayKey(path){
+  return String(path||'').trim().replace(/\\/g,'/').replace(/\/+$/,'');
+}
+
+function _showProjectDefaultWorkspacePicker(proj, wsList, anchorEvent){
+  document.querySelectorAll('.project-ws-picker').forEach(el=>el.remove());
+  const pick=document.createElement('div');
+  pick.className='project-ws-picker';
+  pick.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  const vw=window.innerWidth||document.documentElement.clientWidth||0;
+  const vh=window.innerHeight||document.documentElement.clientHeight||0;
+  const x=Math.max(8,Math.min(anchorEvent.clientX||8,(vw||348)-348));
+  const y=Math.max(8,Math.min(anchorEvent.clientY||8,(vh||316)-316));
+  pick.style.left=x+'px';
+  pick.style.top=y+'px';
+  const makeRow=(label,ws,danger)=>{
+    const row=document.createElement('div');
+    const isCurrent=_projectWorkspaceDisplayKey(ws)===_projectWorkspaceDisplayKey(proj.default_workspace);
+    row.textContent=label+(isCurrent?' ✓':'');
+    row.style.cssText='padding:7px 14px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'+(danger?'color:var(--error,#e94560);':'color:var(--text);');
+    row.onmouseenter=()=>row.style.background='var(--hover-bg)';
+    row.onmouseleave=()=>row.style.background='';
+    row.onclick=async()=>{
+      pick.remove();
+      document.removeEventListener('click',dismiss);
+      try{
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:proj.color||null,default_workspace:ws||null})});
+        await renderSessionList();
+        showToast(ws?'Default workspace set':'Default workspace cleared');
+      }catch(err){
+        showToast('Failed: '+(err.message||err));
+      }
+    };
+    return row;
+  };
+  if(proj.default_workspace){
+    pick.appendChild(makeRow('Clear default',null,true));
+    const sep=document.createElement('hr');
+    sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+    pick.appendChild(sep);
+  }
+  if(!wsList||!wsList.length){
+    const none=document.createElement('div');
+    none.textContent='No saved workspaces';
+    none.style.cssText='padding:7px 14px;font-size:12px;color:var(--text);';
+    pick.appendChild(none);
+  }else{
+    wsList.forEach(ws=>{
+      const label=typeof ws==='string'?ws:(ws.path||ws.name||String(ws));
+      pick.appendChild(makeRow(label,label,false));
+    });
+  }
+  document.body.appendChild(pick);
+  const dismiss=()=>{pick.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
 function _showProjectContextMenu(e, proj, chip){
   document.querySelectorAll('.project-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
@@ -9305,6 +9383,23 @@ function _showProjectContextMenu(e, proj, chip){
     colorRow.appendChild(dot);
   });
   menu.appendChild(colorRow);
+
+  // Default workspace
+  const wsItem=document.createElement('div');
+  wsItem.textContent='Default workspace'+(proj.default_workspace?' ✓':'');
+  wsItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  wsItem.onmouseenter=()=>wsItem.style.background='var(--hover-bg)';
+  wsItem.onmouseleave=()=>wsItem.style.background='';
+  wsItem.onclick=async(wsEv)=>{
+    menu.remove();
+    try{
+      const data=await api('/api/workspaces',{method:'GET'});
+      _showProjectDefaultWorkspacePicker(proj,(data&&data.workspaces)||[],wsEv||e);
+    }catch(err){
+      showToast('Failed to load workspaces: '+(err.message||err));
+    }
+  };
+  menu.appendChild(wsItem);
 
   // Divider + Delete
   const sep=document.createElement('hr');

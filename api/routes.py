@@ -13191,7 +13191,14 @@ def handle_get(handler, parsed) -> bool:
         isolated_profile_mode = _is_isolated_profile_mode()
         all_profiles = _all_profiles_enabled(parsed)
         if all_profiles:
-            scoped = all_projects
+            scoped = []
+            for project in all_projects:
+                if _profiles_match(project.get("profile"), active_profile):
+                    scoped.append(project)
+                    continue
+                foreign_project = dict(project)
+                foreign_project.pop("default_workspace", None)
+                scoped.append(foreign_project)
             other_profile_count = 0
         else:
             scoped = [p for p in all_projects
@@ -13899,6 +13906,31 @@ def _validate_session_toolsets_shape(toolsets):
         raise ValueError("each toolset must be a non-empty string")
     return toolsets
 
+
+def _get_visible_project_for_session(project_id: str, active_profile: str):
+    """Return the project visible to *active_profile*, or None when it is foreign or missing."""
+    if not project_id:
+        return None
+    for proj in load_projects():
+        if proj.get("project_id") == project_id and _profiles_match(proj.get("profile"), active_profile):
+            return proj
+    return None
+
+
+def _get_project_default_workspace_for_session(project_id: str, active_profile: str) -> "str | None":
+    """Return the stored default_workspace for *project_id* visible to *active_profile*, or None."""
+    proj = _get_visible_project_for_session(project_id, active_profile)
+    if not proj:
+        return None
+    dw = proj.get("default_workspace")
+    if not dw:
+        return None
+    try:
+        return str(resolve_trusted_workspace(dw))
+    except (TypeError, ValueError):
+        return None
+
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -14228,10 +14260,31 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        _body_project_id = body.get("project_id") or None
+        _request_profile = body.get("profile") or get_active_profile_name()
+        _visible_project = _get_visible_project_for_session(_body_project_id, _request_profile)
+        if not _visible_project:
+            _body_project_id = None
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        fallback_workspace = None
+        # Use the project's stored default workspace when no explicit workspace was supplied.
+        if not workspace and _body_project_id:
+            _proj_ws = _get_project_default_workspace_for_session(
+                _body_project_id, _request_profile
+            )
+            if _proj_ws:
+                workspace = _proj_ws
+        # Validate the lower-priority fallback only when it can still be selected.
+        if not workspace and body.get("fallback_workspace"):
+            try:
+                fallback_workspace = str(resolve_trusted_workspace(body["fallback_workspace"]))
+            except (TypeError, ValueError) as e:
+                return bad(handler, str(e))
+        if not workspace and fallback_workspace:
+            workspace = fallback_workspace
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always
@@ -14343,7 +14396,7 @@ def handle_post(handler, parsed) -> bool:
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
-            project_id=body.get("project_id") or None,
+            project_id=_body_project_id,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
@@ -16128,6 +16181,13 @@ def handle_post(handler, parsed) -> bool:
             "profile": _requested_profile or get_active_profile_name() or 'default',
             "created_at": time.time(),
         }
+        if "default_workspace" in body:
+            _dw_raw = body.get("default_workspace")
+            if _dw_raw:
+                try:
+                    proj["default_workspace"] = str(resolve_trusted_workspace(_dw_raw))
+                except (TypeError, ValueError) as _e:
+                    return bad(handler, f"invalid default_workspace: {_e}")
         projects.append(proj)
         save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
@@ -16155,6 +16215,15 @@ def handle_post(handler, parsed) -> bool:
             if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
                 return bad(handler, "Invalid color format")
             proj["color"] = color
+        if "default_workspace" in body:
+            _dw_raw = body.get("default_workspace")
+            if _dw_raw:
+                try:
+                    proj["default_workspace"] = str(resolve_trusted_workspace(_dw_raw))
+                except (TypeError, ValueError) as _e:
+                    return bad(handler, f"invalid default_workspace: {_e}")
+            else:
+                proj.pop("default_workspace", None)
         save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
