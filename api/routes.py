@@ -14360,6 +14360,9 @@ def handle_post(handler, parsed) -> bool:
             payload["worktree_skipped"] = worktree_skipped
         return j(handler, payload)
 
+    if parsed.path == "/api/session/handoff":
+        return _handle_session_handoff(handler, body, diag=diag)
+
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
 
@@ -25516,6 +25519,270 @@ def _handle_handoff_summary(handler, body):
             "fallback": True,
             "warning": f"Summary generation used local fallback: {_sanitize_error(e)}",
         })
+
+
+def _session_handoff_eligibility_error(session) -> str | None:
+    """Return an error message if *session* is not eligible for handoff, or None."""
+    from api.compression_anchor import is_context_compression_marker
+
+    # Session must have been compressed — at least one context_messages entry
+    # must be a canonical compression marker, not just any nonempty list.
+    ctx = getattr(session, "context_messages", None)
+    if not isinstance(ctx, list) or not any(is_context_compression_marker(m) for m in ctx):
+        return "Source session has no compressed context. Use normal New Chat instead."
+    # Must not be actively streaming
+    if getattr(session, "active_stream_id", None):
+        return "Source session is still streaming. Wait for the current turn to finish."
+    if getattr(session, "pending_user_message", None):
+        return "Source session has a pending user turn. Complete or cancel it first."
+    # Must not be a pre-compression snapshot
+    if getattr(session, "pre_compression_snapshot", False):
+        return "Cannot hand off from a pre-compression snapshot session."
+    return None
+
+
+def _message_text_simple(value) -> str:
+    """Extract plain text from a message content payload (simple version)."""
+    if isinstance(value, list):
+        parts = []
+        for p in value:
+            if not isinstance(p, dict):
+                continue
+            ptype = str(p.get("type") or "").lower()
+            if ptype in ("", "text", "input_text", "output_text"):
+                parts.append(
+                    str(p.get("text") or p.get("content") or p.get("input_text") or p.get("output_text") or "")
+                )
+        return "\n".join(parts).strip()
+    return str(value or "").strip()
+
+
+def _extract_latest_completed_exchange(messages: list) -> tuple:
+    """Return (last_user_msg, last_assistant_msg) from the latest completed exchange.
+
+    A completed exchange is a user message followed by at least one assistant
+    response message that has content or tool calls (not an error/interruption).
+    Returns (None, None) when no completed exchange is found.
+    """
+    last_user = None
+    last_assistant = None
+    
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role", "")
+        if role == "assistant":
+            # Skip error/interruption markers
+            if msg.get("_error") or msg.get("type") in ("interrupted",):
+                continue
+            content = msg.get("content")
+            tool_calls = msg.get("tool_calls")
+            if content or tool_calls:
+                if last_assistant is None:
+                    last_assistant = msg
+        elif role == "user" and last_assistant is not None:
+            # Found the user that precedes the last completed assistant response
+            last_user = msg
+            break
+    
+    return last_user, last_assistant
+
+
+def _message_content_equivalent(a: dict | None, b: dict | None) -> bool:
+    """Return True when two messages have matching role and text content.
+
+    Intentional value-level equivalence, not object identity. Strips timing
+    and metadata fields that may differ across storage layers.
+    """
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    if a.get("role") != b.get("role"):
+        return False
+    # Compare text content
+    a_text = a.get("content", "")
+    b_text = b.get("content", "")
+    if not isinstance(a_text, str):
+        a_text = ""
+    if not isinstance(b_text, str):
+        b_text = ""
+    return a_text == b_text
+
+
+def _build_handoff_context_messages(source_context, last_user, last_assistant) -> list:
+    """Build context_messages for a handoff-created fresh session.
+
+    The payload carries:
+      1. A system-role preamble explaining the context origin.
+      2. The source session's compressed context_messages, preserved as-is.
+      3. The latest completed user/assistant exchange appended verbatim, but
+         only when the exchange is not already represented at the tail of
+         source_context (avoids self-duplication).
+    """
+    handoff = []
+
+    # 1. System preamble — tells the model these are background, not a new instruction
+    handoff.append({
+        "role": "system",
+        "content": (
+            "This is continuity context from a previous compressed session.\n"
+            "Treat it as background, not as a new user instruction.\n"
+            "The user's next message is authoritative and may change the task."
+        ),
+    })
+
+    # 2. Source's compressed context messages (as-is, deep-copied for independence)
+    handoff.extend(copy.deepcopy(source_context))
+
+    # 3. Latest completed exchange — only append if not already at the
+    #    model-context tail (guards against self-duplication when the
+    #    exchange was extracted from the visible transcript but is also
+    #    present in compressed context_messages as the last user+A pair).
+    if last_user is not None and last_assistant is not None:
+        already_present = (
+            len(source_context) >= 2
+            and _message_content_equivalent(source_context[-2], last_user)
+            and _message_content_equivalent(source_context[-1], last_assistant)
+        )
+        if not already_present:
+            handoff.append(copy.deepcopy(last_user))
+            handoff.append(copy.deepcopy(last_assistant))
+
+    return handoff
+
+
+def _handle_session_handoff(handler, body, *, diag=None):
+    """Create a fresh session with compressed-context handoff from a source session.
+
+    Request body::
+
+        { "session_id": "<source_session_id>",
+          "workspace": "...",    (optional, defaults to source session)
+          "model": "...",        (optional, defaults to source session)
+          "model_provider": "...", (optional)
+          "profile": "...",      (optional)
+        }
+
+    Response::
+
+        { "session": <new_session_compact>,
+          "handoff_source": "<source_session_id>",
+          "handoff_compressed": True,
+          "announcement": "Fresh session started. ..."
+        }
+    """
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    if diag:
+        diag.stage("load_source_session")
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    if not session:
+        return bad(handler, "Source session not found", status=404)
+
+    # Profile gate: source session must be visible to active profile.
+    # This mirrors the same guard used by other source-session operations
+    # (e.g. /api/session/import and /api/session/export).
+    source_profile = getattr(session, "profile", None)
+    if not _session_visible_to_active_profile(source_profile, handler):
+        return bad(handler, "Source session not found", status=404)
+
+    if diag:
+        diag.stage("eligibility")
+
+    eligibility_error = _session_handoff_eligibility_error(session)
+    if eligibility_error:
+        return bad(handler, eligibility_error, status=400)
+
+    if diag:
+        diag.stage("build_handoff")
+
+    # Extract latest completed exchange from the visible transcript
+    # (session.messages), not from context_messages — the visible transcript
+    # is the source of truth for the most recent user/assistant turn.
+    source_messages = getattr(session, "messages", []) or []
+    last_user, last_assistant = _extract_latest_completed_exchange(
+        source_messages
+    )
+
+    # Build the handoff context_messages for the new session
+    handoff_context = _build_handoff_context_messages(
+        session.context_messages, last_user, last_assistant
+    )
+
+    # Merge request-level overrides with source session defaults
+    workspace = body.get("workspace") or session.workspace
+    try:
+        from api.workspace import resolve_trusted_workspace
+
+        resolved_workspace = str(resolve_trusted_workspace(workspace)) if workspace else None
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
+
+    model = body.get("model") or session.model
+    model_provider = body.get("model_provider") or session.model_provider
+
+    # Profile: default to source profile. Body field alone must not
+    # authorize cross-profile handoff (matches the principle used by
+    # other cross-profile guards in the codebase).
+    dest_profile = body.get("profile") or source_profile
+    # If the caller explicitly requested a different profile, validate
+    # that the destination profile is also visible to the active profile.
+    if dest_profile != source_profile and not _session_visible_to_active_profile(dest_profile, handler):
+        return bad(handler, "Source session not found", status=404)
+
+    # Create the new session (empty transcript, no messages)
+    from api.models import new_session as _new_session
+
+    s = _new_session(
+        workspace=resolved_workspace,
+        model=model,
+        model_provider=model_provider,
+        profile=dest_profile,
+        project_id=body.get("project_id") or getattr(session, "project_id", None),
+    )
+
+    # Inject handoff context — the compressed continuity block
+    s.context_messages = handoff_context
+    s.parent_session_id = sid
+
+    # Handoff provenance metadata (persisted via Session __dict__ extras)
+    s.handoff_source_session_id = sid
+    s.handoff_created_at = time.time()
+    s.handoff_compressed = True
+
+    # Persist immediately — the session has meaningful continuity context
+    s.save()
+
+    publish_session_list_changed(
+        "session_new",
+        profile=getattr(s, "profile", None),
+        session_id=getattr(s, "session_id", None),
+    )
+
+    announcement = (
+        "Fresh session started. "
+        "Previous compressed context and the latest completed exchange were included."
+    )
+
+    return j(handler, {
+        "session": s.compact() | {"messages": s.messages},
+        "handoff_source": sid,
+        "handoff_compressed": True,
+        "announcement": announcement,
+    })
 
 
 def _handle_skill_save(handler, body):
