@@ -1671,6 +1671,9 @@ async function loadSession(sid){
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
+  const _internalBranchHandoff=!!opts.internalBranchHandoff;
+  if(typeof _branchHandoffInProgress!=='undefined'&&_branchHandoffInProgress&&!_internalBranchHandoff) return;
+  const _throwOnMessageLoadFailure=!!opts.throwOnMessageLoadFailure;
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
@@ -2232,6 +2235,7 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if (_isCurrentLoad()) _loadingSessionId = null;
+      if(_throwOnMessageLoadFailure) throw new Error('Failed to load conversation messages');
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
@@ -2497,12 +2501,10 @@ function _isReadOnlySession(session) {
 
 function _isBranchableReadOnlySession(session) {
   if (!_isReadOnlySession(session)) return false;
-  const sources = [
-    session && session.source_tag,
-    session && session.raw_source,
-    session && session.source,
-  ].map(v => String(v || '').trim().toLowerCase());
-  return sources.includes('cron');
+  const sourceKind = String(
+    (session && (session.source_tag || session.raw_source || session.source)) || ''
+  ).trim().toLowerCase();
+  return sourceKind === 'cron';
 }
 
 function _sourceKeyForSession(session) {

@@ -26,6 +26,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = ROOT / "static" / "commands.js"
 SESSIONS_JS = ROOT / "static" / "sessions.js"
+MESSAGES_JS = ROOT / "static" / "messages.js"
 NODE = shutil.which("node")
 
 
@@ -124,6 +125,105 @@ def _commands_harness(body: str) -> str:
             "  console.error(err && err.stack ? err.stack : String(err));",
             "  process.exit(1);",
             "});",
+        ])
+    )
+
+
+def _send_harness(body: str) -> str:
+    source = MESSAGES_JS.read_text(encoding="utf-8")
+    commands_source = COMMANDS_JS.read_text(encoding="utf-8")
+    session_source = SESSIONS_JS.read_text(encoding="utf-8")
+    send = _extract_async_function(source, "send")
+    cmd_branch = _extract_async_function(commands_source, "cmdBranch")
+    is_read_only = _extract_function(session_source, "_isReadOnlySession")
+    is_branchable_read_only = _extract_function(session_source, "_isBranchableReadOnlySession")
+    real_load_session = _extract_async_function(session_source, "loadSession").replace(
+        "async function loadSession(",
+        "async function _realLoadSession(",
+        1,
+    )
+    return _run_node(
+        "\n".join([
+            "const calls = [];",
+            "const toasts = [];",
+            "const loadedSessions = [];",
+            "const restoreCalls = [];",
+            "const draftSaveCalls = [];",
+            "let S = null;",
+            "const composer = { value: 'What changed since yesterday?', dispatchEvent() {} };",
+            "const document = { querySelector: () => null };",
+            "const window = { _defaultMessageMode: 'queue', _defaultModel: '', _activeProvider: null };",
+            "const $ = (id) => id === 'msg' ? composer : null;",
+            "const t = (key) => ({ branch_forked: 'Forked into new session', branch_failed: 'Fork failed: ' }[key] || key);",
+            "const showToast = (...args) => toasts.push(args);",
+            "const renderTray = () => {};",
+            "const autoResize = () => {};",
+            "const hideCmdDropdown = () => {};",
+            "const renderMessages = () => {};",
+            "const updateSendBtn = () => {};",
+            "const renderSessionList = async () => {};",
+            "const _ensureAllMessagesLoaded = async () => {};",
+            "const _clearComposerDraft = () => Promise.resolve();",
+            "const _restoreComposerDraftAfterFailedSend = (text, files, sid) => { restoreCalls.push({ text, files: [...files], sid }); composer.value = text; S.pendingFiles = [...files]; };",
+            "const _flushSelectionBlocksToComposer = () => {};",
+            "const _composerTextWithPendingSelections = () => composer.value;",
+            "const _pendingSelections = [];",
+            "const _clearPendingSelections = () => {};",
+            "const _saveComposerDraftNow = (sid, text, files) => { draftSaveCalls.push({ sid, text, files: [...files] }); return Promise.resolve(); };",
+            "const parseCommand = (text) => { const [name, ...rest] = text.slice(1).trim().split(/\\s+/); return { name, args: rest.join(' ') }; };",
+            "const shouldInterceptCompressionRecoveryContinuation = () => false;",
+            "const isCompressionUiRunning = () => false;",
+            "const _clearStaleBusyStateBeforeSend = () => false;",
+            "const _chatPayloadModelState = () => ({ model: S.session.model || 'default-model', model_provider: S.session.model_provider || null });",
+            "const uploadPendingFiles = async ({ files }) => files.map(file => ({ name: file.name, path: file.name }));",
+            "const setBusy = (busy) => { S.busy = busy; };",
+            "let api = async (url, opts) => { const body = JSON.parse(opts.body); calls.push({ url, body }); if(url === '/api/session/branch') return { session_id: 'forked-session' }; return { stream_id: 'stream-1' }; };",
+            "let _branchHandoffInProgress = false;",
+            real_load_session,
+            "let useRealLoadSession = false;",
+            "let loadSession = async (sid, opts = {}) => { if(opts.internalBranchHandoff || !useRealLoadSession){ loadedSessions.push(sid); S.session = { session_id: sid, workspace: '/tmp', model: 'child-default', model_provider: 'child-provider', profile: 'child-profile' }; return; } return await _realLoadSession(sid, opts); };",
+            "const ensureLiveWorklogShell = () => {};",
+            "const clearLiveToolCards = () => {};",
+            "const appendThinking = () => {};",
+            "const upsertActiveSessionForLocalTurn = () => {};",
+            "const renderSessionListFromCache = () => {};",
+            "const startApprovalPolling = () => {};",
+            "const startClarifyPolling = () => {};",
+            "const _fetchYoloState = () => {};",
+            "const applySessionTitleUpdate = () => {};",
+            "const saveInflightState = () => {};",
+            "const _runOptionalPreStartUiStep = (_label, fn) => { try { fn(); } catch (_) {} };",
+            "const _runOptionalPostStartUiStep = (_label, fn) => { try { fn(); } catch (_) {} };",
+            "const _readPendingSessionModel = () => null;",
+            "const _clearPendingSessionModel = () => {};",
+            "let _forcedSkillDirectivePending = null;",
+            "const _clearComposerAfterQueuedSelectionSend = () => { composer.value = ''; };",
+            "const _defaultMessageMode = 'queue';",
+            "const COMMANDS = [];",
+            "const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set();",
+            "const INFLIGHT = {};",
+            "let _sendInProgress = false;",
+            "let _sendInProgressSid = null;",
+            "const cancelStream = async () => {};",
+            "const stopApprovalPolling = () => {};",
+            "const stopClarifyPolling = () => {};",
+            "const hideApprovalCard = () => {};",
+            "const hideClarifyCard = () => {};",
+            "const removeThinking = () => {};",
+            "const clearOptimisticSessionStreaming = () => {};",
+            "const attachLiveStream = () => {};",
+            "const queueSessionMessage = () => {};",
+            "const updateQueueBadge = () => {};",
+            "const setComposerStatus = () => {};",
+            "const _isOffline = false;",
+            is_read_only,
+            is_branchable_read_only,
+            cmd_branch,
+            send,
+            "(async () => {",
+            "S = { session: { session_id: 'daily-summary', raw_source: 'cron', read_only: true, model: 'chosen-model', model_provider: 'chosen-provider', workspace: '/tmp', profile: 'chosen-profile' }, busy: false, pendingFiles: [{ name: 'notes.txt' }], messages: [], activeProfile: 'chosen-profile', toolCalls: [] };",
+            body,
+            "})().catch((err) => { console.error(err && err.stack ? err.stack : String(err)); process.exit(1); });",
         ])
     )
 
@@ -572,9 +672,8 @@ def test_branchable_read_only_helper_accepts_cron_sources():
     """Read-only cron sessions should be forkable follow-up sources."""
     src = _read('static/sessions.js')
     assert "function _isBranchableReadOnlySession(session)" in src
-    assert "session && session.source_tag" in src
-    assert "session && session.raw_source" in src
-    assert "sources.includes('cron')" in src
+    assert "session.source_tag || session.raw_source || session.source" in src
+    assert "sourceKind === 'cron'" in src
     assert "sid.startsWith('cron_')" not in src
     assert "sid.startsWith('cron-')" not in src
 
@@ -678,6 +777,256 @@ def test_forkFromMessage_preserves_absolute_keep_count_for_writable_sessions():
     assert payload["ensureCalls"] == 2, "writable forkFromMessage should preserve both message-load calls"
     assert payload["loadedSessions"] == ["forked-session"]
     assert payload["renderCalls"] == 1
+
+
+def test_send_branches_read_only_cron_session_and_continues_original_message():
+    result = _send_harness(
+        "await send(); console.log(JSON.stringify({ calls, loadedSessions, toasts, session: S.session, composer: composer.value }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch", "/api/chat/start"]
+    assert payload["loadedSessions"] == ["forked-session"]
+    assert payload["calls"][1]["body"]["session_id"] == "forked-session"
+    assert payload["calls"][1]["body"]["message"].startswith("What changed since yesterday?")
+    assert payload["toasts"][0][0] == "Forked into new session"
+
+
+def test_send_branch_command_on_read_only_cron_session_branches_only_once():
+    result = _send_harness(
+        "composer.value = '/branch'; "
+        "S.pendingFiles = []; "
+        "COMMANDS.push({ name: 'branch', fn: cmdBranch, noEcho: true }); "
+        "await send(); "
+        "console.log(JSON.stringify({ calls, loadedSessions, toasts, session: S.session, composer: composer.value }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch"]
+    assert payload["loadedSessions"] == ["forked-session"]
+    assert payload["session"]["session_id"] == "forked-session"
+    assert payload["composer"] == ""
+
+
+def test_send_non_branch_slash_command_on_read_only_cron_session_stays_blocked():
+    result = _send_harness(
+        "composer.value = '/help'; "
+        "S.pendingFiles = []; "
+        "COMMANDS.push({ name: 'help', fn: () => {}, noEcho: false }); "
+        "await send(); "
+        "console.log(JSON.stringify({ calls, toasts, messages: S.messages, composer: composer.value }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == []
+    assert payload["toasts"][0][0] == "Read-only imported sessions cannot be modified."
+    assert payload["messages"] == []
+    assert payload["composer"] == "/help"
+
+
+def test_send_busy_non_branch_slash_command_on_read_only_cron_session_stays_blocked():
+    result = _send_harness(
+        "composer.value = '/queue hold this'; "
+        "S.busy = true; "
+        "S.activeStreamId = 'stream-1'; "
+        "const busyCalls = []; "
+        "COMMANDS.push({ name: 'queue', fn: (args) => { busyCalls.push(args); }, noEcho: true }); "
+        "await send(); "
+        "console.log(JSON.stringify({ calls, busyCalls, toasts, composer: composer.value }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == []
+    assert payload["busyCalls"] == []
+    assert payload["toasts"][0][0] == "Read-only imported sessions cannot be modified."
+    assert payload["composer"] == "/queue hold this"
+
+
+def test_send_requests_strict_fork_load_failure_from_load_session():
+    result = _send_harness(
+        "let loadOptions = null; "
+        "loadSession = async (sid, opts) => { "
+        "  loadOptions = opts; "
+        "  loadedSessions.push(sid); "
+        "  S.session = { session_id: sid, workspace: '/tmp', model: 'child-default', model_provider: 'child-provider', profile: 'child-profile' }; "
+        "}; "
+        "await send(); "
+        "console.log(JSON.stringify({ loadOptions, loadedSessions, calls }));"
+    )
+    payload = json.loads(result)
+    assert payload["loadOptions"] == {"throwOnMessageLoadFailure": True, "internalBranchHandoff": True}
+    assert payload["loadedSessions"] == ["forked-session"]
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch", "/api/chat/start"]
+
+
+def test_send_non_cron_read_only_session_stays_blocked():
+    result = _send_harness(
+        "S.session.raw_source = 'messaging'; await send(); console.log(JSON.stringify({ calls, toasts, composer: composer.value }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == []
+    assert payload["toasts"][0][0] == "Read-only imported sessions cannot be modified."
+    assert payload["composer"] == "What changed since yesterday?"
+
+
+def test_send_cron_prefixed_non_cron_read_only_session_stays_blocked():
+    result = _send_harness(
+        "S.session.session_id = 'cron_spoof_messaging'; S.session.raw_source = 'messaging'; await send(); console.log(JSON.stringify({ calls, toasts }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == []
+    assert payload["toasts"][0][0] == "Read-only imported sessions cannot be modified."
+
+
+def test_send_conflicting_source_precedence_stays_blocked():
+    result = _send_harness(
+        "S.session.source_tag = 'messaging'; S.session.raw_source = 'cron'; await send(); console.log(JSON.stringify({ calls, toasts }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == []
+    assert payload["toasts"][0][0] == "Read-only imported sessions cannot be modified."
+
+
+def test_send_preserves_files_model_provider_and_profile_across_branch_handoff():
+    result = _send_harness(
+        "await send(); console.log(JSON.stringify({ start: calls.find(call => call.url === '/api/chat/start'), session: S.session, files: S.pendingFiles }));"
+    )
+    payload = json.loads(result)
+    start = payload["start"]["body"]
+    assert [attachment["name"] for attachment in start["attachments"]] == ["notes.txt"]
+    assert start["model"] == "chosen-model"
+    assert start["model_provider"] == "chosen-provider"
+    assert start["profile"] == "chosen-profile"
+    assert payload["session"]["model"] == "chosen-model"
+    assert payload["session"]["model_provider"] == "chosen-provider"
+    assert payload["session"]["profile"] == "chosen-profile"
+
+
+def test_send_clears_source_draft_before_branch_load_observes_it():
+    result = _send_harness(
+        "let branchLoadSnapshot = null; "
+        "loadSession = async (sid) => { "
+        "  branchLoadSnapshot = { sid, composer: composer.value, files: [...S.pendingFiles] }; "
+        "  loadedSessions.push(sid); "
+        "  S.session = { session_id: sid, workspace: '/tmp', model: 'child-default', model_provider: 'child-provider', profile: 'child-profile' }; "
+        "}; "
+        "await send(); "
+        "console.log(JSON.stringify({ branchLoadSnapshot, start: calls.find(call => call.url === '/api/chat/start'), composer: composer.value, files: S.pendingFiles }));"
+    )
+    payload = json.loads(result)
+    assert payload["branchLoadSnapshot"] == {
+        "sid": "forked-session",
+        "composer": "",
+        "files": [],
+    }
+    assert payload["start"]["body"]["message"].startswith("What changed since yesterday?")
+    assert [attachment["name"] for attachment in payload["start"]["body"]["attachments"]] == ["notes.txt"]
+    assert payload["composer"] == ""
+    assert payload["files"] == []
+
+
+def test_send_restores_payload_when_branch_response_lacks_session_id():
+    result = _send_harness(
+        "api = async (url, opts) => { const body = JSON.parse(opts.body); calls.push({ url, body }); if(url === '/api/session/branch') return {}; return { stream_id: 'stream-1' }; }; await send(); console.log(JSON.stringify({ calls, toasts, composer: composer.value, files: S.pendingFiles }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch"]
+    assert payload["toasts"][0][0].startswith("Fork failed: ")
+    assert payload["composer"] == "What changed since yesterday?"
+    assert payload["files"] == [{"name": "notes.txt"}]
+
+
+def test_send_restores_payload_when_fork_load_fails():
+    result = _send_harness(
+        "loadSession = async () => { throw new Error('load failed'); }; await send(); console.log(JSON.stringify({ calls, toasts, composer: composer.value, files: S.pendingFiles }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch"]
+    assert payload["toasts"][0][0] == "Fork failed: load failed"
+    assert payload["composer"] == "What changed since yesterday?"
+    assert payload["files"] == [{"name": "notes.txt"}]
+
+
+def test_send_restores_payload_to_visible_child_when_fork_load_fails_after_activation():
+    result = _send_harness(
+        "loadSession = async (sid) => { loadedSessions.push(sid); S.session = { session_id: sid, workspace: '/tmp', model: 'child-default', model_provider: 'child-provider', profile: 'child-profile' }; throw new Error('Failed to load conversation messages'); }; "
+        "await send(); "
+        "console.log(JSON.stringify({ calls, toasts, composer: composer.value, files: S.pendingFiles, restoreCalls, session: S.session }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch"]
+    assert payload["toasts"][0][0] == "Fork failed: Failed to load conversation messages"
+    assert payload["composer"] == "What changed since yesterday?"
+    assert payload["files"] == [{"name": "notes.txt"}]
+    assert payload["restoreCalls"] == [{
+        "text": "What changed since yesterday?",
+        "files": [{"name": "notes.txt"}],
+        "sid": "forked-session",
+    }]
+    assert payload["session"]["session_id"] == "forked-session"
+
+
+def test_send_blocks_unrelated_session_load_during_branch_handoff():
+    result = _send_harness(
+        "let resolveBranch; const loadAttempts = []; "
+        "useRealLoadSession = true; "
+        "const originalLoadSession = loadSession; "
+        "loadSession = async (sid, opts = {}) => { loadAttempts.push({ sid, opts }); return await originalLoadSession(sid, opts); }; "
+        "api = async (url, opts) => { const body = JSON.parse(opts.body); calls.push({ url, body }); "
+        "  if(url === '/api/session/branch') return await new Promise(resolve => { resolveBranch = resolve; }); "
+        "  return { stream_id: 'stream-1' }; "
+        "}; "
+        "const first = send(); await Promise.resolve(); await loadSession('manual-session'); "
+        "const during = { session: S.session.session_id, composer: composer.value, files: [...S.pendingFiles], draftSaveCalls: [...draftSaveCalls], loadedSessions: [...loadedSessions] }; "
+        "resolveBranch({ session_id: 'forked-session' }); await first; "
+        "console.log(JSON.stringify({ calls, loadAttempts, during, session: S.session, loadedSessions, draftSaveCalls }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch", "/api/chat/start"]
+    assert [attempt["sid"] for attempt in payload["loadAttempts"]] == ["manual-session", "forked-session"]
+    assert payload["loadAttempts"][0]["opts"] == {}
+    assert payload["loadAttempts"][1]["opts"] == {
+        "throwOnMessageLoadFailure": True,
+        "internalBranchHandoff": True,
+    }
+    assert payload["during"] == {
+        "session": "daily-summary",
+        "composer": "What changed since yesterday?",
+        "files": [{"name": "notes.txt"}],
+        "draftSaveCalls": [],
+        "loadedSessions": [],
+    }
+    assert payload["draftSaveCalls"] == []
+    assert payload["loadedSessions"] == ["forked-session"]
+    assert payload["session"]["session_id"] == "forked-session"
+
+
+def test_send_restores_payload_when_fork_load_does_not_activate_child():
+    result = _send_harness(
+        "loadSession = async () => {}; await send(); console.log(JSON.stringify({ calls, toasts, composer: composer.value, files: S.pendingFiles }));"
+    )
+    payload = json.loads(result)
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch"]
+    assert payload["toasts"][0][0] == "Fork failed: Fork load did not activate the writable child."
+    assert payload["composer"] == "What changed since yesterday?"
+    assert payload["files"] == [{"name": "notes.txt"}]
+
+
+def test_send_ignores_second_submit_during_branch_handoff():
+    result = _send_harness(
+        "let resolveBranch; api = async (url, opts) => { const body = JSON.parse(opts.body); calls.push({ url, body }); if(url === '/api/session/branch') return await new Promise(resolve => { resolveBranch = resolve; }); return { stream_id: 'stream-1' }; }; const first = send(); await Promise.resolve(); const branchDisabledDuringWait = composer.disabled && composer.readOnly; await send(); resolveBranch({ session_id: 'forked-session' }); await first; console.log(JSON.stringify({ calls, branchDisabledDuringWait, loadedSessions }));"
+    )
+    payload = json.loads(result)
+    assert payload["branchDisabledDuringWait"] is True
+    assert [call["url"] for call in payload["calls"]] == ["/api/session/branch", "/api/chat/start"]
+    assert payload["loadedSessions"] == ["forked-session"]
+
+
+def test_busy_read_only_cron_send_does_not_auto_branch():
+    result = _send_harness(
+        "S.busy = true; S.activeStreamId = 'stream-1'; await send(); console.log(JSON.stringify({ calls, toasts, composer: composer.value, queued: S.pendingFiles }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == []
+    assert payload["toasts"][0][0] == "Read-only imported sessions cannot be modified."
+    assert payload["composer"] == "What changed since yesterday?"
+    assert payload["queued"] == [{"name": "notes.txt"}]
 
 
 # ── Frontend: sidebar parent indicator ────────────────────────────────────────
