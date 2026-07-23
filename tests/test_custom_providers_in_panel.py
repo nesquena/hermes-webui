@@ -9,9 +9,22 @@ import os
 import sys
 import types
 
+import pytest
+
 import api.config as config
 import api.profiles as profiles
 from tests._pytest_port import BASE
+
+
+@pytest.fixture(autouse=True)
+def _isolate_in_memory_provider_config(monkeypatch):
+    """Keep direct ``config.cfg`` fixtures independent of loader/cache state."""
+    from api import providers
+
+    providers.invalidate_providers_cache()
+    monkeypatch.setattr(providers, "get_config", lambda: config.cfg)
+    yield
+    providers.invalidate_providers_cache()
 
 
 def _install_fake_hermes_cli(monkeypatch):
@@ -166,6 +179,35 @@ class TestCustomProvidersInGetProviders:
             assert len(cp) == 1
             assert cp[0]["has_key"] is False
             assert cp[0]["key_source"] == "none"
+        finally:
+            self._restore_cfg(old_cfg, old_mtime)
+
+    def test_custom_provider_key_from_credential_pool(self, monkeypatch, tmp_path):
+        """Custom providers still inherit keys stored by ``hermes auth add``."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(
+            config,
+            "_has_explicit_pool_credentials",
+            lambda provider_id: provider_id == "custom:pool-only",
+        )
+
+        old_cfg, old_mtime = self._setup_cfg([
+            {
+                "name": "pool-only",
+                "base_url": "https://pool.example/v1",
+                "api_key": "",
+            },
+        ])
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            provider = next(
+                item for item in result["providers"]
+                if item["id"] == "custom:pool-only"
+            )
+            assert provider["has_key"] is True
         finally:
             self._restore_cfg(old_cfg, old_mtime)
 

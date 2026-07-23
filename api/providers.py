@@ -10,10 +10,12 @@ from __future__ import annotations
 import atexit
 import base64
 import copy
+import contextvars
 import hashlib
 import json
 import logging
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -138,11 +140,225 @@ _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
 _providers_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _providers_cache_lock = threading.Lock()
+_providers_build_inflight: dict[tuple[Any, ...], "_ProvidersBuildInFlight"] = {}
 _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
+_providers_cache_generation = 0
+_PROVIDERS_MAX_WORKERS = 8
+_PROVIDERS_MAX_ACTIVE_TASKS = 64
+_PROVIDERS_BUILD_TIMEOUT_SECONDS = 15.0
+_PROVIDERS_FOLLOWER_TIMEOUT_SECONDS = 20.0
+_providers_runner_lock = threading.Lock()
+_providers_runner_condition = threading.Condition(_providers_runner_lock)
+_providers_active_runners: set["_ProvidersBuildRunner"] = set()
+_providers_active_tasks: dict[tuple[str, str], "_ProvidersBuildRunner"] = {}
+_providers_shutdown = threading.Event()
 
 # Per-home worker pool configuration for probe tail-latency reduction (#3787)
 _ACCOUNT_USAGE_WORKERS_PER_HOME = 2
+
+
+class _ProvidersBuildInFlight:
+    def __init__(self, generation: int):
+        self.generation = generation
+        self.event = threading.Event()
+        self.result: dict[str, Any] | None = None
+        self.exception: BaseException | None = None
+
+
+class _ProvidersBuildRunner:
+    """Own one bounded provider build without reusable non-daemon workers.
+
+    Provider plugins and live catalog callbacks do not all expose a terminating
+    timeout.  Running them in a process-wide ``ThreadPoolExecutor`` therefore
+    lets one stuck callback permanently consume reusable capacity and makes the
+    interpreter join that worker at exit.  Each cold build instead owns up to
+    ``_PROVIDERS_MAX_WORKERS`` daemon workers and returns at a hard build
+    deadline.  A process-wide task registry prevents a timed-out
+    ``(Hermes home, provider)`` callback from being started again while the old
+    invocation is still alive, and the active-task cap bounds total detached
+    work across profiles.
+
+    Python cannot terminate an arbitrary running thread safely.  Timed-out
+    callbacks are therefore quarantined rather than falsely reported as
+    cancelled; queued work is dropped and cannot start after ``stop()``.
+    """
+
+    def __init__(
+        self,
+        home_key: str,
+        jobs: list[tuple[str, str, contextvars.Context, tuple[Any, ...]]],
+        worker_fn,
+    ):
+        self.home_key = home_key
+        self._jobs: queue.Queue[
+            tuple[str, str, contextvars.Context, tuple[Any, ...]]
+        ] = queue.Queue()
+        for job in jobs:
+            self._jobs.put(job)
+        self._worker_fn = worker_fn
+        self._stop = threading.Event()
+        self._done = threading.Event()
+        self._wake = threading.Event()
+        self._result_lock = threading.Lock()
+        self._remaining = len(jobs)
+        self._results: dict[str, Any] = {}
+        self._deadline = 0.0
+        self.timed_out = False
+        self.skipped_quarantined = False
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        # Synchronize with task admission so no queued callback can be claimed
+        # after stop() returns.
+        with _providers_runner_condition:
+            _providers_runner_condition.notify_all()
+        # Drop queued contexts immediately.  A stuck running callback retains
+        # only its own context instead of pinning every cancelled job forever.
+        while True:
+            try:
+                self._jobs.get_nowait()
+            except queue.Empty:
+                break
+            self._finish_job()
+
+    def _finish_job(self) -> None:
+        with self._result_lock:
+            self._remaining -= 1
+            if self._remaining <= 0:
+                self._done.set()
+                self._wake.set()
+
+    def _claim_task(
+        self,
+        active_id: str,
+    ) -> tuple[str, tuple[str, str] | None]:
+        task_key = (self.home_key, active_id)
+        with _providers_runner_condition:
+            if self._stop.is_set() or _providers_shutdown.is_set():
+                return "stop", None
+            if time.monotonic() >= self._deadline:
+                self.timed_out = True
+                _providers_runner_condition.notify_all()
+                return "deadline", None
+            owner = _providers_active_tasks.get(task_key)
+            if owner is not None:
+                if owner.timed_out:
+                    return "quarantined", None
+                return "retry", None
+            if len(_providers_active_tasks) >= _PROVIDERS_MAX_ACTIVE_TASKS:
+                return "retry", None
+            _providers_active_tasks[task_key] = self
+            return "claimed", task_key
+
+    def _release_task(self, task_key: tuple[str, str]) -> None:
+        with _providers_runner_condition:
+            if _providers_active_tasks.get(task_key) is self:
+                _providers_active_tasks.pop(task_key, None)
+            _providers_runner_condition.notify_all()
+
+    def _requeue_and_wait(
+        self,
+        job: tuple[str, str, contextvars.Context, tuple[Any, ...]],
+    ) -> bool:
+        with _providers_runner_condition:
+            if self._stop.is_set() or _providers_shutdown.is_set():
+                return False
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._jobs.put(job)
+            _providers_runner_condition.wait(timeout=min(remaining, 0.05))
+            return True
+
+    def _worker(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._jobs.get_nowait()
+            except queue.Empty:
+                return
+            result_id, active_id, context, args = job
+
+            task_key: tuple[str, str] | None = None
+            finish_job = True
+            try:
+                claim, task_key = self._claim_task(active_id)
+                if claim == "retry":
+                    if self._requeue_and_wait(job):
+                        finish_job = False
+                    continue
+                if claim == "quarantined":
+                    self.skipped_quarantined = True
+                    continue
+                if claim == "deadline":
+                    self.stop()
+                    continue
+                if claim != "claimed" or task_key is None:
+                    continue
+                entry = context.run(self._worker_fn, *args)
+                if isinstance(entry, dict) and not self._stop.is_set():
+                    with self._result_lock:
+                        if not self._stop.is_set():
+                            self._results[result_id] = entry
+            except BaseException:
+                logger.debug("Failed building provider work item %s", result_id, exc_info=True)
+            finally:
+                if task_key is not None:
+                    self._release_task(task_key)
+                if finish_job:
+                    self._finish_job()
+
+    def run(self, deadline: float) -> dict[str, Any]:
+        if self._remaining == 0:
+            return {}
+        self._deadline = deadline
+        if deadline <= time.monotonic():
+            with _providers_runner_condition:
+                self.timed_out = True
+                _providers_runner_condition.notify_all()
+            self.stop()
+            return {}
+        with _providers_runner_condition:
+            if _providers_shutdown.is_set():
+                return {}
+            _providers_active_runners.add(self)
+
+        worker_count = min(_PROVIDERS_MAX_WORKERS, self._remaining)
+        try:
+            for index in range(worker_count):
+                threading.Thread(
+                    target=self._worker,
+                    name=f"provider-build-{index + 1}",
+                    daemon=True,
+                ).start()
+            remaining = max(0.0, deadline - time.monotonic())
+            if not self._wake.wait(remaining):
+                with _providers_runner_condition:
+                    self.timed_out = True
+                    _providers_runner_condition.notify_all()
+                self.stop()
+            with self._result_lock:
+                return dict(self._results)
+        finally:
+            self.stop()
+            with _providers_runner_condition:
+                _providers_active_runners.discard(self)
+                _providers_runner_condition.notify_all()
+
+
+def shutdown_provider_build_runners() -> None:
+    """Stop admitting provider work during orderly server shutdown.
+
+    Running callbacks may be third-party code that Python cannot safely kill.
+    Runner threads are daemonized, so shutdown signals every active runner and
+    returns without joining callbacks that ignore cancellation.
+    """
+    _providers_shutdown.set()
+    with _providers_runner_lock:
+        runners = list(_providers_active_runners)
+    for runner in runners:
+        runner.stop()
 
 
 def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
@@ -761,6 +977,27 @@ def _provider_credential_env_vars() -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+_BEDROCK_SINGLE_CREDENTIAL_ENV_SIGNALS = (
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_PROFILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+)
+
+
+def _provider_has_structural_bedrock_credentials() -> bool:
+    """Return True when Bedrock credential signals are available without probing."""
+    access_key = _thread_local_env_value("AWS_ACCESS_KEY_ID").strip()
+    secret_key = _thread_local_env_value("AWS_SECRET_ACCESS_KEY").strip()
+    if access_key and secret_key:
+        return True
+    for env_name in _BEDROCK_SINGLE_CREDENTIAL_ENV_SIGNALS:
+        if _thread_local_env_value(env_name).strip():
+            return True
+    return False
+
+
 _PROVIDER_CREDENTIAL_ENV_VARS = _provider_credential_env_vars()
 
 # Providers that use OAuth or token flows — their credentials are managed
@@ -1010,6 +1247,121 @@ def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
     )
 
 
+def _acquire_provider_build_state(
+    cache_key: tuple[Any, ...],
+) -> tuple[str, dict[str, Any] | None, _ProvidersBuildInFlight | None]:
+    now = time.monotonic()
+    with _providers_cache_lock:
+        cached = _providers_cache.get(cache_key)
+        if cached is not None:
+            ts, payload = cached
+            if now - ts < _PROVIDERS_CACHE_TTL_SECONDS:
+                return "cached", copy.deepcopy(payload), None
+            _providers_cache.pop(cache_key, None)
+
+        generation = _providers_cache_generation
+        in_flight = _providers_build_inflight.get(cache_key)
+        if in_flight is not None:
+            if in_flight.generation == generation:
+                return "wait", None, in_flight
+            _providers_build_inflight.pop(cache_key, None)
+
+        state = _ProvidersBuildInFlight(generation)
+        _providers_build_inflight[cache_key] = state
+        return "build", None, state
+
+
+def _complete_provider_build(
+    cache_key: tuple[Any, ...],
+    state: _ProvidersBuildInFlight,
+    payload: dict[str, Any] | None = None,
+    *,
+    error: BaseException | None = None,
+    cache_payload: bool = True,
+) -> dict[str, Any] | None:
+    completion_error: BaseException | None = error
+    completed_result: dict[str, Any] | None = None
+    published_cache_entry: tuple[float, dict[str, Any]] | None = None
+    try:
+        if completion_error is None:
+            if payload is not None:
+                state.result = copy.deepcopy(payload)
+            else:
+                state.result = None
+        else:
+            state.exception = completion_error
+            state.result = None
+
+        if (
+            completion_error is None
+            and state.result is not None
+            and cache_payload
+        ):
+            with _providers_cache_lock:
+                if state.generation == _providers_cache_generation:
+                    published_cache_entry = (
+                        time.monotonic(),
+                        copy.deepcopy(state.result),
+                    )
+                    _providers_cache.clear()
+                    _providers_cache[cache_key] = published_cache_entry
+
+        if completion_error is None:
+            completed_result = copy.deepcopy(state.result)
+    except BaseException as exc:
+        if completion_error is None:
+            completion_error = exc
+            state.exception = exc
+        else:
+            state.exception = completion_error
+    finally:
+        try:
+            if completion_error is not None and published_cache_entry is not None:
+                try:
+                    with _providers_cache_lock:
+                        if _providers_cache.get(cache_key) is published_cache_entry:
+                            _providers_cache.pop(cache_key, None)
+                except BaseException:
+                    logger.debug(
+                        "Failed to rollback provider cache publication for %s",
+                        cache_key,
+                        exc_info=True,
+                    )
+            with _providers_cache_lock:
+                if _providers_build_inflight.get(cache_key) is state:
+                    _providers_build_inflight.pop(cache_key, None)
+        except BaseException:
+            logger.debug(
+                "Failed to remove provider build state for %s",
+                cache_key,
+                exc_info=True,
+            )
+        state.event.set()
+
+    if completion_error is not None:
+        if error is None:
+            raise completion_error
+        return None
+    return completed_result
+
+
+def _wait_provider_build(state: _ProvidersBuildInFlight, cache_key: tuple[Any, ...]) -> dict[str, Any]:
+    if not state.event.wait(_PROVIDERS_FOLLOWER_TIMEOUT_SECONDS):
+        # Bound this caller without stealing ownership from the leader.  The
+        # leader may still publish a valid result; removing its state here
+        # would let a replacement build race and then be overwritten by that
+        # late completion.
+        raise TimeoutError("Timed out waiting for provider discovery")
+    if state.exception is not None:
+        raise state.exception
+    if state.result is not None:
+        return copy.deepcopy(state.result)
+    cached = _get_cached_providers(cache_key)
+    if cached is not None:
+        return cached
+    raise RuntimeError("Provider build did not produce payload")
+
+
 def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
     now = time.monotonic()
     with _providers_cache_lock:
@@ -1023,20 +1375,13 @@ def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
         return copy.deepcopy(payload)
 
 
-def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> dict[str, Any]:
-    with _providers_cache_lock:
-        # Single-entry by design: /api/providers is cacheable only for the
-        # active profile/config snapshot, so clear older snapshots to avoid
-        # retaining unbounded provider metadata across profile switches.
-        _providers_cache.clear()
-        _providers_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
-    return payload
-
-
 def invalidate_providers_cache() -> None:
     """Clear cached ``GET /api/providers`` responses."""
+    global _providers_cache_generation
     with _providers_cache_lock:
+        _providers_cache_generation += 1
         _providers_cache.clear()
+        _providers_build_inflight.clear()
 
 
 def _load_env_file(env_path: Path) -> dict[str, str]:
@@ -1054,6 +1399,23 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
     except Exception:
         return {}
     return values
+
+
+def _provider_entry_env_key_source(provider_id: str, env_values: dict[str, Any]) -> str:
+    """Resolve an env-backed key source label for a provider card."""
+    env_var = _provider_env_var_for(provider_id)
+    if not env_var:
+        return "none"
+    if _provider_value_counts_as_api_key(provider_id, env_values.get(env_var)):
+        return "env_file"
+    if _provider_value_counts_as_api_key(provider_id, _thread_local_env_value(env_var)):
+        return "env_var"
+    for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
+        if _provider_value_counts_as_api_key(provider_id, env_values.get(alias)):
+            return "env_file"
+        if _provider_value_counts_as_api_key(provider_id, _thread_local_env_value(alias)):
+            return "env_var"
+    return "none"
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
@@ -2519,45 +2881,67 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
-def get_providers() -> dict[str, Any]:
-    """Return a list of all known providers with their configuration status.
+def _build_provider_entry(
+    provider_id: str,
+    initial_has_key: bool,
+    providers_cfg: dict[str, Any],
+    active_profile_name: str,
+    request_thread_env: dict[str, Any],
+    block_process_env_fallback: bool,
+) -> dict[str, Any] | None:
+    """Build one provider entry using request-scoped profile/thread-local context."""
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return None
 
-    Each entry contains:
-    - ``id``: canonical provider slug
-    - ``display_name``: human-readable name
-    - ``has_key``: whether an API key is configured
-    - ``configurable``: whether the key can be set from the WebUI
-    - ``key_source``: where the key was found (``env_file``, ``env_var``,
-      ``config_yaml``, ``oauth``, ``none``)
-    - ``models``: list of known model IDs for this provider
-    """
-    # Collect all known provider IDs from multiple sources
-    known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
-    known_ids.update(plugin_model_provider_ids())
+    display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
+    is_oauth = _provider_is_oauth(pid)
+    providers_cfg = providers_cfg if isinstance(providers_cfg, dict) else {}
+    thread_env = dict(request_thread_env or {})
 
-    # Also detect providers from config.yaml providers section
-    cfg = get_config()
-    cache_key = _providers_cache_key(cfg)
-    cached = _get_cached_providers(cache_key)
-    if cached is not None:
-        return cached
+    import api.config as cfg
+    import api.profiles as profiles
 
-    providers = []
-    providers_cfg = cfg.get("providers") or {}
-    if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+    has_key = bool(initial_has_key)
+    is_bedrock = pid == "bedrock"
+    auth_error = None
+    key_source = "none"
 
-    # Add OAuth providers even if not in _PROVIDER_DISPLAY
-    known_ids.update(_OAUTH_PROVIDERS)
+    previous_thread_env = dict(getattr(cfg._thread_ctx, "env", {}))
+    previous_block = bool(getattr(cfg._thread_ctx, "block_process_env_fallback", False))
 
-    for pid in sorted(known_ids):
-        display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
-        is_oauth = _provider_is_oauth(pid)
-        has_key = _provider_has_key(pid)
+    try:
+        if active_profile_name:
+            profiles.set_request_profile(active_profile_name)
+        else:
+            profiles.clear_request_profile()
+        cfg._set_thread_env(**thread_env)
+        cfg._thread_ctx.block_process_env_fallback = block_process_env_fallback
+
+        if has_key:
+            if is_bedrock:
+                if _provider_has_structural_bedrock_credentials():
+                    key_source = "env_var"
+                else:
+                    key_source = "config_yaml"
+            elif is_oauth:
+                key_source = "oauth"
+            else:
+                env_var = _provider_env_var_for(pid)
+                if env_var:
+                    env_path = _get_hermes_home() / ".env"
+                    env_values = _load_env_file(env_path)
+                    key_source = _provider_entry_env_key_source(pid, env_values)
+                    if key_source == "none":
+                        key_source = "config_yaml"
+                else:
+                    key_source = "config_yaml"
+
         plugin_auth_status: dict[str, Any] | None = None
         if not has_key and is_plugin_model_provider(pid):
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
+
                 _plugin_status = _gas_plugin(pid)
                 if isinstance(_plugin_status, dict) and (
                     _plugin_status.get("logged_in") or _plugin_status.get("configured")
@@ -2567,10 +2951,17 @@ def get_providers() -> dict[str, Any]:
             except Exception:
                 logger.debug("Plugin provider auth check failed for %s", pid, exc_info=True)
 
-        # Determine key source
-        key_source = "none"
-        auth_error = None
-        if is_oauth:
+        if is_bedrock:
+            # Bedrock auth must stay structural-only on the settings path (#2720/#6010).
+            # Use the same env-signal family consumed by the runtime adapter path,
+            # but do not invoke hermes_cli.auth or botocore-like resolution.
+            if _provider_has_structural_bedrock_credentials() and not has_key:
+                has_key = True
+                if key_source == "none":
+                    key_source = "env_var"
+            if key_source == "none" and has_key:
+                key_source = "env_var"
+        elif is_oauth:
             key_source = "oauth"
             # Check if actually authenticated via hermes_cli.
             # IMPORTANT: do not unconditionally overwrite has_key from _provider_has_key().
@@ -2579,6 +2970,7 @@ def get_providers() -> dict[str, Any]:
             # or refresh token consumed by native Codex CLI / VS Code extension).
             try:
                 from hermes_cli.auth import get_auth_status as _gas
+
                 status = _gas(pid)
                 if isinstance(status, dict) and status.get("logged_in"):
                     has_key = True
@@ -2601,32 +2993,14 @@ def get_providers() -> dict[str, Any]:
             if env_var:
                 env_path = _get_hermes_home() / ".env"
                 env_values = _load_env_file(env_path)
-                if _provider_value_counts_as_api_key(pid, env_values.get(env_var)):
-                    key_source = "env_file"
-                elif _provider_value_counts_as_api_key(pid, _thread_local_env_value(env_var)):
-                    key_source = "env_var"
-                else:
-                    # Canonical name not set; check legacy aliases (e.g. lmstudio's
-                    # pre-#1500 LMSTUDIO_API_KEY) so existing users see "env_file"
-                    # instead of being misreported as "config_yaml" when the key
-                    # actually lives in .env under the old name.
-                    aliased = False
-                    for alias in _PROVIDER_ENV_VAR_ALIASES.get(pid, ()) or ():
-                        if _provider_value_counts_as_api_key(pid, env_values.get(alias)):
-                            key_source = "env_file"
-                            aliased = True
-                            break
-                        if _provider_value_counts_as_api_key(pid, _thread_local_env_value(alias)):
-                            key_source = "env_var"
-                            aliased = True
-                            break
-                    if not aliased:
-                        _plugin_ks = (
-                            str(plugin_auth_status.get("key_source") or "").strip()
-                            if isinstance(plugin_auth_status, dict)
-                            else ""
-                        )
-                        key_source = _plugin_ks or "config_yaml"
+                key_source = _provider_entry_env_key_source(pid, env_values)
+                if key_source == "none":
+                    _plugin_ks = (
+                        str(plugin_auth_status.get("key_source") or "").strip()
+                        if isinstance(plugin_auth_status, dict)
+                        else ""
+                    )
+                    key_source = _plugin_ks or "config_yaml"
             else:
                 _plugin_ks = (
                     str(plugin_auth_status.get("key_source") or "").strip()
@@ -2636,32 +3010,34 @@ def get_providers() -> dict[str, Any]:
                 key_source = _plugin_ks or "config_yaml"
         elif not _provider_env_var_for(pid):
             # Fallback: provider is not a known API-key provider and not in
-            # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
+            # the hardcoded _OAUTH_PROVIDERS set. It may be a custom or
             # newly-added OAuth provider (e.g. Anthropic connected via OAuth).
             # Check live auth status so the Providers tab agrees with the
             # model picker (#1212).
             #
             # IMPORTANT: we skip providers with a known API-key env var because
             # they are pure API-key providers — calling get_auth_status() for
-            # every unconfigured API-key provider would add unnecessary latency
-            # (network round-trip per provider) on the Settings page.
-            # Validate pid looks like a real provider before probing
+            # every unconfigured API-key provider would add unnecessary latency.
             import re as _re
-            if _re.match(r'^[a-z][a-z0-9_-]{0,63}$', pid):
+
+            if _re.match(r"^[a-z][a-z0-9_-]{0,63}$", pid):
                 try:
                     from hermes_cli.auth import get_auth_status as _gas
+
                     status = _gas(pid)
                     if isinstance(status, dict) and status.get("logged_in"):
                         has_key = True
-                        # Constrain key_source to a known-safe closed set
+                        # Constrain key_source to a known-safe closed set.
                         _raw_ks = status.get("key_source", "")
-                        key_source = _raw_ks if _raw_ks in {"oauth", "env", "config", "token"} else "oauth"
+                        key_source = (
+                            _raw_ks if _raw_ks in {"oauth", "env", "config", "token"} else "oauth"
+                        )
                         is_oauth = True
                 except Exception:
                     pass
 
         if pid == "openai" and not has_key and _provider_has_shadowed_codex_oauth_value(pid):
-            continue
+            return None
 
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)
@@ -2696,7 +3072,7 @@ def get_providers() -> dict[str, Any]:
         # Nous Portal: prefer the live catalog so the providers card matches
         # the dropdown picker (#1538). Same fallback shape as the static-only
         # case below — when hermes_cli is unavailable or its lookup raises,
-        # we keep the four-entry curated list.
+        # we keep the curated list.
         #
         # On large-tier accounts (#1567 reporter Deor saw 396 entries), we
         # render the same featured subset the picker uses so the providers
@@ -2723,7 +3099,7 @@ def get_providers() -> dict[str, Any]:
             except Exception:
                 logger.debug("Failed to load Nous Portal models from hermes_cli")
         # LM Studio: fetch live locally-loaded models so the providers card
-        # matches what's actually available on the user's server (#WebUI).
+        # matches what's actually available on your server (#WebUI).
         if pid == "lmstudio":
             try:
                 from hermes_cli.models import provider_model_ids as _pmi
@@ -2749,7 +3125,7 @@ def get_providers() -> dict[str, Any]:
                     pid,
                     exc_info=True,
                 )
-        # Also include models from config.yaml providers section
+        # Also include models from config.yaml providers section.
         if isinstance(providers_cfg, dict):
             provider_cfg = providers_cfg.get(pid, {})
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
@@ -2769,11 +3145,12 @@ def get_providers() -> dict[str, Any]:
         is_self_hosted = pid in _SELF_HOSTED_PROVIDER_IDS
         try:
             from api.config import _get_provider_base_url
+
             provider_base_url = _get_provider_base_url(pid) if is_self_hosted else None
         except Exception:
             provider_base_url = None
         _is_plugin = is_plugin_model_provider(pid)
-        providers.append({
+        return {
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
@@ -2782,21 +3159,209 @@ def get_providers() -> dict[str, Any]:
             "base_url": provider_base_url,
             "is_plugin_provider": _is_plugin,
             "is_oauth": is_oauth,
-            "key_source": key_source,
+            "key_source": key_source if has_key else "none",
             "auth_error": auth_error,
             "models": models,
             # models_total reflects the complete catalog size (e.g. 396 for
             # an enterprise Nous Portal account), even when "models" is
-            # trimmed to a featured subset for UI scannability. The frontend
-            # uses this for the header text "396 models · OAuth" so users
-            # know the full catalog exists and is reachable via the slash
-            # command. For providers that don't trim, models_total ==
-            # len(models) and the frontend behaves identically to before.
+            # trimmed to a featured subset for UI scannability. For providers
+            # that don't trim, models_total equals len(models) and the
+            # frontend behaves identically to before.
             "models_total": models_total,
-        })
+        }
+    except Exception:
+        logger.debug("Failed to build provider entry for %s", pid, exc_info=True)
+        models = list(_PROVIDER_MODELS.get(pid, []))
+        models_total = len(models)
+        if isinstance(providers_cfg, dict):
+            provider_cfg = providers_cfg.get(pid, {})
+            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+                cfg_models = provider_cfg["models"]
+                if isinstance(cfg_models, dict):
+                    models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
+                elif isinstance(cfg_models, list):
+                    models = models + [{"id": k, "label": k} for k in cfg_models]
+                if pid != "nous":
+                    models_total = len(models)
+        is_self_hosted = pid in _SELF_HOSTED_PROVIDER_IDS
+        try:
+            from api.config import _get_provider_base_url
+
+            provider_base_url = _get_provider_base_url(pid) if is_self_hosted else None
+        except Exception:
+            provider_base_url = None
+        if pid == "openai" and not has_key and _provider_has_shadowed_codex_oauth_value(pid):
+            return None
+        return {
+            "id": pid,
+            "display_name": display_name,
+            "has_key": has_key,
+            "configurable": not is_oauth and bool(_provider_env_var_for(pid)),
+            "is_self_hosted": is_self_hosted,
+            "base_url": provider_base_url,
+            "is_plugin_provider": is_plugin_model_provider(pid),
+            "is_oauth": is_oauth,
+            "key_source": key_source if has_key else "none",
+            "auth_error": auth_error,
+            "models": models,
+            "models_total": models_total,
+        }
+    finally:
+        cfg._thread_ctx.block_process_env_fallback = previous_block
+        if previous_thread_env:
+            cfg._set_thread_env(**previous_thread_env)
+        else:
+            cfg._clear_thread_env()
+        profiles.clear_request_profile()
+
+
+def _scan_provider_has_keys(
+    provider_ids: list[str],
+    custom_provider_ids: list[str],
+    active_profile_name: str,
+    request_thread_env: dict[str, Any],
+    block_process_env_fallback: bool,
+) -> dict[str, bool]:
+    """Run serialized credential-pool discovery inside the build deadline."""
+    import api.config as config_module
+    import api.profiles as profiles
+
+    previous_thread_env = dict(getattr(config_module._thread_ctx, "env", {}))
+    previous_block = bool(
+        getattr(config_module._thread_ctx, "block_process_env_fallback", False)
+    )
+    try:
+        if active_profile_name:
+            profiles.set_request_profile(active_profile_name)
+        else:
+            profiles.clear_request_profile()
+        config_module._set_thread_env(**dict(request_thread_env or {}))
+        config_module._thread_ctx.block_process_env_fallback = block_process_env_fallback
+
+        results: dict[str, bool] = {}
+        custom_ids = set(custom_provider_ids)
+        for provider_id in provider_ids:
+            try:
+                if provider_id in custom_ids:
+                    from api.config import _has_explicit_pool_credentials
+
+                    has_key = _has_explicit_pool_credentials(provider_id)
+                else:
+                    has_key = _provider_has_key(provider_id)
+                if provider_id.lower() == "bedrock":
+                    has_key = has_key or _provider_has_structural_bedrock_credentials()
+                results[provider_id] = has_key
+            except Exception:
+                logger.debug(
+                    "Failed reading local provider credentials for %s",
+                    provider_id,
+                    exc_info=True,
+                )
+                results[provider_id] = False
+        return results
+    finally:
+        config_module._thread_ctx.block_process_env_fallback = previous_block
+        if previous_thread_env:
+            config_module._set_thread_env(**previous_thread_env)
+        else:
+            config_module._clear_thread_env()
+        profiles.clear_request_profile()
+
+
+def _build_providers_payload(
+    cfg: dict[str, Any],
+    sorted_known_ids: list[str],
+    active_profile_name: str,
+    request_thread_env: dict[str, Any],
+    request_block_process_env_fallback: bool,
+    providers_cfg: dict[str, Any],
+    deadline: float,
+) -> tuple[dict[str, Any], bool]:
+    providers = []
+
+    try:
+        home_key = str(_get_hermes_home().resolve())
+    except OSError:
+        home_key = str(_get_hermes_home())
+
+    custom_providers_cfg = cfg.get("custom_providers", [])
+    custom_provider_ids = []
+    if isinstance(custom_providers_cfg, list):
+        custom_provider_ids = [
+            _custom_provider_slug_from_name(str(cp.get("name") or "").strip())
+            for cp in custom_providers_cfg
+            if isinstance(cp, dict) and cp.get("name")
+        ]
+    credential_scan_ids = list(dict.fromkeys([
+        *(str(pid or "").strip() for pid in sorted_known_ids),
+        *(pid for pid in custom_provider_ids if pid),
+    ]))
+
+    # Credential-pool discovery mutates a shared process cache, so it stays
+    # serialized as one work item while still sharing the leader's deadline.
+    preflight_runner = _ProvidersBuildRunner(
+        home_key,
+        [(
+            "credentials",
+            "__credential_preflight__",
+            contextvars.copy_context(),
+            (
+                credential_scan_ids,
+                custom_provider_ids,
+                active_profile_name,
+                request_thread_env,
+                request_block_process_env_fallback,
+            ),
+        )],
+        _scan_provider_has_keys,
+    )
+    preflight_results = preflight_runner.run(deadline)
+    initial_has_keys = preflight_results.get("credentials", {})
+    if not isinstance(initial_has_keys, dict):
+        initial_has_keys = {}
+    preflight_complete = (
+        "credentials" in preflight_results
+        and not preflight_runner.timed_out
+        and not preflight_runner.skipped_quarantined
+    )
+
+    # Potentially unbounded plugin/live callbacks run only in this build's
+    # daemonized runner.  A hard build deadline drops queued work, while the
+    # process-wide task registry quarantines any callback that remains stuck.
+    jobs = []
+    for pid in sorted_known_ids:
+        context = contextvars.copy_context()
+        provider_id = str(pid or "").strip()
+        jobs.append((
+            provider_id,
+            provider_id,
+            context,
+            (
+                pid,
+                initial_has_keys.get(provider_id, False),
+                providers_cfg,
+                active_profile_name,
+                request_thread_env,
+                request_block_process_env_fallback,
+            ),
+        ))
+
+    runner = _ProvidersBuildRunner(home_key, jobs, _build_provider_entry)
+    provider_entries = runner.run(deadline)
+    if runner.timed_out:
+        logger.warning(
+            "Provider discovery exceeded %.1fs; returning %d/%d completed entries",
+            _PROVIDERS_BUILD_TIMEOUT_SECONDS,
+            len(provider_entries),
+            len(jobs),
+        )
+
+    for pid in sorted_known_ids:
+        entry = provider_entries.get(pid)
+        if entry is not None:
+            providers.append(entry)
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
-    custom_providers_cfg = cfg.get("custom_providers", [])
     if isinstance(custom_providers_cfg, list):
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
@@ -2822,14 +3387,8 @@ def get_providers() -> dict[str, Any]:
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(_thread_local_env_value(env_var).strip())
-            # Fallback: check credential pool (key added via hermes auth add)
-            if not cp_has_key:
-                try:
-                    from api.config import _has_explicit_pool_credentials
-                    if _has_explicit_pool_credentials(cp_id):
-                        cp_has_key = True
-                except ImportError:
-                    pass
+            # The serialized preflight includes credential-pool keys.
+            cp_has_key = cp_has_key or bool(initial_has_keys.get(cp_id, False))
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,
@@ -2859,11 +3418,85 @@ def get_providers() -> dict[str, Any]:
         return (3, pid)
     providers.sort(key=_provider_sort_key)
 
-    result = {
-        "providers": providers,
-        "active_provider": active_provider,
-    }
-    return _store_cached_providers(cache_key, result)
+    return (
+        {
+            "providers": providers,
+            "active_provider": active_provider,
+        },
+        preflight_complete
+        and not runner.timed_out
+        and not runner.skipped_quarantined,
+    )
+
+
+def get_providers() -> dict[str, Any]:
+    """Return a list of all known providers with their configuration status.
+
+    Each entry contains:
+    - ``id``: canonical provider slug
+    - ``display_name``: human-readable name
+    - ``has_key``: whether an API key is configured
+    - ``configurable``: whether the key can be set from the WebUI
+    - ``key_source``: where the key was found (``env_file``, ``env_var``,
+      ``config_yaml``, ``oauth``, ``none``)
+    - ``models``: list of known model IDs for this provider
+    """
+    # Collect all known provider IDs from multiple sources
+    known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
+    known_ids.update(plugin_model_provider_ids())
+
+    # Also detect providers from config.yaml providers section
+    cfg = get_config()
+    cache_key = _providers_cache_key(cfg)
+    state, cached, in_flight = _acquire_provider_build_state(cache_key)
+    if state == "cached" and cached is not None:
+        return cached
+    if state == "wait" and in_flight is not None:
+        return _wait_provider_build(in_flight, cache_key)
+
+    if in_flight is None:
+        raise RuntimeError("Failed to claim provider build state")
+
+    deadline = time.monotonic() + _PROVIDERS_BUILD_TIMEOUT_SECONDS
+    try:
+        providers_cfg: dict[str, Any] = cfg.get("providers") or {}
+        if isinstance(providers_cfg, dict):
+            known_ids.update(providers_cfg.keys())
+
+        # Add OAuth providers even if not in _PROVIDER_DISPLAY
+        known_ids.update(_OAUTH_PROVIDERS)
+
+        sorted_known_ids = sorted(known_ids)
+        import api.config as config_module
+        import api.profiles as profiles
+
+        active_profile_name = profiles.get_active_profile_name()
+        request_thread_env = dict(getattr(config_module._thread_ctx, "env", {}))
+        request_block_process_env_fallback = bool(
+            getattr(config_module._thread_ctx, "block_process_env_fallback", False),
+        )
+
+        result, cache_payload = _build_providers_payload(
+            cfg=cfg,
+            sorted_known_ids=sorted_known_ids,
+            active_profile_name=active_profile_name,
+            request_thread_env=request_thread_env,
+            request_block_process_env_fallback=request_block_process_env_fallback,
+            providers_cfg=providers_cfg,
+            deadline=deadline,
+        )
+    except BaseException as exc:
+        _complete_provider_build(cache_key, in_flight, error=exc)
+        raise
+    completed = _complete_provider_build(
+        cache_key,
+        in_flight,
+        payload=result,
+        cache_payload=cache_payload,
+    )
+    if completed is None:
+        raise RuntimeError("Provider build did not produce payload")
+    return completed
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
