@@ -2842,6 +2842,13 @@ function _currentBootSettingsDefaultOverride(data,opts){
   if(!(opts&&opts.preferProfileDefaultOnFreshBoot)) return null;
   const state=window._bootSettingsDefaultModelState||null;
   if(!state||state.default_model_has_explicit_source!==true) return null;
+  if(state.profile){
+    const activeProfile=String((typeof S!=='undefined'&&S&&S.activeProfile)||'default').trim()||'default';
+    if(String(state.profile).trim()!==activeProfile) return null;
+  }
+  if(Object.prototype.hasOwnProperty.call(state,'profile_switch_generation')){
+    if(typeof _profileSwitchGeneration!=='number'||Number(state.profile_switch_generation)!==_profileSwitchGeneration) return null;
+  }
   const model=String(state.model||'').trim();
   if(!model) return null;
   const payloadModel=String(data&&data.default_model||'').trim();
@@ -3464,6 +3471,7 @@ async function populateModelDropdown(opts={}){
     let data=await _modelsRes.json();
     data=_applyBootSettingsDefaultOverrideToModelPayload(data,opts);
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(opts&&opts.preferProfileDefaultOnFreshBoot) window._bootSettingsDefaultModelState=null;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._defaultModelHasExplicitSource=data.default_model_has_explicit_source===true;

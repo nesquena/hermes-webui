@@ -6578,6 +6578,21 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
+function _advanceBootSettingsDefaultModelStateForProfileSwitch(data,gen){
+  const model=String(data&&data.default_model||'').trim();
+  if(!model){
+    window._bootSettingsDefaultModelState=null;
+    return;
+  }
+  window._bootSettingsDefaultModelState={
+    model,
+    model_provider:data&&data.default_model_provider?String(data.default_model_provider):null,
+    default_model_has_explicit_source:true,
+    profile:String(data&&data.active||S.activeProfile||'default').trim()||'default',
+    profile_switch_generation:gen,
+  };
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
@@ -7189,6 +7204,7 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    _advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 

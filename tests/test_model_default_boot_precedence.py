@@ -22,34 +22,42 @@ from api import config as config_api
 REPO = Path(__file__).resolve().parents[1]
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
+const panels = fs.readFileSync(process.argv[3], 'utf8');
 
-function extractFunc(name) {
+function extractFuncFrom(src, name) {
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const start = ui.search(re);
+  const start = src.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let openParen = ui.indexOf('(', start);
+  let openParen = src.indexOf('(', start);
   let i = openParen + 1;
   let parenDepth = 1;
-  while (parenDepth > 0 && i < ui.length) {
-    if (ui[i] === '(') parenDepth++;
-    else if (ui[i] === ')') parenDepth--;
+  while (parenDepth > 0 && i < src.length) {
+    if (src[i] === '(') parenDepth++;
+    else if (src[i] === ')') parenDepth--;
     i++;
   }
-  i = ui.indexOf('{', i);
+  i = src.indexOf('{', i);
   let depth = 1;
   i++;
-  while (depth > 0 && i < ui.length) {
-    if (ui[i] === '{') depth++;
-    else if (ui[i] === '}') depth--;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
     i++;
   }
-  return ui.slice(start, i);
+  return src.slice(start, i);
+}
+function extractFunc(name) {
+  return extractFuncFrom(ui, name);
+}
+function tryExtractPanelFunc(name) {
+  try { return extractFuncFrom(panels, name); } catch (_e) { return ''; }
 }
 
 const calls = {syncModelChip: 0, renderModelDropdown: 0, positionModelDropdown: 0, liveFetches: []};
@@ -143,7 +151,7 @@ const document = {
     return {tagName: upper, value: '', textContent: '', title: '', dataset: {}, parentElement: null};
   },
 };
-const args = JSON.parse(process.argv[3]);
+const args = JSON.parse(process.argv[4]);
 const localStorageData = Object.assign({}, args.localStorage || {});
 const localStorage = {
   getItem(key) {
@@ -156,6 +164,7 @@ const window = {_defaultModel: null, _activeProvider: null, _configuredModelBadg
 let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
+var _profileSwitchGeneration = args.profileSwitch && args.profileSwitch.generation ? args.profileSwitch.generation : 0;
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 window._provisionalBootModelSelection = null;
 window._bootSettingsDefaultModelState = null;
@@ -241,9 +250,20 @@ for (const name of [
 apiModels = args.apiModels;
 modelSelect = makeSelect(args.initialOptions, args.initialValue);
 var S = {session: args.session || null};
+S.activeProfile = args.activeProfile || 'default';
 
 if (args.settings) {
   hydrateBootDefaultModelFromSettingsForTest(args.settings);
+}
+const advanceProfileSwitchStateSource = tryExtractPanelFunc('_advanceBootSettingsDefaultModelStateForProfileSwitch');
+if (advanceProfileSwitchStateSource) eval(advanceProfileSwitchStateSource);
+if (args.profileSwitch) {
+  S.activeProfile = args.profileSwitch.active || 'default';
+  window._defaultModel = args.profileSwitch.default_model || null;
+  window._activeProvider = args.profileSwitch.default_model_provider || null;
+  if (typeof _advanceBootSettingsDefaultModelStateForProfileSwitch === 'function') {
+    _advanceBootSettingsDefaultModelStateForProfileSwitch(args.profileSwitch, _profileSwitchGeneration);
+  }
 }
 
 fetch = async function(url) {
@@ -300,7 +320,9 @@ populateModelDropdown(args.opts || {}).then(() => {
     defaultModelEligibleForFreshBoot: window._defaultModelEligibleForFreshBoot,
     provisionalBootModelSelection: window._provisionalBootModelSelection,
     badgeKeys: Object.keys(window._configuredModelBadges || {}),
+    badgeMap: window._configuredModelBadges || {},
     activeProvider: window._activeProvider,
+    bootSettingsDefaultModelState: window._bootSettingsDefaultModelState,
     localStorage: localStorageData,
     calls,
   }));
@@ -596,6 +618,7 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "let previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
     assert "const rawProvisionalBootSelection=window._provisionalBootModelSelection||null;" in UI_JS
     assert "data=_applyBootSettingsDefaultOverrideToModelPayload(data,opts);" in UI_JS
+    assert "if(opts&&opts.preferProfileDefaultOnFreshBoot) window._bootSettingsDefaultModelState=null;" in UI_JS
     assert "const persistedState=(typeof _readPersistedModelState==='function')?_readPersistedModelState():null;" in UI_JS
     assert "window._provisionalBootModelSelection=null;" in UI_JS
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
@@ -614,6 +637,21 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "_ensureModelOptionInDropdown(modelId, sel, providerId)" in snippet
     assert "_readPersistedModelState()" not in snippet
     assert "localStorage.getItem('hermes-webui-model')" not in snippet
+
+
+def test_profile_switch_advances_boot_settings_default_before_background_refresh():
+    switch_start = PANELS_JS.index("async function switchToProfile(name) {")
+    switch_body = PANELS_JS[switch_start : PANELS_JS.index("function openProfileCreate", switch_start)]
+    advance_idx = switch_body.index("_advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);")
+    refresh_idx = switch_body.index("_refreshProfileSwitchBackground(_switchGen);")
+
+    assert advance_idx < refresh_idx
+    helper = PANELS_JS[
+        PANELS_JS.index("function _advanceBootSettingsDefaultModelStateForProfileSwitch")
+        : switch_start
+    ]
+    assert "window._bootSettingsDefaultModelState=null;" in helper
+    assert "profile_switch_generation:gen" in helper
 
 
 def test_model_select_onchange_retires_provisional_boot_marker():
@@ -757,6 +795,59 @@ def test_boot_model_refresh_keeps_current_settings_default_over_stale_cached_mod
     assert stale_cached_default not in got["selectedState"]["model"]
     assert got["defaultModelHasExplicitSource"] is True
     assert got["defaultModelEligibleForFreshBoot"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_profile_switch_model_refresh_keeps_switched_profile_default_over_boot_snapshot(
+    populate_driver_path,
+):
+    boot_model = "custom/profile-a-model"
+    switched_model = "custom/profile-b-model"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value=boot_model,
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        active_profile="alpha",
+        settings={
+            "default_model": boot_model,
+            "default_model_provider": "alpha-provider",
+            "default_model_has_explicit_source": True,
+        },
+        profile_switch={
+            "active": "beta",
+            "default_model": switched_model,
+            "default_model_provider": "beta-provider",
+            "generation": 1,
+        },
+        api_default_model=switched_model,
+        api_default_model_has_explicit_source=True,
+        api_active_provider="beta-provider",
+        api_groups=[
+            {
+                "provider": "Beta",
+                "provider_id": "beta-provider",
+                "models": [{"id": switched_model, "label": "Profile B model"}],
+            }
+        ],
+        initial_options=[
+            {"provider": "alpha-provider", "value": boot_model, "label": "Profile A model"},
+        ],
+    )
+
+    assert got["selectedState"] == {
+        "model": switched_model,
+        "model_provider": "beta-provider",
+    }
+    assert got["defaultModel"] == switched_model
+    assert got["activeProvider"] == "beta-provider"
+    assert got["selectedProvider"] == "beta-provider"
+    assert got["selectValue"] == switched_model
+    assert switched_model in got["optionValues"]
+    assert boot_model not in got["optionValues"]
+    assert boot_model not in got["badgeKeys"]
+    assert got["badgeMap"].get(boot_model) is None
+    assert got["bootSettingsDefaultModelState"] is None
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -1004,6 +1095,8 @@ def _run_populate_driver(
     api_groups: list[dict] | None = None,
     initial_options: list[dict] | None = None,
     settings: dict | None = None,
+    active_profile: str = "default",
+    profile_switch: dict | None = None,
     local_storage: dict | None = None,
     apply_boot_saved_state: bool = False,
 ):
@@ -1031,12 +1124,14 @@ def _run_populate_driver(
         "opts": opts,
         "session": session,
         "settings": settings,
+        "activeProfile": active_profile,
+        "profileSwitch": profile_switch,
         "localStorage": local_storage or {},
         "applyBootSavedState": apply_boot_saved_state,
     }
     assert NODE is not None
     result = subprocess.run(
-        [NODE, driver_path, str(REPO / "static" / "ui.js"), json.dumps(payload)],
+        [NODE, driver_path, str(REPO / "static" / "ui.js"), str(REPO / "static" / "panels.js"), json.dumps(payload)],
         capture_output=True,
         text=True,
         timeout=30,
