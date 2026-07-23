@@ -1104,6 +1104,18 @@ def test_health_profile_home_lookup_does_not_spawn_on_cold_root_alias(monkeypatc
     assert home == profiles._DEFAULT_HERMES_HOME / "profiles" / "renamed-root"
 
 
+def test_general_profile_resolution_keeps_cold_renamed_root_semantics(monkeypatch):
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", False)
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": "renamed-root", "is_default": True}],
+    )
+    assert profiles.get_hermes_home_for_profile("renamed-root") == profiles._DEFAULT_HERMES_HOME
+
+
 def test_sessions_cap_generation_bound_applies_to_invalidation(monkeypatch, tmp_path):
     from api import config
 

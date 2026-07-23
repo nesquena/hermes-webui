@@ -519,14 +519,8 @@ def _resolve_profile_home_for_name(name: str) -> Path:
                 name, isolated_name,
             )
         return isolated_home
-    if not name or name == 'default':
+    if not name or _is_root_profile(name):
         return _DEFAULT_HERMES_HOME
-    if name != 'default':
-        with _root_profile_name_cache_lock:
-            root_cache_loaded = _root_profile_name_cache_loaded
-            is_cached_root = name in _root_profile_name_cache
-        if root_cache_loaded and is_cached_root:
-            return _DEFAULT_HERMES_HOME
     if not _PROFILE_ID_RE.fullmatch(name):
         return _DEFAULT_HERMES_HOME
     return _resolve_named_profile_home(name)
@@ -949,6 +943,19 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
                     _config._clear_thread_env()
         _config.publish_sessions_cap_snapshot(home, expanded, generation=generation,
                                               process_authority=None)
+        # Keep diagnostics addressable by the canonical logical profile path
+        # when tests or deployments override the physical profile home.
+        logical_home = _DEFAULT_HERMES_HOME / "profiles" / home.name
+        if logical_home != home:
+            logical_generation = _config.observe_sessions_cap_sources(
+                logical_home,
+                (cfg_stat.st_mtime_ns, cfg_stat.st_size) if cfg_stat else None,
+                (env_stat.st_mtime_ns, env_stat.st_size) if env_stat else None,
+            )
+            _config.publish_sessions_cap_snapshot(
+                logical_home, expanded, generation=logical_generation,
+                process_authority=None,
+            )
     except Exception:
         logger.debug("Failed to publish session cap observation", exc_info=True)
     return env
@@ -965,6 +972,9 @@ def get_cached_profile_home_for_diagnostics(name: str) -> Path | None:
             return _DEFAULT_HERMES_HOME
     if not _PROFILE_ID_RE.fullmatch(name):
         return None
+    with _root_profile_name_cache_lock:
+        if not _root_profile_name_cache_loaded:
+            return _DEFAULT_HERMES_HOME / "profiles" / name
     return get_hermes_home_for_profile(name)
 
 
