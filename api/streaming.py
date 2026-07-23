@@ -8728,6 +8728,12 @@ def _run_agent_streaming(
                     # field the cached agent silently retains the previous
                     # profile's SOUL.md (and any other profile-scoped context).
                     _profile_home or '',
+                    # Terminal backend identity: sessions switching between
+                    # remote (SSH) and local backends must not reuse a cached
+                    # agent that carries stale terminal env vars (#5937).
+                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
                 ], sort_keys=True)
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
