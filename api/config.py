@@ -633,6 +633,85 @@ def reload_config() -> None:
 _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
+# Diagnostics retain only a bounded scalar observation of the effective session
+# cap.  Raw config and environment values stay in the producer's stack frame.
+_sessions_cap_snapshot_lock = threading.Lock()
+_sessions_cap_snapshots: collections.OrderedDict[str, dict[str, Any]] = collections.OrderedDict()
+_sessions_cap_generations: dict[str, tuple[Any, Any, int]] = {}
+_SESSIONS_CAP_SNAPSHOT_MAX = 64
+
+
+def _sessions_cap_home_key(profile_home: Path | str) -> str:
+    try:
+        # Lexical canonicalization keeps diagnostic reads free of filesystem I/O.
+        return os.path.normcase(os.path.abspath(os.path.expanduser(str(profile_home))))
+    except Exception:
+        return str(Path(profile_home).expanduser())
+
+
+def observe_sessions_cap_sources(profile_home: Path | str, config_signature: Any, env_signature: Any) -> int:
+    key = _sessions_cap_home_key(profile_home)
+    signature = (config_signature, env_signature)
+    with _sessions_cap_snapshot_lock:
+        previous = _sessions_cap_generations.get(key)
+        generation = previous[2] if previous else 0
+        if previous is None or previous[:2] != signature:
+            generation += 1
+            _sessions_cap_generations[key] = (config_signature, env_signature, generation)
+            _sessions_cap_snapshots.pop(key, None)
+        return generation
+
+
+def publish_sessions_cap_snapshot(profile_home: Path | str, config_data: dict, *, generation: int,
+                                  process_authority: str | None = None) -> None:
+    key = _sessions_cap_home_key(profile_home)
+    cap = get_sessions_cache_max(config_data)
+    with _sessions_cap_snapshot_lock:
+        current = _sessions_cap_generations.get(key)
+        if current is None or current[2] != generation:
+            return
+        existing = _sessions_cap_snapshots.get(key)
+        if existing and existing.get("process_authority") is not None and process_authority is None:
+            return
+        _sessions_cap_snapshots[key] = {
+            "generation": generation,
+            "cap": int(cap),
+            "process_authority": process_authority,
+        }
+        _sessions_cap_snapshots.move_to_end(key)
+        while len(_sessions_cap_snapshots) > _SESSIONS_CAP_SNAPSHOT_MAX:
+            evicted, _ = _sessions_cap_snapshots.popitem(last=False)
+            _sessions_cap_generations.pop(evicted, None)
+
+
+def invalidate_sessions_cap_snapshot(profile_home: Path | str) -> None:
+    key = _sessions_cap_home_key(profile_home)
+    with _sessions_cap_snapshot_lock:
+        previous = _sessions_cap_generations.get(key)
+        generation = (previous[2] + 1) if previous else 1
+        signatures = previous[:2] if previous else (None, None)
+        _sessions_cap_generations[key] = (*signatures, generation)
+        _sessions_cap_snapshots.pop(key, None)
+
+
+def try_get_sessions_cap_snapshot(profile_home: Path | str, *, process_authority: str | None = None) -> tuple[int, bool]:
+    key = _sessions_cap_home_key(profile_home)
+    fallback = get_sessions_cache_max({})
+    if not _sessions_cap_snapshot_lock.acquire(blocking=False):
+        return fallback, False
+    try:
+        record = _sessions_cap_snapshots.get(key)
+        generation = _sessions_cap_generations.get(key)
+        if not record or not generation or record["generation"] != generation[2]:
+            return fallback, False
+        attached = record.get("process_authority")
+        if attached is not None and attached != process_authority:
+            return fallback, False
+        _sessions_cap_snapshots.move_to_end(key)
+        return int(record["cap"]), True
+    finally:
+        _sessions_cap_snapshot_lock.release()
+
 
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
@@ -659,6 +738,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         st = config_path.stat()
     except OSError:
         # Missing or unstattable file — preserve the original "no config" contract.
+        observe_sessions_cap_sources(config_path.parent, None, None)
         return {}
 
     cache_key = str(config_path)
@@ -677,6 +757,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
         logger.debug("Failed to parse yaml config from %s", config_path)
+        observe_sessions_cap_sources(config_path.parent, (st.st_mtime_ns, st.st_size), None)
         return {}
 
     raw = loaded if isinstance(loaded, dict) else {}
@@ -691,9 +772,31 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     # deep-copy the raw dict first (keeps the /api/reasoning hot path cheap).
     raw = _load_yaml_config_file_raw(config_path, _copy=False)
     if not raw:
+        try:
+            observe_sessions_cap_sources(config_path.parent, None, None)
+        except Exception:
+            pass
         return {}
     expanded = _expand_env_vars(raw)
-    return expanded if isinstance(expanded, dict) else {}
+    result = expanded if isinstance(expanded, dict) else {}
+    try:
+        env_path = config_path.parent / ".env"
+        cfg_stat = config_path.stat()
+        env_stat = env_path.stat() if env_path.exists() else None
+        generation = observe_sessions_cap_sources(
+            config_path.parent,
+            (cfg_stat.st_mtime_ns, cfg_stat.st_size),
+            (env_stat.st_mtime_ns, env_stat.st_size) if env_stat else None,
+        )
+        publish_sessions_cap_snapshot(
+            config_path.parent,
+            result,
+            generation=generation,
+            process_authority=_sessions_cap_home_key(config_path.parent),
+        )
+    except OSError:
+        pass
+    return result
 
 
 def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
@@ -791,6 +894,7 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     # serve a stale dict (#4650 review) — evicting on our own write closes that gap.
     with _yaml_file_cache_lock:
         _yaml_file_cache.pop(str(config_path), None)
+    invalidate_sessions_cap_snapshot(config_path.parent)
 
 
 # Initial load

@@ -1038,3 +1038,58 @@ def test_system_health_models_cache_snapshot_releases_successful_lock(monkeypatc
     assert lock.acquire_calls == [False]
     assert lock.release_calls == 1
     assert lock.held is False
+
+
+def test_sessions_cap_snapshot_is_bounded_and_scalar(monkeypatch, tmp_path):
+    from api import config
+
+    monkeypatch.setattr(config, "_sessions_cap_snapshots", __import__("collections").OrderedDict())
+    monkeypatch.setattr(config, "_sessions_cap_generations", {})
+    for index in range(65):
+        home = tmp_path / f"profile-{index}"
+        generation = config.observe_sessions_cap_sources(home, (index, 1), None)
+        config.publish_sessions_cap_snapshot(
+            home, {"webui": {"sessions_cache_max": index + 1}}, generation=generation
+        )
+    assert len(config._sessions_cap_snapshots) == 64
+    assert all(set(record) == {"generation", "cap", "process_authority"}
+               for record in config._sessions_cap_snapshots.values())
+
+
+def test_sessions_cap_snapshot_invalidation_uses_production_fallback(monkeypatch, tmp_path):
+    from api import config
+
+    monkeypatch.setattr(config, "SESSIONS_MAX", 222)
+    home = tmp_path / "profile"
+    generation = config.observe_sessions_cap_sources(home, (1, 1), None)
+    config.publish_sessions_cap_snapshot(
+        home, {"webui": {"sessions_cache_max": 731}}, generation=generation
+    )
+    config.invalidate_sessions_cap_snapshot(home)
+    assert config.try_get_sessions_cap_snapshot(home) == (222, False)
+
+
+def test_process_authoritative_snapshot_cannot_be_overwritten_by_blocked_publish(tmp_path):
+    from api import config
+
+    home = tmp_path / "profile"
+    generation = config.observe_sessions_cap_sources(home, (1, 1), None)
+    config.publish_sessions_cap_snapshot(home, {"webui": {"sessions_cache_max": 731}},
+                                         generation=generation, process_authority="proc")
+    config.publish_sessions_cap_snapshot(home, {"webui": {"sessions_cache_max": 202}},
+                                         generation=generation, process_authority=None)
+    assert config.try_get_sessions_cap_snapshot(home, process_authority="proc") == (731, True)
+
+
+def test_missing_yaml_observation_invalidates_snapshot(monkeypatch, tmp_path):
+    from api import config
+
+    home = tmp_path / "profile"
+    path = home / "config.yaml"
+    home.mkdir()
+    path.write_text("webui:\n  sessions_cache_max: 731\n", encoding="utf-8")
+    config._load_yaml_config_file(path)
+    assert config.try_get_sessions_cap_snapshot(home, process_authority=config._sessions_cap_home_key(home))[1]
+    path.unlink()
+    config._load_yaml_config_file_raw(path)
+    assert config.try_get_sessions_cap_snapshot(home)[1] is False

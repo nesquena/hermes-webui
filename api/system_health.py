@@ -192,13 +192,6 @@ def _zero_webui_runtime_payload() -> dict[str, Any]:
     }
 
 
-def _default_sessions_cache_cap(_config) -> int:
-    try:
-        return max(0, int(getattr(_config, "DEFAULT_SESSIONS_CACHE_MAX", 0)))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _try_acquire(lock: Any) -> bool:
     if lock is None or not hasattr(lock, "acquire"):
         return False
@@ -215,102 +208,36 @@ def _release_lock(lock: Any) -> None:
 
 
 def _cached_profile_sessions_cache_cap(_config) -> tuple[int, bool]:
-    default_cap = _default_sessions_cache_cap(_config)
-
-    def _resolve_from_cache() -> tuple[int, bool]:
-        cache_lock = getattr(_config, "_yaml_file_cache_lock", None)
-        if not _try_acquire(cache_lock):
-            return default_cap, False
-        try:
-            config_path = _config._get_config_path()
-            cache = getattr(_config, "_yaml_file_cache", {})
-            cached = cache.get(str(config_path)) if isinstance(cache, dict) else None
-        finally:
-            _release_lock(cache_lock)
-
-        if not cached or len(cached) < 2:
-            return default_cap, False
-
-        raw_config = cached[1]
-        if not isinstance(raw_config, dict):
-            return default_cap, True
-
-        webui_cfg = raw_config.get("webui", {}) if isinstance(raw_config, dict) else {}
-        raw_cap = webui_cfg.get("sessions_cache_max") if isinstance(webui_cfg, dict) else None
-        if raw_cap is None:
-            return default_cap, True
-
-        try:
-            cap = int(raw_cap)
-        except (TypeError, ValueError):
-            cap = None
-        if cap is not None and cap >= 1:
-            return cap, True
-
-        expanded = _expand_sessions_cap_with_request_env(_config, raw_cap, default_cap)
-        webui_cfg = expanded.get("webui", {}) if isinstance(expanded, dict) else {}
-        raw_cap = (
-            webui_cfg.get("sessions_cache_max") if isinstance(webui_cfg, dict) else None
-        )
-        try:
-            cap = int(raw_cap)
-        except (TypeError, ValueError):
-            cap = None
-        if cap is not None and cap >= 1:
-            return cap, True
-        return default_cap, True
-
-    return _resolve_from_cache()
-
-
-def _expand_sessions_cap_with_request_env(
-    _config,
-    raw_cap: Any,
-    default_cap: int,
-) -> dict[str, Any]:
-    if not isinstance(raw_cap, str):
-        return {"webui": {"sessions_cache_max": default_cap}}
-
     try:
         from api import profiles as _profiles
-
-        profile_name = (_profiles.get_active_profile_name() or "").strip()
-        is_named_profile = bool(profile_name and profile_name != "default")
-        profile_home = (
-            Path(_profiles.get_hermes_home_for_profile(profile_name))
-            if is_named_profile
-            else None
-        )
-        cached_profile_env = (
-            _profiles.filter_runtime_env_for_gateway_parity(
-                _profiles.get_cached_profile_runtime_env(profile_home)
-            )
-            if is_named_profile and profile_home is not None
-            else {}
-        )
-    except Exception:
-        return {"webui": {"sessions_cache_max": default_cap}}
-
-    previous_thread_env = getattr(_config._thread_ctx, "env", {}).copy()
-    previous_block = bool(
-        getattr(_config._thread_ctx, "block_process_env_fallback", False)
-    )
-    try:
-        if is_named_profile:
-            thread_env = dict(cached_profile_env)
-            if profile_home is not None:
-                thread_env["HERMES_HOME"] = str(profile_home)
-            _config._set_thread_env(**thread_env)
-            _config._thread_ctx.block_process_env_fallback = True
-        expanded = _config._expand_env_vars({"webui": {"sessions_cache_max": raw_cap}})
-    finally:
-        _config._thread_ctx.block_process_env_fallback = previous_block
-        if previous_thread_env:
-            _config._set_thread_env(**previous_thread_env)
+        name = _profiles.get_active_profile_name()
+        if not name:
+            name = "default"
+        if name == "default":
+            home = _profiles._DEFAULT_HERMES_HOME
+        elif _profiles._PROFILE_ID_RE.fullmatch(name):
+            home = _profiles._DEFAULT_HERMES_HOME / "profiles" / name
         else:
-            _config._clear_thread_env()
-
-    return expanded if isinstance(expanded, dict) else {"webui": {}}
+            return _config.get_sessions_cache_max({}), False
+        process_authority = None
+        cfg_path = getattr(_config, "_cfg_path", None)
+        if cfg_path is not None:
+            try:
+                if _config._sessions_cap_home_key(home) == _config._sessions_cap_home_key(Path(cfg_path).parent):
+                    process_authority = _config._sessions_cap_home_key(Path(cfg_path).parent)
+            except Exception:
+                pass
+        result = _config.try_get_sessions_cap_snapshot(home, process_authority=process_authority)
+        if not result[1] and name != "default":
+            try:
+                candidate = Path(_config._get_config_path()).parent
+                if candidate != home:
+                    return _config.try_get_sessions_cap_snapshot(candidate, process_authority=None)
+            except Exception:
+                pass
+        return result
+    except Exception:
+        return _config.get_sessions_cache_max({}), False
 
 
 def _webui_runtime_sources() -> dict[str, Any]:
@@ -417,15 +344,16 @@ def _webui_runtime_payload() -> dict[str, Any]:
     sessions_cap_observed = True
     if isinstance(sessions_cap, tuple) and len(sessions_cap) >= 2:
         sessions_cap_value, sessions_cap_observed = sessions_cap[:2]
-    if sessions_cap_observed and _try_acquire(sessions_lock):
+    if _try_acquire(sessions_lock):
         try:
             payload["sessions"]["resident_count"] = len(sessions)
-            payload["sessions"]["effective_cap"] = _safe_int(
-                sessions_cap_value,
-                default=payload["sessions"]["effective_cap"],
-            )
         finally:
             _release_lock(sessions_lock)
+    if sessions_cap_observed:
+        payload["sessions"]["effective_cap"] = _safe_int(
+            sessions_cap_value,
+            default=payload["sessions"]["effective_cap"],
+        )
 
     session_list_cache = sources.get("session_list_cache")
     session_list_cache_lock = sources.get("session_list_cache_lock")
