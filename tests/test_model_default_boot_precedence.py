@@ -136,6 +136,7 @@ function _redirectIfUnauth() { return false; }
 function _fetchLiveModels(provider, _sel) { calls.liveFetches.push(provider); }
 
 const document = {
+  title: '',
   baseURI: 'http://127.0.0.1/hermes/',
   createElement(tag) {
     const upper = tag.toUpperCase();
@@ -150,6 +151,7 @@ const document = {
     }
     return {tagName: upper, value: '', textContent: '', title: '', dataset: {}, parentElement: null};
   },
+  createTextNode(text) { return {textContent: text}; },
 };
 const args = JSON.parse(process.argv[4]);
 const localStorageData = Object.assign({}, args.localStorage || {});
@@ -531,7 +533,14 @@ function $(id) {
 }
 function t(key) { return key; }
 function getModelLabel(v) { return v; }
+function assistantDisplayName() { return 'Hermes'; }
 function syncModelChip() { calls.syncModelChip++; }
+function syncAppTitlebar() {}
+function syncWorkspaceDisplays() {}
+function syncReasoningChip() {}
+function syncToolsetsChip() {}
+function syncTerminalButton() {}
+function _syncHermesPanelSessionActions() {}
 function renderModelDropdown() {}
 function _positionModelDropdown() {}
 function _redirectIfUnauth() { return false; }
@@ -542,7 +551,6 @@ function animateNextSessionListRefresh() {}
 function _openProfileSwitchSessionBrowser() {}
 function showToast(msg) { calls.toasts.push(msg); }
 function loadWorkspaceList() { return Promise.resolve([]); }
-function syncTopbar() {}
 function _clearCronDetail() {}
 
 const renderWaits = [];
@@ -578,9 +586,15 @@ const profilePayloads = {
   beta: {active: 'beta', is_default: false, default_model: 'custom/profile-b-model', default_model_provider: 'beta-provider'},
   gamma: {active: 'gamma', is_default: false, default_model: 'custom/profile-c-model', default_model_provider: 'gamma-provider'},
 };
+const profileSwitchRequests = [];
 api = async function(url, opts = {}) {
   if (url === '/api/profile/switch') {
     const body = JSON.parse(opts.body || '{}');
+    if (args.scenario === 'session-mismatch-rapid-beta-gamma') {
+      const d = deferred();
+      profileSwitchRequests.push({name: body.name, resolve: d.resolve, reject: d.reject});
+      return d.promise;
+    }
     return profilePayloads[body.name];
   }
   if (url === '/api/settings') return {};
@@ -595,7 +609,7 @@ for (const name of [
   '_captureModelDropdownSelection', '_modelStateMatches',
   '_readPersistedModelState', '_writePersistedModelState', '_clearPersistedModelState',
   '_findModelInDropdown', '_applyModelToDropdown', '_ensureModelOptionInDropdown',
-  '_reconcileModelDropdownSelection',
+  '_reconcileModelDropdownSelection', '_providerDefersMissingModelFallback',
 ]) {
   eval(extractFuncFrom(ui, name));
 }
@@ -612,8 +626,10 @@ for (const name of [
 eval(extractFuncFrom(ui, '_addLiveModelsToSelect'));
 eval(extractFuncFrom(ui, '_fetchLiveModels'));
 eval(extractFuncFrom(ui, 'populateModelDropdown'));
+eval(extractFuncFrom(ui, 'syncTopbar'));
 eval(extractFuncFrom(panels, '_refreshProfileSwitchBackground'));
 eval(extractFuncFrom(panels, '_advanceBootSettingsDefaultModelStateForProfileSwitch'));
+eval(extractFuncFrom(panels, '_applyAcceptedProfileSwitchModelCatalog'));
 eval(extractFuncFrom(panels, '_profileSwitchPanelLoad'));
 eval(extractFuncFrom(panels, 'switchToProfile'));
 eval(extractFuncFrom(sessions, '_switchProfileForSessionLoad'));
@@ -658,6 +674,7 @@ function snapshot() {
       .map(model => model && model.id)
       .filter(Boolean),
     livePendingKeys: Array.from(_liveModelFetchPending),
+    profileSwitchRequestCount: profileSwitchRequests.length,
   };
 }
 
@@ -700,6 +717,8 @@ async function ownerlessLiveSameProviderCacheLeak() {
     'custom/profile-a-model',
   );
   S.activeProfile = 'alpha';
+  S.session = null;
+  S.messages = [];
   _profileSwitchGeneration = 0;
   _modelDropdownRequestSeq = 0;
   _modelCatalogContextEpoch = 0;
@@ -740,15 +759,23 @@ async function sessionMismatchSwitchFailedRefresh() {
     default_model_provider: 'shared-provider',
   };
   modelSelect = makeSelect(
-    [{provider: 'shared-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+    [{provider: 'alpha-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
     'custom/profile-a-model',
   );
   S.activeProfile = 'alpha';
+  S.session = {
+    session_id: 'alpha-session',
+    title: 'Alpha session',
+    model: 'custom/profile-a-model',
+    model_provider: 'alpha-provider',
+    message_count: 1,
+  };
+  S.messages = [{role: 'user'}];
   _profileSwitchGeneration = 0;
   _modelDropdownRequestSeq = 0;
   _modelCatalogContextEpoch = 0;
   window._defaultModel = 'custom/profile-a-model';
-  window._activeProvider = 'shared-provider';
+  window._activeProvider = 'alpha-provider';
   await _switchProfileForSessionLoad('beta');
   await tick(12);
   if (modelRequests.length) {
@@ -758,11 +785,56 @@ async function sessionMismatchSwitchFailedRefresh() {
   return {final: snapshot()};
 }
 
+async function sessionMismatchRapidBetaGamma() {
+  profilePayloads.beta = {
+    active: 'beta',
+    is_default: false,
+    default_model: 'custom/profile-b-model',
+    default_model_provider: 'shared-provider',
+  };
+  profilePayloads.gamma = {
+    active: 'gamma',
+    is_default: false,
+    default_model: 'custom/profile-c-model',
+    default_model_provider: 'shared-provider',
+  };
+  modelSelect = makeSelect(
+    [{provider: 'alpha-provider', value: 'custom/profile-a-model', label: 'Profile A model'}],
+    'custom/profile-a-model',
+  );
+  S.activeProfile = 'alpha';
+  S.session = {
+    session_id: 'alpha-session',
+    title: 'Alpha session',
+    model: 'custom/profile-a-model',
+    model_provider: 'alpha-provider',
+    message_count: 1,
+  };
+  S.messages = [{role: 'user'}];
+  _profileSwitchGeneration = 0;
+  _modelDropdownRequestSeq = 0;
+  _modelCatalogContextEpoch = 0;
+  window._defaultModel = 'custom/profile-a-model';
+  window._activeProvider = 'alpha-provider';
+
+  const betaSwitch = _switchProfileForSessionLoad('beta');
+  await waitFor('beta switch POST', () => profileSwitchRequests.length === 1);
+  const gammaSwitch = _switchProfileForSessionLoad('gamma');
+  await waitFor('gamma switch POST', () => profileSwitchRequests.length === 2);
+  profileSwitchRequests[1].resolve(profilePayloads.gamma);
+  await tick(12);
+  profileSwitchRequests[0].resolve(profilePayloads.beta);
+  await Promise.allSettled([betaSwitch, gammaSwitch]);
+  await tick(12);
+  return {final: snapshot()};
+}
+
 (async () => {
   let result;
   if (args.scenario === 'rapid-beta-gamma') result = await rapidBetaThenGamma();
   else if (args.scenario === 'ownerless-live-same-provider') result = await ownerlessLiveSameProviderCacheLeak();
   else if (args.scenario === 'session-mismatch-failed-refresh') result = await sessionMismatchSwitchFailedRefresh();
+  else if (args.scenario === 'session-mismatch-rapid-beta-gamma') result = await sessionMismatchRapidBetaGamma();
   else result = await staleAlphaThenFailedBeta();
   process.stdout.write(JSON.stringify(result));
 })().catch(err => {
@@ -1091,18 +1163,23 @@ def test_profile_switch_advances_boot_settings_default_before_background_refresh
     accepted_switch_idx = switch_body.index("if (_switchGen !== _profileSwitchGeneration) return false;")
     invalidate_idx = switch_body.index("if (typeof _invalidateModelCatalogContext === 'function') _invalidateModelCatalogContext();")
     active_profile_idx = switch_body.index("S.activeProfile = data.active || name;")
-    reset_idx = switch_body.index("_resetModelCatalogSurfacesForProfileSwitch(data,_switchGen)")
-    advance_idx = switch_body.index("_advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);")
+    helper_call_idx = switch_body.index("_applyAcceptedProfileSwitchModelCatalog(data,_switchGen)")
     panel_load_idx = switch_body.index("await _profileSwitchPanelLoad();")
     refresh_idx = switch_body.index("_refreshProfileSwitchBackground(_switchGen);")
 
-    assert accepted_switch_idx < invalidate_idx < active_profile_idx < reset_idx < advance_idx < panel_load_idx < refresh_idx
+    assert accepted_switch_idx < invalidate_idx < active_profile_idx < helper_call_idx < panel_load_idx < refresh_idx
     helper = PANELS_JS[
         PANELS_JS.index("function _advanceBootSettingsDefaultModelStateForProfileSwitch")
         : switch_start
     ]
     assert "window._bootSettingsDefaultModelState=null;" in helper
     assert "profile_switch_generation:gen" in helper
+    accepted_helper = PANELS_JS[
+        PANELS_JS.index("function _applyAcceptedProfileSwitchModelCatalog")
+        : PANELS_JS.index("async function loadProfilesPanel", PANELS_JS.index("function _applyAcceptedProfileSwitchModelCatalog"))
+    ]
+    assert "_resetModelCatalogSurfacesForProfileSwitch(data,gen)" in accepted_helper
+    assert "_advanceBootSettingsDefaultModelStateForProfileSwitch(data,gen);" in accepted_helper
 
 
 def test_model_select_onchange_retires_provisional_boot_marker():
@@ -1404,6 +1481,38 @@ def test_session_profile_mismatch_switch_owns_model_catalog_refresh_when_refresh
         "default_model_has_explicit_source": True,
         "profile": "beta",
         "profile_switch_generation": 1,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_profile_mismatch_switch_rejects_superseded_post_response(
+    profile_switch_race_driver_path,
+):
+    got = _run_profile_switch_race_driver(
+        profile_switch_race_driver_path,
+        scenario="session-mismatch-rapid-beta-gamma",
+        render_plan=[],
+    )
+
+    snapshot = got["final"]
+    assert snapshot["profile"] == "gamma"
+    assert snapshot["generation"] == 2
+    assert snapshot["defaultModel"] == "custom/profile-c-model"
+    assert snapshot["activeProvider"] == "shared-provider"
+    assert snapshot["selectedState"] == {
+        "model": "custom/profile-c-model",
+        "model_provider": "shared-provider",
+    }
+    assert snapshot["selectValue"] == "custom/profile-c-model"
+    assert "custom/profile-b-model" not in snapshot["optionValues"]
+    assert "custom/profile-a-model" not in snapshot["optionValues"]
+    assert snapshot["profileSwitchRequestCount"] == 2
+    assert snapshot["bootSettingsDefaultModelState"] == {
+        "model": "custom/profile-c-model",
+        "model_provider": "shared-provider",
+        "default_model_has_explicit_source": True,
+        "profile": "gamma",
+        "profile_switch_generation": 2,
     }
 
 

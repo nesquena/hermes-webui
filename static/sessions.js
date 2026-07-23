@@ -1637,11 +1637,15 @@ async function _switchProfileForSessionLoad(profile){
   const profileSwitchGen=typeof _profileSwitchGeneration==='number'
     ? ++_profileSwitchGeneration
     : null;
+  const profileSwitchStillCurrent=()=>profileSwitchGen===null
+    || typeof _profileSwitchGeneration!=='number'
+    || profileSwitchGen===_profileSwitchGeneration;
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
+    if(!profileSwitchStillCurrent()) return;
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
@@ -1649,17 +1653,22 @@ async function _switchProfileForSessionLoad(profile){
     }
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
-    const profileSwitchModelAuthority=typeof _resetModelCatalogSurfacesForProfileSwitch==='function'
-      ? _resetModelCatalogSurfacesForProfileSwitch(data,profileSwitchGen)
-      : null;
-    if(!profileSwitchModelAuthority){
-      if(typeof _invalidateModelCatalogContext==='function') _invalidateModelCatalogContext();
-      if(data.default_model) window._defaultModel=data.default_model;
-      if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    if(typeof _applyAcceptedProfileSwitchModelCatalog==='function'){
+      _applyAcceptedProfileSwitchModelCatalog(data,profileSwitchGen);
+    }else{
+      const profileSwitchModelAuthority=typeof _resetModelCatalogSurfacesForProfileSwitch==='function'
+        ? _resetModelCatalogSurfacesForProfileSwitch(data,profileSwitchGen)
+        : null;
+      if(!profileSwitchModelAuthority){
+        if(typeof _invalidateModelCatalogContext==='function') _invalidateModelCatalogContext();
+        if(data.default_model) window._defaultModel=data.default_model;
+        if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+      }
+      if(typeof _advanceBootSettingsDefaultModelStateForProfileSwitch==='function'){
+        _advanceBootSettingsDefaultModelStateForProfileSwitch(data,profileSwitchGen);
+      }
     }
-    if(typeof _advanceBootSettingsDefaultModelStateForProfileSwitch==='function'){
-      _advanceBootSettingsDefaultModelStateForProfileSwitch(data,profileSwitchGen);
-    }
+    if(!profileSwitchStillCurrent()) return;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
@@ -1675,10 +1684,22 @@ async function _switchProfileForSessionLoad(profile){
     }else if(typeof populateModelDropdown==='function'){
       Promise.resolve(populateModelDropdown({preferProfileDefaultOnFreshBoot:true})).catch(()=>{});
     }
+    if(!profileSwitchStillCurrent()) return;
     if(typeof startGatewaySSE==='function') startGatewaySSE();
-    if(typeof syncTopbar==='function') syncTopbar();
+    if(!S.session&&typeof syncTopbar==='function'){
+      syncTopbar();
+    }else if(typeof $==='function'){
+      const profileLabel=$('profileChipLabel');
+      if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+      const titleLabel=$('titlebarProfileLabel');
+      if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+    }
+    if(!profileSwitchStillCurrent()) return;
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    if(typeof renderSessionList==='function') await renderSessionList();
+    if(typeof renderSessionList==='function'){
+      await renderSessionList();
+      if(!profileSwitchStillCurrent()) return;
+    }
   }catch(switchErr){
     // The switch POST failed, so we're still on the previous profile and its
     // caches are intact. Clear the up-front skeleton and re-render the real

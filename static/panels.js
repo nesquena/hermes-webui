@@ -6593,6 +6593,21 @@ function _advanceBootSettingsDefaultModelStateForProfileSwitch(data,gen){
   };
 }
 
+function _applyAcceptedProfileSwitchModelCatalog(data,gen){
+  const profileSwitchModelAuthority=typeof _resetModelCatalogSurfacesForProfileSwitch==='function'
+    ? _resetModelCatalogSurfacesForProfileSwitch(data,gen)
+    : null;
+  if(!profileSwitchModelAuthority){
+    if(typeof _invalidateModelCatalogContext==='function') _invalidateModelCatalogContext();
+    if(data&&data.default_model) window._defaultModel=data.default_model;
+    if(data&&data.default_model_provider) window._activeProvider=data.default_model_provider;
+  }
+  if(typeof _advanceBootSettingsDefaultModelStateForProfileSwitch==='function'){
+    _advanceBootSettingsDefaultModelStateForProfileSwitch(data,gen);
+  }
+  return profileSwitchModelAuthority;
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
@@ -7026,12 +7041,9 @@ async function switchToProfile(name) {
     if (typeof _invalidateModelCatalogContext === 'function') _invalidateModelCatalogContext();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
-    const _profileSwitchModelAuthority = typeof _resetModelCatalogSurfacesForProfileSwitch === 'function'
-      ? _resetModelCatalogSurfacesForProfileSwitch(data,_switchGen)
+    const _profileSwitchModelAuthority = typeof _applyAcceptedProfileSwitchModelCatalog === 'function'
+      ? _applyAcceptedProfileSwitchModelCatalog(data,_switchGen)
       : null;
-    if (typeof _advanceBootSettingsDefaultModelStateForProfileSwitch === 'function') {
-      _advanceBootSettingsDefaultModelStateForProfileSwitch(data,_switchGen);
-    }
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
