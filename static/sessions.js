@@ -7650,8 +7650,9 @@ function renderSessionListFromCache(){
       noneChip.onclick=()=>{_setActiveProjectFilter(NO_PROJECT_FILTER);};
       bar.appendChild(noneChip);
     }
-    // Project chips
-    for(const p of _allProjects){
+    // Project chips — sorted alphabetically by name so the bar is deterministic.
+    const projects = [..._allProjects].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    for(const p of projects){
       const chip=document.createElement('span');
       chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
       if(p.color){
