@@ -10336,6 +10336,24 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
+function _isCanonicalAssistantToolCallEnvelope(msg){
+  if(!msg||String(msg.role||'')!=='assistant') return false;
+  const calls=msg.tool_calls;
+  if(!Array.isArray(calls)||calls.length===0) return false;
+  for(let i=0;i<calls.length;i++){
+    const call=calls[i];
+    if(!call||typeof call!=='object'||Array.isArray(call)) return false;
+    const hasCallId = (typeof call.id === 'string' && call.id.trim().length>0)
+      || (typeof call.call_id === 'string' && call.call_id.trim().length>0);
+    if(!hasCallId) return false;
+    const fnName = (typeof call.name === 'string' && call.name.trim().length>0)
+      || (call.function && typeof call.function === 'object'
+          && typeof call.function.name === 'string' && call.function.name.trim().length>0);
+    if(!fnName) return false;
+  }
+  return true;
+}
+
 function _pendingCurrentTailUserMessage(messages){
   const list=Array.isArray(messages)?messages:[];
   for(let i=list.length-1;i>=0;i--){
@@ -10346,6 +10364,7 @@ function _pendingCurrentTailUserMessage(messages){
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
       return msg;
     }
+    if(_isCanonicalAssistantToolCallEnvelope(msg)) continue;
     if(msg._live||String(msg.role||'')==='tool') continue;
     return null;
   }

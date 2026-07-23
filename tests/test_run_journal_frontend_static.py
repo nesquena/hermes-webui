@@ -75,6 +75,17 @@ process.stdout.write(JSON.stringify({{
 
 def _run_current_turn_scope_probe() -> dict:
     prompt = "repeat me"
+    tool_call_noop = json.dumps({"name": "noop", "arguments": "{}"})
+    tool_turn_envelope = json.dumps(
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": 3.2,
+            "tool_calls": [
+                {"id": "tool-turn-call", "type": "function", "function": json.loads(tool_call_noop)}
+            ],
+        }
+    )
     historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
     current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
     helpers = "\n".join(
@@ -88,6 +99,7 @@ def _run_current_turn_scope_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
             _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
             _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
             _function_body(SESSIONS_SRC, "function _mergePendingSessionMessage"),
@@ -156,8 +168,22 @@ const completedBoundaryDedupe = _hasCurrentTailUserDuplicate(
   [historical, historicalAnswer, compaction],
   {{role:'user', content:{json.dumps(prompt)}, _ts:3}}
 );
+const toolTurnPrompt = {json.dumps("tool-call prompt")};
+const toolTurnUser = {{role:'user', content:toolTurnPrompt, _ts:3}};
+const toolTurnEnvelope = {tool_turn_envelope};
+const toolTurnResult = {{role:'tool', content:'tool result', _ts:3.6, tool_call_id:'tool-turn-call'}};
+const toolTurnBase = [historical, historicalAnswer, toolTurnUser, toolTurnEnvelope, toolTurnResult];
+const toolTurnInflight = _mergeInflightTailMessages(
+  toolTurnBase,
+  [{{role:'user', content:toolTurnPrompt, _ts:3}}, {{role:'assistant', content:'live turn', _live:true, _ts:4}}]
+);
+const toolTurnPendingMessage = {{pending_user_message:toolTurnPrompt, pending_started_at:4}};
+const toolTurnPendingMerged = _mergePendingSessionMessage(toolTurnPendingMessage, toolTurnBase);
 const distinctCompletedTurnPromptCount = inflightAfterHistory.filter(
   m=>m&&m.role==='user'&&_normalizeUserTranscriptText(m.content)==={json.dumps(prompt)}
+).length;
+const toolTurnInflightPromptCount = toolTurnInflight.filter(
+  m=>m&&m.role==='user'&&_normalizeUserTranscriptText(m.content)===_normalizeUserTranscriptText(toolTurnPrompt)
 ).length;
 
 process.stdout.write(JSON.stringify({{
@@ -177,6 +203,8 @@ process.stdout.write(JSON.stringify({{
   compactionLiveAssistantRetained,
   completedBoundaryDedupe,
   distinctCompletedTurnPromptCount,
+  toolTurnPendingMerged,
+  toolTurnInflightPromptCount,
 }}));
 """
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
@@ -185,6 +213,21 @@ process.stdout.write(JSON.stringify({{
 
 def _run_pending_session_message_probe() -> dict:
     prompt = "repeat me"
+    tool_call_inspect = json.dumps({"name": "inspect", "arguments": "{}"})
+    tool_envelope_current_turn = json.dumps(
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": 2.5,
+            "tool_calls": [
+                {
+                    "id": "turn-envelope-call",
+                    "type": "function",
+                    "function": json.loads(tool_call_inspect),
+                }
+            ],
+        }
+    )
     historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
     current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
     helpers = "\n".join(
@@ -196,6 +239,7 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
@@ -228,6 +272,9 @@ const repeatedCompletedBase = [
   repeatedPromptTurnTwo,
   repeatedPromptAnswerTwo,
 ];
+const toolEnvelopeCurrentTurn = {tool_envelope_current_turn};
+const toolEnvelopeResult = {{role:'tool', content:'tool result', tool_call_id:'turn-envelope-call', _ts:2.6}};
+const toolEnvelopeCurrentMessages = [historical, historicalAnswer, currentTail, toolEnvelopeCurrentTurn, toolEnvelopeResult];
 
 const fromHistoricalSameText = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:3}},
@@ -277,6 +324,10 @@ process.stdout.write(JSON.stringify({{
   exactCurrentTailAttachmentsCopied: Array.isArray(currentTail.attachments) && currentTail.attachments[0].name==='note.txt',
   workspaceCurrentTailDedupe: workspaceCurrentResult===null,
   liveAfterCurrentTailDedupe: liveAfterCurrentResult===null,
+  toolEnvelopeTurnSuppressesPending: getPendingSessionMessage(
+    {{pending_user_message:prompt, pending_started_at:4}},
+    toolEnvelopeCurrentMessages
+  )===null,
   differentCurrentTailSurvives: !!differentTailResult && differentTailResult.content===prompt && differentTailResult._pending===true,
   compactionBoundaryDedupe: compactionTailResult===null,
   compactionBoundaryCurrentTail: compactionCurrentTail&&compactionCurrentTail.role==='user'&&compactionCurrentTail.content===prompt,
@@ -285,6 +336,103 @@ process.stdout.write(JSON.stringify({{
   isContextCompactionText: _isContextCompactionText(compactionMarker.content),
   isContextCompactionMessage: _isContextCompactionMessage(compactionMarker),
 }}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _run_tail_scanner_boundary_probe() -> list[dict]:
+    prompt = "scan me"
+    prior_prompt = "older prompt"
+    helpers = "\n".join(
+        [
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(UI_SRC, "function _isContextCompactionText"),
+            _function_body(UI_SRC, "function _isContextCompactionMessage"),
+        ]
+    )
+    script = f"""
+{helpers}
+const prompt = {json.dumps(prompt)};
+const priorPrompt = {json.dumps(prior_prompt)};
+const currentUser = {{role:'user', content:prompt, _ts:3}};
+const priorUser = {{role:'user', content:priorPrompt, _ts:1}};
+const priorAssistant = {{role:'assistant', content:'earlier answer', _ts:2}};
+const compaction = {{
+  role:'user',
+  content:'[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.',
+  _ts:3.5,
+}};
+const live = {{role:'assistant', content:'working', _live:true, _ts:4}};
+const toolResult = {{role:'tool', content:'tool result', tool_call_id:'scan-call', _ts:3.6}};
+const completedAssistant = {{role:'assistant', content:'done', _ts:4.2}};
+const canonicalFunctionCall = {{
+  id: 'scan-fn-id',
+  type: 'function',
+  function: {{name: 'inspect', arguments: '{{}}'}},
+}};
+const canonicalTopNameCall = {{
+  call_id: 'scan-call-id',
+  type: 'function',
+  name: 'inspect',
+  function: {{}},
+}};
+const canonicalPreambleCall = {{
+  id: 'scan-preamble-id',
+  type: 'function',
+  function: {{name: 'inspect', arguments: '{{}}'}},
+}};
+
+const canonicalFunctionEnvelope = {{role:'assistant', content:'', _ts:2.1, tool_calls:[canonicalFunctionCall]}};
+const canonicalTopNameEnvelope = {{role:'assistant', content:'', _ts:2.2, tool_calls:[canonicalTopNameCall]}};
+const canonicalCallIdEnvelope = {{role:'assistant', content:'', _ts:2.3, tool_calls:[canonicalTopNameCall]}};
+const canonicalPreambleEnvelope = {{role:'assistant', content:'I will inspect', _ts:2.4, tool_calls:[canonicalPreambleCall]}};
+const malformedLiteral = {{role:'assistant', content:'no tools', _ts:2.7}};
+const malformedObjectNoId = {{role:'assistant', content:'', _ts:3.6, tool_calls:[{{type:'function', function:{{name:'inspect', arguments:'{{}}'}}}}]}};
+const malformedObjectNoName = {{role:'assistant', content:'', _ts:3.7, tool_calls:[{{id:'no-name', type:'function', function:{{}}}}]}};
+const toolCallWithInvalid = {{role:'assistant', content:'', _ts:3.8, tool_calls:[canonicalFunctionCall, null]}};
+
+const cases = [
+  {{name:'canonical function.name', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope], expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical top-level name', helperMessage:canonicalTopNameEnvelope, messages:[priorUser, currentUser, canonicalTopNameEnvelope], expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical call_id', helperMessage:canonicalCallIdEnvelope, messages:[priorUser, currentUser, canonicalCallIdEnvelope], expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical with visible preamble', helperMessage:canonicalPreambleEnvelope, messages:[priorUser, currentUser, canonicalPreambleEnvelope], expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'canonical envelope followed by tool result', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult], expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'final assistant boundary after tool activity', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult, completedAssistant], expectHelper:true, expectTailPrompt:null}},
+  {{name:'legitimate repeated user rows', helperMessage:malformedLiteral, messages:[{{role:'user', content:prompt, _ts:1}}, priorAssistant, currentUser], expectHelper:false, expectTailPrompt:prompt}},
+  {{name:'compaction before completion', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, priorAssistant, currentUser, compaction, canonicalFunctionEnvelope], expectHelper:true, expectTailPrompt:prompt}},
+  {{name:'compaction after completion', helperMessage:canonicalFunctionEnvelope, messages:[priorUser, currentUser, canonicalFunctionEnvelope, toolResult, completedAssistant, compaction], expectHelper:true, expectTailPrompt:null}},
+  {{name:'_live', helperMessage:malformedLiteral, messages:[priorUser, currentUser, live], expectHelper:false, expectTailPrompt:prompt}},
+  {{name:'[]', helperMessage:{{role:'assistant', content:'', _ts:3.1, tool_calls: []}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.1, tool_calls: []}}], expectHelper:false, expectTailPrompt:null}},
+  {{name:'non-array tool_calls', helperMessage:{{role:'assistant', content:'', _ts:3.2, tool_calls:'not-an-array'}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.2, tool_calls:'not-an-array'}}], expectHelper:false, expectTailPrompt:null}},
+  {{name:'[null]', helperMessage:{{role:'assistant', content:'', _ts:3.3, tool_calls:[null]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.3, tool_calls:[null]}}], expectHelper:false, expectTailPrompt:null}},
+  {{name:'[{{}}]', helperMessage:{{role:'assistant', content:'', _ts:3.4, tool_calls:[{{}}]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.4, tool_calls:[{{}}]}}], expectHelper:false, expectTailPrompt:null}},
+  {{name:'primitive entry', helperMessage:{{role:'assistant', content:'', _ts:3.5, tool_calls:[1]}}, messages:[priorUser, {{role:'assistant', content:'', _ts:3.5, tool_calls:[1]}}], expectHelper:false, expectTailPrompt:null}},
+  {{name:'missing ID', helperMessage:malformedObjectNoId, messages:[priorUser, malformedObjectNoId], expectHelper:false, expectTailPrompt:null}},
+  {{name:'missing name', helperMessage:malformedObjectNoName, messages:[priorUser, malformedObjectNoName], expectHelper:false, expectTailPrompt:null}},
+  {{name:'mixed valid+invalid', helperMessage:toolCallWithInvalid, messages:[priorUser, toolCallWithInvalid], expectHelper:false, expectTailPrompt:null}},
+];
+
+const results = cases.map((tc) => {{
+  const current = _currentTailUserMessage(tc.messages);
+  const pending = _pendingCurrentTailUserMessage(tc.messages);
+  const currentPrompt = current && current.role==='user' ? String(current.content||'') : null;
+  const pendingPrompt = pending && pending.role==='user' ? String(pending.content||'') : null;
+  return {{
+    name: tc.name,
+    helper: _isCanonicalAssistantToolCallEnvelope(tc.helperMessage),
+    currentTailIsUser: !!(current && current.role==='user'),
+    currentTailPrompt: currentPrompt,
+    pendingTailIsUser: !!(pending && pending.role==='user'),
+    pendingTailPrompt: pendingPrompt,
+    expectHelper: tc.expectHelper,
+    expectTailPrompt: tc.expectTailPrompt,
+  }};
+}});
+process.stdout.write(JSON.stringify(results));
 """
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     return json.loads(proc.stdout)
@@ -472,6 +620,20 @@ def test_user_turn_dedupe_is_scoped_to_current_turn_by_behavior():
     assert result["compactionLiveAssistantRetained"] is True
     assert result["completedBoundaryDedupe"] is False
     assert result["distinctCompletedTurnPromptCount"] == 2
+    assert result["toolTurnPendingMerged"] is False
+    assert result["toolTurnInflightPromptCount"] == 1
+
+
+def test_tail_scanner_boundary_behavior_is_shared_between_current_and_pending_scans():
+    result = _run_tail_scanner_boundary_probe()
+
+    for row in result:
+        expected_user = row["expectTailPrompt"] is not None
+        assert row["helper"] == row["expectHelper"], row["name"]
+        assert row["currentTailIsUser"] is expected_user, row["name"]
+        assert row["pendingTailIsUser"] is expected_user, row["name"]
+        assert row["currentTailPrompt"] == row["expectTailPrompt"], row["name"]
+        assert row["pendingTailPrompt"] == row["expectTailPrompt"], row["name"]
 
 
 def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
@@ -498,6 +660,7 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["repeatedCompletedPromptsRemainValid"] is True
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
+    assert result["toolEnvelopeTurnSuppressesPending"] is True
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():

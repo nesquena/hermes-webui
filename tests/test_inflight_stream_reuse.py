@@ -50,6 +50,18 @@ def _function_decl(src: str, name: str) -> str:
     return src[start:i]
 
 
+def _sessions_helper_src() -> str:
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    return "\n".join(
+        [
+            _function_decl(UI_JS, "_isCanonicalAssistantToolCallEnvelope"),
+            SESSIONS_JS[start:end],
+        ]
+    )
+
+
 def test_attach_live_stream_reuses_existing_same_stream_transport():
     """Returning to a running session must not tear down its same SSE stream.
 
@@ -338,10 +350,7 @@ def test_running_reattach_refreshes_single_live_assistant_from_server_progress()
     render one `_live` assistant instead of duplicating or deleting progress.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -395,10 +404,7 @@ def test_running_reattach_rebuilds_live_assistant_from_last_text_before_activity
     switch or token causes the text segment to reappear.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -429,10 +435,7 @@ def test_running_reattach_projects_live_text_into_activity_burst_segments():
     timeline even when the DOM snapshot is unavailable.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -472,10 +475,7 @@ def test_running_reattach_reprojects_segmented_live_tail_without_duplicate_prefi
     visible process text.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -516,10 +516,7 @@ def test_running_reattach_keeps_segmented_tail_when_last_segment_is_not_accumula
     the prior live segments are still the source of truth and must be preserved.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -552,10 +549,7 @@ def test_running_reattach_aliases_empty_activity_bursts_to_previous_text_segment
     attached to a burst id that has no visible assistant segment.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -591,10 +585,7 @@ def test_running_reattach_backfills_tool_segment_seq_for_burst_anchors():
     so tool cards land next to their triggering text, not at the tail.
     """
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
@@ -821,10 +812,7 @@ def test_project_inflight_with_no_visible_anchor_maps_tools_to_run_anchor_segmen
     """Without a visible burst anchor, in-flight tools should still map to the first
     segment instead of falling back to the last segment in render order."""
     assert NODE, "node not on PATH"
-    start = SESSIONS_JS.find("function _messageComparableText")
-    end = SESSIONS_JS.find("// Load older messages", start)
-    assert start != -1 and end != -1
-    helper_src = SESSIONS_JS[start:end]
+    helper_src = _sessions_helper_src()
     script = f"""
 const assert = require('assert');
 {helper_src}
