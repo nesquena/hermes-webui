@@ -93,6 +93,10 @@ globalThis.S = {
   _profileSwitchWorkspace: null,
   _profileDefaultWorkspace: null,
 };
+globalThis.setWorkspaceSearchSession = (session) => {
+  globalThis.S.session = session;
+  return true;
+};
 globalThis._defaultModel = args.defaultModel || null;
 globalThis._activeProvider = args.activeProvider || null;
 globalThis._emptyComposerModelOverride = args.emptyComposerOverride || null;

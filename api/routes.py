@@ -9622,6 +9622,8 @@ from api.workspace import (
     authorize_escape_target,
     EscapeAuthorizationExpiredError,
     list_dir,
+    search_workspace,
+    WorkspaceSearchUnavailableError,
     list_authorized_escape_dir,
     dir_signature,
     list_workspace_suggestions,
@@ -13236,6 +13238,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/list":
         return _handle_list_dir(handler, parsed)
+
+    if parsed.path == "/api/workspace/search":
+        return _handle_workspace_search(handler, parsed)
 
     if parsed.path == "/api/escape/list":
         return _handle_escape_list_dir(handler, parsed)
@@ -16962,6 +16967,32 @@ def _handle_list_dir(handler, parsed):
                 "path": rel_path,
             },
         )
+    except (FileNotFoundError, ValueError) as e:
+        return bad(handler, _sanitize_error(e), 404)
+
+
+def _handle_workspace_search(handler, parsed):
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    query = qs.get("query", [""])[0].strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+    if len(query) < 2:
+        return bad(handler, "query must contain at least 2 characters", 400)
+    try:
+        s = get_session_for_file_ops(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        workspace_raw = str(getattr(s, "workspace", "") or "").strip()
+        if not workspace_raw:
+            return bad(handler, "Workspace not configured", 404)
+        workspace = resolve_trusted_workspace(workspace_raw)
+        include_hidden = qs.get("include_hidden", ["0"])[0].lower() in {"1", "true", "yes"}
+        payload = search_workspace(Path(workspace), query, include_hidden=include_hidden)
+        return j(handler, {"query": query, **payload})
+    except WorkspaceSearchUnavailableError as e:
+        return bad(handler, _sanitize_error(e), 503)
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
 

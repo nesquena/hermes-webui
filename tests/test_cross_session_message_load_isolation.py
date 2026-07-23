@@ -202,6 +202,10 @@ function createEnvironment() {
     busy: false,
     activeStreamId: null,
   };
+  globalThis.setWorkspaceSearchSession = (session) => {
+    globalThis.S.session = session;
+    return true;
+  };
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
@@ -579,9 +583,11 @@ runAll()
 def _run_node(script: str) -> dict:
     assert NODE is not None, "node is required"
     completed = subprocess.run(
-        [NODE, "--input-type=module", "-e", script],
+        [NODE, "--input-type=module"],
         cwd=str(REPO),
+        input=script,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=60,
         check=False,

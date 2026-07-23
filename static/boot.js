@@ -2079,7 +2079,7 @@ $('btnShareSession').onclick=async()=>{
       }
     }
     const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
+    if(res&&res.session) { setWorkspaceSearchSession(res.session); }
     const href=new URL(String(res&&res.share&&res.share.url||''),location.origin).href;
     await _copyText(href);
     showToast(t('share_session_created'));
@@ -2100,7 +2100,7 @@ $('btnStopSharingSession').onclick=async()=>{
   if(!ok) return;
   try{
     const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
+    if(res&&res.session) { setWorkspaceSearchSession(res.session); }
     showToast(t('share_session_revoked'));
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
   }catch(err){
@@ -3708,7 +3708,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         if(savedSidebarOnlyState.archived){
           try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
-        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        setWorkspaceSearchSession(null); S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
@@ -3716,7 +3716,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         return;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
-        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        setWorkspaceSearchSession(null); S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
@@ -3752,7 +3752,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         : [];
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
       if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
-        S.session=null; S.messages=[];
+        setWorkspaceSearchSession(null); S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
         // even though there is no active session (#workspace-persist).

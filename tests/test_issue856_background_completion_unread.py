@@ -437,7 +437,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     active_const_idx = done_block.find("const isActiveSession=_isSessionCurrentPane(activeSid);")
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
-    session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
+    session_update_idx = done_block.find("setWorkspaceSearchSession(d.session)", active_guard_idx)
     render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("preservePreview", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)
@@ -445,7 +445,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     assert active_const_idx != -1, "done handler must compute active/current pane separately"
     assert viewed_const_idx != -1, "done handler must still compute visible/focused read state"
     assert active_const_idx < viewed_const_idx
-    assert session_update_idx != -1, "active hidden completion must still refresh S.session"
+    assert session_update_idx != -1, "active hidden completion must still refresh the owned session state"
     assert render_idx != -1, "active hidden completion must still render the final assistant response"
     assert load_dir_idx != -1, "active hidden completion must keep normal active-session finalization"
     assert mark_viewed_idx != -1, "read-state write must stay gated by visible/focused viewing"
@@ -526,14 +526,14 @@ def test_completion_unread_clears_only_when_session_is_opened():
     # flows through _acknowledgeSessionVisit(S.session.session_id, ...), which
     # calls _setSessionViewedCount() internally (and _setSessionViewedCount clears
     # any stale completion-unread marker, #3020) (#4946).
-    assign_idx = load_block.find("S.session=data.session;")
+    assign_idx = load_block.find("setWorkspaceSearchSession(data.session)")
     acknowledge_idx = load_block.find("_acknowledgeSessionVisit(\n    S.session.session_id,", assign_idx)
     # The last stale-response ownership guard before the visit is acknowledged:
     # stale loadSession responses must not clear unread markers for sessions the
     # user did not actually open.
     stale_guard_idx = load_block.rfind("if (!_isCurrentLoad())", 0, acknowledge_idx)
 
-    assert assign_idx != -1, "loadSession must assign S.session before acknowledging the visit"
+    assert assign_idx != -1, "loadSession must accept session state before acknowledging the visit"
     assert acknowledge_idx != -1 and assign_idx < acknowledge_idx, (
         "loadSession must acknowledge the visit only after the session metadata "
         "response is accepted for the in-flight load"

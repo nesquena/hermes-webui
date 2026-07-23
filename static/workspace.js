@@ -285,6 +285,73 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
   return '';
 }
 
+let _workspaceSearchTimer=null;
+let _workspaceSearchRequest=0;
+let _workspaceSearchQuery='';
+if(!S._workspaceSearchResults) S._workspaceSearchResults=[];
+if(!S._workspaceSearchTruncated) S._workspaceSearchTruncated=false;
+S._workspaceSearchPending=false;
+
+function _workspaceSearchActive(){ return _workspaceSearchQuery.length>=2; }
+function _resetWorkspaceSearch(clearQuery){
+  if(_workspaceSearchTimer) clearTimeout(_workspaceSearchTimer);
+  _workspaceSearchTimer=null;
+  _workspaceSearchRequest++;
+  if(clearQuery){
+    _workspaceSearchQuery='';
+    const input=$('workspaceSearch');
+    if(input) input.value='';
+  }
+  S._workspaceSearchResults=[];
+  S._workspaceSearchTruncated=false;
+  S._workspaceSearchPending=false;
+}
+function setWorkspaceSearchSession(session){
+  const previous=S.session;
+  const previousKey=previous?`${previous.session_id||''}\u0000${previous.workspace||''}`:'\u0000';
+  const nextKey=session?`${session.session_id||''}\u0000${session.workspace||''}`:'\u0000';
+  S.session=session;
+  if(nextKey===previousKey) return false;
+  _resetWorkspaceSearch(true);
+  if(typeof renderFileTree==='function') renderFileTree();
+  return true;
+}
+function _clearWorkspaceSearch(){ _resetWorkspaceSearch(true); }
+function requestWorkspaceSearch(query){
+  const normalizedQuery=String(query||'').trim();
+  _workspaceSearchQuery=normalizedQuery;
+  const sessionId=S.session&&S.session.session_id;
+  const workspace=S.session&&S.session.workspace;
+  const treeGen=_wsTreeGen;
+  if(_workspaceSearchTimer) clearTimeout(_workspaceSearchTimer);
+  if(!_workspaceSearchActive()||!sessionId){
+    _resetWorkspaceSearch(false);
+    if(typeof renderFileTree==='function') renderFileTree();
+    return;
+  }
+  const request=++_workspaceSearchRequest;
+  S._workspaceSearchPending=true;
+  if(typeof renderFileTree==='function') renderFileTree();
+  _workspaceSearchTimer=setTimeout(async()=>{
+    try{
+      const params=new URLSearchParams({session_id:sessionId,query:normalizedQuery,include_hidden:S.showHiddenWorkspaceFiles?'1':'0'});
+      const data=await api(`/api/workspace/search?${params.toString()}`);
+      if(request!==_workspaceSearchRequest||treeGen!==_wsTreeGen||!S.session||S.session.session_id!==sessionId||S.session.workspace!==workspace||_workspaceSearchQuery!==normalizedQuery) return;
+      S._workspaceSearchResults=Array.isArray(data.results)?data.results:[];
+      S._workspaceSearchTruncated=!!data.truncated;
+      S._workspaceSearchPending=false;
+      if(typeof renderFileTree==='function') renderFileTree();
+    }catch(_){
+      if(request===_workspaceSearchRequest&&treeGen===_wsTreeGen&&S.session&&S.session.session_id===sessionId&&S.session.workspace===workspace&&_workspaceSearchQuery===normalizedQuery) {
+        S._workspaceSearchResults=[];
+        S._workspaceSearchTruncated=false;
+        S._workspaceSearchPending=false;
+        if(typeof renderFileTree==='function') renderFileTree();
+      }
+    }
+  },250);
+}
+
 async function authorizeWorkspaceEscapeNavigation(item){
   if(!S.session || !item || !item.path) return null;
   const normalizedPath = _normalizeWorkspaceRelPath(item.path);
@@ -671,6 +738,7 @@ const _WS_SKELETON_ROWS = [
 let _wsTreeGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
+  if(typeof _clearWorkspaceSearch==='function') _clearWorkspaceSearch();
   return _wsTreeGen;
 }
 if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeGen;
@@ -722,20 +790,24 @@ async function loadDir(path, opts={}){
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
+  const nextDir=path||'.';
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
                              // from the previous workspace — which would pass the session_id
                              // guard because an empty-session switch reuses the same id — is
                              // rejected here instead of painting the wrong profile's files.
   try{
-    if(!path||path==='.'||refreshExpanded){
+    if(typeof _workspaceSearchActive==='function'&&_workspaceSearchActive()&&nextDir!==(S.currentDir||'.')){
+      _clearWorkspaceSearch();
+    }
+    if(nextDir==='.'||refreshExpanded){
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
-    S.currentDir=path||'.';
+    S.currentDir=nextDir;
     const data=await api(
-      _workspaceRouteForPath(path, 'list') ||
-      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
+      _workspaceRouteForPath(nextDir, 'list') ||
+      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(nextDir)}`
     );
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();

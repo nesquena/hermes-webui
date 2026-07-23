@@ -11,10 +11,10 @@ boot path which never calls loadDir() — file tree went blank.
 Fix: keep the session ID in localStorage. Every refresh runs the same
 path:
   loadSession() → loadDir() populates the workspace
-  → ephemeral guard fires → S.session=null in memory only
+  → ephemeral guard fires → setWorkspaceSearchSession(null) clears the active session in memory only
   → workspace panel stays open with files visible
 
-The session ID persisting in localStorage is harmless — server-side
+The session ID persisting in localStorage is harmless. Server-side
 ``all_sessions()`` filters Untitled+0-message sessions so no phantom
 sidebar entry appears, and ``newSession()`` overwrites the key when the
 user actually creates a real session.
@@ -56,9 +56,10 @@ def test_ephemeral_guard_still_clears_in_memory_session_state():
     block_end = BOOT_JS.find("return;", guard_idx)
     block = BOOT_JS[guard_idx:block_end]
     # Both in-memory clears must remain
-    assert re.search(r"S\.session\s*=\s*null", block), (
-        "Empty-session guard must still set S.session=null so the empty "
-        "scratch-pad is not surfaced as the active conversation"
+    assert "setWorkspaceSearchSession(null)" in block, (
+        "Empty-session guard must still clear the active session through "
+        "setWorkspaceSearchSession(null) so the empty scratch-pad is not "
+        "surfaced as the active conversation"
     )
     assert re.search(r"S\.messages\s*=\s*\[\]", block), (
         "Empty-session guard must still reset S.messages=[]"

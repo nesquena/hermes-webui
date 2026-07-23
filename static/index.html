@@ -1694,6 +1694,7 @@
       <button class="workspace-panel-tab" id="workspaceTodosTab" type="button" onclick="switchWorkspacePanelTab('todos')" role="tab" aria-selected="false" hidden data-i18n="tab_todos">Todos</button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
+    <div class="workspace-search"><input id="workspaceSearch" type="search" placeholder="Search files and folders…" data-i18n-placeholder="workspace_search_placeholder" oninput="requestWorkspaceSearch(this.value)" autocomplete="off"></div>
     <div class="file-tree" id="fileTree"></div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
     <div class="workspace-todos" id="workspaceTodosPanel" hidden style="flex:1;overflow-y:auto;padding:8px 12px"></div>
