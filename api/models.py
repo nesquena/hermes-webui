@@ -5224,6 +5224,101 @@ class _ExternalSessionView:
         self.workspace = workspace
 
 
+class WorkspaceBindingPersistenceError(ValueError):
+    """A recovered workspace could not be durably bound to its WebUI session."""
+
+
+_EXPECTED_WORKSPACE_UNSET = object()
+
+
+def persist_recovered_workspace_binding(
+    session,
+    workspace: str | Path,
+    *,
+    expected_workspace=_EXPECTED_WORKSPACE_UNSET,
+):
+    """Atomically persist only a recovered session's workspace binding.
+
+    Existing sidecars are patched as raw JSON so metadata-only callers never
+    reserialize (or otherwise clobber) the transcript. Missing sidecars fail
+    closed so recovery cannot resurrect a concurrently deleted session. The
+    per-session mutation lock keeps compare-and-replace ordered with other
+    compliant session writers.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        raise WorkspaceBindingPersistenceError(
+            "Failed to persist recovered workspace: invalid session id"
+        )
+    resolved = str(Path(workspace).expanduser().resolve())
+    expected_value = (
+        getattr(session, "workspace", "")
+        if expected_workspace is _EXPECTED_WORKSPACE_UNSET
+        else expected_workspace
+    )
+    expected = str(expected_value or "")
+    path = SESSION_DIR / f"{sid}.json"
+    lock = _get_session_agent_lock(sid)
+    with lock:
+        if not path.exists():
+            # Recovery only repairs an existing WebUI sidecar. Creating a new
+            # sidecar here can resurrect a session that was deleted after the
+            # recovery decision but before this lock was acquired.
+            raise WorkspaceBindingPersistenceError(
+                "Failed to persist recovered workspace: session sidecar is missing"
+            )
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise WorkspaceBindingPersistenceError(
+                "Failed to persist recovered workspace: unreadable session sidecar"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise WorkspaceBindingPersistenceError(
+                "Failed to persist recovered workspace: invalid session sidecar"
+            )
+        current = str(payload.get("workspace") or "")
+        if current != resolved:
+            if current != expected:
+                raise WorkspaceBindingPersistenceError(
+                    "Failed to persist recovered workspace: session workspace changed"
+                )
+            payload["workspace"] = resolved
+            tmp = path.with_suffix(
+                f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+            )
+            try:
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _safe_replace(tmp, path)
+            except Exception as exc:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise WorkspaceBindingPersistenceError(
+                    "Failed to persist recovered workspace"
+                ) from exc
+
+        session.workspace = resolved
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if cached is not None:
+                cached.workspace = resolved
+        try:
+            _write_session_index(updates=[cached or session])
+        except Exception:
+            logger.debug(
+                "Failed to refresh session index after workspace recovery for %s",
+                sid,
+                exc_info=True,
+            )
+        return cached or session
+
+
 def get_session_for_file_ops(sid: str):
     """Return a profile-authorized session-like object for file-manager handlers.
 
@@ -5254,6 +5349,24 @@ def get_session_for_file_ops(sid: str):
             active_profile,
         )
         raise KeyError(sid)
+    try:
+        from api.workspace import resolve_implicit_workspace_with_recovery
+
+        stored_workspace = getattr(session, "workspace", None)
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+        )
+    except ValueError:
+        # Preserve the existing file-handler behavior for non-missing trust or
+        # access errors. Recovery is deliberately limited to deleted paths.
+        return session
+    if recovered:
+        return persist_recovered_workspace_binding(
+            session,
+            workspace,
+            expected_workspace=stored_workspace,
+        )
     return session
 
 

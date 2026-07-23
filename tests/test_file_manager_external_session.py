@@ -11,10 +11,15 @@ Covers:
 
 from __future__ import annotations
 
+import gc
 import io
+import json
 import logging
 import re
 import sqlite3
+import threading
+import weakref
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -27,6 +32,10 @@ ROUTES_PY = ROOT / "api" / "routes.py"
 
 
 FILE_HANDLERS = [
+    "_handle_escape_authorize",
+    "_handle_escape_list_dir",
+    "_handle_escape_file_read",
+    "_handle_escape_file_raw",
     "_handle_folder_download",
     "_handle_file_raw",
     "_handle_file_read",
@@ -38,6 +47,8 @@ FILE_HANDLERS = [
     "_handle_file_reveal",
     "_handle_file_path",
     "_handle_file_open_vscode",
+    "_handle_office_file_save",
+    "_handle_file_move",
 ]
 
 
@@ -136,6 +147,491 @@ def test_get_session_for_file_ops_webui_passthrough(models_module, monkeypatch):
     result = models_module.get_session_for_file_ops("webui-sid")
     assert result is sentinel
     assert called == {"get_session": 1, "profile_match": 1, "state_db": 0}
+
+
+def test_get_session_for_file_ops_recovers_missing_implicit_workspace(
+    models_module, monkeypatch, tmp_path
+):
+    """A deleted sidecar workspace reloads fully before persisting its binding."""
+    profiles_module = pytest.importorskip("api.profiles")
+    workspace_module = pytest.importorskip("api.workspace")
+    stale = tmp_path / "deleted-workspace"
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    metadata_session = SimpleNamespace(
+        session_id="stale-webui-sid",
+        profile=None,
+        workspace=str(stale),
+        _loaded_metadata_only=True,
+    )
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / "stale-webui-sid.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "stale-webui-sid",
+                "workspace": str(stale),
+                "messages": [{"role": "user", "content": "preserve me"}],
+                "future_field": {"preserve": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def get_session(_sid, metadata_only=False):
+        assert metadata_only is True
+        return metadata_session
+
+    monkeypatch.setattr(models_module, "get_session", get_session)
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "_write_session_index", lambda **_kwargs: None)
+    monkeypatch.setattr(models_module, "get_last_workspace", lambda: str(fallback))
+    monkeypatch.setattr(profiles_module, "_profiles_match", lambda *_args: True)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(workspace_module, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(workspace_module, "load_workspaces", lambda: [])
+
+    recovered = models_module.get_session_for_file_ops(metadata_session.session_id)
+
+    assert recovered is metadata_session
+    assert recovered.session_id == metadata_session.session_id
+    assert Path(recovered.workspace) == fallback.resolve()
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert persisted["workspace"] == str(fallback.resolve())
+    assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]
+    assert persisted["future_field"] == {"preserve": True}
+
+
+def test_get_session_for_file_ops_recovery_save_failure_fails_closed(
+    models_module, monkeypatch, tmp_path
+):
+    profiles_module = pytest.importorskip("api.profiles")
+    workspace_module = pytest.importorskip("api.workspace")
+    stale = tmp_path / "deleted-workspace"
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    metadata_session = SimpleNamespace(
+        session_id="stale-save-failure",
+        profile=None,
+        workspace=str(stale),
+        _loaded_metadata_only=True,
+    )
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{metadata_session.session_id}.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": metadata_session.session_id,
+                "workspace": str(stale),
+                "messages": [{"role": "user", "content": "preserve me"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        models_module,
+        "get_session",
+        lambda _sid, metadata_only=False: metadata_session,
+    )
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(
+        models_module,
+        "_safe_replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr(models_module, "get_last_workspace", lambda: str(fallback))
+    monkeypatch.setattr(profiles_module, "_profiles_match", lambda *_args: True)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(workspace_module, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(workspace_module, "load_workspaces", lambda: [])
+
+    with pytest.raises(models_module.WorkspaceBindingPersistenceError):
+        models_module.get_session_for_file_ops(metadata_session.session_id)
+
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert metadata_session.workspace == str(stale)
+    assert persisted["workspace"] == str(stale)
+    assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]
+
+
+def test_recovered_workspace_compare_rejects_a_stale_concurrent_binding(
+    models_module, monkeypatch, tmp_path
+):
+    stale = tmp_path / "deleted-workspace"
+    fallback_a = tmp_path / "fallback-a"
+    fallback_b = tmp_path / "fallback-b"
+    fallback_a.mkdir()
+    fallback_b.mkdir()
+    metadata_session = SimpleNamespace(
+        session_id="stale-concurrent-binding",
+        workspace=str(stale),
+        _loaded_metadata_only=True,
+    )
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{metadata_session.session_id}.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": metadata_session.session_id,
+                "workspace": str(fallback_a.resolve()),
+                "messages": [{"role": "user", "content": "preserve me"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+
+    with pytest.raises(
+        models_module.WorkspaceBindingPersistenceError,
+        match="session workspace changed",
+    ):
+        models_module.persist_recovered_workspace_binding(
+            metadata_session, fallback_b
+        )
+
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert metadata_session.workspace == str(stale)
+    assert persisted["workspace"] == str(fallback_a.resolve())
+    assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]
+
+
+def test_recovery_cas_uses_the_workspace_seen_when_recovery_was_decided(
+    models_module, monkeypatch, tmp_path
+):
+    stale = tmp_path / "deleted-workspace"
+    fallback_a = tmp_path / "fallback-a"
+    explicit_b = tmp_path / "explicit-b"
+    fallback_a.mkdir()
+    explicit_b.mkdir()
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    session = SimpleNamespace(
+        session_id="explicit-switch-wins",
+        workspace=str(explicit_b.resolve()),
+        _loaded_metadata_only=True,
+    )
+    sidecar = session_dir / f"{session.session_id}.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": session.session_id,
+                "workspace": str(explicit_b.resolve()),
+                "messages": [{"role": "user", "content": "preserve me"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+
+    with pytest.raises(
+        models_module.WorkspaceBindingPersistenceError,
+        match="session workspace changed",
+    ):
+        models_module.persist_recovered_workspace_binding(
+            session,
+            fallback_a,
+            expected_workspace=str(stale),
+        )
+
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert session.workspace == str(explicit_b.resolve())
+    assert persisted["workspace"] == str(explicit_b.resolve())
+    assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]
+
+
+def test_recovery_never_recreates_a_missing_session_sidecar(
+    models_module, monkeypatch, tmp_path
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    stale = tmp_path / "deleted-workspace"
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    saves = {"count": 0}
+    session = SimpleNamespace(
+        session_id="deleted-before-recovery",
+        workspace=str(stale),
+        _loaded_metadata_only=False,
+        save=lambda **_kwargs: saves.__setitem__("count", saves["count"] + 1),
+    )
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+
+    with pytest.raises(
+        models_module.WorkspaceBindingPersistenceError,
+        match="session sidecar is missing",
+    ):
+        models_module.persist_recovered_workspace_binding(
+            session,
+            fallback,
+            expected_workspace=str(stale),
+        )
+
+    assert saves["count"] == 0
+    assert session.workspace == str(stale)
+    assert not (session_dir / f"{session.session_id}.json").exists()
+
+
+class _DeleteJSONHandler:
+    def __init__(self, body: dict):
+        body_bytes = json.dumps(body).encode()
+        self.status = None
+        self.rfile = BytesIO(body_bytes)
+        self.wfile = BytesIO()
+        self.headers = {"Content-Length": str(len(body_bytes))}
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, _key, _value):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def _safe_webui_print(self, *_args, **_kwargs):
+        pass
+
+
+def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
+    models_module, monkeypatch, tmp_path
+):
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    stale = tmp_path / "deleted-workspace"
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    sid = "delete-recovery-race"
+    session = SimpleNamespace(
+        session_id=sid,
+        workspace=str(stale),
+        profile=None,
+        _loaded_metadata_only=True,
+    )
+    sidecar = session_dir / f"{sid}.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": sid,
+                "workspace": str(stale),
+                "messages": [{"role": "user", "content": "preserve me"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    replace_entered = threading.Event()
+    allow_replace = threading.Event()
+    original_replace = models_module._safe_replace
+
+    def paused_replace(source, target):
+        replace_entered.set()
+        assert allow_replace.wait(timeout=5)
+        original_replace(source, target)
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "_safe_replace", paused_replace)
+    monkeypatch.setattr(models_module, "_write_session_index", lambda **_kwargs: None)
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "prune_session_from_index", lambda _sid: None)
+    monkeypatch.setattr(
+        routes_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
+    )
+    monkeypatch.setattr(
+        routes_module, "_publish_session_list_changed", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", lambda _sid: True)
+    monkeypatch.setattr(
+        upload_module,
+        "_session_attachment_dir",
+        lambda _sid: tmp_path / "attachments" / _sid,
+    )
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(
+        background_module, "forget_bg_task_completion_dedup", lambda _sid: None
+    )
+    monkeypatch.setattr(terminal_module, "close_terminal", lambda _sid: None)
+
+    recovery_errors = []
+
+    def recover():
+        try:
+            models_module.persist_recovered_workspace_binding(
+                session,
+                fallback,
+            )
+        except Exception as exc:
+            recovery_errors.append(exc)
+
+    recovery_thread = threading.Thread(target=recover)
+    recovery_thread.start()
+    assert replace_entered.wait(timeout=5)
+
+    delete_result = {}
+
+    def delete():
+        handler = _DeleteJSONHandler({"session_id": sid})
+        routes_module.handle_post(
+            handler, SimpleNamespace(path="/api/session/delete")
+        )
+        delete_result["status"] = handler.status
+
+    delete_thread = threading.Thread(target=delete)
+    delete_thread.start()
+    delete_thread.join(timeout=0.2)
+    assert delete_thread.is_alive(), "delete must wait for the recovery mutation lock"
+
+    allow_replace.set()
+    recovery_thread.join(timeout=5)
+    delete_thread.join(timeout=5)
+
+    assert not recovery_errors
+    assert delete_result["status"] == 200
+    assert not sidecar.exists()
+
+
+def test_session_lock_registry_reuses_live_lock_and_reclaims_unused_entry():
+    config_module = pytest.importorskip("api.config")
+    sid = "weak-session-lock"
+    with config_module.SESSION_AGENT_LOCKS_LOCK:
+        config_module.SESSION_AGENT_LOCKS.pop(sid, None)
+
+    first = config_module._get_session_agent_lock(sid)
+    first_ref = weakref.ref(first)
+    assert config_module._get_session_agent_lock(sid) is first
+
+    del first
+    gc.collect()
+
+    assert first_ref() is None
+    with config_module.SESSION_AGENT_LOCKS_LOCK:
+        assert sid not in config_module.SESSION_AGENT_LOCKS
+
+
+def test_compression_lock_alias_keeps_old_and_new_ids_on_one_live_lock():
+    config_module = pytest.importorskip("api.config")
+    old_sid = "compression-old-lock"
+    new_sid = "compression-new-lock"
+    with config_module.SESSION_AGENT_LOCKS_LOCK:
+        config_module.SESSION_AGENT_LOCKS.pop(old_sid, None)
+        config_module.SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+    compression_lock = config_module._get_session_agent_lock(old_sid)
+    waiter_reference = compression_lock
+    config_module._alias_session_agent_lock(
+        old_sid,
+        new_sid,
+        compression_lock,
+    )
+
+    assert config_module._get_session_agent_lock(old_sid) is waiter_reference
+    assert config_module._get_session_agent_lock(new_sid) is waiter_reference
+    streaming_source = (Path(__file__).parents[1] / "api" / "streaming.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_alias_session_agent_lock(old_sid, new_sid, _agent_lock)" in streaming_source
+
+
+def test_get_session_for_file_ops_does_not_fallback_existing_untrusted_workspace(
+    models_module, monkeypatch, tmp_path
+):
+    """Recovery must not replace a non-missing trust rejection with a fallback."""
+    profiles_module = pytest.importorskip("api.profiles")
+    workspace_module = pytest.importorskip("api.workspace")
+    home = tmp_path / "home"
+    fallback = home / "fallback"
+    fallback.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    session = SimpleNamespace(
+        session_id="untrusted-webui-sid",
+        profile=None,
+        workspace=str(outside),
+    )
+
+    monkeypatch.setattr(models_module, "get_session", lambda *args, **kwargs: session)
+    monkeypatch.setattr(models_module, "get_last_workspace", lambda: str(fallback))
+    monkeypatch.setattr(profiles_module, "_profiles_match", lambda *_args: True)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(workspace_module, "_home_path", lambda: home)
+    monkeypatch.setattr(workspace_module, "load_workspaces", lambda: [])
+    monkeypatch.setattr(workspace_module, "_BOOT_DEFAULT_WORKSPACE", fallback)
+
+    result = models_module.get_session_for_file_ops(session.session_id)
+
+    assert result is session
+    assert result.workspace == str(outside)
+
+
+@pytest.mark.parametrize(
+    "terminal_cfg",
+    [
+        pytest.param(
+            {"backend": "ssh", "cwd": "/Users/joeyshiue"},
+            id="cwd-absolute",
+        ),
+        pytest.param({"backend": "ssh"}, id="cwd-omitted"),
+        pytest.param({"backend": "ssh", "cwd": ""}, id="cwd-empty"),
+        pytest.param({"backend": "ssh", "cwd": "."}, id="cwd-dot"),
+    ],
+)
+def test_get_session_for_file_ops_does_not_recover_remote_trust_rejection(
+    models_module, monkeypatch, tmp_path, terminal_cfg
+):
+    """A local miss cannot prove that an out-of-scope remote path was deleted."""
+    config_module = pytest.importorskip("api.config")
+    profiles_module = pytest.importorskip("api.profiles")
+    workspace_module = pytest.importorskip("api.workspace")
+    candidate = "/Users/other/projects/demo"
+    fallback_path = tmp_path / "fallback"
+    fallback_path.mkdir()
+    session = SimpleNamespace(
+        session_id="remote-untrusted-webui-sid",
+        profile=None,
+        workspace=candidate,
+    )
+    fallback_calls = {"count": 0}
+
+    monkeypatch.setattr(models_module, "get_session", lambda *args, **kwargs: session)
+    monkeypatch.setattr(profiles_module, "_profiles_match", lambda *_args: True)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        config_module,
+        "get_config",
+        lambda: {"terminal": terminal_cfg},
+    )
+    monkeypatch.setattr(workspace_module, "_home_path", lambda: tmp_path)
+
+    def fallback():
+        fallback_calls["count"] += 1
+        return fallback_path
+
+    monkeypatch.setattr(models_module, "get_last_workspace", fallback)
+
+    result = models_module.get_session_for_file_ops(session.session_id)
+
+    assert result is session
+    assert result.workspace == candidate
+    assert fallback_calls["count"] == 0
 
 
 def test_get_session_for_file_ops_rejects_foreign_profile(
