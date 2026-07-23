@@ -129,14 +129,10 @@ _FILE_URI_RE = re.compile(r"(^|\s)(file://[^\s<>'\"\)\]]+)", re.IGNORECASE)
 _API_MEDIA_PATH_RE = re.compile(r"(?:^|/)api/media(?:/|$)", re.IGNORECASE)
 _RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
 _ENTITY_PRE_REGION_RE = re.compile(
-    r"&lt;pre\b(?:[^&]|&(?!gt;))*&gt;[\s\S]*?&lt;/pre&gt;"
+    r"&lt;(?i:pre)\b(?:[^&]|&(?!gt;))*&gt;[\s\S]*?&lt;/(?i:pre)&gt;"
 )
-_BLOCKQUOTE_FENCED_CODE_REGION_RE = re.compile(
-    r"(^|\r\n|\r|\n)(?:(?:>|&gt;) ?)+[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)"
-    r"(?:\r\n|\r|\n)"
-    r"(?:(?:(?:>|&gt;) ?)+[^\r\n]*(?:\r\n|\r|\n))*?"
-    r"(?:(?:>|&gt;) ?)+[ ]{0,3}(?P=fence)`*[ \t]*(?=\r\n|\r|\n|$)"
-)
+_BLOCKQUOTE_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,})([^\r\n`]*)$")
+_BLOCKQUOTE_FENCE_CLOSE_RE = re.compile(r"^[ ]{0,3}(`{3,})[ \t]*$")
 _FENCED_CODE_REGION_RE = re.compile(
     r"(^|\r\n|\r|\n)[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)"
     r"(?:\r\n|\r|\n)"
@@ -471,17 +467,100 @@ def _replace_media_tokens(text: str, replace_token) -> str:
     return "".join(pieces)
 
 
+def _line_content(line: str) -> str:
+    if line.endswith("\r\n"):
+        return line[:-2]
+    if line.endswith("\n") or line.endswith("\r"):
+        return line[:-1]
+    return line
+
+
+def _share_lines_with_offsets(text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    offset = 0
+    for line in str(text or "").splitlines(keepends=True):
+        lines.append((offset, _line_content(line)))
+        offset += len(line)
+    return lines
+
+
+def _blockquote_depth_and_remainder(line: str) -> tuple[int, str]:
+    depth = 0
+    index = 0
+    while index < len(line):
+        if line[index] == ">":
+            index += 1
+        elif line.startswith("&gt;", index):
+            index += 4
+        else:
+            break
+        if index < len(line) and line[index] == " ":
+            index += 1
+        depth += 1
+    return depth, line[index:]
+
+
+def _is_fence_close_line(line: str, min_len: int) -> bool:
+    match = _BLOCKQUOTE_FENCE_CLOSE_RE.fullmatch(line)
+    return bool(match and len(match.group(1)) >= min_len)
+
+
+def _stash_blockquote_fenced_code_regions(text: str, stash) -> str:
+    lines = _share_lines_with_offsets(text)
+    if not lines:
+        return text
+
+    pieces: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(lines):
+        line_start, line = lines[index]
+        depth, remainder = _blockquote_depth_and_remainder(line)
+        opener = _BLOCKQUOTE_FENCE_OPEN_RE.fullmatch(remainder)
+        if depth <= 0 or not opener:
+            index += 1
+            continue
+
+        fence_len = len(opener.group(1))
+        close_index = None
+        probe = index + 1
+        while probe < len(lines):
+            probe_depth, probe_remainder = _blockquote_depth_and_remainder(lines[probe][1])
+            if probe_depth < depth:
+                break
+            if _is_fence_close_line(probe_remainder, fence_len):
+                close_index = probe
+                break
+            probe += 1
+
+        if close_index is None:
+            index += 1
+            continue
+
+        close_start, close_line = lines[close_index]
+        region_end = close_start + len(close_line)
+        pieces.append(text[cursor:line_start])
+        pieces.append(stash(text[line_start:region_end]))
+        cursor = region_end
+        index = close_index + 1
+
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _stash_share_code_regions(text: str):
     stashed: list[str] = []
     stash_prefix = f"\x00SHARE_CODE_{secrets.token_hex(8)}_"
 
-    def stash(match: re.Match) -> str:
-        stashed.append(match.group(0))
+    def stash(match: re.Match | str) -> str:
+        stashed.append(match.group(0) if hasattr(match, "group") else str(match))
         return f"{stash_prefix}{len(stashed) - 1}\x00"
 
     protected = _RAW_PRE_REGION_RE.sub(stash, text)
     protected = _ENTITY_PRE_REGION_RE.sub(stash, protected)
-    protected = _BLOCKQUOTE_FENCED_CODE_REGION_RE.sub(stash, protected)
+    protected = _stash_blockquote_fenced_code_regions(protected, stash)
     protected = _FENCED_CODE_REGION_RE.sub(stash, protected)
     protected = _INLINE_CODE_REGION_RE.sub(stash, protected)
 

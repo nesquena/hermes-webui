@@ -202,7 +202,15 @@ def test_public_share_snapshot_preserves_nested_and_entity_blockquote_fence_lite
         "&gt; file:///fixture-not-redacted/entity-quote.txt\n"
         "&gt; ```"
     )
+    mixed_blockquote_fence = (
+        ">&gt; ```text\n"
+        ">&gt; file:///fixture-not-redacted/mixed-quote.txt\n"
+        ">&gt; ```"
+    )
     valid_entity_pre = "&lt;pre&gt;file:///fixture-not-redacted/valid-pre.txt&lt;/pre&gt;"
+    valid_upper_entity_pre = (
+        "&lt;PRE&gt; file:///fixture-not-redacted/upper-pre.txt &lt;/PRE&gt;"
+    )
     session = SimpleNamespace(
         title="Nested blockquote share",
         messages=[
@@ -211,7 +219,9 @@ def test_public_share_snapshot_preserves_nested_and_entity_blockquote_fence_lite
                 "content": (
                     f"{nested_blockquote_fence}\n"
                     f"{entity_blockquote_fence}\n"
-                    f"{valid_entity_pre}"
+                    f"{mixed_blockquote_fence}\n"
+                    f"{valid_entity_pre}\n"
+                    f"{valid_upper_entity_pre}"
                 ),
             }
         ],
@@ -221,8 +231,50 @@ def test_public_share_snapshot_preserves_nested_and_entity_blockquote_fence_lite
 
     assert nested_blockquote_fence in content
     assert entity_blockquote_fence in content
+    assert mixed_blockquote_fence in content
     assert valid_entity_pre in content
+    assert valid_upper_entity_pre in content
     assert content.count(OMITTED_ATTACHMENT) == 0
+
+
+def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
+    import api.shares as shares
+
+    shallower_payload = (
+        ">> ```text\n"
+        "> file:///private-not-known/depth-mismatch.png\n"
+        ">> ```"
+    )
+    shallower_closer = (
+        ">> ```text\n"
+        ">> file:///private-not-known/closer-mismatch.png\n"
+        "> ```"
+    )
+    session = SimpleNamespace(
+        title="Title >> ```text\n> file:///private-not-known/title-depth.png\n>> ```",
+        messages=[
+            {
+                "role": "assistant",
+                "content": f"{shallower_payload}\n{shallower_closer}",
+            }
+        ],
+    )
+
+    snapshot = shares.build_share_snapshot(session)
+    content = snapshot["messages"][0]["content"]
+    title = snapshot["title"]
+
+    assert "file://" not in content
+    assert "private-not-known" not in content
+    assert "depth-mismatch" not in content
+    assert "closer-mismatch" not in content
+    assert f"> {OMITTED_ATTACHMENT}" in content
+    assert f">> {OMITTED_ATTACHMENT}" in content
+    assert content.count(OMITTED_ATTACHMENT) == 2
+    assert "file://" not in title
+    assert "private-not-known" not in title
+    assert "title-depth" not in title
+    assert title.count(OMITTED_ATTACHMENT) == 1
 
 
 def test_public_share_snapshot_omits_parser_divergent_active_file_uri_shapes():
