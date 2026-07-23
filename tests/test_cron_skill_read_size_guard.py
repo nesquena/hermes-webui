@@ -612,7 +612,6 @@ def test_read_text_bounded_same_inode_growth_does_not_read_unbounded(monkeypatch
     small-file branch must NOT read the grown content unbounded. The pinned
     size guards the seek, but the read itself must be capped at max_bytes + 1
     so growth beyond the cap is reported truncated, not materialized."""
-    from pathlib import Path
     from api.routes import _read_text_bounded
 
     f = tmp_path / "growable.txt"
