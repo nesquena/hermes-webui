@@ -45,6 +45,8 @@ def test_login_page_uses_simplified_chinese_for_zh_cn_alias():
         assert 'lang="zh-CN"' in html
         assert "\u767b\u5f55" in html
         assert "\u8f93\u5165\u5bc6\u7801\u7ee7\u7eed\u4f7f\u7528" in html
+        assert 'id="pw-toggle"' in html
+        assert 'aria-label="Show password"' in html
     finally:
         restored, restore_status = post("/api/settings", {"language": prev_lang})
         assert restore_status == 200

@@ -10072,8 +10072,9 @@ body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFo
   margin:0 auto 12px;box-shadow:0 2px 12px rgba(233,69,96,.3)}
 h1{font-size:18px;font-weight:600;margin-bottom:4px}
 .sub{font-size:12px;color:#8888aa;margin-bottom:24px}
-input{width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
-  background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;outline:none;margin-bottom:14px;
+.pw-wrap{position:relative;margin-bottom:14px}
+input{width:100%;padding:10px 46px 10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
+  background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;outline:none;
   transition:border-color .15s}
 input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.1)}
 button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(124,185,255,.15);
@@ -10084,6 +10085,10 @@ button:hover{background:rgba(124,185,255,.25)}
   background:rgba(255,255,255,.04);border:1px solid rgba(111,214,164,.35);color:#6fd6a4;
   font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
 .oidc-login:hover{background:rgba(111,214,164,.12)}
+.pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:34px;height:30px;padding:0;
+  border-radius:8px;background:transparent;border:1px solid transparent;color:#8888aa;font-size:16px;line-height:1}
+.pw-toggle:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.08);color:#e8e8f0}
+.pw-toggle:focus-visible{outline:2px solid rgba(124,185,255,.65);outline-offset:2px}
 .passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
@@ -10092,7 +10097,10 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
+    <div class="pw-wrap">
+      <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus autocomplete="current-password">
+      <button type="button" id="pw-toggle" class="pw-toggle" aria-label="Show password" aria-pressed="false" title="Show password">👁</button>
+    </div>
     <button type="submit">{{LOGIN_BTN}}</button>
     <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
     {{OIDC_LOGIN_HTML}}
