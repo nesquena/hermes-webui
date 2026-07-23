@@ -58,7 +58,7 @@ def test_terminal_done_removes_idle_live_turn_after_settled_render():
         "if(typeof _renderMessagesWithScrollSnapshot==='function') "
         "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});"
     )
-    cleanup_idx = done_block.index("_removeIdleLiveAssistantTurn(activeSid)")
+    cleanup_idx = done_block.index("_removeIdleLiveAssistantTurn?.(activeSid)")
 
     assert final_render_idx < cleanup_idx, (
         "the done handler must remove any stale #liveAssistantTurn only after "
