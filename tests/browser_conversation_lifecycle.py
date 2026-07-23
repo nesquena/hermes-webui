@@ -37,9 +37,30 @@ SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+NEGATIVE_BITE = os.environ.get("LIFECYCLE_NEGATIVE_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+EXPECTED_MUTATION_FAILURE_MARKERS = {
+    "drop-anchor-persistence": (
+        "MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed "
+        "the transcript-backed Anchor scene before hard reload"
+    ),
+    "drop-terminal-anchor-row": (
+        "MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed "
+        "the terminal row from the hard-reloaded Anchor scene"
+    ),
+}
+NEGATIVE_MUTATION_FAILURE_MARKERS = {
+    "fail-reload-final-text": (
+        "NEGATIVE CANARY EXPECTED UNMARKED FAILURE: hard-reload final-text "
+        "prerequisite failed before Anchor-scene classification"
+    ),
+    "throw-reloaded-worklog-expand": (
+        "NEGATIVE CANARY EXPECTED UNMARKED FAILURE: Worklog expansion failed "
+        "after the reloaded Anchor group was present"
+    ),
+}
 
 
 def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
@@ -478,6 +499,15 @@ def _capture_anchor_scene_requests(page):
     return events
 
 
+def _mutation_event_observed(events: list[dict], bite: str) -> bool:
+    return any(
+        isinstance(event, dict)
+        and event.get("type") == "mutation"
+        and event.get("bite") == bite
+        for event in events
+    )
+
+
 def _activity_snapshot(page) -> dict:
     return page.evaluate(
         """() => {
@@ -539,13 +569,16 @@ def _activity_snapshot(page) -> dict:
     )
 
 
-def _expand_settled_worklog(page) -> None:
+def _expand_settled_worklog(page, *, force_failure: bool = False) -> None:
     page.wait_for_function(
-        """() => {
+        """({forceFailure}) => {
           const group = Array.from(document.querySelectorAll(
             '.assistant-turn [data-anchor-settled-scene-owner="1"]'
           )).pop();
           if (!group) return false;
+          if (forceFailure) {
+            throw new Error('forced Worklog expansion failure after group present');
+          }
           const summary = group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
           if (group.classList.contains('tool-call-group-collapsed') && summary) {
             if (typeof _toggleActivityGroup === 'function') _toggleActivityGroup(summary);
@@ -559,6 +592,7 @@ def _expand_settled_worklog(page) -> None:
           }
           return Boolean(group.querySelector('[data-anchor-scene-row="1"]'));
         }""",
+        arg={"forceFailure": force_failure},
         timeout=10000,
     )
 
@@ -680,6 +714,26 @@ def _assert_process_row_present(snapshot: dict) -> list[dict]:
     return rows
 
 
+def _raise_expected_mutation_failure(
+    marker: str,
+    *,
+    errors: list,
+    proc: subprocess.Popen | None,
+    cause: Exception,
+) -> None:
+    if errors:
+        raise AssertionError(
+            "unexpected browser errors before expected mutation failure: "
+            f"{errors!r}"
+        ) from cause
+    if proc is not None and proc.poll() is not None:
+        raise AssertionError(
+            "WebUI server exited before expected mutation failure: "
+            f"{proc.returncode}"
+        ) from cause
+    raise AssertionError(marker) from cause
+
+
 def _semantic_activity(snapshot: dict) -> list[dict]:
     """Canonical user-visible activity, independent of renderer row ordering."""
     semantic = []
@@ -720,6 +774,21 @@ def main() -> int:
         raise ValueError(
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
             "expected one of '', 'drop-anchor-persistence', 'drop-terminal-anchor-row'"
+        )
+    if NEGATIVE_BITE not in {
+        "",
+        "fail-reload-final-text",
+        "throw-reloaded-worklog-expand",
+    }:
+        raise ValueError(
+            f"Unsupported LIFECYCLE_NEGATIVE_BITE {NEGATIVE_BITE!r}; "
+            "expected one of '', 'fail-reload-final-text', "
+            "'throw-reloaded-worklog-expand'"
+        )
+    if NEGATIVE_BITE and TEST_BITE != "drop-anchor-persistence":
+        raise ValueError(
+            "LIFECYCLE_NEGATIVE_BITE is only valid with "
+            "LIFECYCLE_TEST_BITE=drop-anchor-persistence"
         )
     if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
         raise ValueError(
@@ -785,7 +854,15 @@ def main() -> int:
         anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE:
             def _route_anchor_scene(route):
-                if TEST_BITE == "drop-anchor-persistence":
+                if (
+                    TEST_BITE == "drop-anchor-persistence"
+                    and NEGATIVE_BITE != "throw-reloaded-worklog-expand"
+                ):
+                    anchor_scene_requests.append({
+                        "type": "mutation",
+                        "bite": "drop-anchor-persistence",
+                        "action": "dropped-anchor-scene-persistence",
+                    })
                     route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -805,6 +882,11 @@ def main() -> int:
                                     if not (isinstance(row, dict) and row.get("role") == "terminal")
                                 ]
                                 if len(kept) != len(rows):
+                                    anchor_scene_requests.append({
+                                        "type": "mutation",
+                                        "bite": "drop-terminal-anchor-row",
+                                        "action": "removed-terminal-row",
+                                    })
                                     mutated = dict(payload)
                                     updated_scene = dict(scene)
                                     updated_scene["activity_rows"] = kept
@@ -988,17 +1070,96 @@ def main() -> int:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
-        page.wait_for_function(
-            "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-            arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
-            timeout=15000,
+        reload_text = TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT
+        if NEGATIVE_BITE == "fail-reload-final-text":
+            reload_text = "missing lifecycle final-text negative canary"
+        try:
+            page.wait_for_function(
+                "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg=reload_text,
+                timeout=15000,
+            )
+        except Exception as exc:
+            if NEGATIVE_BITE == "fail-reload-final-text":
+                raise AssertionError(
+                    NEGATIVE_MUTATION_FAILURE_MARKERS["fail-reload-final-text"]
+                ) from exc
+            raise
+        settled_anchor_group_selector = (
+            '.assistant-turn [data-anchor-settled-scene-owner="1"]'
         )
+        settled_anchor_selector = (
+            '.assistant-turn [data-anchor-settled-scene-owner="1"] '
+            '[data-anchor-scene-row="1"]'
+        )
+        if TEST_BITE == "drop-anchor-persistence":
+            try:
+                page.wait_for_selector(settled_anchor_group_selector, timeout=2000)
+            except Exception as exc:
+                if not _mutation_event_observed(
+                    anchor_scene_requests,
+                    "drop-anchor-persistence",
+                ):
+                    raise AssertionError(
+                        "drop-anchor-persistence mutation was not observed before "
+                        "the reloaded Anchor group went missing"
+                    ) from exc
+                _raise_expected_mutation_failure(
+                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
+                    errors=errors,
+                    proc=proc,
+                    cause=exc,
+                )
+            try:
+                _expand_settled_worklog(
+                    page,
+                    force_failure=NEGATIVE_BITE == "throw-reloaded-worklog-expand",
+                )
+            except Exception as exc:
+                if NEGATIVE_BITE == "throw-reloaded-worklog-expand":
+                    raise AssertionError(
+                        NEGATIVE_MUTATION_FAILURE_MARKERS[
+                            "throw-reloaded-worklog-expand"
+                        ]
+                    ) from exc
+                raise
+            raise AssertionError(
+                "Mutation survived: drop-anchor-persistence still rendered a "
+                "transcript-backed Anchor scene after hard reload"
+            )
         _expand_settled_worklog(page)
         page.wait_for_selector(
-            '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            settled_anchor_selector,
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)
+        if TEST_BITE == "drop-terminal-anchor-row":
+            if errors:
+                raise AssertionError(
+                    "unexpected browser errors before expected mutation failure: "
+                    f"{errors!r}"
+                )
+            if proc is not None and proc.poll() is not None:
+                raise AssertionError(
+                    "WebUI server exited before expected mutation failure: "
+                    f"{proc.returncode}"
+                )
+            if _terminal_rows(reloaded_snapshot):
+                raise AssertionError(
+                    "Mutation survived: drop-terminal-anchor-row still rendered "
+                    "a terminal row after hard reload"
+                )
+            if not _mutation_event_observed(
+                anchor_scene_requests,
+                "drop-terminal-anchor-row",
+            ):
+                raise AssertionError(
+                    "drop-terminal-anchor-row mutation was not observed before "
+                    "the reloaded terminal row went missing"
+                )
+            raise AssertionError(
+                EXPECTED_MUTATION_FAILURE_MARKERS["drop-terminal-anchor-row"]
+            )
         _assert_settled(reloaded_snapshot, scenario)
         if scenario == "terminal-error":
             _assert_process_row_present(reloaded_snapshot)
@@ -1047,6 +1208,7 @@ def main() -> int:
                     json.dumps({
                         "scenario": scenario,
                         "test_bite": TEST_BITE or None,
+                        "negative_bite": NEGATIVE_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
                         "anchor_projection": _anchor_projection_snapshot(page),

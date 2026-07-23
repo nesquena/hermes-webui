@@ -5,6 +5,7 @@ name: Conversation lifecycle (informational)
 # docs-only or unrelated changes. If none of these paths change, the run is
 # skipped entirely (GitHub treats a path-filtered no-match as "not triggered").
 on:
+  workflow_dispatch:
   pull_request:
     branches: [master]
     paths:
@@ -30,7 +31,6 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -67,3 +67,143 @@ jobs:
           name: conversation-lifecycle-failure-${{ matrix.scenario }}
           path: lifecycle-artifacts
           if-no-files-found: ignore
+
+  mutation-canary:
+    name: Lifecycle mutation canaries
+    needs: live-to-final
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            **/requirements*.txt
+            **/pyproject.toml
+            .github/workflows/conversation-lifecycle.yml
+
+      - name: Install browser gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Verify mutation canaries fail
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-mutation-artifacts
+        run: |
+          mkdir -p "$LIFECYCLE_ARTIFACT_DIR"
+
+          run_expected_failure() {
+            local name="$1"
+            local expected_marker="$2"
+            shift 2
+            local log="$LIFECYCLE_ARTIFACT_DIR/${name}.log"
+
+            echo "::group::$name"
+            set +e
+            "$@" 2>&1 | tee "$log"
+            local status="${PIPESTATUS[0]}"
+            set -e
+            echo "::endgroup::"
+
+            if [ "$status" -eq 0 ]; then
+              echo "::error title=Mutation survived::$name unexpectedly passed"
+              return 1
+            fi
+            if ! grep -Fq -- "$expected_marker" "$log"; then
+              echo "::error title=Unexpected mutation failure::$name failed without expected marker: $expected_marker"
+              tail -200 "$log"
+              return 1
+            fi
+            echo "$name failed as expected with marker: $expected_marker"
+          }
+
+          run_unexpected_failure_without_marker() {
+            local name="$1"
+            local required_marker="$2"
+            local forbidden_marker="$3"
+            shift 3
+            local log="$LIFECYCLE_ARTIFACT_DIR/${name}.log"
+
+            echo "::group::$name"
+            set +e
+            "$@" 2>&1 | tee "$log"
+            local status="${PIPESTATUS[0]}"
+            set -e
+            echo "::endgroup::"
+
+            if [ "$status" -eq 0 ]; then
+              echo "::error title=Negative canary survived::$name unexpectedly passed"
+              return 1
+            fi
+            if ! grep -Fq -- "$required_marker" "$log"; then
+              echo "::error title=Wrong negative failure::$name failed without required marker: $required_marker"
+              tail -200 "$log"
+              return 1
+            fi
+            if grep -Fq -- "$forbidden_marker" "$log"; then
+              echo "::error title=Over-broad mutation marker::$name emitted forbidden marker: $forbidden_marker"
+              tail -200 "$log"
+              return 1
+            fi
+            echo "$name failed without the mutation marker as expected"
+          }
+
+          run_expected_failure normal-anchor-persistence \
+            'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
+            env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+            python tests/browser_conversation_lifecycle.py
+          run_expected_failure terminal-error-row \
+            'MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed the terminal row from the hard-reloaded Anchor scene' \
+            env LIFECYCLE_SCENARIO=terminal-error \
+            LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
+            python tests/browser_conversation_lifecycle.py
+          run_unexpected_failure_without_marker anchor-final-text-prerequisite \
+            'NEGATIVE CANARY EXPECTED UNMARKED FAILURE: hard-reload final-text prerequisite failed before Anchor-scene classification' \
+            'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
+            env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+            LIFECYCLE_NEGATIVE_BITE=fail-reload-final-text \
+            python tests/browser_conversation_lifecycle.py
+          run_unexpected_failure_without_marker anchor-worklog-expand-prerequisite \
+            'NEGATIVE CANARY EXPECTED UNMARKED FAILURE: Worklog expansion failed after the reloaded Anchor group was present' \
+            'MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed the transcript-backed Anchor scene before hard reload' \
+            env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+            LIFECYCLE_NEGATIVE_BITE=throw-reloaded-worklog-expand \
+            python tests/browser_conversation_lifecycle.py
+
+      - name: Upload mutation artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversation-lifecycle-mutation-canary-failure
+          path: lifecycle-mutation-artifacts
+          if-no-files-found: ignore
+
+  proof-summary:
+    name: Lifecycle proof summary
+    needs: [live-to-final, mutation-canary]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish aggregate result
+        env:
+          LIFECYCLE_RESULT: ${{ needs.live-to-final.result }}
+          MUTATION_RESULT: ${{ needs.mutation-canary.result }}
+        run: |
+          {
+            echo "## Conversation lifecycle proof"
+            echo
+            echo "| Component | Result |"
+            echo "| --- | --- |"
+            echo "| Lifecycle rows | $LIFECYCLE_RESULT |"
+            echo "| Mutation canaries | $MUTATION_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          test "$LIFECYCLE_RESULT" = success
+          test "$MUTATION_RESULT" = success
