@@ -42,9 +42,9 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', dashboard: 'tab_dashboard', logs: 'tab_logs', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','dashboard','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -394,6 +394,9 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  if (prevPanel === 'dashboard' && nextPanel !== 'dashboard') {
+    if (typeof _dashboardStopPolling === 'function') _dashboardStopPolling();
+  }
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
@@ -420,6 +423,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'profiles') await loadProfilesPanel();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
+  if (nextPanel === 'dashboard') await loadDashboard();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -4381,6 +4385,246 @@ function _renderStaticModelHealthTable() {
     <span class="insights-model-health-replacement">${esc(row.replacement)}</span>
   </div>`).join('');
   return `<details class="insights-card insights-model-health-card"><summary><span class="insights-card-title">${esc(t('insights_model_health_title'))}</span></summary><div class="insights-table insights-model-health-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_health_provider'))}</span><span>${esc(t('insights_model_health_cost_per_m'))}</span><span>${esc(t('insights_model_health_replacement'))}</span></div>${rows}</div></details>`;
+}
+
+// ── Dashboard panel ──
+// In-app operator dashboard: KPI cards linking into the other views, a
+// system-health snapshot, recent cron activity, a log tail and a memory
+// recall search. Aggregates existing endpoints only; no dashboard backend.
+let _dashboardPollTimer = null;
+let _dashMemoryData = null;
+const DASHBOARD_POLL_MS = 10000;
+
+function _dashSparklineSvg(values) {
+  const nums = (Array.isArray(values) ? values : []).map(v => Number(v) || 0);
+  if (nums.length < 2) return '';
+  const max = Math.max(...nums, 1);
+  const stepX = 100 / (nums.length - 1);
+  const pts = nums.map((v, i) => `${(i * stepX).toFixed(1)},${(22 - (v / max) * 20).toFixed(1)}`);
+  return `<svg class="dash-sparkline" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">`
+    + `<polygon fill="var(--accent-bg-strong)" stroke="none" points="0,24 ${pts.join(' ')} 100,24"/>`
+    + `<polyline fill="none" stroke="var(--accent)" stroke-width="1.5" points="${pts.join(' ')}"/></svg>`;
+}
+
+function _dashRelTime(ts) {
+  const diff = (Date.now() - Number(ts) * 1000) / 1000;
+  if (!isFinite(diff) || diff < 0) return '';
+  if (diff < 60) return `${Math.floor(diff)}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86400)}d`;
+}
+
+async function loadDashboard(animate) {
+  const box = $('dashboardContent');
+  const refreshBtn = $('dashboardRefreshBtn');
+  if (!box) return;
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  try {
+    const [insights, crons, skills, health, recent, logs, memory] = await Promise.all([
+      api('/api/insights?days=7').catch(() => null),
+      api('/api/crons').catch(() => ({jobs: []})),
+      api('/api/skills').catch(() => ({skills: []})),
+      api('/api/system/health').catch(() => null),
+      api('/api/crons/recent?since=' + Math.floor(Date.now() / 1000 - 86400)).catch(() => ({completions: []})),
+      api('/api/logs?file=agent&tail=100').catch(() => null),
+      api('/api/memory').catch(() => null),
+    ]);
+    // The fetch batch is heavy (7 endpoints); if the user has already clicked
+    // away to another panel while it was in flight, skip the render and polling
+    // start entirely. Rendering into a hidden view just thrashes the main thread
+    // during rapid sidebar clicks, and a late _dashboardStartPolling() here would
+    // leak a timer past the switchPanel leave-cleanup. Mirrors the kanban/logs
+    // "_currentPanel !== '…'" bail-outs.
+    if (_currentPanel !== 'dashboard') return;
+    _dashMemoryData = memory;
+    if (!insights && !health && !logs) {
+      box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + t('dashboard_unavailable'))}</div>`;
+      return;
+    }
+    _renderDashboard(box, insights, crons, skills, health, recent, logs);
+    _dashboardStartPolling();
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
+  } finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+function _renderDashboard(box, insights, crons, skills, health, recent, logs) {
+  const fmtNum = n => Number(n || 0).toLocaleString();
+  const fmtTokens = n => {
+    const value = Number(n || 0);
+    return value >= 1e6 ? (value / 1e6).toFixed(1) + 'M' : value >= 1e3 ? (value / 1e3).toFixed(1) + 'K' : fmtNum(value);
+  };
+  const fmtCost = c => {
+    const value = Number(c || 0);
+    return value > 0 ? '$' + value.toFixed(value < 1 ? 4 : 2) : t('insights_no_cost');
+  };
+  const daily = (insights && Array.isArray(insights.daily_tokens)) ? insights.daily_tokens : [];
+  const jobs = (crons && Array.isArray(crons.jobs)) ? crons.jobs : [];
+  const activeJobs = jobs.filter(jb => jb && !jb.paused && !jb.disabled).length;
+  const skillList = (skills && Array.isArray(skills.skills)) ? skills.skills : [];
+  const memoryChars = _dashMemoryData
+    ? ['memory', 'user', 'soul'].reduce((n, k) => n + String(_dashMemoryData[k] || '').length, 0)
+    : 0;
+
+  // KPI cards — each links into the view that owns the metric.
+  const kpis = [
+    { label: t('insights_sessions'), value: insights ? fmtNum(insights.total_sessions) : '—',
+      icon: li('message-square', 16), panel: 'insights', spark: daily.map(r => Number(r.sessions) || 0) },
+    { label: t('insights_tokens'), value: insights ? fmtTokens(insights.total_tokens) : '—',
+      icon: li('cpu', 16), panel: 'insights', spark: daily.map(r => (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0)) },
+    { label: t('insights_cost'), value: insights ? fmtCost(insights.total_cost) : '—',
+      icon: li('dollar-sign', 16), panel: 'insights', spark: daily.map(r => Number(r.cost) || 0) },
+    { label: t('dashboard_kpi_cron_jobs'), value: `${fmtNum(activeJobs)} / ${fmtNum(jobs.length)}`,
+      icon: li('clock', 16), panel: 'tasks', spark: [] },
+    { label: t('dashboard_kpi_skills'), value: fmtNum(skillList.length),
+      icon: li('zap', 16), panel: 'skills', spark: [] },
+    { label: t('dashboard_kpi_memory'), value: memoryChars ? fmtTokens(memoryChars) : '—',
+      icon: li('brain', 16), panel: 'memory', spark: [] },
+  ];
+  const kpiHtml = `<div class="dash-kpi-grid">` + kpis.map(k =>
+    `<button type="button" class="dash-kpi" onclick="switchPanel('${k.panel}')">`
+    + `<div class="dash-kpi-head"><span class="dash-kpi-label">${esc(k.label)}</span><span class="dash-kpi-icon">${k.icon}</span></div>`
+    + `<div class="dash-kpi-value">${k.value}</div>`
+    + (k.spark.length > 1 ? _dashSparklineSvg(k.spark) : '')
+    + `</button>`).join('') + `</div>`;
+
+  // System health — own IDs/attributes so the insights panel monitor
+  // (#systemHealthPanel) is never shadowed by this copy.
+  const metric = (key, label) =>
+    `<div class="system-health-metric" data-dash-health-metric="${key}">`
+    + `<div class="system-health-label"><span>${esc(label)}</span><span class="system-health-value" data-dash-health-value>—</span></div>`
+    + `<div class="system-health-bar" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div></div>`;
+  const healthHtml =
+    `<section class="insights-card system-health-panel dash-health" id="dashboardHealthPanel" aria-live="polite">`
+    + `<div class="system-health-head"><div><div class="insights-card-title">${esc(t('dashboard_system_health'))}</div></div>`
+    + `<span class="system-health-status" id="dashboardHealthStatus"><span class="system-health-dot" aria-hidden="true"></span>${esc(t('loading'))}</span></div>`
+    + `<div class="system-health-metrics">${metric('cpu', 'CPU')}${metric('memory', 'RAM')}${metric('disk', 'Disk')}</div></section>`;
+
+  // Recent activity feed (cron completions, last 24h).
+  const completions = (recent && Array.isArray(recent.completions)) ? recent.completions : [];
+  completions.sort((a, b) => Number(b.completed_at || 0) - Number(a.completed_at || 0));
+  const feedRows = completions.slice(0, 12).map(c => {
+    const ok = String(c.status || '').toLowerCase() === 'success' || String(c.status || '').toLowerCase() === 'ok';
+    const sid = String(c.session_id || '');
+    const open = sid
+      ? `onclick="switchPanel('chat');loadSession('${esc(sid)}')"`
+      : `onclick="switchPanel('tasks')"`;
+    return `<button type="button" class="dash-feed-item" ${open}>`
+      + `<span class="dash-feed-dot" style="background:${ok ? 'var(--success)' : 'var(--error)'}"></span>`
+      + `<span class="dash-feed-name">${esc(c.name || c.job_id || '')}</span>`
+      + `<span class="dash-feed-meta">${esc(String(c.status || ''))} · ${esc(_dashRelTime(c.completed_at))}</span></button>`;
+  }).join('');
+  const feedHtml = `<div class="insights-card dash-feed-card"><div class="dash-card-head"><div class="insights-card-title">${esc(t('dashboard_recent_activity'))}</div>`
+    + `<button type="button" class="dash-card-link" onclick="switchPanel('tasks')">${esc(t('dashboard_view_all'))}</button></div>`
+    + (feedRows || `<div class="insights-empty">${esc(t('dashboard_no_activity'))}</div>`) + `</div>`;
+
+  // Log tail (agent log, last lines).
+  const logLines = (logs && Array.isArray(logs.lines)) ? logs.lines.slice(-15) : [];
+  const logHtml = `<div class="insights-card dash-log-card"><div class="dash-card-head"><div class="insights-card-title">${esc(t('dashboard_log_tail'))}</div>`
+    + `<button type="button" class="dash-card-link" onclick="switchPanel('logs')">${esc(t('dashboard_view_all'))}</button></div>`
+    + `<pre class="dash-log-tail" id="dashboardLogTail">${esc(logLines.join('\n') || (logs && logs.hint) || t('logs_empty'))}</pre></div>`;
+
+  // Memory recall — client-side substring search over the memory blobs.
+  const memHtml = _dashMemoryData
+    ? `<div class="insights-card dash-memory-card"><div class="dash-card-head"><div class="insights-card-title">${esc(t('dashboard_memory_recall'))}</div>`
+      + `<button type="button" class="dash-card-link" onclick="switchPanel('memory')">${esc(t('dashboard_view_all'))}</button></div>`
+      + `<input type="search" id="dashboardMemorySearch" class="dash-memory-input" placeholder="${esc(t('dashboard_memory_search_placeholder'))}" oninput="_dashMemorySearchDebounced()">`
+      + `<div class="dash-memory-results" id="dashboardMemoryResults"></div></div>`
+    : '';
+
+  box.innerHTML = kpiHtml
+    + `<div class="dash-columns"><div>${feedHtml}${memHtml}</div><div>${healthHtml}${logHtml}</div></div>`;
+  if (health) _updateDashHealth(health);
+}
+
+function _updateDashHealth(payload) {
+  const panel = $('dashboardHealthPanel');
+  if (!panel) return;
+  const statusEl = $('dashboardHealthStatus');
+  const available = !!(payload && payload.available !== false && payload.status !== 'unavailable');
+  panel.classList.remove('loading');
+  if (statusEl) {
+    statusEl.innerHTML = `<span class="system-health-dot" aria-hidden="true"></span>${esc(available ? (payload.status || 'ok') : t('dashboard_health_unavailable'))}`;
+  }
+  if (!available) return;
+  ['cpu', 'memory', 'disk'].forEach(key => {
+    const m = panel.querySelector(`[data-dash-health-metric="${key}"]`);
+    const src = payload[key] || {};
+    const pct = Math.max(0, Math.min(100, Number(src.percent) || 0));
+    if (!m) return;
+    const valueEl = m.querySelector('[data-dash-health-value]');
+    if (valueEl) valueEl.textContent = `${pct.toFixed(0)}%`;
+    const bar = m.querySelector('.system-health-bar');
+    if (bar) bar.setAttribute('aria-valuenow', String(Math.round(pct)));
+    const fill = m.querySelector('.system-health-bar-fill');
+    if (fill) fill.style.width = `${pct}%`;
+  });
+}
+
+let _dashMemorySearchTimer = null;
+function _dashMemorySearchDebounced() {
+  clearTimeout(_dashMemorySearchTimer);
+  _dashMemorySearchTimer = setTimeout(_dashMemorySearch, 180);
+}
+
+function _dashMemorySearch() {
+  const input = $('dashboardMemorySearch');
+  const out = $('dashboardMemoryResults');
+  if (!input || !out || !_dashMemoryData) return;
+  const q = input.value.trim().toLowerCase();
+  if (!q) { out.innerHTML = ''; return; }
+  const sections = [['MEMORY', _dashMemoryData.memory], ['USER', _dashMemoryData.user], ['SOUL', _dashMemoryData.soul]];
+  const hits = [];
+  for (const [label, text] of sections) {
+    for (const line of String(text || '').split('\n')) {
+      if (hits.length >= 20) break;
+      if (line.toLowerCase().includes(q) && line.trim()) hits.push([label, line.trim()]);
+    }
+  }
+  out.innerHTML = hits.length
+    ? hits.map(([label, line]) => `<div class="dash-memory-hit"><span class="dash-memory-hit-src">${esc(label)}</span>${esc(line)}</div>`).join('')
+    : `<div class="insights-empty">${esc(t('dashboard_memory_no_results'))}</div>`;
+}
+
+function _dashboardIsVisible() {
+  return document.visibilityState === 'visible'
+    && !!document.querySelector('main.main.showing-dashboard')
+    && !!$('dashboardHealthPanel');
+}
+
+async function _dashboardPollTick() {
+  if (!_dashboardIsVisible()) return;
+  const [health, logs] = await Promise.all([
+    api('/api/system/health').catch(() => null),
+    api('/api/logs?file=agent&tail=100').catch(() => null),
+  ]);
+  if (!_dashboardIsVisible()) return;
+  if (health) _updateDashHealth(health);
+  const tailEl = $('dashboardLogTail');
+  if (logs && Array.isArray(logs.lines) && tailEl) {
+    tailEl.textContent = logs.lines.slice(-15).join('\n') || logs.hint || t('logs_empty');
+  }
+}
+
+function _dashboardStartPolling() {
+  if (_dashboardPollTimer) return;
+  _dashboardPollTimer = setInterval(() => { void _dashboardPollTick(); }, DASHBOARD_POLL_MS);
+}
+
+function _dashboardStopPolling() {
+  if (_dashboardPollTimer) {
+    clearInterval(_dashboardPollTimer);
+    _dashboardPollTimer = null;
+  }
 }
 
 async function loadInsights(animate) {

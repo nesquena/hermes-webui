@@ -1331,6 +1331,141 @@
   :root.dark[data-skin="verdigris"] .img-lightbox-close:hover{background:rgba(200,154,90,.35);}
   :root.dark[data-skin="verdigris"] .img-lightbox-nav:hover{background:rgba(200,154,90,.40);}
 
+  /* ═══ YUNO — cozy cream light / pink-on-charcoal dark ═══
+     Ported from the Yuno color system (WCAG-validated pink/magenta brand):
+     light mode is the warm "Cozy" cream palette with a pink-800 primary,
+     dark mode is neutral-900 charcoal with the pink-500 accent family. */
+  :root[data-skin="yuno"]{
+    color-scheme:light;
+    --bg:#FFFBF5;--sidebar:#FFF6E8;--surface:#FFFFFF;--surface-subtle:rgba(183,41,91,.03);--surface-subtle-hover:rgba(183,41,91,.06);
+    --border:#E8E8EC;--border2:#D4D4DA;--border-subtle:rgba(24,24,27,.07);--border-muted:rgba(24,24,27,.12);
+    --text:#18181B;--strong:#0A0A0B;--muted:#71717A;--em:#B30066;
+    --accent:#B7295B;--accent-hover:#7A1B3D;--accent-bg:rgba(183,41,91,.08);--accent-bg-strong:rgba(183,41,91,.15);--accent-text:#B30066;
+    --blue:#0088A8;--gold:#D4733E;--focus-ring:rgba(179,0,102,.35);--focus-glow:rgba(179,0,102,.10);
+    --input-bg:rgba(183,41,91,.03);--hover-bg:rgba(183,41,91,.05);
+    --code-bg:#FFF6E8;--code-inline-bg:rgba(183,41,91,.08);--code-text:#A85526;--pre-text:#18181B;
+    --topbar-bg:rgba(255,246,232,.98);--main-bg:rgba(255,251,245,.5);
+    --error:#C81F2E;--success:#067551;--warning:#B45309;--info:#0088A8;
+  }
+  :root.dark[data-skin="yuno"]{
+    color-scheme:dark;
+    --bg:#18181B;--sidebar:#1D1D21;--surface:#27272A;--surface-subtle:rgba(255,255,255,.025);--surface-subtle-hover:rgba(255,255,255,.05);
+    --border:#3F3F46;--border2:#52525B;--border-subtle:rgba(255,255,255,.07);--border-muted:rgba(255,255,255,.12);
+    --text:#FAFAFB;--strong:#FFFFFF;--muted:#A1A1AB;--em:#FFB6C1;
+    --accent:#FF6BB5;--accent-hover:#FF8FB8;--accent-bg:rgba(255,107,181,.08);--accent-bg-strong:rgba(255,107,181,.15);--accent-text:#FF8FB8;
+    --blue:#22D3EE;--gold:#FFB6C1;--focus-ring:rgba(255,61,175,.35);--focus-glow:rgba(255,61,175,.10);
+    --input-bg:rgba(255,255,255,.04);--hover-bg:rgba(255,255,255,.06);
+    --code-bg:#101012;--code-inline-bg:rgba(255,107,181,.10);--code-text:#FFC8DA;--pre-text:#FAFAFB;
+    --topbar-bg:rgba(29,29,33,.98);--main-bg:rgba(24,24,27,.5);
+    --error:#FF335C;--success:#2BC774;--warning:#FFB000;--info:#22D3EE;
+  }
+  /* ── Yuno skin: component-level overrides ──
+     Primary actions follow the Yuno primary-fg rule: white text on the
+     deep pink in light mode, charcoal text on the bright pink in dark. */
+  :root[data-skin="yuno"] .new-chat-btn,
+  :root[data-skin="yuno"] button.send-btn:not(:disabled),
+  :root[data-skin="yuno"] .btn.primary,
+  :root[data-skin="yuno"] .update-primary,
+  :root[data-skin="yuno"] .clarify-submit{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  :root[data-skin="yuno"] .new-chat-btn:hover,
+  :root[data-skin="yuno"] button.send-btn:not(:disabled):hover,
+  :root[data-skin="yuno"] .btn.primary:hover,
+  :root[data-skin="yuno"] .update-primary:hover,
+  :root[data-skin="yuno"] .clarify-submit:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+  :root.dark[data-skin="yuno"] .new-chat-btn,
+  :root.dark[data-skin="yuno"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="yuno"] .btn.primary,
+  :root.dark[data-skin="yuno"] .update-primary,
+  :root.dark[data-skin="yuno"] .clarify-submit{color:#18181B;}
+  :root[data-skin="yuno"] ::selection{background:rgba(183,41,91,.25);}
+  :root.dark[data-skin="yuno"] ::selection{background:rgba(255,107,181,.35);color:#fff;}
+  :root.dark[data-skin="yuno"] .session-item.active{background:rgba(255,107,181,.10);border-left:2px solid #FF6BB5;}
+
+  /* ═══ YUNO CYBERPUNK — neon magenta operator night palette (dark-only) ═══
+     Dark-focused; falls back to the default light palette in light mode. */
+  :root.dark[data-skin="yuno-cyberpunk"]{
+    --bg:#0A0E27;--sidebar:#070A1F;--surface:#1F1B3A;--code-bg:#050817;
+    --topbar-bg:rgba(7,10,31,.98);--main-bg:rgba(10,14,39,.6);
+    --border:#4D002D;--border2:rgba(255,20,147,.35);
+    --border-subtle:rgba(255,20,147,.10);--border-muted:rgba(255,20,147,.18);
+    --text:#FAFAFB;--strong:#FFFFFF;--muted:#FFA8DD;--em:#4DEEEA;
+    --accent:#FF1493;--accent-hover:#FF3DAF;--accent-bg:rgba(255,20,147,.10);--accent-bg-strong:rgba(255,20,147,.20);--accent-text:#FF6BC6;
+    --blue:#4DEEEA;--gold:#FF6BC6;--focus-ring:rgba(0,229,255,.40);--focus-glow:rgba(255,20,147,.12);
+    --input-bg:rgba(255,20,147,.04);--hover-bg:rgba(255,20,147,.06);
+    --surface-subtle:rgba(255,20,147,.04);--surface-subtle-hover:rgba(255,20,147,.08);
+    --code-inline-bg:rgba(255,20,147,.10);--code-text:#FFA8DD;--pre-text:#E8E6FF;
+    --error:#FF335C;--success:#2BC774;--warning:#FFB000;--info:#4DEEEA;
+  }
+  /* ── Yuno Cyberpunk skin: component-level overrides ── */
+  :root.dark[data-skin="yuno-cyberpunk"] ::selection{background:rgba(255,20,147,.35);color:#fff;}
+  :root.dark[data-skin="yuno-cyberpunk"] .session-item.active{background:rgba(255,20,147,.10);border-left:2px solid #FF1493;}
+  :root.dark[data-skin="yuno-cyberpunk"] textarea:focus,
+  :root.dark[data-skin="yuno-cyberpunk"] input[type="text"]:focus,
+  :root.dark[data-skin="yuno-cyberpunk"] input[type="password"]:focus,
+  :root.dark[data-skin="yuno-cyberpunk"] select:focus{box-shadow:0 0 16px rgba(0,229,255,.18);}
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn{box-shadow:0 0 14px rgba(255,20,147,.25);}
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn:hover{box-shadow:0 0 24px rgba(255,20,147,.45);}
+  :root.dark[data-skin="yuno-cyberpunk"] .new-chat-btn,
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="yuno-cyberpunk"] .btn.primary,
+  :root.dark[data-skin="yuno-cyberpunk"] .update-primary,
+  :root.dark[data-skin="yuno-cyberpunk"] .clarify-submit{background:var(--accent);border-color:var(--accent);color:#050817;font-weight:600;}
+  :root.dark[data-skin="yuno-cyberpunk"] .new-chat-btn:hover,
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="yuno-cyberpunk"] .btn.primary:hover,
+  :root.dark[data-skin="yuno-cyberpunk"] .update-primary:hover,
+  :root.dark[data-skin="yuno-cyberpunk"] .clarify-submit:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#050817;}
+  :root.dark[data-skin="yuno-cyberpunk"] .app-dialog{background:linear-gradient(180deg,rgba(31,27,58,.99),rgba(10,14,39,.99));border-color:rgba(255,20,147,.25);}
+  :root.dark[data-skin="yuno-cyberpunk"] .app-dialog-overlay{background:rgba(0,0,0,.72);}
+  :root.dark[data-skin="yuno-cyberpunk"] .kanban-modal{background:linear-gradient(180deg,rgba(31,27,58,.99),rgba(10,14,39,.99));border-color:rgba(255,20,147,.25);}
+  :root.dark[data-skin="yuno-cyberpunk"] .kanban-modal-overlay{background:rgba(0,0,0,.72);}
+  :root.dark[data-skin="yuno-cyberpunk"] .kanban-board-switcher-menu{background:linear-gradient(180deg,rgba(31,27,58,.99),rgba(10,14,39,.99));border-color:rgba(255,20,147,.20);}
+  :root.dark[data-skin="yuno-cyberpunk"]::-webkit-scrollbar-thumb{background:rgba(255,20,147,.18);border-radius:3px;}
+  :root.dark[data-skin="yuno-cyberpunk"]::-webkit-scrollbar-thumb:hover{background:rgba(255,20,147,.30);}
+  :root.dark[data-skin="yuno-cyberpunk"]{scrollbar-width:thin;scrollbar-color:rgba(255,20,147,.18) transparent;}
+  :root.dark[data-skin="yuno-cyberpunk"] a{color:var(--info);transition:text-shadow .2s;}
+  :root.dark[data-skin="yuno-cyberpunk"] a:hover{text-shadow:0 0 10px rgba(77,238,234,.5);}
+
+  /* ═══ YUNO HC — high-contrast AAA black/white/pink (dark-only) ═══
+     Accessibility-first: pure black canvas, white text and borders,
+     solid focus indicators. Falls back to the default light palette in
+     light mode. */
+  :root.dark[data-skin="yuno-hc"]{
+    --bg:#000000;--sidebar:#0A0A0A;--surface:#0A0A0A;--code-bg:#0A0A0A;
+    --topbar-bg:rgba(0,0,0,.98);--main-bg:#000000;
+    --border:#FFFFFF;--border2:#FFFFFF;
+    --border-subtle:rgba(255,255,255,.6);--border-muted:rgba(255,255,255,.8);
+    --text:#FFFFFF;--strong:#FFFFFF;--muted:#E5E5E5;--em:#4DEEEA;
+    --accent:#FF6BC6;--accent-hover:#FFA8DD;--accent-bg:rgba(255,107,198,.15);--accent-bg-strong:rgba(255,107,198,.28);--accent-text:#FF6BC6;
+    --blue:#4DEEEA;--gold:#FFD966;--focus-ring:#FF6BC6;--focus-glow:rgba(255,107,198,.30);
+    --input-bg:#000000;--hover-bg:rgba(255,255,255,.12);
+    --surface-subtle:rgba(255,255,255,.06);--surface-subtle-hover:rgba(255,255,255,.12);
+    --code-inline-bg:rgba(255,255,255,.12);--code-text:#FFA8DD;--pre-text:#FFFFFF;
+    --error:#FF6688;--success:#5DD695;--warning:#FFD966;--info:#4DEEEA;
+  }
+  /* ── Yuno HC skin: component-level overrides ── */
+  :root.dark[data-skin="yuno-hc"] ::selection{background:#FF6BC6;color:#000;}
+  :root.dark[data-skin="yuno-hc"] textarea:focus,
+  :root.dark[data-skin="yuno-hc"] input[type="text"]:focus,
+  :root.dark[data-skin="yuno-hc"] input[type="password"]:focus,
+  :root.dark[data-skin="yuno-hc"] select:focus{outline:2px solid #FF6BC6;outline-offset:1px;}
+  :root.dark[data-skin="yuno-hc"] .new-chat-btn,
+  :root.dark[data-skin="yuno-hc"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="yuno-hc"] .btn.primary,
+  :root.dark[data-skin="yuno-hc"] .update-primary,
+  :root.dark[data-skin="yuno-hc"] .clarify-submit{background:#FF6BC6;border-color:#FF6BC6;color:#000000;font-weight:600;}
+  :root.dark[data-skin="yuno-hc"] .new-chat-btn:hover,
+  :root.dark[data-skin="yuno-hc"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="yuno-hc"] .btn.primary:hover,
+  :root.dark[data-skin="yuno-hc"] .update-primary:hover,
+  :root.dark[data-skin="yuno-hc"] .clarify-submit:hover{background:#FFA8DD;border-color:#FFA8DD;color:#000000;}
+  :root.dark[data-skin="yuno-hc"] .session-item.active{background:rgba(255,107,198,.20);border-left:2px solid #FF6BC6;color:#FFFFFF;}
+  :root.dark[data-skin="yuno-hc"] .app-dialog{background:#0A0A0A;border:1px solid #FFFFFF;}
+  :root.dark[data-skin="yuno-hc"] .app-dialog-overlay{background:rgba(0,0,0,.85);}
+  :root.dark[data-skin="yuno-hc"] .kanban-modal{background:#0A0A0A;border:1px solid #FFFFFF;}
+  :root.dark[data-skin="yuno-hc"] .kanban-modal-overlay{background:rgba(0,0,0,.85);}
+  :root.dark[data-skin="yuno-hc"] .kanban-board-switcher-menu{background:#0A0A0A;border:1px solid #FFFFFF;}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
@@ -4912,8 +5047,9 @@ main.main > #mainKanban,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
+main.main > #mainDashboard,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-dashboard):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -4922,6 +5058,7 @@ main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
 main.main.showing-logs > #mainLogs{display:flex;}
+main.main.showing-dashboard > #mainDashboard{display:flex;overflow-y:auto;}
 main.main.showing-plugin > #mainPlugin{display:flex;}
 main.main > #mainPlugin{display:none;}
 #mainPlugin .main-view-body{flex:1;display:flex;flex-direction:column;overflow:hidden;}
@@ -6618,6 +6755,37 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .html-preview-iframe{width:100%;height:400px;border:none;display:block;background:#fff;}
 .html-preview-fallback{padding:8px;font-size:13px;}
 .html-preview-spinner{animation:pulse 1.5s ease-in-out infinite;}
+
+/* ── Dashboard panel ──────────────────────────────────────────────────────── */
+/* Theme-variable-only styling so every skin (incl. yuno family) applies. */
+.dash-kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px;}
+.dash-kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card);padding:12px 14px;text-align:left;cursor:pointer;color:var(--text);font:inherit;display:flex;flex-direction:column;gap:6px;transition:border-color .15s,background .15s;}
+.dash-kpi:hover{border-color:var(--accent);background:var(--surface-subtle-hover);}
+.dash-kpi:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}
+.dash-kpi-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.dash-kpi-label{font-size:11px;color:var(--muted);letter-spacing:.02em;}
+.dash-kpi-icon{color:var(--muted);display:inline-flex;}
+.dash-kpi-value{font-size:22px;font-weight:700;color:var(--strong);font-variant-numeric:tabular-nums;line-height:1.1;}
+.dash-sparkline{width:100%;height:24px;display:block;}
+.dash-columns{display:grid;grid-template-columns:3fr 2fr;gap:12px;align-items:start;}
+.dash-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.dash-card-link{background:transparent;border:0;color:var(--accent-text);font-size:11px;cursor:pointer;padding:2px 4px;border-radius:4px;}
+.dash-card-link:hover{background:var(--accent-bg);}
+.dash-feed-item{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:0;border-bottom:1px solid var(--border-subtle);padding:7px 2px;cursor:pointer;color:var(--text);font-size:12px;text-align:left;}
+.dash-feed-item:last-child{border-bottom:0;}
+.dash-feed-item:hover{background:var(--hover-bg);}
+.dash-feed-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.dash-feed-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;}
+.dash-feed-meta{color:var(--muted);font-size:11px;flex-shrink:0;font-variant-numeric:tabular-nums;}
+.dash-log-tail{background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border-subtle);border-radius:var(--radius-md);font-size:11px;line-height:1.5;padding:8px 10px;margin:0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;}
+.dash-memory-input{width:100%;box-sizing:border-box;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-md);padding:7px 10px;font-size:12px;outline:none;font-family:inherit;}
+.dash-memory-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--focus-glow);}
+.dash-memory-results{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;}
+.dash-memory-hit{font-size:12px;color:var(--text);padding:5px 8px;background:var(--surface-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);line-height:1.45;word-break:break-word;}
+.dash-memory-hit-src{display:inline-block;font-size:10px;font-weight:700;color:var(--accent-text);background:var(--accent-bg);border-radius:999px;padding:1px 6px;margin-right:6px;vertical-align:1px;}
+.dash-health .system-health-metrics{margin-top:4px;}
+@media (max-width:900px){.dash-columns{grid-template-columns:1fr;}}
+@media (max-width:640px){.dash-kpi-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));}}
 
 /* ── Insights panel (#464) ────────────────────────────────────────────────── */
 main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}

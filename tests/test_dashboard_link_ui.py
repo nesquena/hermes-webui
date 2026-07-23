@@ -330,13 +330,22 @@ def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -
             pass
 
 
-def test_dashboard_nav_buttons_are_hidden_by_default_and_subpath_safe():
-    assert 'id="dashboardRailBtn"' in INDEX_HTML
-    assert 'id="dashboardMobileBtn"' in INDEX_HTML
-    assert 'data-dashboard-link' in INDEX_HTML
-    assert 'data-i18n-title="tab_dashboard"' in INDEX_HTML
-    assert 'display:none' in INDEX_HTML
-    assert "Dashboard" in INDEX_HTML
+def test_dashboard_nav_buttons_open_in_app_view_and_external_link_is_hidden_by_default():
+    # The rail/mobile dashboard buttons are ordinary always-visible nav tabs
+    # for the in-app dashboard view; the probe-gated external link moved to
+    # #dashboardExternalBtn inside the view header (hidden until the probe
+    # reports a running Hermes Agent dashboard).
+    for btn_id in ("dashboardRailBtn", "dashboardMobileBtn"):
+        tag = re.search(rf'<button[^>]*id="{btn_id}"[^>]*>', INDEX_HTML)
+        assert tag, f"{btn_id} missing"
+        assert 'data-panel="dashboard"' in tag.group(0)
+        assert "switchPanel('dashboard'" in tag.group(0)
+        assert "data-dashboard-link" not in tag.group(0)
+        assert "display:none" not in tag.group(0)
+    ext = re.search(r'<button[^>]*id="dashboardExternalBtn"[^>]*>', INDEX_HTML)
+    assert ext, "dashboardExternalBtn missing"
+    assert "data-dashboard-link" in ext.group(0)
+    assert "display:none" in ext.group(0)
     assert "href=\"/" not in INDEX_HTML
 
 
@@ -366,8 +375,8 @@ def test_dashboard_frontend_opens_external_tab_safely_and_derives_browser_host_u
     assert "noopener,noreferrer" in UI_JS
     assert "window.location.hostname" in UI_JS
     assert "_dashboardBrowserUrl" in UI_JS
-    assert 'id="dashboardRailBtn"' in INDEX_HTML
-    assert re.search(r'id="dashboardRailBtn"[^>]*onclick="openHermesDashboard\(event\)"', INDEX_HTML)
+    assert 'id="dashboardExternalBtn"' in INDEX_HTML
+    assert re.search(r'id="dashboardExternalBtn"[^>]*onclick="openHermesDashboard\(event\)"', INDEX_HTML)
 
 
 def test_dashboard_loopback_warning_and_external_badge_are_present():
