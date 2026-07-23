@@ -78,7 +78,7 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}
 
-    def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
         called["args"] = args
         called["env"] = env
         return MockPopen(
@@ -105,7 +105,7 @@ def test_restart_active_profile_gateway_pins_explicit_default_profile(monkeypatc
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}
 
-    def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
         called["args"] = args
         called["env"] = env
         return MockPopen(args, stdout_text="ok", returncode=0, env=env)
@@ -129,7 +129,7 @@ def test_restart_active_profile_gateway_omits_profile_for_isolated_default_home(
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}
 
-    def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
         called["args"] = args
         called["env"] = env
         return MockPopen(args, stdout_text="ok", returncode=0, env=env)
@@ -169,7 +169,7 @@ def test_restart_active_profile_gateway_accepts_renamed_root_alias(monkeypatch):
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}
 
-    def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
         called["args"] = args
         called["env"] = env
         return MockPopen(args, stdout_text="ok", returncode=0, env=env)
@@ -202,7 +202,10 @@ def test_restart_active_profile_gateway_failure_preserves_empty_output_contract(
     monkeypatch.setattr(
         gateway_restart.subprocess,
         "Popen",
-        lambda args, stdout=None, stderr=None, text=True, env=None: MockPopen(
+        # **kwargs (matching the other Popen stubs in this file) so the stub
+        # tolerates spawn kwargs it doesn't assert on — e.g. the Windows
+        # `creationflags` this call site passes to avoid a console window.
+        lambda args, stdout=None, stderr=None, text=True, env=None, **kwargs: MockPopen(
             args,
             returncode=7,
             env=env,
