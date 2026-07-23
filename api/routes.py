@@ -1878,6 +1878,8 @@ _session_list_row_timestamp = _route_session_list_cache._session_list_row_timest
 _session_list_runtime_sort_key = _route_session_list_cache._session_list_runtime_sort_key
 _session_list_cache_set = _route_session_list_cache._session_list_cache_set
 _session_list_cache_source_stamp = _route_session_list_cache._session_list_cache_source_stamp
+_get_cli_sessions_for_badges = _route_session_list_cache.get_cli_sessions_for_badges
+_reset_cli_badge_cache_for_tests = _route_session_list_cache._reset_cli_badge_cache_for_tests
 _session_list_cache_state_db_fingerprint = _route_session_list_cache._session_list_cache_state_db_fingerprint
 _session_list_cache_stale_reason = _route_session_list_cache._session_list_cache_stale_reason
 _session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
@@ -2450,7 +2452,33 @@ def _build_session_list_cache_payload(
             webui_sessions,
             diag_stage=diag_stage,
         )
-        deduped_cli = []
+        # #6192 gate follow-up: the returned "sessions" list stays webui-only
+        # (_filter_sidebar_source strips CLI rows below), but the sidebar-tab
+        # badges must count the external state.db / Claude-Code rows too — they
+        # exist ONLY in the CLI projection.  Pull that projection through the
+        # slow, churn-tolerant badge cache (state.db writes never bust it; it
+        # refreshes at most once per TTL) and run it through the SAME dedupe as
+        # the cli-tab branch so both request forms count identical rows.
+        diag_stage("cli_badge_counts")
+        try:
+            _badge_cli = _get_cli_sessions_for_badges(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=show_claude_code_sessions,
+                profile_key=None if all_profiles else _get_active_profile_name(),
+            )
+        except Exception:
+            logger.debug("cli badge count projection failed", exc_info=True)
+            _badge_cli = []
+        represented_webui_ids = set()
+        for s in webui_sessions:
+            represented_webui_ids.update(_session_lineage_ids(s))
+        deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
+            _badge_cli,
+            represented_webui_ids,
+            show_cron_sessions=show_cron_sessions,
+            show_webhook_sessions=show_webhook_sessions,
+        )
     else:
         diag_stage("filter_webui_sessions")
         webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]

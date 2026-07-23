@@ -379,6 +379,7 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
                 _session_list_cache_path_stamp(_session_list_cache_settings_file()),
                 streaming_marker,
                 swv,
+                _cli_badge_cache_generation(),
             )
         try:
             state_db_path = Path(str(_session_list_cache_state_db_path()))
@@ -396,6 +397,9 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
             _session_list_cache_path_stamp(_session_list_cache_settings_file()),
             _session_list_cache_state_db_fingerprint(state_db_path),
             swv,
+            # Badge refresh with changed counts must invalidate this bucket
+            # exactly once (#6192 gate: authoritative sidebar-tab badges).
+            _cli_badge_cache_generation(),
         )
     # WebUI-origin sessions can also receive settled rows in state.db when the
     # official Hermes Desktop App continues the same agent session.  The non-
@@ -571,3 +575,97 @@ def _session_list_cache_done(key: tuple, event: threading.Event | None) -> None:
             _SESSIONS_CACHE_INFLIGHT.pop(key, None)
     if event is not None:
         event.set()
+
+
+# ── CLI badge counts for sidebar_source=webui (#6192 gate follow-up) ─────────
+# The webui-tab shortcut skips the expensive get_cli_sessions() projection, but
+# the sidebar-tab badges (cli_session_count / archived_cli_count) must stay
+# authoritative — external state.db / Claude-Code rows exist ONLY in that
+# projection.  This cache hands the routes layer CLI rows for *counting only*
+# on a slow, churn-tolerant TTL: state.db writes never bust it directly (that
+# was exactly the rebuild storm the shortcut removed), it refreshes at most
+# once per TTL during a response-cache rebuild, and when a refresh actually
+# changes the badge-relevant signature its generation bumps so the response
+# stamp invalidates exactly once and converges on the fresh counts.
+_CLI_BADGE_CACHE_LOCK = threading.Lock()
+_CLI_BADGE_CACHE: dict = {
+    "key": None,
+    "expires": 0.0,
+    "rows": [],
+    "sig": None,
+    "gen": 0,
+}
+
+
+def _cli_badge_ttl_seconds() -> float:
+    try:
+        return max(
+            0.0, float(os.environ.get("HERMES_WEBUI_CLI_BADGE_TTL_SECONDS", "30"))
+        )
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _cli_badge_cache_generation() -> int:
+    with _CLI_BADGE_CACHE_LOCK:
+        return int(_CLI_BADGE_CACHE["gen"])
+
+
+def _reset_cli_badge_cache_for_tests() -> None:
+    with _CLI_BADGE_CACHE_LOCK:
+        _CLI_BADGE_CACHE.update(
+            {"key": None, "expires": 0.0, "rows": [], "sig": None, "gen": 0}
+        )
+
+
+def get_cli_sessions_for_badges(
+    *,
+    source_filter=None,
+    all_profiles: bool = False,
+    include_claude_code: bool = True,
+    profile_key=None,
+) -> list:
+    """CLI rows for badge counting on webui-tab requests, TTL-cached.
+
+    Late-binds ``routes.get_cli_sessions`` so focused tests that monkeypatch
+    the routes-level symbol keep steering this path too.
+    """
+    key = (source_filter, bool(all_profiles), bool(include_claude_code), profile_key)
+    now = time.monotonic()
+    with _CLI_BADGE_CACHE_LOCK:
+        if _CLI_BADGE_CACHE["key"] == key and now < _CLI_BADGE_CACHE["expires"]:
+            return list(_CLI_BADGE_CACHE["rows"])
+    from api import routes as _routes
+
+    loader = _routes.get_cli_sessions
+    try:
+        if _routes._callable_accepts_kwarg(loader, "include_claude_code"):
+            rows = loader(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=include_claude_code,
+            )
+        else:
+            rows = loader(source_filter=source_filter, all_profiles=all_profiles)
+    except Exception:
+        rows = []
+    rows = list(rows or [])
+    sig = tuple(
+        sorted(
+            (str(r.get("session_id") or ""), bool(r.get("archived")))
+            for r in rows
+            if isinstance(r, dict)
+        )
+    )
+    with _CLI_BADGE_CACHE_LOCK:
+        if sig != _CLI_BADGE_CACHE["sig"]:
+            _CLI_BADGE_CACHE["gen"] += 1
+        _CLI_BADGE_CACHE.update(
+            {
+                "key": key,
+                "expires": now + _cli_badge_ttl_seconds(),
+                "rows": rows,
+                "sig": sig,
+            }
+        )
+        return list(rows)
