@@ -9396,9 +9396,18 @@ function _showProjectContextMenu(e, proj, chip){
 
   // Default workspace
   const wsItem=document.createElement('div');
-  wsItem.textContent='Default workspace'+(proj.default_workspace?' ✓':'');
-  if(proj.default_workspace) wsItem.title=proj.default_workspace;
-  wsItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  wsItem.style.cssText='display:flex;align-items:center;gap:8px;padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  const wsLabel=document.createElement('span');
+  wsLabel.style.cssText='flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+  wsLabel.textContent='Default workspace';
+  wsItem.appendChild(wsLabel);
+  if(proj.default_workspace){
+    wsItem.title=proj.default_workspace;
+    const wsCheck=document.createElement('span');
+    wsCheck.style.cssText='flex:0 0 auto;color:var(--accent,var(--text));';
+    wsCheck.textContent='✓';
+    wsItem.appendChild(wsCheck);
+  }
   wsItem.onmouseenter=()=>wsItem.style.background='var(--hover-bg)';
   wsItem.onmouseleave=()=>wsItem.style.background='';
   wsItem.onclick=async(wsEv)=>{
