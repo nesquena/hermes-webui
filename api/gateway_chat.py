@@ -69,6 +69,20 @@ def _publish_gateway_run_id(stream_id: str, run_id: str) -> None:
         _STREAM_RUN_STARTING_CONDITION.notify_all()
 
 
+def _persist_gateway_stable_run_id(on_run_id, stream_id: str, run_id: str) -> None:
+    if on_run_id is None:
+        return
+    try:
+        on_run_id(run_id)
+    except Exception:
+        logger.debug(
+            "Failed to persist stable gateway run id %s for stream %s",
+            run_id,
+            stream_id,
+            exc_info=True,
+        )
+
+
 def _finish_gateway_run_starting(stream_id: str, *, result: str = "failed") -> None:
     with _STREAM_RUN_STARTING_CONDITION:
         state = _STREAM_RUN_LIFECYCLE.get(stream_id) or {}
@@ -556,16 +570,7 @@ def _run_gateway_runs_api_streaming(
 
     usage: dict = {}
     _publish_gateway_run_id(stream_id, run_id)
-    if on_run_id is not None:
-        try:
-            on_run_id(run_id)
-        except Exception:
-            logger.debug(
-                "Failed to persist stable gateway run id %s for stream %s",
-                run_id,
-                stream_id,
-                exc_info=True,
-            )
+    _persist_gateway_stable_run_id(on_run_id, stream_id, run_id)
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
     headers_sse = dict(headers)
@@ -1066,6 +1071,7 @@ def _run_gateway_chat_streaming(
                         continue
                     _payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip()
                     if _payload_event in {"hermes.approval.request", "approval.request"}:
+                        sse_event = "message"
                         approval_data = _gateway_runs_approval_event(payload)
                         if approval_data:
                             # Record the gateway run_id so /api/approval/respond
@@ -1076,21 +1082,11 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
-                                set_journal_stable_run_id = getattr(
-                                    run_journal,
-                                    "set_stable_run_id",
-                                    None,
+                                _persist_gateway_stable_run_id(
+                                    getattr(run_journal, "set_stable_run_id", None),
+                                    stream_id,
+                                    _approval_run_id,
                                 )
-                                if set_journal_stable_run_id is not None:
-                                    try:
-                                        set_journal_stable_run_id(_approval_run_id)
-                                    except Exception:
-                                        logger.debug(
-                                            "Failed to persist legacy gateway run id %s for stream %s",
-                                            _approval_run_id,
-                                            stream_id,
-                                            exc_info=True,
-                                        )
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror
                                 head, total = submit_gateway_pending_mirror(session_id, approval_data)
@@ -1100,7 +1096,6 @@ def _run_gateway_chat_streaming(
                             put_gateway_event("approval", approval_data)
                         else:
                             logger.debug("Ignoring malformed gateway approval payload")
-                        sse_event = "message"
                         continue
                     if sse_event == "hermes.tool.progress":
                         translated = _gateway_tool_progress_event(payload)
