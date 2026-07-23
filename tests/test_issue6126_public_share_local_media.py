@@ -404,12 +404,12 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
     )
     unicode_separator = (
         "> ```text\u2028"
-        "> file:///private-not-known/u2028-separator.png\u2028"
+        "> file:///fixture-not-redacted/u2028-separator.png\u2028"
         "> ```"
     )
     vertical_tab_separator = (
         "> ```text\v"
-        "> file:///private-not-known/vtab-separator.png\v"
+        "> file:///fixture-not-redacted/vtab-separator.png\v"
         "> ```"
     )
     session = SimpleNamespace(
@@ -438,7 +438,7 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
     content = snapshot["messages"][0]["content"]
     title = snapshot["title"]
 
-    assert "file://" not in content
+    assert "file:///private-not-known" not in content
     assert "private-not-known" not in content
     assert "depth-mismatch" not in content
     assert "closer-mismatch" not in content
@@ -449,11 +449,14 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
     assert "cross-inline" not in content
     assert "cross-entity-inline" not in content
     assert "pre-shadow" not in content
-    assert "u2028-separator" not in content
-    assert "vtab-separator" not in content
+    assert "u2028-separator" in content
+    assert "vtab-separator" in content
+    assert "fixture-not-redacted/u2028-separator.png" in content
+    assert "fixture-not-redacted/vtab-separator.png" in content
     assert f"> {OMITTED_ATTACHMENT}" in content
     assert f">> {OMITTED_ATTACHMENT}" in content
-    assert content.count(OMITTED_ATTACHMENT) == 11
+    assert content.count(OMITTED_ATTACHMENT) == 9
+    assert "api/media?path=" not in _render_md_with_node(content)
     assert "file://" not in title
     assert "private-not-known" not in title
     assert "title-depth" not in title
@@ -519,9 +522,6 @@ def test_public_share_snapshot_render_md_oracle_keeps_local_refs_closed():
                     "> ```text\n"
                     "> file:///private-not-known/pre-shadow-render.png\n"
                     "> ```\n"
-                    "> ```text\u2028"
-                    "> file:///private-not-known/u2028-render.png\u2028"
-                    "> ```\n"
                     "MEDIA:https://cdn.example.test/image.png"
                     "?source=file:///private-not-known/query-render.png"
                 ),
@@ -573,6 +573,71 @@ def test_public_share_snapshot_omits_parser_divergent_active_file_uri_shapes():
     assert "private-not-known" not in title
     assert "title-cr-leak" not in title
     assert title.count(OMITTED_ATTACHMENT) == 1
+
+
+@pytest.mark.parametrize(
+    ("separator", "name"),
+    [
+        ("\v", "vt"),
+        ("\f", "ff"),
+        ("\x85", "nel"),
+        ("\u2028", "u2028"),
+        ("\u2029", "u2029"),
+    ],
+)
+def test_public_share_snapshot_preserves_renderer_inert_inline_separator_spans(separator, name):
+    import api.shares as shares
+
+    raw = f"`label{separator}file:///fixture-not-redacted/{name}.txt`"
+    session = SimpleNamespace(
+        title="Inline separator share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": raw,
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+    rendered = _render_md_with_node(content)
+
+    assert content == raw
+    assert OMITTED_ATTACHMENT not in content
+    assert "\x00SHARE_CODE_" not in content
+    assert "api/media?path=" not in rendered
+    assert f"fixture-not-redacted/{name}.txt" in rendered
+
+
+def test_public_share_snapshot_restores_nested_code_stashes_without_marker():
+    import api.shares as shares
+
+    raw_pre = "<pre>before `file:///fixture-not-redacted/raw-inline.txt` after</pre>"
+    entity_pre = (
+        "&lt;pre&gt;\n"
+        "```text\n"
+        "file:///fixture-not-redacted/entity-fence.txt\n"
+        "```\n"
+        "&lt;/pre&gt;"
+    )
+    session = SimpleNamespace(
+        title="Nested code stash share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": f"{raw_pre}\n{entity_pre}",
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+    rendered = _render_md_with_node(content)
+
+    assert content == f"{raw_pre}\n{entity_pre}"
+    assert OMITTED_ATTACHMENT not in content
+    assert "\x00SHARE_CODE_" not in content
+    assert "api/media?path=" not in rendered
+    assert "fixture-not-redacted/entity-fence.txt" in rendered
 
 
 def test_public_share_snapshot_redacts_known_paths_inside_code_regions():
@@ -717,7 +782,9 @@ def test_public_share_snapshot_omits_local_payloads_inside_public_media_urls(mon
     session = SimpleNamespace(
         title=(
             "Title MEDIA:https://cdn.example.test/image.png"
-            "?source=file:///private-not-known/title-query.png"
+            "?next=https://relay.example.test/fetch"
+            "?next=https://hermes.example.test/safe/../api/media"
+            "?path=/private-not-known/title-relay.png"
         ),
         messages=[
             {
@@ -734,7 +801,18 @@ def test_public_share_snapshot_omits_local_payloads_inside_public_media_urls(mon
                     "?next=%2Fapi%2Fmedia%3Fpath%3D%2Fprivate-not-known%2Fauth.png\n"
                     "Same-origin auth MEDIA:https://cdn.example.test/image.png"
                     "?next=https%3A%2F%2Fhermes.example.test%2Fapi%2Fmedia"
-                    "%3Fpath%3D%2Fprivate-not-known%2Fsame-origin.png"
+                    "%3Fpath%3D%2Fprivate-not-known%2Fsame-origin.png\n"
+                    "Relay auth MEDIA:https://cdn.example.test/image.png"
+                    "?next=https://relay.example.test/fetch"
+                    "?next=https://hermes.example.test/api/media"
+                    "?path=/private-not-known/relay.png\n"
+                    "Scheme-relative auth MEDIA:https://cdn.example.test/image.png"
+                    "?next=//hermes.example.test/safe/../api/media"
+                    "?path=/private-not-known/scheme-relative.png\n"
+                    "Relative dot auth MEDIA:https://cdn.example.test/image.png"
+                    "?next=/safe/../api/media?path=/private-not-known/relative-dot.png\n"
+                    "Parent dot auth MEDIA:https://cdn.example.test/image.png"
+                    "?next=../api/media?path=/private-not-known/parent-dot.png"
                 ),
             }
         ],
@@ -750,9 +828,14 @@ def test_public_share_snapshot_omits_local_payloads_inside_public_media_urls(mon
     assert "/api/media" not in content
     assert "%2Fapi%2Fmedia" not in content
     assert "hermes.example.test" not in content
+    assert "relay.example.test" not in content
+    assert "safe/../api/media" not in content
+    assert "../api/media" not in content
     assert "private-not-known" not in content
-    assert content.count(OMITTED_ATTACHMENT) == 5
-    assert "file://" not in snapshot["title"]
+    assert content.count(OMITTED_ATTACHMENT) == 9
+    assert "relay.example.test" not in snapshot["title"]
+    assert "hermes.example.test" not in snapshot["title"]
+    assert "/api/media" not in snapshot["title"]
     assert "private-not-known" not in snapshot["title"]
     assert snapshot["title"].count(OMITTED_ATTACHMENT) == 1
 

@@ -134,7 +134,8 @@ _ENTITY_PRE_REGION_RE = re.compile(
 _RENDERER_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n|$)")
 _BLOCKQUOTE_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,})([^\r\n`]*)$")
 _BLOCKQUOTE_FENCE_CLOSE_RE = re.compile(r"^[ ]{0,3}(`{3,})[ \t]*$")
-_NESTED_HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"\)\]]+", re.IGNORECASE)
+_NESTED_HTTP_START_RE = re.compile(r"https?://", re.IGNORECASE)
+_SCHEME_RELATIVE_URL_RE = re.compile(r"(?<!:)//[^\s<>'\"\)\]]+")
 _RELATIVE_API_MEDIA_PAYLOAD_RE = re.compile(
     r"(?:^|[=&?#])(?:\.{0,2}/)*/?api/media(?:[/?#=&]|$)",
     re.IGNORECASE,
@@ -144,7 +145,7 @@ _FENCED_CODE_REGION_RE = re.compile(
     r"(?:\r\n|\r|\n)"
     r"(?:[\s\S]*?(?:\r\n|\r|\n))?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r\n|\r|\n|$)"
 )
-_INLINE_CODE_REGION_RE = re.compile(r"`[^`\r\n\v\f\x85\u2028\u2029]+`")
+_INLINE_CODE_REGION_RE = re.compile(r"`[^`\r\n]+`")
 _DATA_IMAGE_RE = re.compile(
     r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
     re.IGNORECASE,
@@ -367,29 +368,126 @@ def _bounded_unquote_variants(value: str) -> list[str]:
     return variants
 
 
-def _payload_has_local_media_reference(value: str, *, relative_api_media: bool) -> bool:
+def _payload_candidate_end(value: str, start: int) -> int:
+    end = start
+    while end < len(value) and value[end] not in " \t\r\n<>'\")]\x00":
+        end += 1
+    return end
+
+
+def _nested_http_payload_has_local_media_reference(
+    variant: str,
+    *,
+    payload_budget: int,
+) -> bool:
+    for match in _NESTED_HTTP_START_RE.finditer(variant):
+        if payload_budget <= 0:
+            return True
+        end = _payload_candidate_end(variant, match.start())
+        candidate = variant[match.start():end]
+        if not candidate or not _is_public_media_url(
+            candidate,
+            payload_budget=payload_budget - 1,
+        ):
+            return True
+    return False
+
+
+def _scheme_relative_payload_has_local_media_reference(
+    variant: str,
+    *,
+    payload_budget: int,
+) -> bool:
+    for match in _SCHEME_RELATIVE_URL_RE.finditer(variant):
+        if payload_budget <= 0:
+            return True
+        if not _is_public_media_url(
+            f"https:{match.group(0)}",
+            payload_budget=payload_budget - 1,
+        ):
+            return True
+    return False
+
+
+def _relative_payload_has_local_api_media_reference(value: str) -> bool:
+    index = 0
+    while index < len(value):
+        starts_path = (
+            value[index] == "/"
+            or value.startswith("./", index)
+            or value.startswith("../", index)
+        )
+        if not starts_path:
+            index += 1
+            continue
+        if value.startswith("//", index):
+            index += 2
+            continue
+        end = _payload_candidate_end(value, index)
+        candidate = value[index:end]
+        normalized_path = _media_url_path_for_boundary_check(urlsplit(candidate).path)
+        if _API_MEDIA_PATH_RE.search(normalized_path):
+            return True
+        index = max(end, index + 1)
+    return False
+
+
+def _payload_has_local_media_reference(
+    value: str,
+    *,
+    relative_api_media: bool,
+    payload_budget: int,
+) -> bool:
+    if payload_budget <= 0:
+        return bool(value)
     for variant in _bounded_unquote_variants(value):
         lowered = variant.lower()
         if "file://" in lowered or "file:/" in lowered:
             return True
         if relative_api_media and _RELATIVE_API_MEDIA_PAYLOAD_RE.search(variant):
             return True
-        for match in _NESTED_HTTP_URL_RE.finditer(variant):
-            if not _is_public_media_url(match.group(0), validate_payload=False):
-                return True
+        if (
+            relative_api_media
+            and _relative_payload_has_local_api_media_reference(variant)
+        ):
+            return True
+        if _nested_http_payload_has_local_media_reference(
+            variant,
+            payload_budget=payload_budget,
+        ):
+            return True
+        if _scheme_relative_payload_has_local_media_reference(
+            variant,
+            payload_budget=payload_budget,
+        ):
+            return True
     return False
 
 
-def _media_url_has_local_payload(parsed) -> bool:
+def _media_url_has_local_payload(parsed, *, payload_budget: int) -> bool:
     return (
-        _payload_has_local_media_reference(parsed.path, relative_api_media=False)
-        or _payload_has_local_media_reference(parsed.query, relative_api_media=True)
-        or _payload_has_local_media_reference(parsed.fragment, relative_api_media=True)
+        _payload_has_local_media_reference(
+            parsed.path,
+            relative_api_media=False,
+            payload_budget=payload_budget,
+        )
+        or _payload_has_local_media_reference(
+            parsed.query,
+            relative_api_media=True,
+            payload_budget=payload_budget,
+        )
+        or _payload_has_local_media_reference(
+            parsed.fragment,
+            relative_api_media=True,
+            payload_budget=payload_budget,
+        )
     )
 
 
-def _is_public_media_url(raw_ref: str, *, validate_payload: bool = True) -> bool:
+def _is_public_media_url(raw_ref: str, *, payload_budget: int = 5) -> bool:
     ref = str(raw_ref or "")
+    if payload_budget < 0:
+        return False
     if "[" in ref or "]" in ref:
         return False
     try:
@@ -423,7 +521,7 @@ def _is_public_media_url(raw_ref: str, *, validate_payload: bool = True) -> bool
             or _hostname_has_non_global_embedded_ip(hostname)
         ):
             return False
-    if validate_payload and _media_url_has_local_payload(parsed):
+    if _media_url_has_local_payload(parsed, payload_budget=payload_budget):
         return False
     if _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path)):
         return not _is_trusted_webui_origin(parsed, hostname)
@@ -604,7 +702,8 @@ def _stash_share_code_regions(text: str):
     protected = _ENTITY_PRE_REGION_RE.sub(stash, protected)
 
     def restore(value: str) -> str:
-        for index, original in enumerate(stashed):
+        for index in reversed(range(len(stashed))):
+            original = stashed[index]
             value = value.replace(f"{stash_prefix}{index}\x00", original)
         return value
 
