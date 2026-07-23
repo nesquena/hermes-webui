@@ -3814,12 +3814,12 @@ def test_is_dispatch_accepted_parameterized(resp, accepted, reason_part):
 def test_interleaved_non_terminal_two_terminals_batched_in_one_turn(
     notifications_module,
 ):
-    """Two terminals for the same subscription, with a comment between them,
-    are batched into a SINGLE wake turn (RFC §9 "one wake turn per session").
-
-    Each terminal is delivered exactly once — no duplicate delivery — and the
-    cursor advances past every event, consuming the interleaved comment as
-    non-terminal noise.
+    """Greptile P1 fix: the interleaved guard was dead code (5-tuple key
+    against 4-tuple dict). Now it fires. A non-terminal (comment at 15)
+    between two terminals (10, 20) gates the second terminal — only event 10
+    dispatches in iteration 1. In iteration 2, the comment is consumed as
+    safe non-terminal noise, then event 20 dispatches. Two dispatches total,
+    cursor ends at 20, no events lost.
     """
     fb = notifications_module.fake_kanban
     mod = notifications_module.mod
@@ -3832,120 +3832,79 @@ def test_interleaved_non_terminal_two_terminals_batched_in_one_turn(
         )
     )
 
-    # Initialize before inserting live events so the pre-seeded baseline does
-    # not treat these rows as historical ghosts.
     state = mod._initialize_baseline_state(["default"])
     fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=10)
     fb.add_event("t_interleaved", "commented", {"body": "still useful"}, event_id=15)
     fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=20)
 
-    # Iteration 1: both terminals are delivered in one prompt; the cursor
-    # advances to the latest delivered terminal (20).
+    # Iteration 1: only event 10 dispatches. Event 20 is gated by the
+    # non-terminal at 15. Cursor advances to 10.
     mod._run_one_iteration(state)
-
     sub = next(s for s in fb.subs if s["task_id"] == "t_interleaved")
-    assert sub["last_event_id"] == 20
+    assert sub["last_event_id"] == 10
 
-    # Exactly one dispatch — one wake turn carrying both terminals.
-    assert len(notifications_module.dispatched) == 1, (
-        f"iteration 1 should deliver a single batched turn, got "
-        f"{len(notifications_module.dispatched)} dispatches"
-    )
+    assert len(notifications_module.dispatched) == 1
     prompt = notifications_module.dispatched[0]["prompt"]
     assert "event 10" in prompt
-    assert "event 20" in prompt
+    assert "event 20" not in prompt
 
-    # Nothing remains readable — the cursor consumed the comment too.
-    next_candidates = mod._candidate_rows("default", state)
-    assert next_candidates == []
-
-    # Iteration 2: no new events, so no duplicate dispatch of the terminals.
+    # Iteration 2: the non-terminal at 15 is now safe (no undelivered
+    # terminal before it), so it is consumed silently. Event 20 dispatches.
     mod._run_one_iteration(state)
-    assert len(notifications_module.dispatched) == 1
+    assert sub["last_event_id"] == 20
+    assert len(notifications_module.dispatched) == 2
+    prompt2 = notifications_module.dispatched[1]["prompt"]
+    assert "event 20" in prompt2
+
+    # Iteration 3: no duplicate dispatch.
+    mod._run_one_iteration(state)
+    assert len(notifications_module.dispatched) == 2
     assert sub["last_event_id"] == 20
 
 
 def test_interleaved_non_terminal_three_terminals_no_duplicate_delivery(
     notifications_module,
 ):
-    """3 terminals interleaved with non-terminals are batched into one turn.
-
-    Scenario: events [10(terminal), 12(non-term), 14(non-term),
-    20(terminal), 30(terminal)] for the same subscription.
-
-    All three terminals are delivered in a SINGLE wake turn (RFC §9
-    "one wake turn per session"), each exactly once — no duplicate
-    delivery. The interleaved non-terminals are consumed as noise and the
-    cursor advances to the latest delivered terminal (30).
+    """Greptile P1 fix: non-terminals gate later terminals. Events
+    [10(term), 12(comment), 14(comment), 20(term), 30(term)] — only event 10
+    dispatches in iteration 1. Comments consumed in iteration 2, then 20 and
+    30 dispatch together (both now un-gated). 2 dispatches total, cursor=30.
     """
     fb = notifications_module.fake_kanban
     mod = notifications_module.mod
-    fb.add_task(
-        FakeTask(id="t_three_terminals", title="Three terminals", status="done")
-    )
+    fb.add_task(FakeTask(id="t_interleaved", title="Interleaved", status="done"))
     fb.add_sub(
         FakeSub(
-            task_id="t_three_terminals",
+            task_id="t_interleaved",
             platform="webui",
-            chat_id="chat-three-terminals",
+            chat_id="chat-interleaved",
         )
     )
 
     state = mod._initialize_baseline_state(["default"])
-    fb.add_event(
-        "t_three_terminals", "completed", {"status": "done"}, event_id=10
-    )
-    fb.add_event(
-        "t_three_terminals", "commented", {"body": "first comment"}, event_id=12
-    )
-    fb.add_event(
-        "t_three_terminals", "progress", {"percent": 25}, event_id=14
-    )
-    fb.add_event(
-        "t_three_terminals", "completed", {"status": "done"}, event_id=20
-    )
-    fb.add_event(
-        "t_three_terminals", "completed", {"status": "done"}, event_id=30
-    )
+    fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=10)
+    fb.add_event("t_interleaved", "commented", {"body": "a"}, event_id=12)
+    fb.add_event("t_interleaved", "commented", {"body": "b"}, event_id=14)
+    fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=20)
+    fb.add_event("t_interleaved", "completed", {"status": "done"}, event_id=30)
 
-    # Iteration 1.
     mod._run_one_iteration(state)
+    sub = next(s for s in fb.subs if s["task_id"] == "t_interleaved")
+    assert sub["last_event_id"] == 10
+    assert len(notifications_module.dispatched) == 1
+    assert "event 10" in notifications_module.dispatched[0]["prompt"]
 
-    sub = next(s for s in fb.subs if s["task_id"] == "t_three_terminals")
-    # Cursor advances to the latest delivered terminal (30), consuming the
-    # interleaved non-terminals (12, 14) along the way.
-    assert sub["last_event_id"] == 30, (
-        f"final cursor expected 30, got {sub['last_event_id']}"
-    )
-
-    # Exactly ONE dispatch carrying all three terminals.
-    assert len(notifications_module.dispatched) == 1, (
-        f"iteration 1 expected 1 batched dispatch, got "
-        f"{len(notifications_module.dispatched)}"
-    )
-
-    # That single prompt lists every delivered terminal event.
-    prompt = notifications_module.dispatched[0]["prompt"]
-    assert "event 10" in prompt
-    assert "event 20" in prompt
-    assert "event 30" in prompt
-
-    # Nothing remains readable after the batched turn.
-    iter1_candidates = mod._candidate_rows("default", state)
-    assert iter1_candidates == []
-
-    # Iteration 2: no new events → no duplicate delivery.
+    # Iteration 2: comments consumed, events 20+30 both dispatch.
     mod._run_one_iteration(state)
-    assert len(notifications_module.dispatched) == 1, (
-        f"iteration 2 must not re-deliver already-consumed terminals, got "
-        f"{len(notifications_module.dispatched)}"
-    )
     assert sub["last_event_id"] == 30
+    assert len(notifications_module.dispatched) == 2
+    prompt2 = notifications_module.dispatched[1]["prompt"]
+    assert "event 20" in prompt2
+    assert "event 30" in prompt2
 
-
-# ── Fix 3 regression: real task metadata reaches the wake prompt ─────
-
-
+    # No duplicate.
+    mod._run_one_iteration(state)
+    assert len(notifications_module.dispatched) == 2
 def test_real_sqlite_iteration_prompt_includes_task_title_and_summary(
     monkeypatch,
     tmp_path,

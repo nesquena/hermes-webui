@@ -2986,7 +2986,6 @@ def _process_chat(
                     entry.get("board"),
                     entry.get("task_id"),
                     entry.get("chat_id"),
-                    entry.get("thread_id") or "",
                     entry.get("profile"),
                 )
             )
