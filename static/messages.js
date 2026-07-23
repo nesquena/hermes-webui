@@ -6225,7 +6225,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
         _scheduleAnchorRegistryCleanup();
-        clearLiveToolCards();if(!assistantText)removeThinking();
         let isRecoveryControlMessage=false;
         try{
           const isRateLimit=d.type==='rate_limit';
@@ -6265,6 +6264,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
           _attachProjectedAnchorSceneToLastAssistant(S.messages);
         }
+        // Keep the live Anchor DOM through terminal-error settlement so the
+        // projected activity scene can be attached and persisted before cleanup.
+        clearLiveToolCards();if(!assistantText)removeThinking();
         if(isRecoveryControlMessage){
           (async()=>{
             if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
