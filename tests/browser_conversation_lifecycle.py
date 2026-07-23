@@ -499,6 +499,15 @@ def _capture_anchor_scene_requests(page):
     return events
 
 
+def _mutation_event_observed(events: list[dict], bite: str) -> bool:
+    return any(
+        isinstance(event, dict)
+        and event.get("type") == "mutation"
+        and event.get("bite") == bite
+        for event in events
+    )
+
+
 def _activity_snapshot(page) -> dict:
     return page.evaluate(
         """() => {
@@ -849,6 +858,11 @@ def main() -> int:
                     TEST_BITE == "drop-anchor-persistence"
                     and NEGATIVE_BITE != "throw-reloaded-worklog-expand"
                 ):
+                    anchor_scene_requests.append({
+                        "type": "mutation",
+                        "bite": "drop-anchor-persistence",
+                        "action": "dropped-anchor-scene-persistence",
+                    })
                     route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -868,6 +882,11 @@ def main() -> int:
                                     if not (isinstance(row, dict) and row.get("role") == "terminal")
                                 ]
                                 if len(kept) != len(rows):
+                                    anchor_scene_requests.append({
+                                        "type": "mutation",
+                                        "bite": "drop-terminal-anchor-row",
+                                        "action": "removed-terminal-row",
+                                    })
                                     mutated = dict(payload)
                                     updated_scene = dict(scene)
                                     updated_scene["activity_rows"] = kept
@@ -1077,6 +1096,14 @@ def main() -> int:
             try:
                 page.wait_for_selector(settled_anchor_group_selector, timeout=2000)
             except Exception as exc:
+                if not _mutation_event_observed(
+                    anchor_scene_requests,
+                    "drop-anchor-persistence",
+                ):
+                    raise AssertionError(
+                        "drop-anchor-persistence mutation was not observed before "
+                        "the reloaded Anchor group went missing"
+                    ) from exc
                 _raise_expected_mutation_failure(
                     EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
                     errors=errors,
@@ -1121,6 +1148,14 @@ def main() -> int:
                 raise AssertionError(
                     "Mutation survived: drop-terminal-anchor-row still rendered "
                     "a terminal row after hard reload"
+                )
+            if not _mutation_event_observed(
+                anchor_scene_requests,
+                "drop-terminal-anchor-row",
+            ):
+                raise AssertionError(
+                    "drop-terminal-anchor-row mutation was not observed before "
+                    "the reloaded terminal row went missing"
                 )
             raise AssertionError(
                 EXPECTED_MUTATION_FAILURE_MARKERS["drop-terminal-anchor-row"]
