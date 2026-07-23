@@ -3961,6 +3961,12 @@ def resolve_model_reasoning_efforts(
     filtered = _filter_reasoning_efforts_for_provider(
         [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
     )
+    # Grok-4.5 hard provider contract (independent of models.dev authority):
+    # floor is low, ceiling is high. models.dev may still decide that the model
+    # *supports reasoning*, but it must not re-advertise minimal/xhigh/max for a
+    # model whose native ladder is only low/medium/high (#6438 re-gate round 3).
+    if _is_grok_45_model_id(model_id):
+        filtered = [eff for eff in filtered if eff in {"low", "medium", "high"}]
     if had_none:
         # Keep 'none' in its original leading position if it was there.
         return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
@@ -4130,6 +4136,11 @@ def coerce_reasoning_effort_for_model(
     # still showed Off). Fall through to the provider default (empty).
     if raw == "none" and _is_grok_45_model_id(model_id):
         return ""
+    # Grok-4.5 hard floor is low. Even when models.dev authoritatively returns a
+    # fuller ladder that still lists 'minimal', never send minimal for 4.5
+    # (custom proxy 400 / native silent clamp → UI/provider mismatch).
+    if raw == "minimal" and _is_grok_45_model_id(model_id):
+        return "low"
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
