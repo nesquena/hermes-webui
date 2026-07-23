@@ -5616,6 +5616,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
     });
 
+    // artifact_reference: routes workspace file artifact metadata into the
+    // Assistant Turn Anchor without adding a Worklog row or repainting the
+    // live scene (#6205). The backend derives these references from successful
+    // write_file / patch tool completions and emits one event per unique file.
+    source.addEventListener('artifact_reference',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      let d;
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
+      if(!d||typeof d!=='object') return;
+      if(!d.path||typeof d.path!=='string') return;
+      _applyToAnchor('artifact_reference',d,e);
+    });
+
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);

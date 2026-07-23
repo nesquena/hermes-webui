@@ -8138,6 +8138,113 @@ def _run_agent_streaming(
                 }])
                 return True
 
+            def _derive_artifact_references_from_tool_result(name, args, function_result, workspace):
+                """Derive turn-owned artifact references from successful file mutations.
+
+                Recognizes the Hermes Agent canonical file mutation tools
+                (``write_file`` and ``patch``), requires the raw result to prove
+                success, normalizes each path to the session workspace, and
+                rejects traversal, symlink escape, foreign drive paths, and URLs.
+
+                Returns a list of unique, sanitized workspace-relative paths.
+                """
+                if not name or not isinstance(name, str):
+                    return []
+                name = name.strip().lower()
+                if name not in ('write_file', 'patch'):
+                    return []
+
+                # Parse result
+                result = function_result
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except (json.JSONDecodeError, ValueError):
+                        return []
+                if not isinstance(result, dict):
+                    return []
+
+                # Validate success
+                if name == 'write_file':
+                    bytes_written = result.get('bytes_written')
+                    if not isinstance(bytes_written, (int, float)) or bytes_written <= 0:
+                        return []
+                elif name == 'patch':
+                    if result.get('success') is not True:
+                        return []
+
+                # Collect candidate paths
+                candidates = []
+                files_modified = result.get('files_modified')
+                if isinstance(files_modified, list):
+                    for p in files_modified:
+                        if isinstance(p, str) and p.strip():
+                            candidates.append(p.strip())
+                resolved_path = result.get('resolved_path')
+                if isinstance(resolved_path, str) and resolved_path.strip():
+                    candidates.append(resolved_path.strip())
+                # Fallback: tool args
+                if not candidates and isinstance(args, dict):
+                    arg_path = args.get('path') or args.get('file_path')
+                    if isinstance(arg_path, str) and arg_path.strip():
+                        candidates.append(arg_path.strip())
+
+                # Normalize and sanitize
+                try:
+                    ws = Path(workspace).expanduser().resolve()
+                except Exception:
+                    return []
+
+                safe_paths = []
+                seen = set()
+                for raw_path in candidates:
+                    # Reject URLs and data URIs
+                    if '://' in raw_path or raw_path.startswith('data:'):
+                        continue
+                    try:
+                        p = Path(raw_path)
+                        # Resolve relative to workspace
+                        if not p.is_absolute():
+                            p = ws / p
+                        p = p.resolve()
+                        # Reject traversal outside workspace
+                        try:
+                            p.relative_to(ws)
+                        except ValueError:
+                            continue
+                        # Reject symlinks (resolve already follows them, but
+                        # a symlink inside workspace pointing outside would trip
+                        # the relative_to check above)
+                        if p.is_symlink():
+                            continue
+                        # Reject non-files (directories, special)
+                        if not p.exists():
+                            # File might be about to be created — trust the path
+                            # if it's within the workspace
+                            pass
+                        elif not p.is_file():
+                            continue
+                        # Reject ignored build/cache trees
+                        parts = set(p.parts)
+                        if parts & {'.git', 'node_modules', '__pycache__', '.venv', 'venv',
+                                     '.tox', '.mypy_cache', '.pytest_cache', '.ruff_cache'}:
+                            continue
+                        # Make it workspace-relative for the payload
+                        try:
+                            rel = str(p.relative_to(ws))
+                        except ValueError:
+                            continue
+                        if rel == '.':
+                            continue
+                        if rel in seen:
+                            continue
+                        seen.add(rel)
+                        safe_paths.append(rel)
+                    except Exception:
+                        continue
+
+                return safe_paths
+
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 # #4729: a tool boundary closes/reorders the live reasoning stream — flush
@@ -8307,6 +8414,27 @@ def _run_agent_streaming(
                         session_id=session_id,
                         stream_id=stream_id,
                     )
+                    # Derive artifact references from successful file mutations
+                    # (#6205). Emit one path-only artifact_reference SSE event per
+                    # unique workspace file without adding a Worklog row.
+                    try:
+                        _artifact_refs = _derive_artifact_references_from_tool_result(
+                            name=name,
+                            args=args_snap,
+                            function_result=(
+                                cb_kwargs.get('result')
+                                if cb_kwargs.get('result') is not None
+                                else preview
+                            ),
+                            workspace=str(s.workspace),
+                        )
+                        for _rel_path in _artifact_refs:
+                            put('artifact_reference', {
+                                'path': _rel_path,
+                                'kind': 'workspace_file',
+                            })
+                    except Exception:
+                        pass
                     _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -8390,6 +8518,23 @@ def _run_agent_streaming(
                             session_id=session_id,
                             stream_id=stream_id,
                         )
+                        # Derive artifact references from successful file mutations
+                        # (#6205). Emit one path-only artifact_reference SSE event per
+                        # unique workspace file without adding a Worklog row.
+                        try:
+                            _artifact_refs = _derive_artifact_references_from_tool_result(
+                                name=name,
+                                args=args,
+                                function_result=function_result,
+                                workspace=str(s.workspace),
+                            )
+                            for _rel_path in _artifact_refs:
+                                put('artifact_reference', {
+                                    'path': _rel_path,
+                                    'kind': 'workspace_file',
+                                })
+                        except Exception:
+                            pass
                     _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
