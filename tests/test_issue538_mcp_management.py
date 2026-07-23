@@ -1,5 +1,6 @@
 """Tests for issue #538 — MCP server management API."""
-import json, pytest
+from pathlib import Path
+import json, sys, types
 from unittest.mock import patch, MagicMock, call
 import yaml
 from api.routes import (
@@ -8,10 +9,16 @@ from api.routes import (
     _handle_mcp_server_delete,
     _handle_mcp_server_toggle,
     _mask_secrets,
+    _mcp_write_capability,
     _parse_mcp_enabled,
     _server_summary,
     _strip_masked_values,
 )
+from api import agent_config_bridge as bridge
+pytest_plugins = ("tests.test_agent_config_bridge",)
+
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 def _make_handler():
@@ -38,6 +45,16 @@ SAMPLE_MCP = {
         "headers": {"Authorization": "Bearer secret123"}
     }
 }
+
+
+def test_mcp_test_client_waits_for_the_server_probe_budget():
+    """The browser must outlive the route's 30s connect + 10s agent budget."""
+    panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    start = panels.index("async function testMcpServer(")
+    body = panels[start:panels.index("\n}\n", start) + 3]
+    assert "timeoutMs:45000" in body
+    assert "timeoutMs:35000" not in body
+    assert "timeoutMs:20000" not in body
 
 
 class TestMcpList:
@@ -178,6 +195,83 @@ class TestMcpList:
         assert 'new-srv' not in active_home_saved['mcp_servers']
 
 
+class TestMcpWriteCapability:
+    """`writable` field on GET /api/mcp/servers — see routes._mcp_write_capability.
+
+    Convention: a GET response bearing on write capability carries a
+    `writable` bool; false only for the specific fail-closed case where an
+    agent checkout IS configured but its config layer failed to import (a
+    half-wired deployment, distinct from "no checkout at all" which writes
+    fine through the legacy YAML path).
+    """
+
+    def test_standalone_is_writable(self, monkeypatch):
+        # conftest.py sets HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE=1 and no
+        # agent dir is configured in the test env — legacy writer applies.
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+        result = _mcp_write_capability()
+        assert result == {'writable': True}
+
+    def test_bridge_available_is_writable(self, monkeypatch, tmp_path):
+        hermes_constants = types.ModuleType('hermes_constants')
+        hermes_constants.set_hermes_home_override = lambda path: object()
+        hermes_constants.reset_hermes_home_override = lambda token: None
+        config_mod = types.ModuleType('hermes_cli.config')
+        config_mod.load_config = lambda: {}
+        config_mod.save_config = lambda cfg, **kw: None
+        config_mod.save_env_value = lambda k, v: None
+        hermes_cli = types.ModuleType('hermes_cli')
+        hermes_cli.__path__ = []
+        monkeypatch.delenv('HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE', raising=False)
+        monkeypatch.setitem(sys.modules, 'hermes_constants', hermes_constants)
+        monkeypatch.setitem(sys.modules, 'hermes_cli', hermes_cli)
+        monkeypatch.setitem(sys.modules, 'hermes_cli.config', config_mod)
+        monkeypatch.setattr(bridge, '_AGENT_DIR', str(tmp_path / 'agent'), raising=False)
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+        try:
+            result = _mcp_write_capability()
+            assert result == {'writable': True}
+        finally:
+            bridge._import_state = None
+
+    def test_broken_checkout_is_not_writable(self, monkeypatch, tmp_path):
+        # Agent checkout configured but its config layer cannot import —
+        # must fail closed, not silently fall back to the legacy writer.
+        monkeypatch.delenv('HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE', raising=False)
+        for name in ('hermes_constants', 'hermes_cli', 'hermes_cli.config'):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        monkeypatch.setattr(bridge, '_AGENT_DIR', str(tmp_path / 'missing-agent'), raising=False)
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+
+        class _Blocker:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname in ('hermes_constants', 'hermes_cli', 'hermes_cli.config'):
+                    raise ImportError(f'{fullname} blocked by test')
+                return None
+
+        blocker = _Blocker()
+        sys.meta_path.insert(0, blocker)
+        try:
+            result = _mcp_write_capability()
+        finally:
+            sys.meta_path.remove(blocker)
+            bridge._import_state = None
+        assert result['writable'] is False
+        assert 'unavailable_reason' in result and result['unavailable_reason']
+
+    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes.get_active_hermes_home')
+    def test_list_payload_carries_write_capability(self, mock_home, mock_cfg, monkeypatch):
+        mock_home.return_value = object()
+        mock_cfg.return_value = {'mcp_servers': {}}
+        monkeypatch.setattr(bridge, '_import_state', None, raising=False)
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert payload['writable'] is True
+        assert 'unavailable_reason' not in payload
+
+
 class TestMcpSave:
     """PUT /api/mcp/servers/<name> — add or update."""
 
@@ -251,6 +345,165 @@ class TestMcpSave:
         assert h.send_response.called
         status = h.send_response.call_args[0][0]
         assert status == 400
+
+
+class TestMcpSaveBridgeModeMasking:
+    """Bridge-mode PUT — existing_cfg for _strip_masked_values() must come
+    from the bridge's own home-scoped reader (_bridge.load_agent_config),
+    not the WebUI's get_config() cache. The two can diverge (stale cache,
+    different profile resolution); if existing_cfg is read from the wrong
+    source, a masked •••••• field submitted unchanged would be missed and
+    saved as the literal placeholder — a quiet secret loss. Uses the same
+    sys.modules-faking pattern as tests/test_agent_config_bridge.py.
+    """
+
+    def _activate_fake_agent(self, monkeypatch, tmp_path, initial_config):
+        from api import agent_config_bridge as bridge
+
+        state = {"config": initial_config}
+
+        hermes_constants = types.ModuleType("hermes_constants")
+        hermes_constants.set_hermes_home_override = lambda path: object()
+        hermes_constants.reset_hermes_home_override = lambda token: None
+
+        config_mod = types.ModuleType("hermes_cli.config")
+        config_mod.load_config = lambda: {k: v for k, v in state["config"].items()}
+
+        def _save_config(cfg, **kwargs):
+            state["config"] = dict(cfg)
+
+        config_mod.save_config = _save_config
+        config_mod.save_env_value = lambda k, v: None
+
+        security_mod = types.ModuleType("hermes_cli.mcp_security")
+        security_mod.validate_mcp_server_entry = lambda name, entry: []
+
+        hermes_cli = types.ModuleType("hermes_cli")
+        hermes_cli.__path__ = []
+
+        monkeypatch.delenv("HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE", raising=False)
+        monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants)
+        monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+        monkeypatch.setitem(sys.modules, "hermes_cli.config", config_mod)
+        monkeypatch.setitem(sys.modules, "hermes_cli.mcp_security", security_mod)
+        monkeypatch.setattr(bridge, "_AGENT_DIR", str(tmp_path / "agent"), raising=False)
+        monkeypatch.setattr(bridge, "_import_state", None, raising=False)
+        return state
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes.get_active_hermes_home')
+    @patch('api.routes.get_config')
+    def test_masked_header_survives_timeout_only_edit(
+        self, mock_get_config, mock_home, mock_reload, monkeypatch, tmp_path
+    ):
+        from api import agent_config_bridge as bridge
+
+        real_headers = {"Authorization": "Bearer real-secret-token"}
+        initial_config = {
+            "mcp_servers": {
+                "web-srv": {
+                    "url": "http://localhost:4000",
+                    "headers": dict(real_headers),
+                    "timeout": 60,
+                },
+            }
+        }
+        state = self._activate_fake_agent(monkeypatch, tmp_path, initial_config)
+        mock_home.return_value = tmp_path
+        # The WebUI's own get_config() cache is made to DIVERGE from the
+        # bridge's real config (simulating a stale cache / different profile
+        # resolution) — this is the exact condition the fix must be immune
+        # to: existing_cfg must come from the bridge, not from here.
+        mock_get_config.return_value = {"mcp_servers": {}}
+
+        h = _make_handler()
+        h.command = 'PUT'
+        # Real UI behavior: the GET response masked the header to ••••••,
+        # and editing the form (changing only the timeout) round-trips the
+        # masked placeholder unchanged.
+        body = {
+            "url": "http://localhost:4000",
+            "headers": {"Authorization": "••••••"},
+            "timeout": 120,
+        }
+        _handle_mcp_server_update(h, 'web-srv', body)
+
+        status = h.send_response.call_args[0][0]
+        assert status == 200
+        saved = state["config"]["mcp_servers"]["web-srv"]
+        assert saved["headers"]["Authorization"] == "Bearer real-secret-token"
+        assert saved["timeout"] == 120
+
+        bridge._import_state = None
+
+
+class TestMcpSaveBearerTokenRoundtrip:
+    """PUT /api/mcp/servers/<name> — bearer_token masked-placeholder roundtrip.
+
+    Submitting the _MASKED_PLACEHOLDER ("......") back for bearer_token (the
+    field the frontend prefills whenever a server already has an
+    Authorization header) must NOT write a new .env value and must NOT lose
+    the existing header template — only a genuinely new value should trigger
+    _bridge.save_mcp_bearer_token.
+
+    Seeds existing state via fake_agent.config_store (the bridge's own
+    home-scoped reader), not a patched api.routes.get_config() — bridge-mode
+    PUT reads existing_cfg via _bridge.load_agent_config(home) exclusively
+    (see _handle_mcp_server_update / 5baee8e4), so a get_config()-seeded
+    fixture would silently stop exercising the real code path the edit form
+    actually uses without failing (get_config() simply goes unused in bridge
+    mode). See TestMcpSaveBridgeModeMasking above for the header-masking
+    regression this same fix addresses from the "changed only the timeout"
+    angle; this class exercises the bearer_token field specifically.
+    """
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes.get_active_hermes_home')
+    def test_masked_bearer_token_preserves_existing_secret(self, mock_home, mock_reload, fake_agent, tmp_path):
+        mock_home.return_value = tmp_path
+        fake_agent.config_store = {
+            'mcp_servers': {
+                'web-srv': {
+                    'url': 'https://x.test/mcp',
+                    'headers': {'Authorization': 'Bearer ${MCP_WEB_SRV_API_KEY}'},
+                }
+            }
+        }
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {
+            'url': 'https://x.test/mcp',
+            'headers': {'Authorization': '••••••'},
+            'bearer_token': '••••••',
+        }
+        _handle_mcp_server_update(h, 'web-srv', body)
+
+        assert fake_agent.env_values == {}, "masked placeholder must not trigger a new .env write"
+        saved = fake_agent.saved_configs[-1]
+        assert saved['mcp_servers']['web-srv']['headers']['Authorization'] == 'Bearer ${MCP_WEB_SRV_API_KEY}'
+        status = h.send_response.call_args[0][0]
+        assert status == 200
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes.get_active_hermes_home')
+    def test_new_bearer_token_overwrites_env_and_header(self, mock_home, mock_reload, fake_agent, tmp_path):
+        mock_home.return_value = tmp_path
+        fake_agent.config_store = {
+            'mcp_servers': {
+                'web-srv': {
+                    'url': 'https://x.test/mcp',
+                    'headers': {'Authorization': 'Bearer ${MCP_WEB_SRV_API_KEY}'},
+                }
+            }
+        }
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {'url': 'https://x.test/mcp', 'bearer_token': 'sk-new-real-token'}
+        _handle_mcp_server_update(h, 'web-srv', body)
+
+        assert fake_agent.env_values.get('MCP_WEB_SRV_API_KEY') == 'sk-new-real-token'
+        saved = fake_agent.saved_configs[-1]
+        assert saved['mcp_servers']['web-srv']['headers']['Authorization'] == 'Bearer ${MCP_WEB_SRV_API_KEY}'
 
 
 class TestMcpDelete:

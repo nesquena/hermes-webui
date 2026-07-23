@@ -12842,17 +12842,71 @@ function toggleMcpServer(name, enabled){
 function _refreshMcpToolsetsCatalog(payload){
   if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
 }
+let _mcpServersCache=[];
+let _mcpFormState={mode:'create',name:null};
+function _mcpJsArg(s){
+  // Same technique as _kanbanJsArg: JSON.stringify quotes/escapes for JS
+  // context, esc() then makes it safe inside the HTML attribute — so a
+  // server name containing a quote can't break out of the inline handler.
+  return esc(JSON.stringify(String(s==null?'':s)));
+}
+function _mcpParseKvLines(text){
+  const out={};
+  String(text||'').split('\n').forEach(line=>{
+    const trimmed=line.trim();
+    if(!trimmed) return;
+    const idx=trimmed.indexOf('=');
+    if(idx<0) return;
+    const key=trimmed.slice(0,idx).trim();
+    const value=trimmed.slice(idx+1).trim();
+    if(key) out[key]=value;
+  });
+  return out;
+}
+function _mcpFormatKvLines(obj){
+  if(!obj||typeof obj!=='object') return '';
+  return Object.entries(obj).map(([k,v])=>`${k}=${v}`).join('\n');
+}
+function _mcpParseLines(text){
+  return String(text||'').split('\n').map(l=>l.trim()).filter(Boolean);
+}
+let _mcpWritable=true;
+function _mcpApplyWriteCapability(r){
+  // Convention: a GET response that bears on write capability carries a
+  // `writable` bool. On false (agent checkout configured but its config
+  // layer failed to import — see _mcp_write_capability in routes.py) the
+  // frontend disables the write controls and shows a persistent hint div
+  // instead of hiding them, so it's clear *why* nothing is clickable rather
+  // than silently missing controls.
+  _mcpWritable=r&&r.writable!==false;
+  const addBtn=$('mcpAddServerBtn');
+  if(addBtn) addBtn.disabled=!_mcpWritable;
+  const hint=$('mcpWriteCapabilityHint');
+  if(hint){
+    if(_mcpWritable){
+      hint.style.display='none';
+      hint.textContent='';
+    }else{
+      hint.textContent=r&&r.unavailable_reason?t('mcp_write_unavailable_reason',r.unavailable_reason):t('mcp_write_unavailable');
+      hint.style.display='';
+    }
+  }
+  if(!_mcpWritable&&_mcpFormState.mode==='edit') cancelMcpServerForm();
+}
 function loadMcpServers(){
   const list=$('mcpServerList');
   if(!list) return;
   list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
   api('/api/mcp/servers').then(r=>{
     if(!r||!Array.isArray(r.servers)) return;
+    _mcpServersCache=r.servers;
     _refreshMcpToolsetsCatalog(r);
+    _mcpApplyWriteCapability(r);
     if(!r.servers.length){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
+    const disabledAttr=_mcpWritable?'':'disabled';
     list.innerHTML=r.servers.map(s=>{
       const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
@@ -12868,8 +12922,9 @@ function loadMcpServers(){
       const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
       const isEnabled=s.enabled!==false;
       const encodedName=encodeURIComponent(s.name).replace(/'/g,"\\'");
+      const nameArg=_mcpJsArg(s.name);
       const toggleBtn=r.toggle_supported
-        ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer('${encodedName}',${!isEnabled})">${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
+        ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer('${encodedName}',${!isEnabled})" ${disabledAttr}>${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
         :`<span>${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</span>`;
       return `<div class="mcp-server-row">
         <div class="mcp-server-row-head">
@@ -12878,10 +12933,192 @@ function loadMcpServers(){
           ${statusBadge}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
-        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${toggleBtn}</div>
+        <div class="mcp-server-meta">
+          <span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>
+          ${toggleBtn}
+          <button type="button" class="sm-btn mcp-row-btn" onclick="openMcpServerEdit(${nameArg})" ${disabledAttr}>${esc(t('edit'))}</button>
+          <button type="button" class="sm-btn mcp-row-btn" onclick="testMcpServer(${nameArg},this)" ${disabledAttr}>${esc(t('mcp_test_server'))}</button>
+          <button type="button" class="sm-btn mcp-row-btn danger" onclick="deleteMcpServer(${nameArg})" ${disabledAttr}>${esc(t('delete_title'))}</button>
+        </div>
+        <div class="mcp-test-result"></div>
       </div>`;
     }).join('');
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
+}
+function _mcpFormShowTransport(value){
+  document.querySelectorAll('.mcp-form-url-group').forEach(el=>{el.style.display=value==='url'?'':'none';});
+  document.querySelectorAll('.mcp-form-command-group').forEach(el=>{el.style.display=value==='command'?'':'none';});
+}
+function _renderMcpServerForm(mode,server){
+  const wrap=$('mcpServerFormWrap');
+  if(!wrap) return;
+  server=server||{};
+  const isEdit=mode==='edit';
+  const transport=server.transport==='stdio'?'command':'url';
+  const hasAuthHeader=!!(server.headers&&Object.prototype.hasOwnProperty.call(server.headers,'Authorization'));
+  wrap.innerHTML=`
+    <form class="detail-form" id="mcpServerForm" onsubmit="event.preventDefault(); saveMcpServerForm();">
+      <div class="detail-form-row">
+        <label for="mcpFormName">${esc(t('mcp_field_name'))}</label>
+        <input type="text" id="mcpFormName" value="${esc(server.name||'')}" ${isEdit?'disabled':''} autocomplete="off" required>
+      </div>
+      <div class="detail-form-row">
+        <label for="mcpFormTransport">${esc(t('mcp_transport_label'))}</label>
+        <select id="mcpFormTransport" onchange="_mcpFormShowTransport(this.value)">
+          <option value="url" ${transport==='url'?'selected':''}>${esc(t('mcp_transport_url'))}</option>
+          <option value="command" ${transport==='command'?'selected':''}>${esc(t('mcp_transport_command'))}</option>
+        </select>
+      </div>
+      <div class="detail-form-row mcp-form-url-group" style="${transport==='url'?'':'display:none'}">
+        <label for="mcpFormUrl">${esc(t('mcp_field_url'))}</label>
+        <input type="text" id="mcpFormUrl" value="${esc(server.url||'')}" placeholder="https://example.com/mcp" autocomplete="off">
+      </div>
+      <div class="detail-form-row mcp-form-url-group" style="${transport==='url'?'':'display:none'}">
+        <label for="mcpFormHeaders">${esc(t('mcp_field_headers'))}</label>
+        <textarea id="mcpFormHeaders" rows="3" placeholder="X-Custom-Header=value">${esc(_mcpFormatKvLines(server.headers))}</textarea>
+        <div class="detail-form-hint">${esc(t('mcp_field_headers_hint'))}</div>
+      </div>
+      <div class="detail-form-row mcp-form-url-group" style="${transport==='url'?'':'display:none'}">
+        <label for="mcpFormBearerToken">${esc(t('mcp_field_bearer_token'))}</label>
+        <input type="password" id="mcpFormBearerToken" value="${hasAuthHeader?'••••••':''}" autocomplete="off">
+        <div class="detail-form-hint">${esc(t('mcp_field_bearer_token_hint'))}</div>
+      </div>
+      <div class="detail-form-row mcp-form-command-group" style="${transport==='command'?'':'display:none'}">
+        <label for="mcpFormCommand">${esc(t('mcp_field_command'))}</label>
+        <input type="text" id="mcpFormCommand" value="${esc(server.command||'')}" autocomplete="off">
+      </div>
+      <div class="detail-form-row mcp-form-command-group" style="${transport==='command'?'':'display:none'}">
+        <label for="mcpFormArgs">${esc(t('mcp_field_args'))}</label>
+        <textarea id="mcpFormArgs" rows="2">${esc((Array.isArray(server.args)?server.args:[]).join('\n'))}</textarea>
+        <div class="detail-form-hint">${esc(t('mcp_field_args_hint'))}</div>
+      </div>
+      <div class="detail-form-row mcp-form-command-group" style="${transport==='command'?'':'display:none'}">
+        <label for="mcpFormEnv">${esc(t('mcp_field_env'))}</label>
+        <textarea id="mcpFormEnv" rows="3">${esc(_mcpFormatKvLines(server.env))}</textarea>
+        <div class="detail-form-hint">${esc(t('mcp_field_env_hint'))}</div>
+      </div>
+      <div class="detail-form-row">
+        <label for="mcpFormTimeout">${esc(t('mcp_field_timeout'))}</label>
+        <input type="number" id="mcpFormTimeout" min="1" value="${server.timeout!=null?esc(String(server.timeout)):''}" autocomplete="off">
+      </div>
+      <div id="mcpFormError" class="detail-form-error" style="display:none"></div>
+      <div style="display:flex;gap:8px">
+        <button type="submit" class="sm-btn">${esc(t('mcp_save'))}</button>
+        <button type="button" class="sm-btn secondary" onclick="cancelMcpServerForm()">${esc(t('mcp_cancel'))}</button>
+      </div>
+    </form>`;
+  wrap.style.display='';
+  const focusEl=$('mcpFormName');
+  if(focusEl&&!isEdit) focusEl.focus();
+}
+function openMcpServerCreate(){
+  _mcpFormState={mode:'create',name:null};
+  _renderMcpServerForm('create',{});
+}
+function openMcpServerEdit(name){
+  const server=_mcpServersCache.find(s=>s.name===name);
+  if(!server){showToast(t('mcp_load_failed'),5000,'error');return;}
+  _mcpFormState={mode:'edit',name:server.name};
+  _renderMcpServerForm('edit',server);
+}
+function cancelMcpServerForm(){
+  const wrap=$('mcpServerFormWrap');
+  if(wrap){wrap.style.display='none';wrap.innerHTML='';}
+  _mcpFormState={mode:'create',name:null};
+}
+async function saveMcpServerForm(){
+  const errEl=$('mcpFormError');
+  if(errEl){errEl.style.display='none';errEl.innerHTML='';}
+  const isEdit=_mcpFormState.mode==='edit';
+  const nameEl=$('mcpFormName');
+  const name=isEdit?_mcpFormState.name:(nameEl?nameEl.value.trim():'');
+  if(!name){
+    if(errEl){errEl.textContent=t('mcp_name_required');errEl.style.display='';}
+    return;
+  }
+  const transport=$('mcpFormTransport')?$('mcpFormTransport').value:'url';
+  const body={};
+  if(transport==='url'){
+    const url=($('mcpFormUrl')?$('mcpFormUrl').value:'').trim();
+    if(!url){
+      if(errEl){errEl.textContent=t('mcp_url_required');errEl.style.display='';}
+      return;
+    }
+    body.url=url;
+    const headers=_mcpParseKvLines($('mcpFormHeaders')?$('mcpFormHeaders').value:'');
+    if(Object.keys(headers).length) body.headers=headers;
+    const bearer=($('mcpFormBearerToken')?$('mcpFormBearerToken').value:'').trim();
+    if(bearer) body.bearer_token=bearer;
+  }else{
+    const command=($('mcpFormCommand')?$('mcpFormCommand').value:'').trim();
+    if(!command){
+      if(errEl){errEl.textContent=t('mcp_command_required');errEl.style.display='';}
+      return;
+    }
+    body.command=command;
+    const args=_mcpParseLines($('mcpFormArgs')?$('mcpFormArgs').value:'');
+    if(args.length) body.args=args;
+    const env=_mcpParseKvLines($('mcpFormEnv')?$('mcpFormEnv').value:'');
+    if(Object.keys(env).length) body.env=env;
+  }
+  const timeoutVal=$('mcpFormTimeout')?$('mcpFormTimeout').value:'';
+  if(timeoutVal!=='') body.timeout=Number(timeoutVal);
+  try{
+    await api('/api/mcp/servers/'+encodeURIComponent(name),{method:'PUT',body:JSON.stringify(body)});
+    showToast(t('mcp_saved'));
+    cancelMcpServerForm();
+    loadMcpServers();
+  }catch(e){
+    let issues=null;
+    try{const parsed=JSON.parse(e.body||'');if(Array.isArray(parsed.issues)) issues=parsed.issues;}catch(_parseErr){}
+    if(errEl){
+      errEl.innerHTML=issues&&issues.length
+        ?esc(t('mcp_save_failed'))+':<ul style="margin:6px 0 0 18px;padding:0">'+issues.map(i=>`<li>${esc(i)}</li>`).join('')+'</ul>'
+        :esc(t('mcp_save_failed'))+(e.message?': '+esc(e.message):'');
+      errEl.style.display='';
+    }
+  }
+}
+async function deleteMcpServer(name){
+  const ok=await showConfirmDialog({title:t('mcp_delete_confirm_title'),message:t('mcp_delete_confirm_message',name),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
+  if(!ok) return;
+  try{
+    await api('/api/mcp/servers/'+encodeURIComponent(name),{method:'DELETE'});
+    showToast(t('mcp_deleted'));
+    _refreshMcpToolsetsCatalog();
+    if(_mcpFormState.mode==='edit'&&_mcpFormState.name===name) cancelMcpServerForm();
+    loadMcpServers();
+  }catch(e){
+    showToast(t('mcp_delete_failed')+(e.message?': '+e.message:''),5000,'error');
+  }
+}
+async function testMcpServer(name,btnEl){
+  const row=btnEl?btnEl.closest('.mcp-server-row'):null;
+  const resultEl=row?row.querySelector('.mcp-test-result'):null;
+  if(btnEl) btnEl.disabled=true;
+  if(resultEl) resultEl.innerHTML=`<span class="mcp-test-badge mcp-test-pending">${esc(t('mcp_test_running'))}</span>`;
+  try{
+    // The route fixes this interactive probe's connect timeout at 30s; the
+    // agent adds up to 10s for cleanup. Leave a small browser overhead margin.
+    // The route accepts no browser-controlled timeout.
+    const r=await api('/api/mcp/servers/'+encodeURIComponent(name)+'/test',{timeoutMs:45000});
+    if(resultEl){
+      if(r&&r.ok){
+        const parts=[];
+        if(typeof r.latency_ms==='number') parts.push(t('mcp_test_latency',r.latency_ms));
+        if(typeof r.tools_count==='number') parts.push(t('mcp_test_tools_count',r.tools_count));
+        resultEl.innerHTML=`<span class="mcp-test-badge mcp-test-ok">${esc(parts.join(' · ')||t('mcp_test_ok'))}</span>`;
+      }else if(r&&r.supported===false){
+        resultEl.innerHTML=`<span class="mcp-test-badge mcp-test-unsupported">${esc(r.reason||t('mcp_test_unsupported'))}</span>`;
+      }else{
+        resultEl.innerHTML=`<span class="mcp-test-badge mcp-test-fail">${esc((r&&r.error)||t('mcp_test_failed'))}</span>`;
+      }
+    }
+  }catch(e){
+    if(resultEl) resultEl.innerHTML=`<span class="mcp-test-badge mcp-test-fail">${esc(t('mcp_test_failed'))}${e.message?': '+esc(e.message):''}</span>`;
+  }finally{
+    if(btnEl) btnEl.disabled=false;
+  }
 }
 let _mcpToolsCache=[];
 let _mcpToolsMeta={};

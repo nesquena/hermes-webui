@@ -41,3 +41,19 @@ def test_french_theme_usage_uses_actual_slash_command_with_space():
     fr_theme_usage = _literal_value(_locale_block("fr"), "theme_usage")
     assert fr_theme_usage == "Utilisation : /theme "
     assert "/thème" not in fr_theme_usage
+
+
+def test_spanish_mcp_labels_do_not_fall_back_to_chinese_placeholders():
+    """The MCP settings surface must not mix Spanish controls with stale Chinese copy."""
+    block = _locale_block("es")
+    visible_literals = (
+        "mcp_servers_title", "mcp_servers_desc", "mcp_no_servers", "mcp_add_server",
+        "mcp_field_name", "mcp_transport_label", "mcp_field_command", "mcp_field_timeout",
+        "mcp_save", "mcp_cancel", "mcp_name_required", "mcp_url_required",
+        "mcp_command_required", "mcp_saved", "mcp_save_failed", "mcp_delete_confirm_title",
+        "mcp_delete_confirm_message", "mcp_deleted", "mcp_delete_failed", "mcp_load_failed",
+    )
+    for key in visible_literals:
+        value = _literal_value(block, key)
+        assert not re.search(r"[\u3400-\u9fff]", value), f"Spanish {key} contains Chinese placeholder: {value!r}"
+    assert _literal_value(block, "mcp_servers_title") == "Servidores MCP"
