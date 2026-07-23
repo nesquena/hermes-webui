@@ -675,6 +675,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 **Using & customizing**
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
+- [`docs/project-context.md`](docs/project-context.md) — read-only MCP project context across WebUI sessions
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**
