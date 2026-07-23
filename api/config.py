@@ -5031,6 +5031,29 @@ def _invoke_models_rebuild(builder):
     return builder()
 
 
+def _norm_static_model_id(model_id: str) -> str:
+    """Normalize equivalent picker IDs for network-free catalog matching."""
+    normalized = str(model_id or "").strip().lower()
+    stripped_at_provider = False
+    if normalized.startswith("@") and ":" in normalized:
+        colon_idx = normalized.index(":", 1)
+        candidate = normalized[colon_idx + 1:]
+        stripped_at_provider = bool(candidate)
+        normalized = candidate or normalized
+    if "://" not in normalized:
+        if (
+            not stripped_at_provider
+            and "/" in normalized
+            and ":" in normalized
+            and normalized.index(":") < normalized.index("/")
+        ):
+            normalized = normalized[normalized.index("/") + 1:] or normalized
+        if "/" in normalized:
+            stripped = normalized.split("/", 1)[1]
+            normalized = stripped or normalized
+    return normalized.replace("-", ".")
+
+
 def _configured_model_badges_from_static_catalog(
     groups: list[dict],
     *,
@@ -5079,27 +5102,6 @@ def _configured_model_badges_from_static_catalog(
         for m in g.get("models", [])
         if m.get("id")
     }
-
-    def _norm_static_model_id(model_id: str) -> str:
-        s = str(model_id or "").strip().lower()
-        stripped_at_provider = False
-        if s.startswith("@") and ":" in s:
-            colon_idx = s.index(":", 1)
-            candidate = s[colon_idx + 1:]
-            stripped_at_provider = bool(candidate)
-            s = candidate or s
-        if "://" not in s:
-            if (
-                not stripped_at_provider
-                and "/" in s
-                and ":" in s
-                and s.index(":") < s.index("/")
-            ):
-                s = s[s.index("/") + 1 :] or s
-            if "/" in s:
-                stripped = s.split("/", 1)[1]
-                s = stripped or s
-        return s.replace("-", ".")
 
     norm_lookup: dict[str, list[str]] = {}
     for opt_id in option_ids:
@@ -5454,11 +5456,18 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if _plugin_profile is not None:
                     _fallback = getattr(_plugin_profile, "fallback_models", ()) or ()
                     raw_models = [{"id": str(mid), "label": str(mid)} for mid in _fallback]
+            raw_model_ids_normalized = {
+                _norm_static_model_id(model.get("id"))
+                for model in raw_models
+                if isinstance(model, dict)
+            }
             for model_id in configured_model_ids.get(pid, []):
-                if model_id and not any(m.get("id") == model_id for m in raw_models):
+                normalized_model_id = _norm_static_model_id(model_id)
+                if model_id and normalized_model_id not in raw_model_ids_normalized:
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
+                    raw_model_ids_normalized.add(normalized_model_id)
             # Plugin-only providers (e.g. 9router) must enter `groups` even
             # when `raw_models` is empty so the post-loop filter sees them.
             # Without this, the earlier plugin-fallback pass only seeds
@@ -5474,12 +5483,12 @@ def _static_models_catalog_without_live_probes() -> dict:
                 )
 
         if default_model:
-            all_model_ids = {
-                str(model.get("id") or "")
+            all_model_ids_normalized = {
+                _norm_static_model_id(model.get("id"))
                 for group in groups
                 for model in group.get("models", [])
             }
-            if default_model not in all_model_ids and f"@{active_provider}:{default_model}" not in all_model_ids:
+            if _norm_static_model_id(default_model) not in all_model_ids_normalized:
                 label = _get_label_for_model(default_model, groups)
                 target_group = next(
                     (group for group in groups if group.get("provider_id") == active_provider),

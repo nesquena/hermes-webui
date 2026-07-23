@@ -644,12 +644,19 @@ def test_custom_slug_cold_stale_not_picked_still_strips_5979():
     assert model == bare, f"unmarked stale cold custom:slug id must strip (legacy), got {model!r}"
 
 
-def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
+def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979(
+    monkeypatch,
+):
     """The send-path warm helper publishes provenance from a valid disk cache
     when memory is cold — restoring the endpoint-advertised signal so #433
     strips and #5979 preserves — WITHOUT a live rebuild.
     """
     old_cfg = dict(config.cfg)
+    old_cache = config._available_models_cache
+    old_cache_ts = config._available_models_cache_ts
+    old_cache_fp = config._available_models_cache_source_fingerprint
+    old_prov = config._models_cache_provenance
+    old_memo = config._advertised_model_ids_memo
     config.cfg.clear()
     config.cfg.update({
         'model': {'default': 'x-ai/grok-4.5', 'provider': 'custom:llm-proxy',
@@ -658,16 +665,40 @@ def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
                               'key_env': 'LLM_PROXY_API_KEY',
                               'models': ['x-ai/grok-4.5', 'x-ai/grok-composer-2.5-fast']}],
     })
+    fingerprint = {"test": "isolated-5979-disk-cache"}
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(config, "_current_webui_version", lambda: "test-version")
+    disk_catalog = {
+        "active_provider": "custom:llm-proxy",
+        "default_model": "x-ai/grok-4.5",
+        "configured_model_badges": {},
+        "groups": [{
+            "provider": "llm-proxy",
+            "provider_id": "custom:llm-proxy",
+            "models": [
+                {"id": "x-ai/grok-4.5", "label": "Grok 4.5"},
+                {
+                    "id": "x-ai/grok-composer-2.5-fast",
+                    "label": "Grok Composer 2.5 Fast",
+                },
+            ],
+        }],
+    }
     try:
-        # Build + persist to disk, then simulate a cold memory cache (restart).
+        # Seed a valid isolated disk cache directly. Building it via
+        # get_available_models() made this unit test depend on installed Agent
+        # catalogs, credentials, and live provider latency.
         config.invalidate_models_cache()
-        config.get_available_models()  # publishes to memory + disk
-        assert config._models_cache_provenance is not None
-        # Simulate cold memory but valid disk cache (do NOT delete disk).
+        config._save_models_cache_to_disk(disk_catalog)
+
+        # Simulate a fresh process with valid disk state but cold memory.
         config._available_models_cache = None
+        config._available_models_cache_ts = 0.0
+        config._available_models_cache_source_fingerprint = None
         config._advertised_model_ids_memo = None
         config._sync_models_cache_provenance()
         assert config._models_cache_provenance is None, "precondition: memory cold"
+
         # The warm helper should republish provenance from disk (network-free).
         config.warm_models_catalog_provenance_if_cold()
         assert config._models_cache_provenance is not None, (
@@ -678,9 +709,14 @@ def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
             f"warmed provenance must carry the endpoint-advertised ids, got {adv!r}"
         )
     finally:
+        config._delete_models_cache_on_disk()
         config.cfg.clear()
         config.cfg.update(old_cfg)
-        config.invalidate_models_cache()
+        config._available_models_cache = old_cache
+        config._available_models_cache_ts = old_cache_ts
+        config._available_models_cache_source_fingerprint = old_cache_fp
+        config._models_cache_provenance = old_prov
+        config._advertised_model_ids_memo = old_memo
 
 
 def test_warm_models_catalog_provenance_noop_when_already_warm_5979():
@@ -979,7 +1015,7 @@ def test_default_model_shadowed_with_xiaomi_provider():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_models_cache():
+def _isolate_models_cache(monkeypatch, tmp_path):
     """Invalidate the models TTL cache before and after every test in this file.
 
     Several helpers here mutate ``config.cfg`` in-memory and call
@@ -989,7 +1025,27 @@ def _isolate_models_cache():
     running the function body, causing silently wrong results (e.g. the
     ``test_custom_endpoint_uses_model_config_api_key_for_model_discovery``
     ``KeyError: 'auth'`` on CI where ``urlopen`` is never reached).
+
+    Keep the disk cache isolated too. Without this, invalidation deletes the
+    running user's real models_cache.json and disk-cache tests can accidentally
+    consume or overwrite it.
     """
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model: {}\n", encoding="utf-8")
+    auth_store_path = tmp_path / "auth.json"
+    auth_store_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.json"
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(config, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(
+        config,
+        "_cfg_mtime",
+        config_path.stat().st_mtime,
+        raising=False,
+    )
+    monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: auth_store_path)
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: cache_path)
     try:
         config.invalidate_models_cache()
     except Exception:
@@ -1298,6 +1354,10 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
 
     monkeypatch.setattr('urllib.request.urlopen', _fake_urlopen)
     monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [])
+    monkeypatch.setattr(
+        'api.providers._provider_has_key',
+        lambda _provider_id: False,
+    )
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('HERMES_API_KEY', raising=False)
     monkeypatch.delenv('HERMES_OPENAI_API_KEY', raising=False)

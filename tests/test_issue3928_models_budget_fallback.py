@@ -182,6 +182,38 @@ def test_static_catalog_budget_fallback_lists_local_providers(
     )
 
 
+def test_static_catalog_deduplicates_prefixed_default_model(monkeypatch):
+    """The timeout fallback must preserve #147's normalized default dedup.
+
+    A direct provider's static catalog uses bare model IDs, while config.yaml
+    may store the same default with a provider prefix.  The fallback must not
+    append the configured spelling as a second option merely because a live
+    provider rebuild exceeded its budget.
+    """
+    monkeypatch.setitem(
+        cfg._PROVIDER_MODELS,
+        "anthropic",
+        [{"id": "claude-opus-4.6", "label": "Claude Opus 4.6"}],
+    )
+    cfg.cfg = {
+        "model": {
+            "provider": "anthropic",
+            "default": "anthropic/claude-opus-4.6",
+        }
+    }
+
+    catalog = cfg._static_models_catalog_without_live_probes()
+    anthropic = next(
+        group for group in catalog["groups"] if group["provider_id"] == "anthropic"
+    )
+    normalized_ids = [
+        str(model["id"]).split("/", 1)[-1].replace("-", ".").lower()
+        for model in anthropic["models"]
+    ]
+
+    assert normalized_ids.count("claude.opus.4.6") == 1
+
+
 def test_budget_exceeded_foreground_uses_richer_static_catalog_and_refreshes_out_of_band(
     monkeypatch,
     isolate_models_catalog_state,

@@ -44,10 +44,10 @@ def _exec_norm():
 
 
 def _exec_static_norm():
-    """Re-execute the _norm_static_model_id helper via a synthetic def."""
+    """Re-execute the module-level static catalog normalizer."""
     return _exec_nested_fn(
         "def _norm_static_model_id(model_id: str) -> str:",
-        "norm_lookup: dict[str, list[str]] = {}",
+        "def _configured_model_badges_from_static_catalog(",
         "_norm_static_model_id",
     )
 
