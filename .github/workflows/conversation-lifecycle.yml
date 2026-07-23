@@ -5,6 +5,7 @@ name: Conversation lifecycle (informational)
 # docs-only or unrelated changes. If none of these paths change, the run is
 # skipped entirely (GitHub treats a path-filtered no-match as "not triggered").
 on:
+  workflow_dispatch:
   pull_request:
     branches: [master]
     paths:
@@ -30,7 +31,6 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -67,3 +67,81 @@ jobs:
           name: conversation-lifecycle-failure-${{ matrix.scenario }}
           path: lifecycle-artifacts
           if-no-files-found: ignore
+
+  mutation-canary:
+    name: Lifecycle mutation canaries
+    needs: live-to-final
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            **/requirements*.txt
+            **/pyproject.toml
+            .github/workflows/conversation-lifecycle.yml
+
+      - name: Install browser gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Verify mutation canaries fail
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-mutation-artifacts
+        run: |
+          run_expected_failure() {
+            local name="$1"
+            shift
+            if "$@"; then
+              echo "::error title=Mutation survived::$name unexpectedly passed"
+              return 1
+            fi
+            echo "$name failed as expected"
+          }
+
+          run_expected_failure normal-anchor-persistence \
+            env LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+            python tests/browser_conversation_lifecycle.py
+          run_expected_failure terminal-error-row \
+            env LIFECYCLE_SCENARIO=terminal-error \
+            LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
+            python tests/browser_conversation_lifecycle.py
+
+      - name: Upload mutation artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversation-lifecycle-mutation-canary-failure
+          path: lifecycle-mutation-artifacts
+          if-no-files-found: ignore
+
+  proof-summary:
+    name: Lifecycle proof summary
+    needs: [live-to-final, mutation-canary]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish aggregate result
+        env:
+          LIFECYCLE_RESULT: ${{ needs.live-to-final.result }}
+          MUTATION_RESULT: ${{ needs.mutation-canary.result }}
+        run: |
+          {
+            echo "## Conversation lifecycle proof"
+            echo
+            echo "| Component | Result |"
+            echo "| --- | --- |"
+            echo "| Lifecycle rows | $LIFECYCLE_RESULT |"
+            echo "| Mutation canaries | $MUTATION_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          test "$LIFECYCLE_RESULT" = success
+          test "$MUTATION_RESULT" = success

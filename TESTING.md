@@ -129,10 +129,16 @@ LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
 ```
 
 The dedicated `Conversation lifecycle (informational)` workflow runs both current
-proof rows (`normal` and `terminal-error`) and stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+proof rows (`normal` and `terminal-error`) and automatically verifies the two
+mutation commands above still fail. Its `Lifecycle proof summary` result aggregates
+those checks, so a broken proof row or a mutation that unexpectedly survives is
+visible as a failed workflow result. The workflow can also be started manually from
+the Actions page.
+
+It remains informational: this change does not make it a required merge check.
+The maintainer's private QA harness remains broader; later public slices will add
+session switching, reconnect/replay, cancellation, compression, recovery, and a
+shadow-soak record before the workflow can be considered for promotion.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
