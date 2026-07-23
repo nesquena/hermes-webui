@@ -2070,6 +2070,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return;
   }
+  // #6303: Clear the stale anchor registry from the prior stream connection.
+  // We only reach here when NOT reusing an existing OPEN transport, so the
+  // registry is not owned by any active handler. The new EventSource below
+  // will get a fresh closure that creates a new registry in sync with the
+  // restored INFLIGHT counters.
+  if(reconnecting && typeof window!=='undefined' && window._liveAnchorRegistries && typeof window._liveAnchorRegistries.delete==='function'){
+    window._liveAnchorRegistries.delete(streamId);
+  }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
