@@ -1522,3 +1522,25 @@ if (typeof document !== 'undefined') {
     _wsUploadInit();
   }
 }
+
+function goToDir(path){
+  if(!S.session)return;
+  if(!path||!path.trim()){toggleWorkdirBar();return;}
+  const p=String(path).trim();
+  if(p==='.'||p==='~'){loadDir('.');return;}
+  loadDir(p);
+  const bar=$('workdirBar');
+  if(bar)bar.style.display='none';
+}
+
+function toggleWorkdirBar(){
+  const bar=$('workdirBar');
+  if(!bar)return;
+  if(bar.style.display==='none'||!bar.style.display||bar.style.display===''){
+    bar.style.display='flex';
+    const inp=$('workdirInput');
+    if(inp){setTimeout(()=>inp.focus(),50);inp.value='';}
+  }else{
+    bar.style.display='none';
+  }
+}
