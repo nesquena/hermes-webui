@@ -115,6 +115,68 @@ def test_attention_summary_prefers_pending_approvals_over_clarify_questions():
         _clear_attention_state(sid)
 
 
+def test_attention_summary_keeps_direct_runs_mirror_after_stream_pointer_clears():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    import api.route_approvals as approvals
+
+    sid = "attention-retained-gateway-session"
+    _clear_attention_state(sid)
+    try:
+        approvals.submit_gateway_pending_mirror(sid, {
+            "_gateway_mirror": True,
+            "approval_id": "approval-retained",
+            "run_id": "run-retained",
+            "command": "rm -rf /tmp/retained",
+            "description": "Retained approval",
+        })
+        handler = MagicMock()
+        handler.wfile = io.BytesIO()
+
+        with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=None)), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+            assert routes._session_attention_summary(sid) == {
+                "kind": "approval",
+                "count": 1,
+                "severity": "critical",
+            }
+            routes._handle_approval_respond(handler, {
+                "session_id": sid,
+                "choice": "deny",
+                "approval_id": "approval-retained",
+            })
+
+        handler.send_response.assert_called_with(200)
+        respond_approval.assert_called_once_with("run-retained", "", "deny")
+        assert json.loads(handler.wfile.getvalue().decode("utf-8"))["ok"] is True
+    finally:
+        approvals._pending.pop(sid, None)
+        _clear_attention_state(sid)
+
+
+def test_attention_summary_hides_retired_direct_runs_mirror():
+    import api.route_approvals as approvals
+
+    sid = "attention-retired-gateway-session"
+    _clear_attention_state(sid)
+    try:
+        approvals.submit_gateway_pending_mirror(sid, {
+            "_gateway_mirror": True,
+            "approval_id": "approval-retired",
+            "run_id": "run-retired",
+            "command": "rm -rf /tmp/retired",
+            "description": "Retired approval",
+        })
+
+        assert approvals.retire_gateway_pending_mirror(sid, run_id="run-retired") is True
+        assert routes._session_attention_summary(sid) is None
+        assert approvals.gateway_pending_mirror(sid, run_id="run-retired") is None
+    finally:
+        approvals._pending.pop(sid, None)
+        _clear_attention_state(sid)
+
+
 def test_attention_summary_reports_clarify_when_no_approval_is_pending():
     sid = "attention-clarify-session"
     _clear_attention_state(sid)

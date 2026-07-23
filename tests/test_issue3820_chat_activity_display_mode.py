@@ -322,7 +322,11 @@ def test_chat_activity_display_mode_settled_hide_all_scene_persists_without_work
     return_index = block.index("return hasWorklogRows;")
 
     assert "const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);" in block
-    assert "const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';" in block
+    assert "const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);" in block
+    assert (
+        "const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;"
+        in block
+    )
     assert persist_index < return_index
     assert "return true;" not in block
 
