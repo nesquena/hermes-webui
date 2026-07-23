@@ -414,6 +414,8 @@ def _scan_media_ref_end(text: str, start: int, *, bracket_wrapped: bool) -> tupl
     authority_brackets = _media_authority_brackets(text, start)
     index = start
     while index < len(text):
+        if index > start and text.startswith(_MEDIA_TOKEN_PREFIX, index):
+            return index, False
         ch = text[index]
         if ch in " \t\r\n)`<":
             return index, False

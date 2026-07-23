@@ -341,6 +341,46 @@ def test_public_share_snapshot_does_not_absorb_nested_local_media_inside_public_
     assert content.count(OMITTED_ATTACHMENT) == 1
 
 
+def test_public_share_snapshot_splits_adjacent_nested_media_inside_code_regions():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title="Adjacent media share",
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "`MEDIA:https://cdn.example.test/x"
+                    "MEDIA:file:///private-not-known/watch-secret.png`\n"
+                    "```text\n"
+                    "MEDIA:https://cdn.example.test/path?next="
+                    "MEDIA:file:%2F%2Fprivate-not-known/encoded.png\n"
+                    "```\n"
+                    "<pre>MEDIA:https://cdn.example.test/raw"
+                    "MEDIA:/private-not-known/raw.png</pre>"
+                ),
+            }
+        ],
+    )
+
+    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+
+    assert f"`MEDIA:https://cdn.example.test/x{OMITTED_ATTACHMENT}`" in content
+    assert (
+        f"```text\nMEDIA:https://cdn.example.test/path?next={OMITTED_ATTACHMENT}\n```"
+        in content
+    )
+    assert f"<pre>MEDIA:https://cdn.example.test/raw{OMITTED_ATTACHMENT}</pre>" in content
+    assert "MEDIA:file://" not in content
+    assert "MEDIA:file:%2F%2F" not in content
+    assert "MEDIA:/private-not-known" not in content
+    assert "private-not-known" not in content
+    assert "watch-secret" not in content
+    assert "encoded.png" not in content
+    assert "raw.png" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 3
+
+
 def test_public_share_snapshot_matches_renderer_code_fence_grammar():
     import api.shares as shares
 
@@ -476,6 +516,31 @@ def test_public_share_snapshot_sanitizes_title_media_references():
     public_snapshot = shares.build_share_snapshot(public_title_session)
 
     assert public_snapshot["title"] == "Title MEDIA:https://cdn.example.test/title.png"
+
+
+def test_public_share_snapshot_splits_adjacent_nested_media_in_title():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title=(
+            "Title MEDIA:https://cdn.example.test/x"
+            "MEDIA:/private-not-known/watch-title.png "
+            "Query MEDIA:https://cdn.example.test/q?next="
+            "MEDIA:file:%2F%2Fprivate-not-known/title-encoded.png"
+        ),
+        messages=[{"role": "assistant", "content": "shareable"}],
+    )
+
+    title = shares.build_share_snapshot(session)["title"]
+
+    assert "MEDIA:https://cdn.example.test/x" in title
+    assert "MEDIA:https://cdn.example.test/q?next=" in title
+    assert "MEDIA:/private-not-known" not in title
+    assert "MEDIA:file:%2F%2F" not in title
+    assert "private-not-known" not in title
+    assert "watch-title" not in title
+    assert "title-encoded" not in title
+    assert title.count(OMITTED_ATTACHMENT) == 2
 
 
 def test_authenticated_media_route_stays_private(monkeypatch):
