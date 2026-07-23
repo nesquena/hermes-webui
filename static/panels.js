@@ -7009,6 +7009,7 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
+    if (typeof _invalidateActiveRunVisibilityScope === 'function') _invalidateActiveRunVisibilityScope();
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
@@ -11835,6 +11836,7 @@ async function deletePasskey(id){
 
 function _applySavedSettingsUi(saved, body, opts){
   const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const previousShowCliSessions=window._showCliSessions;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showQuotaChip=showQuotaChip===true;
@@ -11845,6 +11847,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
+  if(previousShowCliSessions!==window._showCliSessions && typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;

@@ -819,6 +819,12 @@ function _isSessionEffectivelyStreaming(s) {
   ));
 }
 
+function _isSessionRingStreaming(s) {
+  return _isSessionEffectivelyStreaming(s) || Boolean(
+    s && typeof _activeRunSessionIds !== 'undefined' && _activeRunSessionIds.has(s.session_id)
+  );
+}
+
 function _hasPendingUserMessageSignal(s) {
   return Boolean(s && (s.pending_user_message || s.has_pending_user_message));
 }
@@ -1487,7 +1493,10 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    if(_sessionSourceFilter==='cli'){
+      _sessionSourceFilter='webui';
+      if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
+    }
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
@@ -1636,6 +1645,7 @@ async function _switchProfileForSessionLoad(profile){
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
+    if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
@@ -2582,6 +2592,7 @@ function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
   if (_activeProject === next) return;
   _activeProject = next;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -2591,6 +2602,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -3899,7 +3911,10 @@ function _restoreShowAllProfiles(){
 }
 
 function _setShowAllProfiles(enabled){
-  _showAllProfiles=!!enabled;
+  const next=!!enabled;
+  if(_showAllProfiles===next) return;
+  _showAllProfiles=next;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   try{ localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY,_showAllProfiles?'1':'0'); }catch(_e){}
 }
 
@@ -5314,6 +5329,9 @@ function _sessionListRenderSignature(){
       _allSessions,
       _sidebarReferenceSessions,
       _allProjects,
+      (typeof _activeRunSessionIds !== 'undefined' && _activeRunSessionIds)
+        ? Array.from(_activeRunSessionIds).sort()
+        : [],
       _activeSessionIdForSidebar(),
       search,
       _sessionSourceFilter,
@@ -6901,8 +6919,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const rows=(collapsedRows||[])
     .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
     .map(cleanSidebarRow);
-  const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
-    ? _isSessionEffectivelyStreaming(childRow)
+  const isChildStreaming=(childRow)=>typeof _isSessionRingStreaming==='function'
+    ? _isSessionRingStreaming(childRow)
     : !!(childRow&&(childRow.active_stream_id||childRow.pending_user_message));
   const childHasUnread=(childRow)=>typeof _hasUnreadForSession==='function'
     ? _hasUnreadForSession(childRow)
@@ -7424,6 +7442,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   }
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
+    if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   }
   const showCliOnly=_sessionSourceFilter==='cli';
   const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
@@ -7943,14 +7962,15 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
-    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const ownRingStreaming=_isSessionRingStreaming(s);
+    const isStreaming=ownRingStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownRingStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -8363,7 +8383,7 @@ function renderSessionListFromCache(){
       for(const child of sortedChildren){
         if(child.session_source==='fork'){
           const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
-          const childStreaming=_isSessionEffectivelyStreaming(child);
+          const childStreaming=_isSessionRingStreaming(child);
           const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
           const childAttention=_sessionAttentionState(child);
           const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
@@ -8875,6 +8895,7 @@ async function _handleShowAllProfilesStorageEvent(e){
   const next=e.newValue==='1'||e.newValue==='true';
   if(_showAllProfiles===next) return;
   _showAllProfiles=next;
+  if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }
 
@@ -9332,7 +9353,10 @@ async function _confirmDeleteProject(proj){
   if(!ok){return;}
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
-    if(_activeProject===proj.project_id) _activeProject=null;
+    if(_activeProject===proj.project_id) {
+      _activeProject=null;
+      if(typeof _invalidateActiveRunVisibilityScope==='function') _invalidateActiveRunVisibilityScope();
+    }
     await renderSessionList();
     showToast('Project deleted');
   } catch(e) {
