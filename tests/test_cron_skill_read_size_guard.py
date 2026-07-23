@@ -61,7 +61,7 @@ def _stub_cron_jobs(monkeypatch, *, output_dir):
 def test_read_text_bounded_under_cap_returns_full(tmp_path):
     f = tmp_path / "small.txt"
     f.write_text("hello world", encoding="utf-8")
-    text, truncated = routes._read_text_bounded(f)
+    text, truncated, _ok = routes._read_text_bounded(f)
     assert text == "hello world"
     assert truncated is False
 
@@ -70,7 +70,7 @@ def test_read_text_bounded_over_cap_returns_head_and_flag(tmp_path):
     f = tmp_path / "big.txt"
     payload = "A" * (_FILE_READ_MAX_BYTES + 4096)
     f.write_text(payload, encoding="utf-8")
-    text, truncated = routes._read_text_bounded(f)
+    text, truncated, _ok = routes._read_text_bounded(f)
     assert truncated is True
     # Only up to the cap was read (never the full oversized payload).
     assert len(text.encode("utf-8")) <= _FILE_READ_MAX_BYTES
@@ -259,7 +259,7 @@ def test_cron_run_detail_oversized_preserves_response_section(monkeypatch, tmp_p
     _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
     # Direct helper check: the bounded read preserves ## Response.
-    txt, truncated = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok = _read_cron_output_bounded(fpath)
     assert truncated is True
     assert "## Response" in txt
     snippet = _cron_output_snippet(txt)
@@ -322,7 +322,7 @@ def test_read_text_bounded_tail_mode_reads_trailing_bytes(tmp_path):
     p = tmp_path / "t.txt"
     # 10 lines, each a complete marker. Cap at a small tail window.
     p.write_text("".join(f"line{i:02d}marker\n" for i in range(10)), encoding="utf-8")
-    text, truncated = _read_text_bounded(p, max_bytes=40, tail=True)
+    text, truncated, _ok = _read_text_bounded(p, max_bytes=40, tail=True)
     assert truncated is True
     # The last line must be present (it's within the tail window).
     assert "line09marker" in text
@@ -357,7 +357,7 @@ def test_cron_run_detail_oversized_preserves_usage_and_response(monkeypatch, tmp
     _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
     fpath = out_dir / "run.md"
-    txt, truncated = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok = _read_cron_output_bounded(fpath)
     assert truncated is True
     # The response survives (tail).
     assert "## Response" in txt
@@ -429,7 +429,7 @@ def test_cron_run_detail_response_marker_split_at_head_boundary(monkeypatch, tmp
     content = frontmatter + ("F" * filler_len) + marker + "Split-marker reply body.\n"
     (out_dir / "run.md").write_text(content, encoding="utf-8")
     fpath = out_dir / "run.md"
-    txt, truncated = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok = _read_cron_output_bounded(fpath)
     assert truncated is True
     snippet = _cron_output_snippet(txt)
     assert "Split-marker reply body." in snippet, (
@@ -457,7 +457,7 @@ def test_cron_run_detail_marker_ends_exactly_at_boundary(monkeypatch, tmp_path):
     assert len(head_portion) == _FILE_READ_MAX_BYTES, len(head_portion)
     (out_dir / "run.md").write_bytes(head_portion + body + b"\n")
     fpath = out_dir / "run.md"
-    txt, truncated = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok = _read_cron_output_bounded(fpath)
     assert truncated is True
     snippet = _cron_output_snippet(txt)
     # Body survives (was "(empty)" before the round-3 fix).
@@ -494,7 +494,7 @@ def test_read_text_bounded_stat_failure_never_returns_unbounded(monkeypatch, tmp
         return real_stat(self, *a, **k)
 
     monkeypatch.setattr(Path, "stat", failing_stat)
-    text, trunc = _read_text_bounded(big)
+    text, trunc, _ok = _read_text_bounded(big)
     # Must NOT return the whole file. Either empty (open also failed) or bounded.
     assert len(text) <= _FILE_READ_MAX_BYTES, (
         f"stat failure must not trigger unbounded read; got {len(text)} bytes"
@@ -508,7 +508,7 @@ def test_read_text_bounded_always_caps_oversized_file(tmp_path):
 
     big = tmp_path / "big.txt"
     big.write_text("y" * (_FILE_READ_MAX_BYTES + 10000))
-    text, trunc = _read_text_bounded(big)
+    text, trunc, _ok = _read_text_bounded(big)
     assert trunc is True
     assert len(text) <= _FILE_READ_MAX_BYTES
 
@@ -532,7 +532,7 @@ def test_read_cron_output_bounded_body_survives_marker_at_boundary(tmp_path):
     )
     f = tmp_path / "cron.md"
     f.write_text(content)
-    text, trunc = _read_cron_output_bounded(f)
+    text, trunc, _ok = _read_cron_output_bounded(f)
     snippet = _cron_output_snippet(text)
     # The snippet must contain body content well beyond the single 'R' prefix.
     assert "BODY" in snippet or "EST_OF_BODY" in snippet, (
@@ -549,7 +549,7 @@ def test_read_cron_output_bounded_no_body_duplication(tmp_path):
     content = "## Response\n" + ("B" * (_FILE_READ_MAX_BYTES + 8192))
     f = tmp_path / "cron.md"
     f.write_text(content)
-    text, trunc = _read_cron_output_bounded(f)
+    text, trunc, _ok = _read_cron_output_bounded(f)
     # Exactly one ## Response marker (the head's partial body was dropped in
     # favor of the tail's complete marker + body).
     assert text.count("## Response") == 1, (
@@ -601,4 +601,132 @@ def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_p
     contents = [e.get("content", "") for e in body.get("outputs", [])]
     assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
         f"valid older output must survive unreadable newer files; got {contents}"
+    )
+
+
+# ── Gate round-2 residuals (2026-07-23 re-gate) ──────────────────────────────
+
+
+def test_read_text_bounded_same_inode_growth_does_not_read_unbounded(monkeypatch, tmp_path):
+    """Round-2 #1: if the file grows between fstat and read (same inode), the
+    small-file branch must NOT read the grown content unbounded. The pinned
+    size guards the seek, but the read itself must be capped at max_bytes + 1
+    so growth beyond the cap is reported truncated, not materialized."""
+    from pathlib import Path
+    from api.routes import _read_text_bounded
+
+    f = tmp_path / "growable.txt"
+    # Start at the cap exactly (size <= max_bytes branch).
+    f.write_text("x" * _FILE_READ_MAX_BYTES)
+
+    # Wrap the file handle's read so that when the small-file branch reads, the
+    # file has "grown" (simulating append-after-fstat): return cap + 5000 bytes.
+    real_open = open
+
+    def growing_read(self, n=-1):
+        # The small-file branch calls fh.read(max_bytes + 1); simulate growth by
+        # returning more than max_bytes.
+        data = real_open(self.name, "rb").read()
+        if n and n > _FILE_READ_MAX_BYTES:
+            return data + (b"g" * 5000)  # grew under us
+        return data[:n] if n and n > 0 else data
+
+    # Patch the read on the file object returned by open. Simplest: patch
+    # _read_text_bounded's internal read via a wrapper file class.
+    class GrowingFile:
+        def __init__(self, name):
+            self.name = name
+            self._real = real_open(name, "rb")
+            self.fileno = self._real.fileno
+        def read(self, n=-1):
+            data = self._real.read(n)
+            if n and n > _FILE_READ_MAX_BYTES and len(data) >= _FILE_READ_MAX_BYTES:
+                return data + (b"g" * 5000)  # grew between fstat and read
+            return data
+        def seek(self, *a): return self._real.seek(*a)
+        def close(self): return self._real.close()
+
+    import builtins
+    def growing_open(name, *a, **k):
+        if str(name) == str(f):
+            return GrowingFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch.setattr(builtins, "open", growing_open)
+
+    text, trunc, ok = _read_text_bounded(f)
+    assert len(text) <= _FILE_READ_MAX_BYTES, (
+        f"same-inode growth must not read unbounded; got {len(text)} bytes"
+    )
+    assert trunc is True, "growth beyond the pinned size must be flagged truncated"
+
+
+def test_read_cron_output_bounded_body_never_exceeds_source(tmp_path):
+    """Round-2 #2: the returned body must never contain MORE bytes than the
+    source file. The just-over-cap shape (marker in head, tail starts mid-body)
+    previously concatenated two overlapping windows and nearly doubled the body."""
+    from api.routes import _read_cron_output_bounded
+
+    body = "B" * (_FILE_READ_MAX_BYTES + 8192)
+    content = "## Response\n" + body
+    f = tmp_path / "cron.md"
+    f.write_text(content)
+    text, trunc, ok = _read_cron_output_bounded(f)
+    # The returned text's 'B' count must not exceed the source's 'B' count.
+    assert text.count("B") <= content.count("B"), (
+        f"body duplicated: returned {text.count('B')} B's vs source "
+        f"{content.count('B')}"
+    )
+
+
+def test_cron_batch_real_read_failure_not_charged(monkeypatch, tmp_path):
+    """Round-2 #3: a real open/fstat/read failure (not a legitimate empty file)
+    must NOT be appended as an entry or charged against the batch budget.
+
+    Fixture chronology corrected per the gate note: unreadable files have the
+    HIGHEST mtimes (processed first by the descending sort), valid file has the
+    LOWEST mtime (processed last). Two unreadable newest files must not consume
+    the budget and suppress the valid older output."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Two large files that will be made unreadable + one valid smaller file.
+    # Unreadable files have HIGHER mtimes (processed first by descending sort).
+    unreadable_a = out_dir / "run-2.md"
+    unreadable_a.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    unreadable_b = out_dir / "run-1.md"
+    unreadable_b.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    valid = out_dir / "run-0.md"
+    valid.write_text("## Response\nVALID_OLDER_OUTPUT\n", encoding="utf-8")
+    # Correct chronology: unreadable = newest (300/200), valid = oldest (100).
+    os.utime(unreadable_a, (300, 300))
+    os.utime(unreadable_b, (200, 200))
+    os.utime(valid, (100, 100))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Make the two large files "unreadable" by patching _read_cron_output_bounded
+    # to return ok=False (simulating a real open/fstat/read failure, NOT a
+    # legitimate empty file). The valid file reads normally.
+    original = routes._read_cron_output_bounded
+
+    def failing_for_unreadable(path, *a, **kw):
+        if path.name in ("run-1.md", "run-2.md"):
+            return "", False, False  # real read failure
+        return original(path, *a, **kw)
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_unreadable)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    # The valid older file's output must still appear — failed reads were not
+    # charged, so budget remained for the valid file.
+    contents = [e.get("content", "") for e in body.get("outputs", [])]
+    assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
+        f"valid older output must survive unreadable newer files (failed reads "
+        f"not charged); got {contents}"
+    )
+    # No empty entries from the failed reads.
+    assert all(c.strip() for c in contents), (
+        f"failed reads must not append empty entries; got {contents}"
     )
