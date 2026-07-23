@@ -3583,17 +3583,18 @@ def _is_grok_model_id(model_id: str | None) -> bool:
 
 
 def _is_grok_45_model_id(model_id: str | None) -> bool:
-    """True for bare Grok-4.5 ids (dot/hyphen/underscore), optional -latest.
+    """True only for the official dotted id ``grok-4.5`` (plus path/custom prefix).
 
-    End-anchored so aliases like ``grok-4.5x`` or ``grok-4-5-turbo`` are NOT
-    misclassified as 4.5 (which would wrongly hide None and drop xhigh).
+    Official xAI spelling is the single product id ``grok-4.5``. Hyphen/underscore
+    forms (``grok-4-5`` / ``grok-4_5``), ``-latest``, and letter/turbo suffixes
+    are intentionally NOT treated as Grok-4.5.
     """
     bare = _grok_bare_model_id(model_id)
     if not bare or "grok" not in bare:
         return False
-    # bare is already the last path segment (and custom-hint stripped). Match
-    # the 4.5 version at end-of-string, allowing only an optional -latest alias.
-    return bool(re.search(r"(?:^|[^a-z0-9])grok-4[._-]5(?:-latest)?$", bare))
+    # bare is last path segment (custom-hint stripped). Match dotted 4.5 only,
+    # end-anchored. Prefix separators (/, :, etc.) are allowed before "grok".
+    return bool(re.search(r"(?:^|[^a-z0-9])grok-4\.5$", bare))
 
 
 def _apply_grok_family_effort_ceiling(

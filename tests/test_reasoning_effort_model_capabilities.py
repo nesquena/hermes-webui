@@ -584,9 +584,16 @@ def test_grok_prefix_without_family_token_is_not_reasoning_capable():
 
 
 def test_grok_45_regex_does_not_false_match_suffix_aliases():
-    # #6438 re-gate: end-anchor the 4.5 matcher so turbo/letter suffixes are
-    # not treated as mandatory-reasoning 4.5 (which would hide None / drop xhigh).
-    for model in ("grok-4.5x", "grok-4-5-turbo", "x-ai/grok-4.5-preview"):
+    # Official product id is only dotted grok-4.5. Hyphen/underscore spellings,
+    # -latest, letter/turbo suffixes must NOT get the 4.5 hard contract.
+    for model in (
+        "grok-4-5",
+        "grok-4_5",
+        "grok-4.5-latest",
+        "grok-4.5x",
+        "grok-4-5-turbo",
+        "x-ai/grok-4.5-preview",
+    ):
         assert cfg._is_grok_45_model_id(model) is False, model
         # Still Grok-family, so family ceiling applies (xhigh ok, max dropped).
         assert cfg._is_grok_model_id(model) is True, model
@@ -598,7 +605,8 @@ def test_grok_45_regex_does_not_false_match_suffix_aliases():
         ) == "none", model
 
 
-def test_grok_45_positive_spellings_and_latest_alias():
-    for model in ("grok-4.5", "grok-4-5", "grok-4_5", "x-ai/grok-4.5", "grok-4.5-latest"):
+def test_grok_45_positive_spellings_only_dotted():
+    # Only the official dotted product id (with optional path/custom prefix).
+    for model in ("grok-4.5", "x-ai/grok-4.5", "@custom:proxy:grok-4.5"):
         assert cfg._is_grok_45_model_id(model) is True, model
 
