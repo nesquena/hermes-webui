@@ -2319,6 +2319,7 @@ async function loadSession(sid){
       setComposerStatus('');
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      startApprovalPolling(sid);
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
@@ -4909,8 +4910,8 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.stop,
       async()=>{
         closeSessionActionMenu();
-        await cancelSessionStream(session);
-        showToast(t('stream_stopped'));
+        if(await cancelSessionStream(session)) showToast(t('stream_stopped'));
+        else showToast(t('cancel_failed'),null,'error');
       }
     ));
   }
