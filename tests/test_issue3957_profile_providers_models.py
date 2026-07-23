@@ -436,16 +436,33 @@ def test_thread_local_env_value_none_default_returns_empty_string(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_detached_worker_scope_noop_for_default_profile(monkeypatch):
-    """profile_scope_for_detached_worker is a no-op for the default profile."""
+def test_detached_worker_scope_binds_tls_for_default_profile(monkeypatch):
+    """profile_scope_for_detached_worker binds TLS for the default profile (#6326).
+
+    For 'default', the scope must set the request-profile TLS so the worker
+    resolves the default profile's configuration even when the process-wide
+    active profile is a named profile, AND must set block_process_env_fallback
+    on the worker thread's TLS so _thread_local_env_value() callers cannot see
+    named-profile credentials (#6327).  The process-wide os.environ is NOT
+    mutated (that would break concurrent named-profile requests).
+    """
     monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
     monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
-    # Default/empty name → no TLS set, no env applied.
-    with profiles.profile_scope_for_detached_worker("default", "test"):
-        assert profiles.get_active_profile_name() in ("", "default")
-        assert os.environ.get("ISSUE_3957_WPROBE") is None
+
+    # Set process-wide active to a named profile to verify TLS overrides it.
+    profiles._active_profile = "work"
+    try:
+        # Default name → TLS bound, block_process_env_fallback set.
+        with profiles.profile_scope_for_detached_worker("default", "test"):
+            assert profiles.get_active_profile_name() == "default"
+            assert os.environ.get("ISSUE_3957_WPROBE") is None
+    finally:
+        profiles._active_profile = "default"
+    # Empty name → still no-op.
     with profiles.profile_scope_for_detached_worker("", "test"):
         assert os.environ.get("ISSUE_3957_WPROBE") is None
+    # After the scope, TLS is cleared; falls back to process-wide active.
+    assert profiles.get_active_profile_name() in ("", "default")
 
 
 def test_detached_worker_scope_binds_profile_on_new_thread(monkeypatch, tmp_path):
@@ -872,6 +889,102 @@ def test_detached_worker_scope_scrubs_non_registry_agent_creds(monkeypatch, tmp_
     assert os.environ.get("AZURE_FOUNDRY_API_KEY") == "process-default-foundry-key"
     assert os.environ.get("IDENTITY_ENDPOINT") == "http://169.254.169.254/msi"
     assert os.environ.get("MSI_ENDPOINT") == "http://169.254.169.254/msi"
+
+
+
+def test_default_detached_worker_isolates_from_named_active_profile(monkeypatch, tmp_path):
+    """Default-scoped detached worker must resolve default, not named active (#6326).
+
+    When the process-wide active profile is a named profile (e.g. 'work'),
+    a detached worker spawned for the 'default' profile must bind the
+    request-profile TLS so that get_active_profile_name() returns 'default',
+    not 'work', AND must set block_process_env_fallback on the worker's
+    TLS so _thread_local_env_value() callers cannot see named-profile
+    credentials (#6327).  The process-wide os.environ is NOT mutated
+    (that would break concurrent named-profile requests).
+    """
+    import threading
+
+    base = tmp_path / ".hermes"
+    (base / "profiles" / "work").mkdir(parents=True)
+    (base / "profiles" / "work" / ".env").write_text(
+        "ISSUE_3957_WPROBE=worker-env\nOPENROUTER_API_KEY=named-profile-credential-leaked\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+    monkeypatch.delenv("ISSUE_3957_WPROBE", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    # Load the named profile's .env into os.environ so the worker thread
+    # can observe it before and after the scope (#6327).
+    profiles._reload_dotenv(base / "profiles" / "work")
+
+    # Simulate process-wide active profile == 'work'
+    profiles._active_profile = "work"
+    try:
+        out: dict = {}
+        worker_exc: list[BaseException] = []
+
+        def worker():
+            try:
+                # On this fresh thread, get_active_profile_name() returns 'work'
+                # (process-wide active) because no TLS is set yet.
+                out["before"] = profiles.get_active_profile_name()
+                with profiles.profile_scope_for_detached_worker("default", "test"):
+                    out["inside"] = profiles.get_active_profile_name()
+                    out["inside_env"] = os.environ.get("ISSUE_3957_WPROBE")
+                out["after"] = profiles.get_active_profile_name()
+            except BaseException as exc:
+                worker_exc.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        if worker_exc:
+            raise worker_exc[0]
+
+        # Before scope: process-wide active 'work' is visible on the new thread.
+        assert out["before"] == "work"
+        # Inside scope: TLS bound to 'default' overrides process-wide 'work'.
+        assert out["inside"] == "default"
+        # Env mirroring skipped for root — work's .env remains visible via
+        # raw os.getenv() (only TLS-aware _thread_local_env_value() readers
+        # are blocked by block_process_env_fallback).
+        # After scope: TLS cleared, falls back to process-wide 'work'.
+        assert out["after"] == "work"
+    finally:
+        profiles._active_profile = "default"
+        # Clean up the .env state loaded by _reload_dotenv so it does not
+        # leak into subsequent tests.
+        profiles._loaded_profile_env_keys.discard("OPENROUTER_API_KEY")
+        profiles._loaded_profile_env_keys.discard("ISSUE_3957_WPROBE")
+        os.environ.pop("OPENROUTER_API_KEY", None)
+        os.environ.pop("ISSUE_3957_WPROBE", None)
+
+def test_default_detached_worker_preserves_root_credentials_when_root_active(monkeypatch):
+    """Default-scoped worker preserves root's own credentials when root is active (#6327).
+
+    When the process-wide active profile IS the root/default profile (the common
+    single-profile deployment), the scope must NOT mutate os.environ — root's
+    own credentials survive intact inside and after the scope.
+    """
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda n: n in ("", "default"))
+
+    # Simulate root profile having loaded its own .env credentials.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "root-own-key")
+
+    # Process-wide active profile is root (default state).
+    profiles._active_profile = "default"
+    try:
+        with profiles.profile_scope_for_detached_worker("default", "test"):
+            assert profiles.get_active_profile_name() == "default"
+            # Root's own credential must survive inside the default scope.
+            assert os.environ.get("OPENROUTER_API_KEY") == "root-own-key"
+        # Credential intact after scope exit too.
+        assert os.environ.get("OPENROUTER_API_KEY") == "root-own-key"
+    finally:
+        profiles._active_profile = "default"
 
 
 def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch):
