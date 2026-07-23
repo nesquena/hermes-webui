@@ -13066,12 +13066,134 @@ async function _gatewayAction(action){
     await loadGatewayStatus();
   }
 }
+// ── Raw config.yaml editor (System settings) ────────────────────────────────
+
+let _configEditorAllowed=false;
+let _configEditorOriginal='';
+let _configEditorEtag=null;
+
+async function loadConfigEditor(){
+  const ta=$('configEditorTextarea');
+  if(!ta) return;
+  const status=$('configEditorStatus');
+  const notice=$('configEditorDisabledNotice');
+  if(status){status.textContent=t('loading');status.style.color='var(--muted)';}
+  try{
+    const r=await api('/api/config/raw');
+    _configEditorOriginal=r.yaml||'';
+    _configEditorAllowed=!!r.allowed;
+    _configEditorEtag=r.etag||null;
+    ta.value=_configEditorOriginal;
+    if(status) status.textContent='';
+    if(notice){
+      notice.style.display=_configEditorAllowed?'none':'';
+      if(!_configEditorAllowed) notice.textContent=t('config_editor_disabled_notice',r.write_gate_env||'HERMES_WEBUI_ALLOW_CONFIG_RAW_WRITE');
+    }
+    _setConfigEditorEditing(false);
+  }catch(e){
+    if(status){status.textContent=t('config_editor_load_failed');status.style.color='var(--error)';}
+  }
+}
+function reloadConfigEditor(){ loadConfigEditor(); }
+
+function _setConfigEditorEditing(editing){
+  const ta=$('configEditorTextarea');
+  const editBtn=$('configEditorEditBtn');
+  const cancelBtn=$('configEditorCancelBtn');
+  const saveBtn=$('configEditorSaveBtn');
+  if(ta) ta.readOnly=!editing;
+  if(editBtn) editBtn.style.display=(!editing&&_configEditorAllowed)?'':'none';
+  if(cancelBtn) cancelBtn.style.display=editing?'':'none';
+  if(saveBtn) saveBtn.style.display=editing?'':'none';
+}
+function toggleConfigEditorEdit(){
+  if(!_configEditorAllowed) return;
+  _setConfigEditorEditing(true);
+  const ta=$('configEditorTextarea');
+  if(ta) ta.focus();
+}
+function cancelConfigEditorEdit(){
+  const ta=$('configEditorTextarea');
+  if(ta) ta.value=_configEditorOriginal;
+  _setConfigEditorEditing(false);
+}
+
+// Simple O(n*m) line-based LCS diff — config.yaml files are small enough
+// (a few hundred lines) that this stays well under a frame budget, and it
+// gives a much more honest changed/added/removed count than a naive
+// index-by-index comparison would for a single inserted/deleted line.
+function _lcsLineCount(a,b){
+  const n=a.length,m=b.length;
+  let prev=new Array(m+1).fill(0);
+  for(let i=1;i<=n;i++){
+    const cur=new Array(m+1).fill(0);
+    const ai=a[i-1];
+    for(let j=1;j<=m;j++){
+      cur[j]=(ai===b[j-1])?prev[j-1]+1:Math.max(prev[j],cur[j-1]);
+    }
+    prev=cur;
+  }
+  return prev[m];
+}
+function _configYamlDiffCounts(oldText,newText){
+  const a=oldText.split('\n'), b=newText.split('\n');
+  const common=_lcsLineCount(a,b);
+  const removed=Math.max(0,a.length-common);
+  const added=Math.max(0,b.length-common);
+  const changed=Math.min(added,removed);
+  return {added:added-changed,removed:removed-changed,changed:changed};
+}
+
+async function saveConfigEditor(){
+  const ta=$('configEditorTextarea');
+  const status=$('configEditorStatus');
+  if(!ta) return;
+  const newYaml=ta.value;
+  if(newYaml===_configEditorOriginal){
+    if(status){status.textContent=t('config_editor_no_changes');status.style.color='var(--muted)';}
+    return;
+  }
+  const counts=_configYamlDiffCounts(_configEditorOriginal,newYaml);
+  const confirmed=await showConfirmDialog({
+    title:t('config_editor_confirm_title'),
+    message:t('config_editor_confirm_message',counts.added,counts.removed,counts.changed),
+    confirmLabel:t('config_editor_confirm_btn'),
+    danger:true,
+  });
+  if(!confirmed) return;
+  const saveBtn=$('configEditorSaveBtn');
+  if(saveBtn) saveBtn.disabled=true;
+  if(status){status.textContent=t('loading');status.style.color='var(--muted)';}
+  try{
+    const r=await api('/api/config/raw',{method:'PUT',body:JSON.stringify({yaml:newYaml,etag:_configEditorEtag})});
+    _configEditorOriginal=newYaml;
+    _configEditorEtag=(r&&r.etag)||null;
+    _setConfigEditorEditing(false);
+    if(status){status.textContent=t('config_editor_saved');status.style.color='var(--success)';}
+    if(typeof showToast==='function') showToast(t('config_editor_saved'),3000,'success');
+  }catch(e){
+    let msg=(e&&e.message)?e.message:t('config_editor_save_failed');
+    try{
+      const body=(e&&e.body)?JSON.parse(e.body):null;
+      if(body&&Array.isArray(body.blocked_paths)&&body.blocked_paths.length){
+        msg=t('config_editor_blocked_paths',body.blocked_paths.join(', '));
+      } else if(e&&e.status===409){
+        msg=t('config_editor_conflict');
+      }
+    }catch(_){}
+    if(status){status.textContent=msg;status.style.color='var(--error)';}
+    if(typeof showToast==='function') showToast(msg,5000,'error');
+  }finally{
+    if(saveBtn) saveBtn.disabled=false;
+  }
+}
+
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name, opts){
   _origSwitchSettings(name, opts);
   if(name==='preferences') updateNotificationPermissionStatus();
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();loadConfigEditor();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────
