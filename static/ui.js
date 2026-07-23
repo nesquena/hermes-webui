@@ -13543,20 +13543,21 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const message=match&&S.messages&&S.messages[Number(match[1])];
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
-  if(savedDisclosure==='open'||(errored&&savedDisclosure!=='closed')) return true;
-  group._deferredWorklogRows=rows;
-  group.setAttribute('data-worklog-rows-deferred','1');
-  group.classList.add('tool-call-group-collapsed');
-  group.classList.remove('open');
-  const summary=group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
-  if(summary) summary.setAttribute('aria-expanded','false');
-  _syncToolCallGroupSummary(group);
-  requestAnimationFrame(()=>{
-    if(!group.isConnected||!group.classList.contains('tool-call-group-collapsed')) return;
-    if(group.getAttribute('data-worklog-rows-deferred')!=='1') return;
-    const list=_toolWorklogListEl(group);
-    if(list) list.replaceChildren();
-  });
+  if(!(savedDisclosure==='open'||(errored&&savedDisclosure!=='closed'))){
+    group._deferredWorklogRows=rows;
+    group.setAttribute('data-worklog-rows-deferred','1');
+    group.classList.add('tool-call-group-collapsed');
+    group.classList.remove('open');
+    const summary=group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded','false');
+    _syncToolCallGroupSummary(group);
+    requestAnimationFrame(()=>{
+      if(!group.isConnected||!group.classList.contains('tool-call-group-collapsed')) return;
+      if(group.getAttribute('data-worklog-rows-deferred')!=='1') return;
+      const list=_toolWorklogListEl(group);
+      if(list) list.replaceChildren();
+    });
+  }
   return true;
 }
 // True while a just-settled worklog is being force-rendered open (between

@@ -5997,12 +5997,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           const _collapsedInPlace=typeof _collapseJustSettledWorklogInPlace==='function'
             && _collapseJustSettledWorklogInPlace(_settledStreamId);
-          if(_collapsedInPlace&&_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
-            _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
-          }else if(typeof _renderMessagesWithScrollSnapshot==='function'){
+          if(!_collapsedInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
             _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
-          }else{
+          }else if(!_collapsedInPlace){
             renderMessages({preserveScroll:true});
+          }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
+            _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
