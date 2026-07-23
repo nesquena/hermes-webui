@@ -2812,9 +2812,70 @@ window.addEventListener('visibilitychange',()=>{
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
+window._defaultModelHasExplicitSource=!!window._defaultModelHasExplicitSource;
+window._defaultModelEligibleForFreshBoot=window._defaultModelEligibleForFreshBoot!==false;
+window._provisionalBootModelSelection=window._provisionalBootModelSelection||null;
+window._bootSettingsDefaultModelState=window._bootSettingsDefaultModelState||null;
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
+
+function _modelCatalogHasRealProviderModels(data){
+  const groups=data&&Array.isArray(data.groups)?data.groups:[];
+  for(const group of groups){
+    const providerName=String(group&&group.provider||'').trim().toLowerCase();
+    const providerId=String(group&&group.provider_id||'').trim().toLowerCase();
+    if(providerName==='default'||providerId==='default') continue;
+    for(const bucket of ['models','extra_models']){
+      const models=Array.isArray(group&&group[bucket])?group[bucket]:[];
+      if(models.some(m=>m&&String(m.id||'').trim())) return true;
+    }
+  }
+  return false;
+}
+function _shouldApplyModelPayloadDefault(data){
+  if(!data||!data.default_model) return false;
+  if(data.default_model_has_explicit_source===true) return true;
+  return !_modelCatalogHasRealProviderModels(data);
+}
+function _currentBootSettingsDefaultOverride(data,opts){
+  if(!(opts&&opts.preferProfileDefaultOnFreshBoot)) return null;
+  const state=window._bootSettingsDefaultModelState||null;
+  if(!state||state.default_model_has_explicit_source!==true) return null;
+  if(state.profile){
+    const activeProfile=String((typeof S!=='undefined'&&S&&S.activeProfile)||'default').trim()||'default';
+    if(String(state.profile).trim()!==activeProfile) return null;
+  }
+  if(Object.prototype.hasOwnProperty.call(state,'profile_switch_generation')){
+    if(typeof _profileSwitchGeneration!=='number'||Number(state.profile_switch_generation)!==_profileSwitchGeneration) return null;
+  }
+  const model=String(state.model||'').trim();
+  if(!model) return null;
+  const payloadModel=String(data&&data.default_model||'').trim();
+  if(!payloadModel||payloadModel===model) return null;
+  return {
+    model,
+    model_provider:state.model_provider?String(state.model_provider):null,
+  };
+}
+function _applyBootSettingsDefaultOverrideToModelPayload(data,opts){
+  const override=_currentBootSettingsDefaultOverride(data,opts);
+  if(!override) return data;
+  const next={...(data||{})};
+  next.default_model=override.model;
+  next.default_model_has_explicit_source=true;
+  if(override.model_provider) next.active_provider=override.model_provider;
+  const provider=override.model_provider||next.active_provider||null;
+  if(provider){
+    next.configured_model_badges={...(next.configured_model_badges||{})};
+    next.configured_model_badges[override.model]={
+      role:'primary',
+      label:'Primary',
+      provider,
+    };
+  }
+  return next;
+}
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -2938,6 +2999,13 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+function _modelStateMatches(a,b){
+  return !!(
+    a&&b&&a.model&&b.model&&
+    String(a.model||'')===String(b.model||'')&&
+    String(a.model_provider||'')===String(b.model_provider||'')
+  );
+}
 function _modelProviderForSend(modelId){
   const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
   if(sessionProvider) return sessionProvider;
@@ -2988,7 +3056,7 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
     return _applyModelToDropdown(modelId, sel, providerId);
   };
 
-  if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
+  if(shouldApplyBootDefault && _shouldApplyModelPayloadDefault(data) && !(activeSession&&activeSession.model)){
     return _applyOrEnsure(data.default_model, data.active_provider||null);
   }
   if(activeSession&&activeSession.model){
@@ -3362,6 +3430,86 @@ function _persistSessionModelCorrection(model, provider, opts){
 }
 let _modelDropdownRequestSeq=0;
 let _modelCatalogFallbackRetried=false;
+let _modelCatalogContextEpoch=0;
+
+function _modelCatalogContextProfile(){
+  return String((typeof S!=='undefined'&&S&&S.activeProfile)||'default').trim()||'default';
+}
+
+function _modelCatalogContextGeneration(){
+  return typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:null;
+}
+
+function _modelCatalogContextSnapshot(){
+  if(typeof _modelCatalogContextEpoch!=='number') _modelCatalogContextEpoch=0;
+  return {
+    epoch:_modelCatalogContextEpoch,
+    profile:_modelCatalogContextProfile(),
+    profile_switch_generation:_modelCatalogContextGeneration(),
+  };
+}
+
+function _modelCatalogContextStillCurrent(context){
+  if(!context) return false;
+  if(typeof _modelCatalogContextEpoch!=='number') _modelCatalogContextEpoch=0;
+  return context.epoch===_modelCatalogContextEpoch
+    && String(context.profile||'default')===_modelCatalogContextProfile()
+    && String(context.profile_switch_generation)===String(_modelCatalogContextGeneration());
+}
+
+function _modelCatalogRequestStillCurrent(requestSeq,context){
+  if(requestSeq!==_modelDropdownRequestSeq) return false;
+  return _modelCatalogContextStillCurrent(context);
+}
+
+function _invalidateModelCatalogContext(){
+  if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
+  if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
+  if(typeof _modelCatalogContextEpoch!=='number') _modelCatalogContextEpoch=0;
+  _modelDropdownRequestSeq++;
+  _modelCatalogContextEpoch++;
+  _modelCatalogFallbackRetried=false;
+  if(typeof _clearLiveModelCatalogState==='function') _clearLiveModelCatalogState();
+}
+
+function _resetModelCatalogSurfacesForProfileSwitch(data,gen){
+  _invalidateModelCatalogContext();
+  window._modelDropdownReady=null;
+  window._configuredModelBadges={};
+  window._modelEndpointErrors={};
+  _dynamicModelLabels={};
+  const model=String(data&&data.default_model||'').trim();
+  const provider=data&&data.default_model_provider?String(data.default_model_provider):null;
+  window._defaultModel=model||null;
+  window._activeProvider=model?(provider||null):null;
+  window._defaultModelHasExplicitSource=!!model;
+  window._defaultModelEligibleForFreshBoot=!!model;
+  if(model&&provider){
+    window._configuredModelBadges[model]={role:'primary',label:'Primary',provider};
+  }
+  const sel=typeof $==='function' ? $('modelSelect') : null;
+  let applied='';
+  if(sel){
+    sel.innerHTML='';
+    if(model){
+      const opt=document.createElement('option');
+      opt.value=model;
+      opt.textContent=typeof getModelLabel==='function'?getModelLabel(model):model;
+      opt.dataset.custom='1';
+      if(provider) opt.dataset.provider=provider;
+      sel.appendChild(opt);
+      applied=typeof _applyModelToDropdown==='function'
+        ? (_applyModelToDropdown(model,sel,provider)||model)
+        : model;
+      if(!sel.value) sel.value=applied;
+    }else{
+      sel.value='';
+    }
+    if(typeof syncModelChip==='function') syncModelChip();
+    if(typeof _refreshOpenModelDropdown==='function') _refreshOpenModelDropdown();
+  }
+  return {model,model_provider:provider||null,applied_model:applied||model||'',profile_switch_generation:gen};
+}
 
 function _applySessionModelFallback(sel){
   if(!sel) return null;
@@ -3389,21 +3537,30 @@ async function populateModelDropdown(opts={}){
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
   if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
   const requestSeq=++_modelDropdownRequestSeq;
+  const requestContext=typeof _modelCatalogContextSnapshot==='function'?_modelCatalogContextSnapshot():null;
+  const requestStillCurrent=()=>typeof _modelCatalogRequestStillCurrent==='function'
+    ? _modelCatalogRequestStillCurrent(requestSeq,requestContext)
+    : requestSeq===_modelDropdownRequestSeq;
   try{
     const modelsUrl=new URL('api/models',document.baseURI||location.href);
     const requestedFreshness=opts&&opts.freshness?String(opts.freshness):'';
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
-    if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
       if(customRedirectIfUnauth(_modelsRes)) return;
     }else if(_redirectIfUnauth(_modelsRes)) return;
     // `_activeProvider` is populated from the /api/models payload below.
-    const data=await _modelsRes.json();
-    if(requestSeq!==_modelDropdownRequestSeq) return;
+    let data=await _modelsRes.json();
+    if(!requestStillCurrent()) return;
+    data=_applyBootSettingsDefaultOverrideToModelPayload(data,opts);
+    if(!requestStillCurrent()) return;
+    if(opts&&opts.preferProfileDefaultOnFreshBoot) window._bootSettingsDefaultModelState=null;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
+    window._defaultModelHasExplicitSource=data.default_model_has_explicit_source===true;
+    window._defaultModelEligibleForFreshBoot=_shouldApplyModelPayloadDefault(data);
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
     // Keep g.extra_models label hydration in this function for /model and tail selections.
@@ -3451,13 +3608,26 @@ async function populateModelDropdown(opts={}){
     const willRetry=usedConfiguredFallback && requestedFreshness!=='session_visit' && !_modelCatalogFallbackRetried;
 
     if(!groups.length){
+      if(!requestStillCurrent()) return;
       if(willRetry){
         _modelCatalogFallbackRetried=true;
         populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
       }
       return; // no server groups and no configured fallback
     }
-    const previousSelection=_captureModelDropdownSelection(sel);
+    if(!requestStillCurrent()) return;
+    let previousSelection=_captureModelDropdownSelection(sel);
+    const rawProvisionalBootSelection=window._provisionalBootModelSelection||null;
+    const provisionalBootSelection=typeof rawProvisionalBootSelection==='string'
+      ? {model:rawProvisionalBootSelection,model_provider:null}
+      : rawProvisionalBootSelection;
+    if(opts&&opts.preferProfileDefaultOnFreshBoot&&provisionalBootSelection){
+      const persistedState=(typeof _readPersistedModelState==='function')?_readPersistedModelState():null;
+      if(_modelStateMatches(previousSelection,provisionalBootSelection)&&!_modelStateMatches(persistedState,provisionalBootSelection)){
+        previousSelection=null;
+      }
+      window._provisionalBootModelSelection=null;
+    }
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -3508,13 +3678,14 @@ async function populateModelDropdown(opts={}){
     }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
-    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(requestStillCurrent() && data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq, requestContext);
     if(willRetry){
+      if(!requestStillCurrent()) return;
       _modelCatalogFallbackRetried=true;
       populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
     }
   }catch(e){
-    if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
     if(typeof syncModelChip==='function') syncModelChip();
@@ -3527,6 +3698,35 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+let _liveModelFetchSeq=0;
+
+function _clearLiveModelCatalogState(){
+  for(const key of Object.keys(_liveModelCache)) delete _liveModelCache[key];
+  _liveModelFetchPending.clear();
+}
+
+function _modelCatalogLiveCacheKey(provider,context){
+  const providerId=String(provider||'').trim();
+  if(!providerId||!context) return '';
+  return JSON.stringify([
+    String(context.epoch),
+    String(context.profile||'default'),
+    String(context.profile_switch_generation),
+    providerId,
+  ]);
+}
+
+function _liveModelFetchPendingForProvider(provider){
+  const context=typeof _modelCatalogContextSnapshot==='function'
+    ? _modelCatalogContextSnapshot()
+    : null;
+  const cacheKey=_modelCatalogLiveCacheKey(provider,context);
+  if(!cacheKey) return false;
+  for(const pendingKey of _liveModelFetchPending){
+    if(String(pendingKey).startsWith(cacheKey+'|')) return true;
+  }
+  return false;
+}
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -3627,29 +3827,54 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, requestContext=null){
+  provider=String(provider||'').trim();
   if(!provider||!sel) return;
-  if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  const ownerContext=requestContext||(
+    typeof _modelCatalogContextSnapshot==='function'
+      ? _modelCatalogContextSnapshot()
+      : null
+  );
+  const cacheKey=typeof _modelCatalogLiveCacheKey==='function'
+    ? _modelCatalogLiveCacheKey(provider,ownerContext)
+    : '';
+  const requestStillCurrent=()=>{
+    if(!ownerContext) return false;
+    if(requestSeq===null){
+      return typeof _modelCatalogContextStillCurrent==='function'
+        && _modelCatalogContextStillCurrent(ownerContext);
+    }
+    return typeof _modelCatalogRequestStillCurrent==='function'
+      ? _modelCatalogRequestStillCurrent(requestSeq,ownerContext)
+      : requestSeq===_modelDropdownRequestSeq;
+  };
+  if(!cacheKey||!requestStillCurrent()) return;
   // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+  if(_liveModelCache[cacheKey]){
+    if(!requestStillCurrent()) return;
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[cacheKey],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
-  _liveModelFetchPending.add(provider);
+  const pendingKey=cacheKey+'|'+(++_liveModelFetchSeq);
+  _liveModelFetchPending.add(pendingKey);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!requestStillCurrent()) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,data.models,sel);
+    if(!requestStillCurrent()) return;
+    const models=Array.isArray(data.models)?data.models:[];
+    if(!models.length) return;
+    if(!requestStillCurrent()) return;
+    _liveModelCache[cacheKey]=models;
+    if(!requestStillCurrent()){
+      delete _liveModelCache[cacheKey];
+      return;
+    }
+    const added=_addLiveModelsToSelect(provider,models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
@@ -3657,7 +3882,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    _liveModelFetchPending.delete(pendingKey);
   }
 }
 
@@ -10514,7 +10739,11 @@ function syncTopbar(){
         // Also defer if a live model fetch is still in flight — the model may be
         // in the list once the fetch completes. Persisting now would corrupt the
         // session with the wrong model before live models arrive (#1169).
-        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        const liveStillPending=window._activeProvider&&(
+          typeof _liveModelFetchPendingForProvider==='function'
+            ? _liveModelFetchPendingForProvider(window._activeProvider)
+            : _liveModelFetchPending.has(window._activeProvider)
+        );
         if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).

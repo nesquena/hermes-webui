@@ -1049,7 +1049,11 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=!!(anchorActivityScene&&(
+    (Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length)
+    || (Array.isArray(anchorActivityScene.artifacts)&&anchorActivityScene.artifacts.length)
+    || (Array.isArray(anchorActivityScene.side_effects)&&anchorActivityScene.side_effects.length)
+  ));
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     streamId:String(snapshot.stream_id||snapshot.streamId||''),
@@ -1630,11 +1634,18 @@ async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
+  const profileSwitchGen=typeof _profileSwitchGeneration==='number'
+    ? ++_profileSwitchGeneration
+    : null;
+  const profileSwitchStillCurrent=()=>profileSwitchGen===null
+    || typeof _profileSwitchGeneration!=='number'
+    || profileSwitchGen===_profileSwitchGeneration;
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
+    if(!profileSwitchStillCurrent()) return;
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
@@ -1642,16 +1653,55 @@ async function _switchProfileForSessionLoad(profile){
     }
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
-    if(data.default_model) window._defaultModel=data.default_model;
-    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    if(typeof _applyAcceptedProfileSwitchModelCatalog==='function'){
+      _applyAcceptedProfileSwitchModelCatalog(data,profileSwitchGen);
+    }else{
+      const profileSwitchModelAuthority=typeof _resetModelCatalogSurfacesForProfileSwitch==='function'
+        ? _resetModelCatalogSurfacesForProfileSwitch(data,profileSwitchGen)
+        : null;
+      if(!profileSwitchModelAuthority){
+        if(typeof _invalidateModelCatalogContext==='function') _invalidateModelCatalogContext();
+        if(data.default_model) window._defaultModel=data.default_model;
+        if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+      }
+      if(typeof _advanceBootSettingsDefaultModelStateForProfileSwitch==='function'){
+        _advanceBootSettingsDefaultModelStateForProfileSwitch(data,profileSwitchGen);
+      }
+    }
+    if(!profileSwitchStillCurrent()) return;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
+    if(typeof window!=='undefined'){
+      window._modelDropdownReady=null;
+      let modelRefreshPromise=null;
+      if(typeof window._ensureModelDropdownReady==='function'){
+        modelRefreshPromise=Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+      }else if(typeof populateModelDropdown==='function'){
+        modelRefreshPromise=Promise.resolve(populateModelDropdown({preferProfileDefaultOnFreshBoot:true})).catch(()=>{});
+      }
+      if(modelRefreshPromise) window._modelDropdownReady=modelRefreshPromise;
+    }else if(typeof populateModelDropdown==='function'){
+      Promise.resolve(populateModelDropdown({preferProfileDefaultOnFreshBoot:true})).catch(()=>{});
+    }
+    if(!profileSwitchStillCurrent()) return;
     if(typeof startGatewaySSE==='function') startGatewaySSE();
-    if(typeof syncTopbar==='function') syncTopbar();
+    if(!S.session&&typeof syncTopbar==='function'){
+      syncTopbar();
+    }else if(typeof $==='function'){
+      const profileLabel=$('profileChipLabel');
+      if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+      const titleLabel=$('titlebarProfileLabel');
+      if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+    }
+    if(!profileSwitchStillCurrent()) return;
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    if(typeof renderSessionList==='function') await renderSessionList();
+    if(typeof renderSessionList==='function'){
+      await renderSessionList();
+      if(!profileSwitchStillCurrent()) return;
+    }
   }catch(switchErr){
+    if(!profileSwitchStillCurrent()) return;
     // The switch POST failed, so we're still on the previous profile and its
     // caches are intact. Clear the up-front skeleton and re-render the real
     // list so the sidebar doesn't strand on the skeleton (the #4671 strand bug

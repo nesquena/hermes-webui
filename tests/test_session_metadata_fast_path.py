@@ -70,8 +70,8 @@ def test_deferred_model_resolution_refreshes_context_metadata():
 def test_boot_does_not_block_session_restore_on_model_catalog():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 
-    assert "if(s.default_model){" in src
-    assert "window._defaultModel=s.default_model;" in src
+    assert "_hydrateBootDefaultModelFromSettings(s);" in src
+    assert "window._defaultModel=defaultModel;" in src
     assert "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({" in src
     assert "window._modelDropdownReady=null;" in src
     assert "window._startBootModelDropdown=_startBootModelDropdown;" in src
@@ -120,16 +120,21 @@ def test_failed_boot_model_catalog_prime_is_retryable():
 
 def test_boot_primes_visible_default_model_without_catalog_fetch():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-    default_block_start = src.index("if(s.default_model){")
-    default_block = src[default_block_start:src.index("window._sessionJumpButtonsEnabled", default_block_start)]
+    default_block_start = src.index("function _hydrateBootDefaultModelFromSettings")
+    default_block = src[default_block_start:src.index("(async()=>", default_block_start)]
 
     assert "if(s.default_model_provider) window._activeProvider=s.default_model_provider;" in src
-    assert "const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);" in default_block
+    assert "const hasExplicitSource=_settingsDefaultModelHasExplicitSource(s);" in default_block
+    assert "const persistedState=(typeof _readPersistedModelState==='function')" in default_block
+    assert "const persistedOwnsSelection=typeof _modelStateMatches==='function'" in default_block
+    assert "window._provisionalBootModelSelection=(selectedState&&!persistedOwnsSelection&&!selectedHasExplicitUiOwnership)" in default_block
+    assert "if(!hasExplicitSource)" in default_block
+    assert "const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===defaultModel);" in default_block
     assert "existingDefaultOpt.dataset.provider=window._activeProvider;" in default_block
     assert "if(!existingDefaultOpt)" in default_block
     assert "opt.dataset.custom='1'" in default_block
     assert "opt.dataset.provider=window._activeProvider||''" in default_block
-    assert "_applyModelToDropdown(s.default_model,sel,window._activeProvider||null)" in default_block
+    assert "_applyModelToDropdown(defaultModel,sel,window._activeProvider||null)" in default_block
     assert "populateModelDropdown()" not in default_block
 
 
@@ -137,6 +142,7 @@ def test_settings_exposes_default_model_provider_for_lazy_boot_catalog():
     src = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
     assert 'settings["default_model_provider"]' in src
+    assert 'settings["default_model_has_explicit_source"]' in src
     assert 'model_cfg = get_config().get("model", {})' in src
 
 

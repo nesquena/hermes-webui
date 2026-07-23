@@ -2200,6 +2200,7 @@ function _applySessionContextMetadataUpdate(data){
 }
 
 $('modelSelect').onchange=async()=>{
+  window._provisionalBootModelSelection=null;
   const selectedModel=$('modelSelect').value;
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
@@ -3217,6 +3218,74 @@ function _mirrorSpeechSettingsFromServer(s){
 }
 window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 
+function _settingsDefaultModelHasExplicitSource(s){
+  if(!s||!Object.prototype.hasOwnProperty.call(s,'default_model_has_explicit_source')) return true;
+  return s.default_model_has_explicit_source===true;
+}
+function _hydrateBootDefaultModelFromSettings(s){
+  if(!s) return;
+  if(s.default_model_provider) window._activeProvider=s.default_model_provider;
+  const defaultModel=String(s.default_model||'');
+  if(!defaultModel) return;
+  const hasExplicitSource=_settingsDefaultModelHasExplicitSource(s);
+  window._defaultModel=defaultModel;
+  window._defaultModelHasExplicitSource=hasExplicitSource;
+  window._defaultModelEligibleForFreshBoot=hasExplicitSource;
+  window._bootSettingsDefaultModelState={
+    model:defaultModel,
+    model_provider:s.default_model_provider||null,
+    default_model_has_explicit_source:hasExplicitSource,
+  };
+  const sel=$('modelSelect');
+  if(!hasExplicitSource){
+    let selectedState=null;
+    if(sel&&sel.value){
+      try{
+        selectedState=typeof _modelStateForSelect==='function'
+          ? _modelStateForSelect(sel,sel.value)
+          : {model:String(sel.value||''),model_provider:null};
+      }catch(_){
+        selectedState={model:String(sel.value||''),model_provider:null};
+      }
+    }
+    const selectedOpt=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+    const selectedHasExplicitUiOwnership=!!(
+      selectedOpt&&selectedOpt.dataset&&selectedOpt.dataset.custom
+    );
+    const persistedState=(typeof _readPersistedModelState==='function')
+      ? _readPersistedModelState()
+      : null;
+    const persistedOwnsSelection=typeof _modelStateMatches==='function'
+      ? _modelStateMatches(selectedState,persistedState)
+      : !!(selectedState&&persistedState&&String(selectedState.model||'')===String(persistedState.model||'')
+        &&String(selectedState.model_provider||'')===String(persistedState.model_provider||''));
+    window._provisionalBootModelSelection=(selectedState&&!persistedOwnsSelection&&!selectedHasExplicitUiOwnership)
+      ? selectedState
+      : null;
+    return;
+  }
+  window._provisionalBootModelSelection=null;
+  if(sel&&typeof _applyModelToDropdown==='function'){
+    // Fresh page boot must prefer an explicit profile/server default over
+    // stale browser-persisted model state. Non-explicit fallback defaults
+    // wait for /api/models so a real provider catalog can suppress them.
+    const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===defaultModel);
+    if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
+      existingDefaultOpt.dataset.provider=window._activeProvider;
+    }
+    if(!existingDefaultOpt){
+      const opt=document.createElement('option');
+      opt.value=defaultModel;
+      opt.textContent=typeof getModelLabel==='function'?getModelLabel(defaultModel):defaultModel;
+      opt.dataset.custom='1';
+      opt.dataset.provider=window._activeProvider||'';
+      sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
+      sel.appendChild(opt);
+    }
+    _applyModelToDropdown(defaultModel,sel,window._activeProvider||null);
+  }
+}
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -3292,31 +3361,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
-    if(s.default_model_provider) window._activeProvider=s.default_model_provider;
-    if(s.default_model){
-      window._defaultModel=s.default_model;
-      const sel=$('modelSelect');
-      if(sel&&typeof _applyModelToDropdown==='function'){
-        // Fresh page boot must prefer the profile/server default over stale
-        // browser-persisted model state. A restored session can still apply its
-        // own persisted model later through loadSession(). Preserve the browser
-        // keys for legacy/no-default fallback paths instead of deleting them.
-        const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
-        if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
-          existingDefaultOpt.dataset.provider=window._activeProvider;
-        }
-        if(!existingDefaultOpt){
-          const opt=document.createElement('option');
-          opt.value=s.default_model;
-          opt.textContent=typeof getModelLabel==='function'?getModelLabel(s.default_model):s.default_model;
-          opt.dataset.custom='1';
-          opt.dataset.provider=window._activeProvider||'';
-          sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
-          sel.appendChild(opt);
-        }
-        _applyModelToDropdown(s.default_model,sel,window._activeProvider||null);
-      }
-    }
+    _hydrateBootDefaultModelFromSettings(s);
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     window._renderUserMarkdown=!!s.render_user_markdown;
     // JSON/YAML structured code-block default view (#484): auto | on | off,
@@ -3603,21 +3648,25 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // Active sessions are authoritative. On fresh boot without a restored
     // session, keep the profile/server default ahead of stale browser model
     // state when a default exists.
-    const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
+    const defaultWinsFreshBoot=!!window._defaultModel&&window._defaultModelEligibleForFreshBoot!==false;
+    const stateToApply=sessionModelState||(!defaultWinsFreshBoot?savedState:null);
     const savedModel=stateToApply&&stateToApply.model;
     if(savedModel && $('modelSelect')){
-      const applied=(typeof _applyModelToDropdown==='function')
+      let applied=(typeof _applyModelToDropdown==='function')
         ? (sessionModelState
           ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
           : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
         : null;
-      if(!applied) $('modelSelect').value=stateToApply.model;
       // If the value didn't take (model not in list), clear the bad pref only
       // for persisted browser preferences. Active sessions remain authoritative.
       if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
-        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
+        applied=_ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
       }
-      else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
+      else if(!applied&&!sessionModelState&&savedState&&savedState.model_provider&&typeof _ensureModelOptionInDropdown==='function'){
+        applied=_ensureModelOptionInDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null);
+      }
+      if(!applied) $('modelSelect').value=stateToApply.model;
+      if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
         else {
           localStorage.removeItem('hermes-webui-model');

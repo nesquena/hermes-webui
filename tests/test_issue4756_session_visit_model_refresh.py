@@ -16,6 +16,7 @@ def _catalog(label: str) -> dict:
     return {
         "active_provider": "openai",
         "default_model": label,
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {},
         "groups": [
             {
@@ -665,9 +666,24 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
 
     assert "modelsUrl.searchParams.set('freshness',opts.freshness)" in body
     assert "const requestSeq=++_modelDropdownRequestSeq" in body
-    assert body.count("requestSeq!==_modelDropdownRequestSeq") >= 3
-    assert "_fetchLiveModels(data.active_provider, sel, requestSeq)" in body
-    assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 4
+    assert "const requestContext=typeof _modelCatalogContextSnapshot==='function'?_modelCatalogContextSnapshot():null" in body
+    assert "const requestStillCurrent=()=>typeof _modelCatalogRequestStillCurrent==='function'" in body
+    assert "_modelCatalogRequestStillCurrent(requestSeq,requestContext)" in body
+    assert ": requestSeq===_modelDropdownRequestSeq" in body
+    assert body.count("requestStillCurrent()") >= 7
+    assert "_fetchLiveModels(data.active_provider, sel, requestSeq, requestContext)" in body
+    assert "requestSeq===null" in live_tail
+    assert "const ownerContext=requestContext||(" in live_tail
+    assert "if(!ownerContext) return false;" in live_tail
+    assert "typeof _modelCatalogContextStillCurrent==='function'" in live_tail
+    assert "_modelCatalogContextStillCurrent(ownerContext)" in live_tail
+    assert "const cacheKey=typeof _modelCatalogLiveCacheKey==='function'" in live_tail
+    assert "_liveModelCache[cacheKey]=models;" in live_tail
+    assert "delete _liveModelCache[cacheKey];" in live_tail
+    assert "typeof _modelCatalogRequestStillCurrent==='function'" in live_tail
+    assert "_modelCatalogRequestStillCurrent(requestSeq,ownerContext)" in live_tail
+    assert ": requestSeq===_modelDropdownRequestSeq" in live_tail
+    assert live_tail.count("requestStillCurrent()") >= 5
 
 
 def test_load_session_schedules_session_visit_model_refresh_before_message_load():

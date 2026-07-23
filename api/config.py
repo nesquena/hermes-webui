@@ -866,7 +866,7 @@ def _discover_default_workspace() -> Path:
 
 
 DEFAULT_WORKSPACE = _discover_default_workspace()
-DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "")  # Empty = use provider default; avoids showing unavailable OpenAI model to non-OpenAI users (#646)
+DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "").strip()  # Empty = use provider default; avoids showing unavailable OpenAI model to non-OpenAI users (#646)
 
 
 # ── Startup diagnostics ───────────────────────────────────────────────────────
@@ -3196,6 +3196,23 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
     return default_model
 
 
+def _default_model_has_explicit_source(config_data: dict | None = None) -> bool:
+    """True when the default model came from config or model env, not fallback."""
+    active_cfg = config_data if config_data is not None else cfg
+    model_cfg = active_cfg.get("model", {})
+    if isinstance(model_cfg, str) and model_cfg.strip():
+        return True
+    if isinstance(model_cfg, dict):
+        if str(model_cfg.get("default") or "").strip():
+            return True
+    if str(DEFAULT_MODEL or "").strip():
+        return True
+    env_model = (
+        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+    )
+    return bool(str(env_model or "").strip())
+
+
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
 # Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
 # importing from the agent tree (which may not be installed).  Any drift here
@@ -5036,9 +5053,10 @@ def _configured_model_badges_from_static_catalog(
     *,
     active_provider: str | None,
     default_model: str,
+    default_model_has_explicit_source: bool,
 ) -> dict[str, dict[str, str]]:
     configured_entries: list[dict[str, str]] = []
-    if active_provider and default_model:
+    if active_provider and default_model and default_model_has_explicit_source:
         configured_entries.append(
             {
                 "provider": active_provider,
@@ -5198,6 +5216,7 @@ def _minimal_static_models_catalog() -> dict:
         return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
+            "default_model_has_explicit_source": _default_model_has_explicit_source(cfg),
             "configured_model_badges": {},
             "groups": groups,
             "aliases": {},
@@ -5207,6 +5226,7 @@ def _minimal_static_models_catalog() -> dict:
         return {
             "active_provider": None,
             "default_model": "",
+            "default_model_has_explicit_source": False,
             "configured_model_badges": {},
             "groups": [],
             "aliases": {},
@@ -5252,6 +5272,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
         default_model = get_effective_default_model(cfg)
+        default_model_has_explicit_source = _default_model_has_explicit_source(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -5270,7 +5291,8 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if active_provider:
             detected_providers.add(active_provider)
-            _append_model_id(active_provider, default_model)
+            if default_model_has_explicit_source:
+                _append_model_id(active_provider, default_model)
 
         try:
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
@@ -5473,7 +5495,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                     }
                 )
 
-        if default_model:
+        if default_model and (
+            default_model_has_explicit_source or not active_provider or not groups
+        ):
             all_model_ids = {
                 str(model.get("id") or "")
                 for group in groups
@@ -5563,10 +5587,12 @@ def _static_models_catalog_without_live_probes() -> dict:
         return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
+            "default_model_has_explicit_source": default_model_has_explicit_source,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
                 groups,
                 active_provider=active_provider,
                 default_model=default_model,
+                default_model_has_explicit_source=default_model_has_explicit_source,
             ),
             "groups": groups,
             "aliases": model_aliases,
@@ -5738,7 +5764,7 @@ def _current_webui_version() -> str | None:
 # guarantees that even if a future release accidentally reuses the same
 # WebUI version string (or a debug build doesn't have a version), a structural
 # change still invalidates the cache.
-_MODELS_CACHE_SCHEMA_VERSION = 3
+_MODELS_CACHE_SCHEMA_VERSION = 4
 
 
 _models_cache_path = STATE_DIR / "models_cache.json"
@@ -5848,6 +5874,24 @@ def _models_cache_catalog_fingerprint() -> dict:
     return {
         "provider_catalog_sha256": provider_catalog_sha,
         "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
+    }
+
+
+def _models_cache_default_env_fingerprint() -> dict:
+    """Return normalized default-model env authority for /api/models cache keys.
+
+    ``default_model`` and Primary badges are embedded in the cached payload, so
+    every environment source that can change ``get_effective_default_model()``
+    must participate in the cache identity. ``DEFAULT_MODEL`` is the import-time
+    value of ``HERMES_WEBUI_DEFAULT_MODEL``; the other model env vars are read
+    live so tests and request scopes that mutate them invalidate both memory and
+    disk caches without waiting for TTL expiry.
+    """
+    return {
+        "HERMES_WEBUI_DEFAULT_MODEL": str(DEFAULT_MODEL or "").strip(),
+        "HERMES_MODEL": str(os.getenv("HERMES_MODEL") or "").strip(),
+        "OPENAI_MODEL": str(os.getenv("OPENAI_MODEL") or "").strip(),
+        "LLM_MODEL": str(os.getenv("LLM_MODEL") or "").strip(),
     }
 
 
@@ -5977,6 +6021,7 @@ def _models_cache_source_fingerprint() -> dict:
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
         "catalog": _models_cache_catalog_fingerprint(),
+        "model_default_env": _models_cache_default_env_fingerprint(),
     }
 
 
@@ -5999,12 +6044,19 @@ def _is_valid_models_cache(cache: object) -> bool:
     """
     if not isinstance(cache, dict):
         return False
-    if not {"active_provider", "default_model", "configured_model_badges", "groups"}.issubset(cache):
+    if not {
+        "active_provider",
+        "default_model",
+        "default_model_has_explicit_source",
+        "configured_model_badges",
+        "groups",
+    }.issubset(cache):
         return False
     active_provider = cache.get("active_provider")
     return (
         (active_provider is None or isinstance(active_provider, str))
         and isinstance(cache.get("default_model"), str)
+        and isinstance(cache.get("default_model_has_explicit_source"), bool)
         and isinstance(cache.get("configured_model_badges"), dict)
         and isinstance(cache.get("groups"), list)
     )
@@ -6090,6 +6142,7 @@ def _load_models_cache_from_disk() -> dict | None:
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
+            "default_model_has_explicit_source": cache["default_model_has_explicit_source"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": (
@@ -6158,6 +6211,7 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
+            "default_model_has_explicit_source": cache["default_model_has_explicit_source"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": aliases,
@@ -6190,6 +6244,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             "_source_fingerprint": _models_cache_source_fingerprint(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
+            "default_model_has_explicit_source": cache["default_model_has_explicit_source"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
         }
@@ -6536,6 +6591,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
+        default_model_has_explicit_source = _default_model_has_explicit_source(cfg)
         groups = []
 
         def _norm_model_id(model_id: str) -> str:
@@ -6572,9 +6628,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     s = stripped or s
             return s.replace("-", ".")
 
-        def _build_configured_model_badges() -> dict[str, dict[str, str]]:
+        def _build_configured_model_badges(
+            *,
+            default_model_has_explicit_source: bool,
+        ) -> dict[str, dict[str, str]]:
             configured_entries: list[dict[str, str]] = []
-            if active_provider and default_model:
+            if active_provider and default_model and default_model_has_explicit_source:
                 configured_entries.append(
                     {
                         "provider": active_provider,
@@ -7859,7 +7918,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
                 )
 
-        if default_model:
+        if default_model and (
+            default_model_has_explicit_source or not active_provider or not groups
+        ):
             # Guard against provider-id values mistakenly stored in
             # ``model.default``. The injection logic below puts ANY string
             # into the picker as a fake option, so a stray provider id
@@ -7904,6 +7965,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             {
                                 "provider": "Default",
                                 "provider_id": active_provider or "default",
+                                "models": [{"id": default_model, "label": label}],
+                            }
+                        )
+                    elif not injected:
+                        groups.append(
+                            {
+                                "provider": "Default",
+                                "provider_id": "default",
                                 "models": [{"id": default_model, "label": label}],
                             }
                         )
@@ -7970,7 +8039,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return {
             "active_provider": active_provider,
             "default_model": default_model,
-            "configured_model_badges": _build_configured_model_badges(),
+            "default_model_has_explicit_source": default_model_has_explicit_source,
+            "configured_model_badges": _build_configured_model_badges(
+                default_model_has_explicit_source=default_model_has_explicit_source,
+            ),
             "groups": groups,
             "aliases": model_aliases,
         }
@@ -8042,7 +8114,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         # Reload config if changed
         if _cfg_changed:
-            reload_config()
+            reload_config_if_stale()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
             _available_models_live_rebuild_ts = 0.0
@@ -9391,11 +9463,19 @@ def persisted_speech_settings_keys() -> list[str]:
     return sorted(_extract_persisted_speech_keys(_read_raw_settings_file()))
 
 
+_SETTINGS_DERIVED_MODEL_KEYS = {
+    "default_model",
+    "default_model_provider",
+    "default_model_has_explicit_source",
+}
+
+
 def _settings_payload_for_write(settings: dict, persisted_speech_keys: set[str]) -> dict:
     persisted = {
         k: v
         for k, v in settings.items()
-        if k not in {"default_model", _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD}
+        if k not in _SETTINGS_DERIVED_MODEL_KEYS
+        and k != _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD
     }
     for speech_key in _SETTINGS_SPEECH_KEYS:
         if speech_key not in persisted_speech_keys:
@@ -9420,6 +9500,7 @@ def load_settings() -> dict:
                 k: v
                 for k, v in stored.items()
                 if k not in _SETTINGS_LEGACY_DROP_KEYS
+                and k not in _SETTINGS_DERIVED_MODEL_KEYS
                 and k != _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD
             }
         )
@@ -9465,6 +9546,7 @@ def load_settings() -> dict:
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
     settings["default_model"] = get_effective_default_model()
+    settings["default_model_has_explicit_source"] = _default_model_has_explicit_source()
     try:
         model_cfg = get_config().get("model", {})
         if isinstance(model_cfg, dict) and model_cfg.get("provider"):

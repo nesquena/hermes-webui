@@ -3653,6 +3653,52 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Number.isFinite(idx)||idx<0) return messageIndex;
     return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
   }
+  const ANCHOR_SCENE_ARTIFACT_MAX_COUNT=64;
+  const ANCHOR_SCENE_ARTIFACT_MAX_BYTES=32*1024;
+  function _anchorSceneUtf8ByteSize(value){
+    const text=String(value||'');
+    if(typeof TextEncoder!=='undefined'){
+      try{ return new TextEncoder().encode(text).length; }catch(_){}
+    }
+    return unescape(encodeURIComponent(text)).length;
+  }
+  function _anchorSceneArtifactDedupeKey(event){
+    if(!event||typeof event!=='object') return '';
+    if(event.event_id) return `event_id:${String(event.event_id)}`;
+    if(event.run_id&&event.seq!==undefined&&event.seq!==null&&event.seq!=='') return `run_seq:${String(event.run_id)}:${String(event.seq)}`;
+    const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+    return ['payload',payload.path||'',payload.source_tool||'',payload.tool_call_id||''].join(':');
+  }
+  function _boundedAnchorSceneArtifacts(artifacts){
+    const source=Array.isArray(artifacts)?artifacts:[];
+    const out=[];
+    const seen=new Set();
+    let total=2; // Complete serialized-list framing: '[' + ']'.
+    for(const event of source){
+      if(!event||typeof event!=='object') continue;
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      if(!String(payload.path||'').trim()) continue;
+      const key=_anchorSceneArtifactDedupeKey(event);
+      if(key&&seen.has(key)) continue;
+      let serialized='';
+      try{ serialized=JSON.stringify(event); }catch(_){ serialized=''; }
+      if(!serialized) continue;
+      const size=_anchorSceneUtf8ByteSize(serialized);
+      const framing=out.length?1:0;
+      if(out.length>=ANCHOR_SCENE_ARTIFACT_MAX_COUNT||total+framing+size>ANCHOR_SCENE_ARTIFACT_MAX_BYTES) break;
+      if(key) seen.add(key);
+      total+=framing+size;
+      out.push(event);
+    }
+    return out;
+  }
+  function _boundedAnchorSceneForPersistence(scene){
+    if(!scene||typeof scene!=='object') return scene;
+    return {
+      ...scene,
+      artifacts:_boundedAnchorSceneArtifacts(scene.artifacts),
+    };
+  }
   function _persistSettledAnchorScene(message, scene, messageIndex){
     if(!activeSid||!message||!scene||typeof api!=='function') return;
     try{
@@ -3668,7 +3714,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           message_window_index:messageIndex,
           message_offset:messageOffset,
           message_ref:_anchorSceneMessageRef(message),
-          scene,
+          scene:_boundedAnchorSceneForPersistence(scene),
         }),
       }).catch(err=>{
         if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){
@@ -4042,18 +4088,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
-    if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    const artifacts=Array.isArray(scene&&scene.artifacts)?scene.artifacts:[];
+    if(!scene||scene.version!=='activity_scene_v1'||(!rows.length&&!artifacts.length)) return false;
     const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
     const sceneStreamId=sceneIdentity.stream_id||streamId;
     const sceneRunId=sceneIdentity.run_id||sceneStreamId;
     const sceneKey=[
       sceneRunId||'',
       sceneStreamId||'',
-      scene.activity_rows.length,
-      scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
+      rows.length,
+      rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
+      artifacts.length,
+      artifacts.map(item=>item&&item.event_id||item&&item.local_id||(item&&item.payload&&item.payload.path)||'').join('|'),
     ].join(':');
     if(_anchorRegistry._hydrated_activity_scene_key===sceneKey) return true;
-    const rows=scene.activity_rows;
+    const applySnapshotEvent=(sourceEvent)=>{
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
+      }catch(err){
+        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+          _anchorShadowWarned=true;
+          console.warn('assistant turn anchor snapshot hydration failed',err);
+        }
+        return false;
+      }
+      return true;
+    };
     for(let i=0;i<rows.length;i+=1){
       const row=rows[i];
       if(!row||typeof row!=='object') continue;
@@ -4092,15 +4153,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // (payload may not carry created_at even when the row does). (#5739 gate.)
         created_at:payload.created_at??row.created_at??undefined,
       };
-      try{
-        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
-      }catch(err){
-        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
-          _anchorShadowWarned=true;
-          console.warn('assistant turn anchor snapshot hydration failed',err);
-        }
-        return false;
-      }
+      if(!applySnapshotEvent(sourceEvent)) return false;
+    }
+    for(let i=0;i<artifacts.length;i+=1){
+      const artifact=artifacts[i];
+      if(!artifact||typeof artifact!=='object') continue;
+      const sourceType=artifact.source_event_type||'artifact_reference';
+      if(sourceType!=='artifact_reference') continue;
+      const payload={
+        ...((artifact.payload&&typeof artifact.payload==='object')?artifact.payload:{}),
+      };
+      const artifactIdentity=(artifact.identity&&typeof artifact.identity==='object')?artifact.identity:{};
+      const sourceEvent={
+        ...payload,
+        source_event_type:sourceType,
+        local_id:artifact.local_id||payload.local_id||artifact.event_id||`snapshot-artifact:${sceneStreamId}:${i}`,
+        event_id:artifact.event_id||null,
+        seq:artifact.seq??undefined,
+        status:artifact.status||undefined,
+        stream_id:artifact.stream_id||artifactIdentity.stream_id||sceneStreamId,
+        run_id:artifact.run_id||artifactIdentity.run_id||sceneRunId,
+        created_at:payload.created_at??artifact.created_at??undefined,
+      };
+      if(!applySnapshotEvent(sourceEvent)) return false;
     }
     _anchorRegistry._hydrated_activity_scene_key=sceneKey;
     return true;
@@ -5575,6 +5650,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
     });
 
+    source.addEventListener('artifact_reference',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ return; }
+      _applyToAnchor('artifact_reference',d,e,null,{render:false});
+    });
+
     // Phase 2: dedicated `todo_state` event carries a full snapshot of
     // the upstream TodoStore.  We treat it as the single source of truth
     // for the Todos panel — never merge, always replace.  The handler
@@ -6517,7 +6600,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','artifact_reference','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

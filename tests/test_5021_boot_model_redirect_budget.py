@@ -235,7 +235,19 @@ const redirectIfUnauthLine = extractSingleLineFunction(
   uiSrc,
   'function _redirectIfUnauth(res){'
 );
-const uiBlock = extractFunction(uiSrc, 'populateModelDropdown');
+const uiBlock = [
+  extractBlock(
+    uiSrc,
+    'function _currentBootSettingsDefaultOverride',
+    'function _applyBootSettingsDefaultOverrideToModelPayload'
+  ),
+  extractBlock(
+    uiSrc,
+    'function _applyBootSettingsDefaultOverrideToModelPayload',
+    '\n\n// ── Smart model resolver'
+  ),
+  extractFunction(uiSrc, 'populateModelDropdown'),
+].join('\n');
 
 eval(bootBlock.replace(
   '  const _bootActiveProfileUnauthRedirectBudget=(()=>{',

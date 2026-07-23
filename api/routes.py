@@ -61,6 +61,12 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.artifact_references import (
+    anchor_artifact_event_from_payload,
+    bound_anchor_activity_scene_artifacts,
+    bound_anchor_artifact_events,
+    merge_anchor_activity_scene,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3207,6 +3213,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    artifact_references: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3275,6 +3282,36 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call["activityBurstId"] = current_activity_burst_id
             call["activitySegmentSeq"] = current_activity_burst_id
         tool_calls.append(call)
+
+    def append_artifact_reference(event: dict, payload: dict) -> None:
+        nonlocal artifact_references
+        if not isinstance(payload, dict):
+            return
+        try:
+            event_seq = int(event.get("seq") or 0)
+        except (TypeError, ValueError):
+            event_seq = 0
+        event_id = (
+            _run_journal_snapshot_event_id_for_run(event, run_id, event_seq)
+            or str(event.get("event_id") or "").strip()
+            or None
+        )
+        artifact = anchor_artifact_event_from_payload(
+            payload,
+            session_id=session_id,
+            run_id=run_id,
+            stream_id=stream_id,
+            event_id=event_id,
+            seq=event_seq,
+            created_at=event.get("created_at"),
+            local_id=(
+                (f"artifact:{event_id}" if event_id else "")
+                or f"artifact:{stream_id}:{len(artifact_references) + 1}"
+            ),
+        )
+        if not artifact:
+            return
+        artifact_references = bound_anchor_artifact_events([*artifact_references, artifact])
 
     def reasoning_echo_tail_matches(text: str) -> bool:
         candidate = _compact_for_echo_compare(text)
@@ -3349,6 +3386,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name == "artifact_reference":
+            append_artifact_reference(event, payload)
+            fresh_segment = True
+            continue
 
     if assistant_text or reasoning_text:
         message = {
@@ -3719,6 +3761,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "artifacts": artifact_references,
+            "side_effects": [],
         },
     }
 
@@ -3790,7 +3834,7 @@ def _sanitize_anchor_activity_scene(scene):
         raise ValueError("scene.activity_rows must be a list")
     if len(rows) > _ANCHOR_ACTIVITY_SCENE_MAX_ROWS:
         raise ValueError("scene.activity_rows is too large")
-    scene_copy = copy.deepcopy(scene)
+    scene_copy = bound_anchor_activity_scene_artifacts(copy.deepcopy(scene))
     encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
@@ -4920,6 +4964,8 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
             continue
         next_message = dict(message)
         stream_id = record.get("stream_id")
+        scene_identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+        run_id = record.get("run_id") or scene_identity.get("run_id")
         next_message["_anchor_activity_scene"] = _complete_hydrated_anchor_scene(
             messages,
             scene,
@@ -4930,6 +4976,8 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
         )
         if stream_id:
             next_message["_anchor_stream_id"] = str(stream_id)
+        if run_id:
+            next_message["_anchor_run_id"] = str(run_id)
         out[local_idx] = next_message
     return out
 
@@ -4944,8 +4992,9 @@ def _handle_session_anchor_scene(handler, body):
         return bad(handler, "session_id is required", 400)
     message_index = _anchor_scene_message_index_from_request(body)
     message_ref = str(body.get("message_ref") or "")
+    raw_scene = body.get("scene")
     try:
-        scene = _sanitize_anchor_activity_scene(body.get("scene"))
+        scene = _sanitize_anchor_activity_scene(raw_scene)
     except ValueError as exc:
         return bad(handler, str(exc), 400)
     try:
@@ -4976,14 +5025,65 @@ def _handle_session_anchor_scene(handler, body):
                 scene["turn_duration"] = duration
         ref = _assistant_anchor_scene_message_ref(message)
         records = dict(_anchor_scene_records(s))
-        records[ref or f"index:{idx}"] = {
+        key = ref or f"index:{idx}"
+        existing_record = records.get(key) if isinstance(records.get(key), dict) else {}
+        existing_scene = existing_record.get("scene") if isinstance(existing_record.get("scene"), dict) else {}
+        existing_identity = existing_scene.get("identity") if isinstance(existing_scene.get("identity"), dict) else {}
+        existing_authoritative = str(existing_record.get("owner_authority") or "") == "server"
+        raw_artifacts = raw_scene.get("artifacts") if isinstance(raw_scene, dict) else None
+        incoming_has_artifacts = isinstance(raw_artifacts, list) and bool(raw_artifacts)
+        request_stream_id = str(body.get("stream_id") or "").strip()
+        message_stream_id = str(message.get("_anchor_stream_id") or "").strip() if isinstance(message, dict) else ""
+        message_run_id = str(message.get("_anchor_run_id") or "").strip() if isinstance(message, dict) else ""
+        existing_stream_id = (
+            str(existing_identity.get("stream_id") or existing_record.get("stream_id") or "").strip()
+            if existing_authoritative
+            else ""
+        )
+        existing_run_id = (
+            str(existing_identity.get("run_id") or existing_record.get("run_id") or "").strip()
+            if existing_authoritative
+            else ""
+        )
+        trusted_stream_id = message_stream_id or existing_stream_id
+        trusted_run_id = message_run_id or existing_run_id or (trusted_stream_id if trusted_stream_id else "")
+        if incoming_has_artifacts and (not trusted_run_id or not trusted_stream_id):
+            return bad(handler, "scene artifacts require server-owned stream identity", 400)
+        stream_id = trusted_stream_id or request_stream_id
+        run_id = trusted_run_id or (stream_id if stream_id else "")
+        if trusted_stream_id and request_stream_id and trusted_stream_id != request_stream_id:
+            return bad(handler, "scene.stream_id does not match assistant message", 400)
+        incoming_scene = copy.deepcopy(raw_scene) if isinstance(raw_scene, dict) else scene
+        try:
+            scene = merge_anchor_activity_scene(
+                existing_scene,
+                incoming_scene,
+                session_id=sid,
+                run_id=run_id,
+                stream_id=stream_id,
+                owner_session_id=sid,
+                owner_run_id=trusted_run_id,
+                owner_stream_id=trusted_stream_id,
+                require_owner_authority=True,
+                final_message_ref=ref,
+                turn_duration=_anchor_scene_message_turn_duration(message),
+                reject_owner_mismatch=True,
+            )
+            scene = _sanitize_anchor_activity_scene(scene)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        record = {
             "version": "anchor_activity_scene_record_v1",
             "message_index": idx,
             "message_ref": ref,
-            "stream_id": str(body.get("stream_id") or ""),
+            "run_id": run_id,
+            "stream_id": stream_id,
             "scene": scene,
             "updated_at": time.time(),
         }
+        if trusted_run_id and trusted_stream_id:
+            record["owner_authority"] = "server"
+        records[ref or f"index:{idx}"] = record
         if len(records) > 256:
             ordered = sorted(
                 records.items(),

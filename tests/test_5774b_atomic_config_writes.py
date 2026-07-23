@@ -84,6 +84,29 @@ def test_atomic_write_preserves_existing_permissions(tmp_path: Path) -> None:
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
 
 
+def test_atomic_write_preserves_special_mode_before_replace_publish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The published replacement inode must already carry special mode bits."""
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.chmod(target, 0o2664)
+    mode_at_publish: int | None = None
+    real_replace = os.replace
+
+    def _recording_replace(src, dst) -> None:
+        nonlocal mode_at_publish
+        real_replace(src, dst)
+        mode_at_publish = stat.S_IMODE(os.stat(dst).st_mode)
+
+    monkeypatch.setattr(os, "replace", _recording_replace)
+
+    _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert mode_at_publish == 0o2664
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
+
+
 @pytest.mark.skipif(
     not all(hasattr(os, name) for name in ("getxattr", "listxattr", "setxattr")),
     reason="extended attributes are unavailable on this platform",

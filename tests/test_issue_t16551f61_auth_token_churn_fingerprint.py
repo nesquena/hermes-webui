@@ -153,6 +153,7 @@ def test_token_churn_does_not_reject_valid_disk_models_cache(tmp_path, monkeypat
     shape = {
         "active_provider": "anthropic",
         "default_model": "claude-opus-4-7",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {"claude-opus-4-7": "Anthropic"},
         "groups": [{"name": "Anthropic", "models": ["claude-opus-4-7"]}],
     }
@@ -229,6 +230,7 @@ def test_real_change_rejects_previously_valid_disk_cache(tmp_path, monkeypatch):
     config._save_models_cache_to_disk({
         "active_provider": "anthropic",
         "default_model": "claude-opus-4-7",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {"claude-opus-4-7": "Anthropic"},
         "groups": [{"name": "Anthropic", "models": ["claude-opus-4-7"]}],
     })

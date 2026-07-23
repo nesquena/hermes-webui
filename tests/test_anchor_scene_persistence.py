@@ -3,6 +3,41 @@ from collections import OrderedDict
 from types import SimpleNamespace
 
 
+def _install_anchor_scene_store(tmp_path, monkeypatch, models, routes):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    return session_dir
+
+
+def _post_anchor_scene(monkeypatch, routes, request_body):
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: request_body)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload,
+            status=status,
+        ) or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: captured.update(error=msg, status=status) or True,
+    )
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    return captured
+
+
 def _client_anchor_scene_message_ref(message):
     content = message.get("content") if isinstance(message, dict) else ""
     if isinstance(content, list):
@@ -349,6 +384,679 @@ def test_anchor_scene_persistence_rejects_invalid_scene(tmp_path, monkeypatch):
     assert routes.handle_post(SimpleNamespace(command="POST"), SimpleNamespace(path="/api/session/anchor-scene")) is True
     assert captured["status"] == 400
     assert "activity_scene_v1" in captured["error"]
+
+
+def test_anchor_scene_persistence_trims_artifact_budget_instead_of_rejecting_scene(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import (
+        MAX_ANCHOR_ARTIFACT_BYTES,
+        MAX_ANCHOR_ARTIFACT_REFERENCES,
+        anchor_artifact_event_from_payload,
+    )
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    Session(
+        session_id="artifact-budget",
+            messages=[
+                {"role": "user", "content": "write many files"},
+                {
+                    "role": "assistant",
+                    "content": "done",
+                    "timestamp": 10,
+                    "_anchor_run_id": "stream-budget",
+                    "_anchor_stream_id": "stream-budget",
+                },
+            ],
+        ).save(skip_index=True)
+
+    artifacts = [
+        anchor_artifact_event_from_payload(
+            {
+                "kind": "workspace_file",
+                "path": f"reports/{idx:03d}-{'x' * 160}.md",
+                "source_tool": "write_file",
+                "tool_call_id": f"call-{idx:03d}",
+            },
+            session_id="artifact-budget",
+            run_id="stream-budget",
+            stream_id="stream-budget",
+            event_id=f"stream-budget:{idx + 1}",
+            seq=idx + 1,
+        )
+        for idx in range(160)
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+        "artifacts": artifacts,
+        "side_effects": [],
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "session_id": "artifact-budget",
+            "stream_id": "stream-budget",
+            "message_index": 1,
+            "scene": scene,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        ) or True,
+    )
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    assert captured["status"] == 200
+
+    raw = json.loads((session_dir / "artifact-budget.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    sanitized = record["scene"]
+    encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    assert sanitized["activity_rows"] == [{"row_id": "tool-1", "role": "tool"}]
+    assert 0 < len(sanitized["artifacts"]) <= MAX_ANCHOR_ARTIFACT_REFERENCES
+    artifact_bytes = len(
+        json.dumps(
+            sanitized["artifacts"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    assert artifact_bytes <= MAX_ANCHOR_ARTIFACT_BYTES
+    assert len(encoded) < routes._ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+    assert sanitized["artifacts"][0]["payload"]["path"].startswith("reports/000-")
+
+
+def test_anchor_scene_persistence_rejects_explicit_foreign_artifact_owner(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    Session(
+        session_id="artifact-foreign-post",
+        messages=[
+            {"role": "user", "content": "write a file"},
+            {
+                "role": "assistant",
+                "content": "cancelled",
+                "timestamp": 10,
+                "_anchor_stream_id": "stream-good",
+            },
+        ],
+    ).save(skip_index=True)
+
+    foreign = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/foreign.md",
+            "source_tool": "write_file",
+            "tool_call_id": "call-foreign",
+        },
+        session_id="artifact-foreign-post",
+        run_id="stream-good",
+        stream_id="stream-foreign",
+        event_id="stream-foreign:1",
+        seq=1,
+    )
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+        "artifacts": [foreign],
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "session_id": "artifact-foreign-post",
+            "stream_id": "stream-good",
+            "message_index": 1,
+            "scene": scene,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: captured.update(error=msg, status=status) or True,
+    )
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    assert captured["status"] == 400
+    assert "artifact.stream_id" in captured["error"]
+
+    raw = json.loads((session_dir / "artifact-foreign-post.json").read_text(encoding="utf-8"))
+    assert not raw.get("anchor_activity_scenes")
+
+
+def test_anchor_scene_persistence_rejects_raw_foreign_owner_claim_forms(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    cases = [
+        (
+            "top_session",
+            {
+                "session_id": "foreign-session",
+                "run_id": "stream-good",
+                "stream_id": "stream-good",
+                "payload": {"kind": "workspace_file", "path": "reports/top-session.md"},
+            },
+            "artifact.session_id",
+        ),
+        (
+            "nested_run",
+            {
+                "identity": {
+                    "session_id": "artifact-claim-nested_run",
+                    "run_id": "run-foreign",
+                    "stream_id": "stream-good",
+                },
+                "payload": {"kind": "workspace_file", "path": "reports/nested-run.md"},
+            },
+            "artifact.run_id",
+        ),
+        (
+            "conflicting_stream",
+            {
+                "session_id": "artifact-claim-conflicting_stream",
+                "run_id": "stream-good",
+                "stream_id": "stream-good",
+                "identity": {
+                    "session_id": "artifact-claim-conflicting_stream",
+                    "run_id": "stream-good",
+                    "stream_id": "stream-foreign",
+                },
+                "payload": {"kind": "workspace_file", "path": "reports/conflicting-stream.md"},
+            },
+            "artifact.stream_id",
+        ),
+        (
+            "top_run_whitespace",
+            {
+                "session_id": "artifact-claim-top_run_whitespace",
+                "run_id": " stream-good ",
+                "stream_id": "stream-good",
+                "payload": {"kind": "workspace_file", "path": "reports/top-run-space.md"},
+            },
+            "artifact.run_id",
+        ),
+        (
+            "nested_stream_overlimit",
+            {
+                "session_id": "artifact-claim-nested_stream_overlimit",
+                "run_id": "stream-good",
+                "stream_id": "stream-good",
+                "identity": {
+                    "session_id": "artifact-claim-nested_stream_overlimit",
+                    "run_id": "stream-good",
+                    "stream_id": "s" * 513,
+                },
+                "payload": {"kind": "workspace_file", "path": "reports/nested-stream-long.md"},
+            },
+            "artifact.stream_id",
+        ),
+    ]
+    for suffix, artifact, expected_error in cases:
+        session_dir = _install_anchor_scene_store(tmp_path / suffix, monkeypatch, models, routes)
+        sid = f"artifact-claim-{suffix}"
+        Session(
+            session_id=sid,
+            messages=[
+                {"role": "user", "content": "write a file"},
+                {
+                    "role": "assistant",
+                    "content": "done",
+                    "timestamp": 10,
+                    "_anchor_stream_id": "stream-good",
+                    "_anchor_run_id": "stream-good",
+                },
+            ],
+        ).save(skip_index=True)
+        scene = {
+            "version": "activity_scene_v1",
+            "mode": "compact_worklog",
+            "activity_rows": [],
+            "artifacts": [artifact],
+        }
+
+        captured = _post_anchor_scene(
+            monkeypatch,
+            routes,
+            {
+                "session_id": sid,
+                "stream_id": "stream-good",
+                "message_index": 1,
+                "scene": scene,
+            },
+        )
+
+        assert captured["status"] == 400
+        assert expected_error in captured["error"]
+        raw = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+        assert not raw.get("anchor_activity_scenes")
+
+
+def test_anchor_scene_persistence_rejects_ownerless_artifact_authority_bootstrap(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = _install_anchor_scene_store(tmp_path, monkeypatch, models, routes)
+    sid = "artifact-ownerless-bootstrap"
+    Session(
+        session_id=sid,
+        messages=[
+            {"role": "user", "content": "write a file"},
+            {"role": "assistant", "content": "done", "timestamp": 10},
+        ],
+    ).save(skip_index=True)
+
+    captured = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "client-stream",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "identity": {
+                    "session_id": sid,
+                    "run_id": "client-run",
+                    "stream_id": "client-stream",
+                },
+                "activity_rows": [],
+                "artifacts": [{
+                    "payload": {
+                        "kind": "workspace_file",
+                        "path": "reports/ownerless.md",
+                        "source_tool": "write_file",
+                    },
+                }],
+            },
+        },
+    )
+
+    assert captured["status"] == 400
+    assert "server-owned stream identity" in captured["error"]
+    raw = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert not raw.get("anchor_activity_scenes")
+
+    scene_only = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "client-stream",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "identity": {
+                    "session_id": sid,
+                    "run_id": "client-run",
+                    "stream_id": "client-stream",
+                },
+                "activity_rows": [{"row_id": "browser-row", "role": "tool"}],
+                "artifacts": [],
+            },
+        },
+    )
+    assert scene_only["status"] == 200
+
+    explicit_artifact = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/explicit-after-scene-only.md",
+            "source_tool": "write_file",
+        },
+        session_id=sid,
+        run_id="client-run",
+        stream_id="client-stream",
+        event_id="client-run:1",
+        seq=1,
+    )
+    captured = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "client-stream",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "activity_rows": [],
+                "artifacts": [explicit_artifact],
+            },
+        },
+    )
+
+    assert captured["status"] == 400
+    assert "server-owned stream identity" in captured["error"]
+    raw = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    assert record.get("owner_authority") is None
+    assert record["scene"]["artifacts"] == []
+
+
+def test_anchor_scene_persistence_rejects_malformed_parent_owner_with_artifact(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir = _install_anchor_scene_store(tmp_path, monkeypatch, models, routes)
+    sid = "artifact-parent-malformed-owner"
+    Session(
+        session_id=sid,
+        messages=[
+            {"role": "user", "content": "write a file"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "timestamp": 10,
+                "_anchor_run_id": "run-good",
+                "_anchor_stream_id": "stream-good",
+            },
+        ],
+    ).save(skip_index=True)
+
+    captured = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "stream-good",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "identity": {
+                    "session_id": sid,
+                    "run_id": " run-good ",
+                    "stream_id": "stream-good",
+                },
+                "activity_rows": [],
+                "artifacts": [{
+                    "payload": {
+                        "kind": "workspace_file",
+                        "path": "reports/parent-malformed.md",
+                        "source_tool": "write_file",
+                    },
+                }],
+            },
+        },
+    )
+
+    assert captured["status"] == 400
+    assert "identity.run_id" in captured["error"]
+    raw = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert not raw.get("anchor_activity_scenes")
+
+
+def test_anchor_scene_persistence_rejects_explicit_artifact_without_server_owner(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = _install_anchor_scene_store(tmp_path, monkeypatch, models, routes)
+    sid = "artifact-unowned-post"
+    Session(
+        session_id=sid,
+        messages=[
+            {"role": "user", "content": "write a file"},
+            {"role": "assistant", "content": "done", "timestamp": 10},
+        ],
+    ).save(skip_index=True)
+    artifact = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/claimed-without-owner.md",
+            "source_tool": "write_file",
+        },
+        session_id=sid,
+        run_id="request-claim",
+        stream_id="request-claim",
+        event_id="request-claim:1",
+        seq=1,
+    )
+
+    captured = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "request-claim",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "activity_rows": [],
+                "artifacts": [artifact],
+            },
+        },
+    )
+
+    assert captured["status"] == 400
+    assert "server-owned stream identity" in captured["error"]
+    raw = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert not raw.get("anchor_activity_scenes")
+
+
+def test_anchor_scene_persistence_accepts_stable_run_rotated_stream_once(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = _install_anchor_scene_store(tmp_path, monkeypatch, models, routes)
+    sid = "artifact-stable-run-post"
+    Session(
+        session_id=sid,
+        messages=[
+            {"role": "user", "content": "write a file"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "timestamp": 10,
+                "_anchor_run_id": "run-stable",
+                "_anchor_stream_id": "transport-new",
+            },
+        ],
+    ).save(skip_index=True)
+    old_transport_artifact = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/rotated-stream.md",
+            "source_tool": "write_file",
+        },
+        session_id=sid,
+        run_id="run-stable",
+        stream_id="transport-old",
+        event_id="run-stable:3",
+        seq=3,
+    )
+
+    captured = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "transport-new",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "activity_rows": [],
+                "artifacts": [old_transport_artifact, old_transport_artifact],
+            },
+        },
+    )
+
+    assert captured["status"] == 200
+    raw = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    scene = record["scene"]
+    assert record["run_id"] == "run-stable"
+    assert record["stream_id"] == "transport-new"
+    assert scene["identity"]["run_id"] == "run-stable"
+    assert scene["identity"]["stream_id"] == "transport-new"
+    assert len(scene["artifacts"]) == 1
+    assert scene["artifacts"][0]["stream_id"] == "transport-old"
+    assert scene["artifacts"][0]["payload"]["path"] == "reports/rotated-stream.md"
+
+    foreign_run_artifact = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/foreign-run.md",
+            "source_tool": "write_file",
+        },
+        session_id=sid,
+        run_id="run-foreign",
+        stream_id="transport-old",
+        event_id="run-foreign:1",
+        seq=1,
+    )
+    captured = _post_anchor_scene(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "stream_id": "transport-new",
+            "message_index": 1,
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "activity_rows": [],
+                "artifacts": [foreign_run_artifact],
+            },
+        },
+    )
+
+    assert captured["status"] == 400
+    assert "artifact.run_id" in captured["error"]
+
+
+def test_anchor_scene_persistence_merges_browser_post_after_worker_settlement(tmp_path, monkeypatch):
+    from api import models, routes, streaming
+    from api.artifact_references import anchor_artifact_event_from_payload
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="artifact-post-after-worker",
+        messages=[
+            {"role": "user", "content": "write then cancel"},
+            {"role": "assistant", "content": "Task cancelled.", "timestamp": 10},
+        ],
+    )
+    event = anchor_artifact_event_from_payload(
+        {
+            "kind": "workspace_file",
+            "path": "reports/late-worker.md",
+            "source_tool": "write_file",
+            "tool_call_id": "call-late",
+        },
+        session_id=session.session_id,
+        run_id="stream-late",
+        stream_id="stream-late",
+        event_id="stream-late:2",
+        seq=2,
+    )
+    assert streaming._reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        "stream-late",
+        [event],
+        terminal_state="cancelled",
+        message_index=1,
+    )
+    session.save(skip_index=True)
+
+    stale_browser_scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {
+            "session_id": session.session_id,
+            "run_id": "stream-late",
+            "stream_id": "stream-late",
+        },
+        "activity_rows": [{"row_id": "browser-tool", "role": "tool", "tool_call_id": "call-late"}],
+        "artifacts": [],
+        "side_effects": [{"kind": "browser-row"}],
+    }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "session_id": session.session_id,
+            "stream_id": "stream-late",
+            "message_index": 1,
+            "scene": stale_browser_scene,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        ) or True,
+    )
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/session/anchor-scene"),
+    ) is True
+    assert captured["status"] == 200
+
+    raw = json.loads((session_dir / "artifact-post-after-worker.json").read_text(encoding="utf-8"))
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    scene = record["scene"]
+    assert scene["activity_rows"] == stale_browser_scene["activity_rows"]
+    assert scene["side_effects"] == stale_browser_scene["side_effects"]
+    assert scene["terminal_state"] == "cancelled"
+    assert scene["artifacts"][0]["payload"]["path"] == "reports/late-worker.md"
 
 
 def test_anchor_scene_persistence_prefers_unique_ref_over_stale_index(tmp_path, monkeypatch):

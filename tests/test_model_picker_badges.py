@@ -56,7 +56,7 @@ def test_duplicate_slash_id_primary_badge_sticks_to_matching_provider_only():
 
     root = Path(__file__).resolve().parent.parent
     src = (root / "api" / "config.py").read_text(encoding="utf-8")
-    start = src.index("def _build_configured_model_badges() -> dict[str, dict[str, str]]:")
+    start = src.index("        def _build_configured_model_badges(")
     end = src.index("            return badges", start) + len("            return badges")
     fn_src = textwrap.dedent(src[start:end])
 
@@ -80,7 +80,9 @@ def test_duplicate_slash_id_primary_badge_sticks_to_matching_provider_only():
     )
     exec(fn_src, scope)
 
-    badges = scope["_build_configured_model_badges"]()
+    badges = scope["_build_configured_model_badges"](
+        default_model_has_explicit_source=True,
+    )
     assert badges.get("@custom:beta:google/gemma-4-27b", {}).get("role") == "primary"
     assert "google/gemma-4-27b" not in badges, (
         "When duplicate slash-qualified IDs are deduplicated across providers, "

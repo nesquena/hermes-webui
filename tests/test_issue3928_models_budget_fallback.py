@@ -117,6 +117,7 @@ def _build_stale_disk_cache_payload() -> dict:
     return {
         "active_provider": "ollama-cloud",
         "default_model": "ollama-cloud/chat-1",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {
             "ollama-cloud/chat-1": {
                 "role": "primary",
@@ -195,6 +196,7 @@ def test_budget_exceeded_foreground_uses_richer_static_catalog_and_refreshes_out
     live_result = {
         "active_provider": "openrouter",
         "default_model": "openrouter/google/gemini-2.5-pro",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {},
         "groups": [
             {
@@ -257,6 +259,7 @@ def test_budget_exceeded_uses_shape_only_stale_cache_before_static_fallback(
     live_result = {
         "active_provider": "openrouter",
         "default_model": "openrouter/google/gemini-2.5-pro",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {},
         "groups": [
             {
@@ -330,6 +333,7 @@ def test_budget_exceeded_fallback_uses_static_when_stale_disk_cache_invalid(
     live_result = {
         "active_provider": "openrouter",
         "default_model": "openrouter/google/gemini-2.5-pro",
+        "default_model_has_explicit_source": True,
         "configured_model_badges": {},
         "groups": [
             {

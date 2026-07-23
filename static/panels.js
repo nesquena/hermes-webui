@@ -6578,6 +6578,36 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
+function _advanceBootSettingsDefaultModelStateForProfileSwitch(data,gen){
+  const model=String(data&&data.default_model||'').trim();
+  if(!model){
+    window._bootSettingsDefaultModelState=null;
+    return;
+  }
+  window._bootSettingsDefaultModelState={
+    model,
+    model_provider:data&&data.default_model_provider?String(data.default_model_provider):null,
+    default_model_has_explicit_source:true,
+    profile:String(data&&data.active||S.activeProfile||'default').trim()||'default',
+    profile_switch_generation:gen,
+  };
+}
+
+function _applyAcceptedProfileSwitchModelCatalog(data,gen){
+  const profileSwitchModelAuthority=typeof _resetModelCatalogSurfacesForProfileSwitch==='function'
+    ? _resetModelCatalogSurfacesForProfileSwitch(data,gen)
+    : null;
+  if(!profileSwitchModelAuthority){
+    if(typeof _invalidateModelCatalogContext==='function') _invalidateModelCatalogContext();
+    if(data&&data.default_model) window._defaultModel=data.default_model;
+    if(data&&data.default_model_provider) window._activeProvider=data.default_model_provider;
+  }
+  if(typeof _advanceBootSettingsDefaultModelStateForProfileSwitch==='function'){
+    _advanceBootSettingsDefaultModelStateForProfileSwitch(data,gen);
+  }
+  return profileSwitchModelAuthority;
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
@@ -7008,8 +7038,12 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    if (typeof _invalidateModelCatalogContext === 'function') _invalidateModelCatalogContext();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    const _profileSwitchModelAuthority = typeof _applyAcceptedProfileSwitchModelCatalog === 'function'
+      ? _applyAcceptedProfileSwitchModelCatalog(data,_switchGen)
+      : null;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7046,28 +7080,34 @@ async function switchToProfile(name) {
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    if (!_profileSwitchModelAuthority) {
+      if (data.default_model) window._defaultModel = data.default_model;
+      if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    }
 
     // ── Apply model ────────────────────────────────────────────────────────
-    if (data.default_model) {
+    const _switchDefaultModel = (_profileSwitchModelAuthority&&_profileSwitchModelAuthority.model)||String(data.default_model||'').trim();
+    if (_switchDefaultModel) {
       const sel = $('modelSelect');
-      const providerId = data.default_model_provider || window._activeProvider || null;
-      const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === data.default_model) : null;
-      if (existingDefaultOpt && providerId && !existingDefaultOpt.dataset.provider) {
-        existingDefaultOpt.dataset.provider = providerId;
+      const providerId = (_profileSwitchModelAuthority&&_profileSwitchModelAuthority.model_provider)||data.default_model_provider || window._activeProvider || null;
+      let modelToUse = (_profileSwitchModelAuthority&&_profileSwitchModelAuthority.applied_model)||'';
+      if (!modelToUse) {
+        const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === _switchDefaultModel) : null;
+        if (existingDefaultOpt && providerId && !existingDefaultOpt.dataset.provider) {
+          existingDefaultOpt.dataset.provider = providerId;
+        }
+        if (sel && !existingDefaultOpt) {
+          const opt = document.createElement('option');
+          opt.value = _switchDefaultModel;
+          opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(_switchDefaultModel) : _switchDefaultModel;
+          opt.dataset.custom = '1';
+          if (providerId) opt.dataset.provider = providerId;
+          sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+          sel.appendChild(opt);
+        }
+        const resolved = _applyModelToDropdown(_switchDefaultModel, sel, providerId);
+        modelToUse = resolved || _switchDefaultModel;
       }
-      if (sel && !existingDefaultOpt) {
-        const opt = document.createElement('option');
-        opt.value = data.default_model;
-        opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(data.default_model) : data.default_model;
-        opt.dataset.custom = '1';
-        if (providerId) opt.dataset.provider = providerId;
-        sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
-        sel.appendChild(opt);
-      }
-      const resolved = _applyModelToDropdown(data.default_model, sel, providerId);
-      const modelToUse = resolved || data.default_model;
       const modelState = (typeof _modelStateForSelect==='function')
         ? _modelStateForSelect(sel, modelToUse)
         : {model:modelToUse,model_provider:providerId};
@@ -9103,7 +9143,16 @@ async function loadSettingsPanel(){
       modelSel.innerHTML='';
       let models=null;
       try{
+        const modelCatalogContext=typeof _modelCatalogContextSnapshot==='function'
+          ? _modelCatalogContextSnapshot()
+          : null;
         models=await api('/api/models');
+        const modelsStillCurrent=!modelCatalogContext
+          || typeof _modelCatalogContextStillCurrent!=='function'
+          || _modelCatalogContextStillCurrent(modelCatalogContext);
+        if(!modelsStillCurrent){
+          models=null;
+        }
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
@@ -9122,8 +9171,8 @@ async function loadSettingsPanel(){
         }
         // Append live-fetched models for the active provider, same as the
         // chat-header dropdown does via _fetchLiveModels() (#872).
-        if(models.active_provider && typeof _fetchLiveModels==='function'){
-          _fetchLiveModels(models.active_provider, modelSel);
+        if(models&&models.active_provider && typeof _fetchLiveModels==='function'){
+          _fetchLiveModels(models.active_provider, modelSel, null, modelCatalogContext);
         }
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';

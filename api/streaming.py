@@ -50,8 +50,14 @@ from api.config import (
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
+from api.artifact_references import (
+    anchor_artifact_event_from_payload,
+    bound_anchor_artifact_events,
+    derive_file_artifact_references,
+    merge_anchor_activity_scene,
+)
 from api.metering import meter
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, _parse_run_journal_event_id
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -1515,29 +1521,41 @@ def _mark_latest_assistant_tool_limit_status(messages) -> bool:
     return False
 
 
-def _session_has_cancel_marker(session) -> bool:
-    """Return True if a visible cancel/interrupted marker is already persisted."""
-    for msg in reversed(getattr(session, 'messages', None) or []):
+def _assistant_message_plain_text(message) -> str:
+    if not isinstance(message, dict):
+        return ''
+    content = message.get('content')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get('text') or part.get('content') or ''))
+            else:
+                parts.append(str(part or ''))
+        return '\n'.join(parts)
+    return str(content or '')
+
+
+def _latest_cancel_marker_index(messages) -> int | None:
+    for idx in range(len(messages or []) - 1, -1, -1):
+        msg = messages[idx]
         if not isinstance(msg, dict):
             continue
         if msg.get('role') == 'user':
-            return False
+            return None
         if msg.get('role') != 'assistant':
             continue
-        content = msg.get('content')
-        text = ''
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict):
-                    parts.append(str(part.get('text') or part.get('content') or ''))
-            text = '\n'.join(parts)
-        normalized = text.strip().lower()
+        normalized = _assistant_message_plain_text(msg).strip().lower()
         if any(pattern in normalized for pattern in _CANCEL_MARKER_PATTERNS):
-            return True
-    return False
+            return idx
+    return None
+
+
+def _session_has_cancel_marker(session) -> bool:
+    """Return True if a visible cancel/interrupted marker is already persisted."""
+    return _latest_cancel_marker_index(getattr(session, 'messages', None) or []) is not None
 
 
 def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | None = None) -> str:
@@ -1551,7 +1569,38 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+def _stamp_anchor_stream_owner(message, stream_id: str | None, terminal_state: str | None) -> bool:
+    if not isinstance(message, dict) or not stream_id:
+        return False
+    stream_id = str(stream_id or '').strip()
+    owner = str(message.get('_anchor_stream_id') or '').strip()
+    if owner and owner != stream_id:
+        return False
+    message['_anchor_stream_id'] = stream_id
+    if terminal_state:
+        message['_anchor_terminal_state'] = str(terminal_state)
+    return True
+
+
+def _stamp_anchor_run_owner(message, run_id: str | None) -> None:
+    if not isinstance(message, dict):
+        return
+    run_id = str(run_id or '').strip()
+    if run_id:
+        message['_anchor_run_id'] = run_id
+
+
+def _stamp_latest_cancel_marker_for_stream(session, stream_id: str | None) -> bool:
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        return False
+    idx = _latest_cancel_marker_index(messages)
+    if idx is None:
+        return False
+    return _stamp_anchor_stream_owner(messages[idx], stream_id, 'cancelled')
+
+
+def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.', stream_id: str | None = None) -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
     cancel_stream() usually writes this marker first, but the streaming thread can
@@ -1566,14 +1615,18 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_user_source = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
-        session.messages.append({
+        marker = {
             'role': 'assistant',
             'content': _cancelled_turn_content(message, agent_name),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
-        })
+        }
+        _stamp_anchor_stream_owner(marker, stream_id, 'cancelled')
+        session.messages.append(marker)
+    else:
+        _stamp_latest_cancel_marker_for_stream(session, stream_id)
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -1590,12 +1643,172 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
 
-def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
+def _message_ref_for_anchor_scene(message) -> str:
+    try:
+        from api.routes import _assistant_anchor_scene_message_ref
+
+        return _assistant_anchor_scene_message_ref(message)
+    except Exception:
+        logger.debug("Failed to compute anchor scene message ref", exc_info=True)
+        return ""
+
+
+def _message_turn_duration(message):
+    if not isinstance(message, dict):
+        return None
+    for key in ('_turnDuration', 'turn_duration', 'duration_seconds'):
+        value = message.get(key)
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if duration >= 0:
+            return duration
+    return None
+
+
+def _reconcile_stream_artifacts_into_terminal_anchor_scene(
+    session,
+    stream_id: str | None,
+    artifact_events,
+    *,
+    terminal_state: str,
+    message_index: int | None = None,
+    run_id: str | None = None,
+) -> bool:
+    """Persist run-owned artifact outcomes on the terminal assistant message."""
+    stream_id = str(stream_id or '').strip()
+    if not stream_id:
+        return False
+    run_id = str(run_id or stream_id or '').strip()
+    try:
+        artifacts = bound_anchor_artifact_events(
+            list(artifact_events or []),
+            session_id=getattr(session, 'session_id', None),
+            stream_id=stream_id,
+            run_id=run_id,
+            reject_owner_mismatch=True,
+        )
+    except ValueError:
+        logger.debug("Rejected foreign-owned anchor artifact during terminal reconciliation", exc_info=True)
+        return False
+    if not artifacts:
+        return False
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        return False
+    idx = None
+    if message_index is not None:
+        try:
+            candidate_idx = int(message_index)
+        except (TypeError, ValueError):
+            candidate_idx = None
+        if candidate_idx is not None and 0 <= candidate_idx < len(messages):
+            candidate = messages[candidate_idx]
+            owner = str(candidate.get('_anchor_stream_id') or '').strip() if isinstance(candidate, dict) else ''
+            if isinstance(candidate, dict) and candidate.get('role') == 'assistant' and owner in ('', stream_id):
+                idx = candidate_idx
+    if idx is None:
+        for candidate_idx in range(len(messages) - 1, -1, -1):
+            candidate = messages[candidate_idx]
+            if (
+                isinstance(candidate, dict)
+                and candidate.get('role') == 'assistant'
+                and str(candidate.get('_anchor_stream_id') or '').strip() == stream_id
+            ):
+                idx = candidate_idx
+                break
+    if idx is None:
+        return False
+    message = messages[idx]
+    if not _stamp_anchor_stream_owner(message, stream_id, terminal_state):
+        return False
+    _stamp_anchor_run_owner(message, run_id)
+    ref = _message_ref_for_anchor_scene(message)
+    key = ref or f"index:{idx}"
+    records = dict(getattr(session, 'anchor_activity_scenes', None) or {})
+    record = records.get(key) if isinstance(records.get(key), dict) else {}
+    existing_scene = record.get('scene') if isinstance(record.get('scene'), dict) else {}
+    final_answer = existing_scene.get('final_answer')
+    if not isinstance(final_answer, str):
+        final_answer = _assistant_message_plain_text(message)
+    duration = _message_turn_duration(message)
+    incoming_scene = {
+        'version': 'activity_scene_v1',
+        'mode': 'compact_worklog',
+        'identity': {
+            'session_id': getattr(session, 'session_id', None),
+            'run_id': run_id,
+            'stream_id': stream_id,
+            'source_message_refs': [ref] if ref else [],
+        },
+        'lifecycle': {
+            'status': terminal_state,
+            'terminal_state': terminal_state,
+        },
+        'final_answer': final_answer,
+        'final_message_ref': ref,
+        'terminal_state': terminal_state,
+        'artifacts': artifacts,
+    }
+    try:
+        scene = merge_anchor_activity_scene(
+            existing_scene,
+            incoming_scene,
+            session_id=getattr(session, 'session_id', None),
+            run_id=run_id,
+            stream_id=stream_id,
+            owner_run_id=run_id,
+            owner_stream_id=stream_id,
+            terminal_state=terminal_state,
+            final_answer=final_answer,
+            final_message_ref=ref,
+            turn_duration=duration,
+            reject_owner_mismatch=True,
+        )
+    except ValueError:
+        logger.debug("Rejected foreign-owned anchor scene during terminal reconciliation", exc_info=True)
+        return False
+    records[key] = {
+        'version': 'anchor_activity_scene_record_v1',
+        'message_index': idx,
+        'message_ref': ref,
+        'run_id': run_id,
+        'stream_id': stream_id,
+        'scene': scene,
+        'updated_at': time.time(),
+    }
+    if len(records) > 256:
+        ordered = sorted(
+            records.items(),
+            key=lambda item: float((item[1] or {}).get('updated_at') or 0),
+        )
+        records = dict(ordered[-256:])
+    session.anchor_activity_scenes = records
+    return True
+
+
+def _finalize_cancelled_turn(
+    session,
+    *,
+    ephemeral: bool = False,
+    message: str = 'Task cancelled.',
+    stream_id: str | None = None,
+    run_id: str | None = None,
+    artifact_events=None,
+) -> None:
     """Finalize a cancelled turn for persistent or ephemeral sessions."""
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return
-    _persist_cancelled_turn(session, message=message)
+    _persist_cancelled_turn(session, message=message, stream_id=stream_id)
+    _reconcile_stream_artifacts_into_terminal_anchor_scene(
+        session,
+        stream_id,
+        artifact_events or [],
+        terminal_state='cancelled',
+        run_id=run_id,
+    )
     try:
         session.save()
     except Exception:
@@ -6123,7 +6336,6 @@ _TOOL_ARG_CONTENT_KEYS = frozenset({
 })
 _TOOL_ARG_CONTENT_CAP = _TOOL_RESULT_SNIPPET_MAX
 
-
 _LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
 _LIVE_TOOL_PROMPT_TURN_MAX = 24_000
 
@@ -7469,11 +7681,63 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _anchor_artifact_events: list[dict] = []
+    _anchor_run_id = [stream_id]
+
+    def _anchor_artifact_event_from_reference(artifact_reference, event_id=None, *, reserve_event_id=False):
+        event_run_id, event_seq = _parse_run_journal_event_id(event_id)
+        if event_run_id:
+            _anchor_run_id[0] = event_run_id
+        if event_seq is None:
+            event_seq = len(_anchor_artifact_events) + 1
+        active_run_id = event_run_id or _anchor_run_id[0] or stream_id
+        anchor_event_id = event_id
+        if reserve_event_id and not anchor_event_id:
+            suffix = f":{event_seq}"
+            anchor_event_id = ("x" * max(0, 512 - len(suffix))) + suffix
+        return anchor_artifact_event_from_payload(
+            artifact_reference,
+            session_id=session_id,
+            run_id=active_run_id,
+            stream_id=stream_id,
+            event_id=anchor_event_id,
+            seq=event_seq,
+            created_at=time.time(),
+        )
+
+    def _anchor_artifact_reference_within_stream_budget(artifact_reference):
+        event = _anchor_artifact_event_from_reference(
+            artifact_reference,
+            reserve_event_id=True,
+        )
+        if not event:
+            return False
+        bounded = bound_anchor_artifact_events(
+            [*_anchor_artifact_events, event],
+            session_id=session_id,
+            run_id=event.get('run_id') or _anchor_run_id[0] or stream_id,
+            stream_id=stream_id,
+        )
+        return any(item.get('event_id') == event.get('event_id') for item in bounded)
+
+    def _record_anchor_artifact_reference(artifact_reference, event_id=None):
+        event = _anchor_artifact_event_from_reference(artifact_reference, event_id)
+        if not event:
+            return
+        _anchor_artifact_events[:] = bound_anchor_artifact_events(
+            [*_anchor_artifact_events, event],
+            session_id=session_id,
+            run_id=event.get('run_id') or _anchor_run_id[0] or stream_id,
+            stream_id=stream_id,
+        )
 
     def put(event, data):
-        # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'error'):
-            return
+        # After cancellation, preserve only terminal events and proven file
+        # artifacts. A tool may finish its on-disk write just after the cancel
+        # flag is set; journaling that reference keeps the real side effect
+        # recoverable without reopening the rest of the live event stream.
+        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'error', 'artifact_reference'):
+            return None
         event_id = None
         if run_journal is not None:
             try:
@@ -7498,6 +7762,7 @@ def _run_agent_streaming(
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
+        return event_id
 
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
@@ -7611,7 +7876,14 @@ def _run_agent_streaming(
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
             with _agent_lock:
-                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
+                _finalize_cancelled_turn(
+                    s,
+                    ephemeral=ephemeral,
+                    message='Task cancelled before start.',
+                    stream_id=stream_id,
+                    run_id=_anchor_run_id[0],
+                    artifact_events=_anchor_artifact_events,
+                )
             put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
@@ -8249,6 +8521,11 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    mutation_result = (
+                        cb_kwargs.get('result')
+                        if cb_kwargs.get('result') is not None
+                        else preview
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -8278,6 +8555,20 @@ def _run_agent_streaming(
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
                     })
+                    try:
+                        artifact_references = derive_file_artifact_references(
+                            name,
+                            args,
+                            mutation_result,
+                            s.workspace,
+                        )
+                        for artifact_reference in artifact_references:
+                            if not _anchor_artifact_reference_within_stream_budget(artifact_reference):
+                                break
+                            artifact_event_id = put('artifact_reference', artifact_reference)
+                            _record_anchor_artifact_reference(artifact_reference, artifact_event_id)
+                    except Exception:
+                        logger.debug('Failed to derive live artifact references', exc_info=True)
                     # Mirror the todo tool's in-memory state into a
                     # dedicated SSE event so the Todos panel can update
                     # in real-time without waiting for the turn to
@@ -8376,6 +8667,21 @@ def _run_agent_streaming(
                             'tid': tool_call_id,
                             'is_error': False,
                         })
+                        try:
+                            artifact_references = derive_file_artifact_references(
+                                name,
+                                args,
+                                function_result,
+                                s.workspace,
+                                tool_call_id=tool_call_id,
+                            )
+                            for artifact_reference in artifact_references:
+                                if not _anchor_artifact_reference_within_stream_budget(artifact_reference):
+                                    break
+                                artifact_event_id = put('artifact_reference', artifact_reference)
+                                _record_anchor_artifact_reference(artifact_reference, artifact_event_id)
+                        except Exception:
+                            logger.debug('Failed to derive live artifact references', exc_info=True)
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
                         # update in real-time without waiting for the
@@ -8893,7 +9199,14 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=ephemeral,
+                            message='Task cancelled before start.',
+                            stream_id=stream_id,
+                            run_id=_anchor_run_id[0],
+                            artifact_events=_anchor_artifact_events,
+                        )
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
@@ -9084,7 +9397,13 @@ def _run_agent_streaming(
                     _cleanup_ephemeral_cancelled_turn(s)
                 else:
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=False,
+                            stream_id=stream_id,
+                            run_id=_anchor_run_id[0],
+                            artifact_events=_anchor_artifact_events,
+                        )
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -9126,7 +9445,13 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
                 with _agent_lock:
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=False,
+                        stream_id=stream_id,
+                        run_id=_anchor_run_id[0],
+                        artifact_events=_anchor_artifact_events,
+                    )
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -9185,7 +9510,13 @@ def _run_agent_streaming(
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=False,
+                            stream_id=stream_id,
+                            run_id=_anchor_run_id[0],
+                            artifact_events=_anchor_artifact_events,
+                        )
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -9446,7 +9777,13 @@ def _run_agent_streaming(
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=ephemeral,
+                            stream_id=stream_id,
+                            run_id=_anchor_run_id[0],
+                            artifact_events=_anchor_artifact_events,
+                        )
                         if not ephemeral:
                             try:
                                 append_turn_journal_event_for_stream(
@@ -9682,6 +10019,14 @@ def _run_agent_streaming(
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
+                        _reconcile_stream_artifacts_into_terminal_anchor_scene(
+                            s,
+                            stream_id,
+                            _anchor_artifact_events,
+                            terminal_state=_err_type or 'error',
+                            message_index=len(s.messages) - 1,
+                            run_id=_anchor_run_id[0],
+                        )
                         try:
                             s.save()
                         except Exception:
@@ -10102,6 +10447,15 @@ def _run_agent_streaming(
                     )
                     if _latest_assistant_idx is not None:
                         _latest_assistant = s.messages[_latest_assistant_idx]
+                        if not cancel_event.is_set():
+                            _reconcile_stream_artifacts_into_terminal_anchor_scene(
+                                s,
+                                stream_id,
+                                _anchor_artifact_events,
+                                terminal_state='completed',
+                                message_index=_latest_assistant_idx,
+                                run_id=_anchor_run_id[0],
+                            )
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10115,7 +10469,13 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=False,
+                        stream_id=stream_id,
+                        run_id=_anchor_run_id[0],
+                        artifact_events=_anchor_artifact_events,
+                    )
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10133,7 +10493,13 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=False,
+                        stream_id=stream_id,
+                        run_id=_anchor_run_id[0],
+                        artifact_events=_anchor_artifact_events,
+                    )
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10237,7 +10603,13 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=False,
+                        stream_id=stream_id,
+                        run_id=_anchor_run_id[0],
+                        artifact_events=_anchor_artifact_events,
+                    )
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10269,7 +10641,13 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=False,
+                            stream_id=stream_id,
+                            run_id=_anchor_run_id[0],
+                            artifact_events=_anchor_artifact_events,
+                        )
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10292,7 +10670,13 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=False,
+                            stream_id=stream_id,
+                            run_id=_anchor_run_id[0],
+                            artifact_events=_anchor_artifact_events,
+                        )
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10661,7 +11045,13 @@ def _run_agent_streaming(
                             model=_turn_route_model,
                             provider=_turn_route_provider,
                         )
-                    _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=ephemeral,
+                        stream_id=stream_id,
+                        run_id=_anchor_run_id[0],
+                        artifact_events=_anchor_artifact_events,
+                    )
                     if not ephemeral:
                         try:
                             append_turn_journal_event_for_stream(
@@ -10912,6 +11302,14 @@ def _run_agent_streaming(
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
                 s.messages.append(_error_message)
+                _reconcile_stream_artifacts_into_terminal_anchor_scene(
+                    s,
+                    stream_id,
+                    _anchor_artifact_events,
+                    terminal_state=_exc_type or 'error',
+                    message_index=len(s.messages) - 1,
+                    run_id=_anchor_run_id[0],
+                )
                 try:
                     s.save()
                 except Exception:
@@ -11505,6 +11903,7 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+                _stamp_latest_cancel_marker_for_stream(_cs, stream_id)
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
