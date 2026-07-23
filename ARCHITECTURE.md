@@ -235,6 +235,24 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+Initial session-tail response cache:
+
+- `GET /api/session?messages=1&msg_limit=N&resolve_model=0` keeps a bounded
+  process-local LRU of final redacted response payloads for idle native WebUI
+  sessions.
+- The cache is a presentation optimization only. Session JSON plus profile
+  `state.db` remain authoritative; `context_messages` and transcript recovery
+  semantics are unchanged.
+- Keys include stat signatures for the session sidecar, active-profile
+  `state.db`/WAL/SHM files, `settings.json`, and the active profile's
+  `config.yaml`. Any source write produces a miss automatically.
+- Active/pending runs, messaging/CLI/read-only sessions, truncation state, and
+  compression/fork lineage bypass the cache and use the established full
+  reconciliation path.
+- The cache is capped by both entry count and serialized payload bytes. It is
+  intentionally process-local: restart drops it safely, and a miss is always a
+  performance cost rather than a correctness failure.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
@@ -439,6 +457,14 @@ Session management:
     deleteSession(sid)    POST /api/session/delete, handle active/inactive cases correctly
     renderSessionList()   GET /api/sessions, rebuild #sessionList DOM
 
+When the all-profiles sidebar opens an existing conversation owned by another
+profile, the profile cookie still switches before `loadSession()`, but the
+already-complete all-profiles list stays visible and is reused from browser
+cache. That path does not synchronously refetch projects/sessions or start the
+generic model-catalog refresh. Session navigation marks the model catalog stale
+without fetching it; opening the model picker performs the bounded
+session-specific freshness check on demand.
+
 Chat:
     send()                Main action: upload files, POST /api/chat/start, open EventSource
     uploadPendingFiles()  Upload each file in S.pendingFiles, return filenames array
@@ -446,10 +472,14 @@ Chat:
     removeThinking()      Removes thinking dots (called on first token or on error)
 
 Rendering:
-    renderMessages()      Full rebuild of #msgInner from S.messages
+    renderMessages()      Reuses a per-session HTML LRU on unchanged cross-session
+                          navigation; otherwise rebuilds #msgInner from S.messages
     renderMd(raw)         Homegrown markdown renderer (see 5.4 for known gaps)
     syncTopbar()          Updates topbar title, meta, model chip, workspace chip
     renderTray()          Updates attach tray showing pending files
+
+The HTML LRU is bounded to eight entries, 2 MiB per entry, and 8 MiB total
+(estimated as UTF-16 browser heap). Cache hits refresh insertion/LRU order.
 
 Approval:
     showApprovalCard(p)   Shows the approval card with command/description text

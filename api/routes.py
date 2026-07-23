@@ -28,7 +28,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -9440,6 +9440,155 @@ from api.models import (
 )
 
 
+# Initial transcript tails are expensive to rebuild for large, tool-heavy
+# sessions even after Session.load() is warm: the route still reconciles
+# sidecar/state.db rows, derives todo/tool state, redacts the payload, and
+# serializes hundreds of KB. Cache only the final, already-redacted response for
+# the ordinary idle native-WebUI path. The cache is a presentation optimization,
+# never a state source: every key includes the source files' stat signatures and
+# any active/pending, messaging, lineage, or recovery shape bypasses it.
+_SESSION_DETAIL_TAIL_CACHE_VERSION = 1
+_SESSION_DETAIL_TAIL_CACHE_MAX_ENTRIES = 24
+_SESSION_DETAIL_TAIL_CACHE_MAX_BYTES = 24 * 1024 * 1024
+_SESSION_DETAIL_TAIL_CACHE_MAX_ENTRY_BYTES = 2 * 1024 * 1024
+_SESSION_DETAIL_TAIL_CACHE: "OrderedDict[tuple, tuple[dict, int]]" = OrderedDict()
+_SESSION_DETAIL_TAIL_CACHE_BYTES = 0
+_SESSION_DETAIL_TAIL_CACHE_LOCK = threading.Lock()
+
+
+def _session_detail_tail_path_stamp(path) -> tuple | None:
+    try:
+        path = Path(path)
+        st = path.stat()
+    except (OSError, TypeError, ValueError):
+        return None
+    return (
+        str(path),
+        int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
+        int(st.st_size),
+        int(getattr(st, "st_ctime_ns", int(st.st_ctime * 1_000_000_000))),
+    )
+
+
+def _session_detail_tail_source_stamp(sid: str) -> tuple | None:
+    if not is_safe_session_id(sid):
+        return None
+    sidecar_stamp = _session_detail_tail_path_stamp(SESSION_DIR / f"{sid}.json")
+    if sidecar_stamp is None:
+        return None
+    try:
+        state_db_path = Path(_active_state_db_path())
+    except Exception:
+        state_db_path = None
+    state_stamps = ()
+    if state_db_path is not None:
+        state_stamps = tuple(
+            _session_detail_tail_path_stamp(path)
+            for path in (
+                state_db_path,
+                Path(f"{state_db_path}-wal"),
+                Path(f"{state_db_path}-shm"),
+            )
+        )
+    try:
+        profile_config_path = _active_profile_config_path()
+    except Exception:
+        profile_config_path = None
+    return (
+        sidecar_stamp,
+        state_stamps,
+        _session_detail_tail_path_stamp(SETTINGS_FILE),
+        _session_detail_tail_path_stamp(profile_config_path),
+    )
+
+
+def _session_detail_tail_cache_eligible(session) -> bool:
+    if session is None:
+        return False
+    if getattr(session, "active_stream_id", None):
+        return False
+    if getattr(session, "pending_user_message", None) or getattr(session, "pending_started_at", None):
+        return False
+    if getattr(session, "parent_session_id", None) or getattr(session, "pre_compression_snapshot", False):
+        return False
+    if getattr(session, "truncation_watermark", None) not in (None, ""):
+        return False
+    if getattr(session, "truncation_boundary", None) not in (None, ""):
+        return False
+    if getattr(session, "read_only", False) or getattr(session, "is_cli_session", False):
+        return False
+    if _is_messaging_session_record(session) or _session_requires_cli_metadata_lookup(session):
+        return False
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    return source in ("", "webui")
+
+
+def _session_detail_tail_cache_key(
+    session,
+    *,
+    msg_limit: int,
+    expand_renderable: bool,
+) -> tuple | None:
+    if not _session_detail_tail_cache_eligible(session):
+        return None
+    sid = str(getattr(session, "session_id", "") or "")
+    source_stamp = _session_detail_tail_source_stamp(sid)
+    if source_stamp is None:
+        return None
+    return (
+        _SESSION_DETAIL_TAIL_CACHE_VERSION,
+        sid,
+        str(getattr(session, "profile", "") or ""),
+        max(1, int(msg_limit)),
+        bool(expand_renderable),
+        source_stamp,
+    )
+
+
+def _session_detail_tail_cache_get(key: tuple | None) -> dict | None:
+    if key is None:
+        return None
+    with _SESSION_DETAIL_TAIL_CACHE_LOCK:
+        entry = _SESSION_DETAIL_TAIL_CACHE.get(key)
+        if entry is None:
+            return None
+        _SESSION_DETAIL_TAIL_CACHE.move_to_end(key)
+        return dict(entry[0])
+
+
+def _session_detail_tail_cache_set(key: tuple | None, payload: dict) -> None:
+    global _SESSION_DETAIL_TAIL_CACHE_BYTES
+    if key is None or not isinstance(payload, dict):
+        return
+    try:
+        entry_bytes = len(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+    except (TypeError, ValueError):
+        return
+    if entry_bytes > _SESSION_DETAIL_TAIL_CACHE_MAX_ENTRY_BYTES:
+        return
+    with _SESSION_DETAIL_TAIL_CACHE_LOCK:
+        previous = _SESSION_DETAIL_TAIL_CACHE.pop(key, None)
+        if previous is not None:
+            _SESSION_DETAIL_TAIL_CACHE_BYTES -= previous[1]
+        _SESSION_DETAIL_TAIL_CACHE[key] = (payload, entry_bytes)
+        _SESSION_DETAIL_TAIL_CACHE_BYTES += entry_bytes
+        while (
+            len(_SESSION_DETAIL_TAIL_CACHE) > _SESSION_DETAIL_TAIL_CACHE_MAX_ENTRIES
+            or _SESSION_DETAIL_TAIL_CACHE_BYTES > _SESSION_DETAIL_TAIL_CACHE_MAX_BYTES
+        ):
+            _old_key, (_old_payload, old_bytes) = _SESSION_DETAIL_TAIL_CACHE.popitem(last=False)
+            _SESSION_DETAIL_TAIL_CACHE_BYTES -= old_bytes
+
+
+def _clear_session_detail_tail_cache() -> None:
+    global _SESSION_DETAIL_TAIL_CACHE_BYTES
+    with _SESSION_DETAIL_TAIL_CACHE_LOCK:
+        _SESSION_DETAIL_TAIL_CACHE.clear()
+        _SESSION_DETAIL_TAIL_CACHE_BYTES = 0
+
+
 _COMPRESSION_RECOVERY_START_LOCK = threading.Lock()
 
 
@@ -12606,7 +12755,17 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             if _diag: _diag.stage("t1_after_get_session_check")
-            s = get_session(sid, metadata_only=(not load_messages))
+            _detail_cache_candidate = (
+                load_messages
+                and msg_limit is not None
+                and msg_before is None
+                and not resolve_model
+            )
+            _detail_cache_key = None
+            s = get_session(
+                sid,
+                metadata_only=(not load_messages) or _detail_cache_candidate,
+            )
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -12628,6 +12787,27 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
+            if _detail_cache_candidate:
+                _detail_cache_key = _session_detail_tail_cache_key(
+                    s,
+                    msg_limit=msg_limit,
+                    expand_renderable=expand_renderable,
+                )
+                _cached_detail_payload = _session_detail_tail_cache_get(_detail_cache_key)
+                if _cached_detail_payload is not None:
+                    if _diag:
+                        _diag.stage("session_detail_tail_cache_hit")
+                        _diag.finish()
+                    return j(handler, _cached_detail_payload)
+                if _diag:
+                    _diag.stage("session_detail_tail_cache_miss")
+                if getattr(s, "_loaded_metadata_only", False):
+                    s = get_session(sid, metadata_only=False)
+                    _session_profile = getattr(s, 'profile', None) or None
+                # A full cached object may have changed while the metadata-only
+                # read was in flight. Re-evaluate eligibility before storing.
+                if not _session_detail_tail_cache_eligible(s):
+                    _detail_cache_key = None
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
@@ -12943,7 +13123,19 @@ def handle_get(handler, parsed) -> bool:
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
-            resp = j(handler, {"session": redact})
+            _response_payload = {"session": redact}
+            if _detail_cache_key is not None:
+                _fresh_detail_cache_key = _session_detail_tail_cache_key(
+                    s,
+                    msg_limit=msg_limit,
+                    expand_renderable=expand_renderable,
+                )
+                # The response was derived between two independent filesystem
+                # snapshots. Store it only when no authoritative input changed
+                # during reconciliation/redaction (TOCTOU stale-cache guard).
+                if _fresh_detail_cache_key == _detail_cache_key:
+                    _session_detail_tail_cache_set(_detail_cache_key, _response_payload)
+            resp = j(handler, _response_payload)
             _t6 = _time.monotonic()
             if _diag: _diag.stage("t6_after_json_write")
             _total_ms = (_t6 - _t0) * 1000
