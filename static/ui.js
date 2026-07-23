@@ -251,15 +251,88 @@ function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
-  const entry={...payload, _queued_at: Date.now()};
+  const entry={...payload, _queued_at: Date.now(), _client_queue_id: (Date.now().toString(36)+'-'+Math.random().toString(36).slice(2))};
   q.push(entry);
   _persistSessionQueueStorage(sid,q);
+  _backendAcknowledgeQueuedMessage(sid, entry);
   return q.length;
+}
+function _queuedEntryHasBrowserOnlyFiles(entry){
+  const files=entry&&Array.isArray(entry.files)?entry.files:[];
+  return files.some(f=>f&&typeof File!=='undefined'&&f instanceof File);
+}
+function _findQueuedEntryByClientId(sid, clientId){
+  const q=_getSessionQueue(sid,false);
+  const idx=q.findIndex(e=>e&&e._client_queue_id===clientId);
+  return {q,idx,entry:idx>=0?q[idx]:null};
+}
+function _deleteBackendQueuedItem(sid, serverId){
+  if(!sid||!serverId||typeof fetch!=='function')return;
+  fetch(new URL('api/session/queue/delete',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:sid,id:serverId}),
+  }).catch(()=>{});
+}
+function _backendAcknowledgeQueuedMessage(sid, entry){
+  if(!sid||!entry||entry._server_owned||entry._server_pending)return;
+  if(_queuedEntryHasBrowserOnlyFiles(entry))return;
+  const text=String(entry.text||entry.message||entry.content||'').trim();
+  if(!text)return;
+  entry._server_pending=true;
+  _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+  const body={
+    session_id:sid,
+    text,
+    attachments:Array.isArray(entry.attachments)?entry.attachments:[],
+    model:entry.model||'',
+    model_provider:entry.model_provider||null,
+    profile:entry.profile||S.activeProfile||'default',
+  };
+  fetch(new URL('api/session/queue',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body),
+  }).then(r=>r.json().then(data=>({ok:r.ok,data})).catch(()=>({ok:r.ok,data:{}})))
+    .then(({ok,data})=>{
+      const found=_findQueuedEntryByClientId(sid,entry._client_queue_id);
+      if(found.idx<0){
+        if(ok&&data&&data.item&&data.item.id)_deleteBackendQueuedItem(sid,data.item.id);
+        return;
+      }
+      if(ok&&data&&data.item&&data.item.id){
+        found.q[found.idx]={...found.entry,_server_pending:false,_server_owned:true,_server_queue_id:data.item.id};
+      }else{
+        found.q[found.idx]={...found.entry,_server_pending:false,_server_error:(data&&data.error)||'queue_ack_failed'};
+      }
+      _persistSessionQueueStorage(sid,found.q);
+      delete _queueRenderKeys[sid];
+      updateQueueBadge(sid);
+    }).catch(()=>{
+      const found=_findQueuedEntryByClientId(sid,entry._client_queue_id);
+      if(found.idx<0)return;
+      found.q[found.idx]={...found.entry,_server_pending:false,_server_error:'queue_ack_failed'};
+      _persistSessionQueueStorage(sid,found.q);
+      delete _queueRenderKeys[sid];
+      updateQueueBadge(sid);
+    });
+}
+function _removeServerQueuedEntry(sid, serverId){
+  if(!sid||!serverId)return false;
+  const q=_getSessionQueue(sid,false);
+  const idx=q.findIndex(e=>e&&e._server_queue_id===serverId);
+  if(idx<0)return false;
+  q.splice(idx,1);
+  if(!q.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+  else _persistSessionQueueStorage(sid,q);
+  delete _queueRenderKeys[sid];
+  updateQueueBadge(sid);
+  return true;
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
   if(!q.length) return null;
-  const next=q.shift();
+  const idx=q.findIndex(e=>!(e&&(_serverEntryOwnedOrPending(e))));
+  if(idx<0)return null;
+  const next=q.splice(idx,1)[0];
   if(!q.length){
     delete SESSION_QUEUES[sid];
     _clearPersistedSessionQueue(sid);
@@ -268,8 +341,64 @@ function shiftQueuedSessionMessage(sid){
   }
   return next;
 }
+function _serverEntryOwnedOrPending(entry){return !!(entry&&(entry._server_owned||entry._server_pending));}
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
+}
+function syncBackendSessionQueue(sid){
+  if(!sid||typeof fetch!=='function')return;
+  fetch(new URL('api/session/queue?session_id='+encodeURIComponent(sid),document.baseURI||location.href).href,{credentials:'include'})
+    .then(r=>r.ok?r.json():null)
+    .then(data=>{
+      if(!data||!Array.isArray(data.items))return;
+      let q=_getSessionQueue(sid,false);
+      if(!q.length){
+        const persisted=_readPersistedSessionQueue(sid);
+        if(persisted.length){SESSION_QUEUES[sid]=persisted;q=persisted;}
+      }
+      if(!q.length)q=_getSessionQueue(sid,true);
+      const serverIds=new Set(data.items.map(item=>String(item&&item.id||'')).filter(Boolean));
+      let changed=false;
+      for(let i=q.length-1;i>=0;i--){
+        if(q[i]&&q[i]._server_owned&&q[i]._server_queue_id&&!serverIds.has(String(q[i]._server_queue_id))){
+          q.splice(i,1);changed=true;
+        }
+      }
+      data.items.forEach(item=>{
+        const id=String(item&&item.id||'');
+        if(!id||q.some(e=>e&&e._server_queue_id===id))return;
+        const itemText=String(item.text||'');
+        const itemMatchText=itemText.trim();
+        const pendingIdx=q.findIndex(e=>e&&e._server_pending&&!e._server_queue_id&&String(e.text||e.message||e.content||'').trim()===itemMatchText);
+        if(pendingIdx>=0){
+          q[pendingIdx]={...q[pendingIdx],text:itemText,_server_pending:false,_server_owned:true,_server_queue_id:id,_server_error:item.error||'',_server_blocked:!!item.blocked};
+          changed=true;
+          return;
+        }
+        q.push({
+          text:itemText,
+          files:[],
+          attachments:Array.isArray(item.attachments)?item.attachments:[],
+          model:item.model||'',
+          model_provider:item.model_provider||null,
+          profile:item.profile||S.activeProfile||'default',
+          _queued_at:Math.round((Number(item.created_at)||Date.now()/1000)*1000),
+          _server_owned:true,
+          _server_pending:false,
+          _server_queue_id:id,
+          _server_error:item.error||'',
+          _server_blocked:!!item.blocked,
+        });
+        changed=true;
+      });
+      for(let i=0;i<q.length;i++){
+        if(q[i]&&q[i]._server_pending&&!q[i]._server_queue_id){
+          q[i]={...q[i],_server_pending:false,_server_error:'queue_ack_recovered'};
+          changed=true;
+        }
+      }
+      if(changed){_persistSessionQueueStorage(sid,q);delete _queueRenderKeys[sid];updateQueueBadge(sid);}
+    }).catch(()=>{});
 }
 function _compressionSessionLock(){
   return window._compressionLockSid||null;
@@ -8071,15 +8200,30 @@ function _renderQueueChips(sid){
       if(hasFiles){
         if(typeof showToast==='function') showToast('Attachments on queued items will be removed',2600,'warning');
       }
+      const snapshot=[..._getSessionQueue(sid,false)];
+      if(snapshot.some(e=>e&&e._server_owned)){
+        if(typeof showToast==='function') showToast('Already-synced queued messages cannot be merged yet',2600,'warning');
+        return;
+      }
       // Merge from current live queue (no delay — snapshot + defer caused data-loss races)
-      _doMerge([..._getSessionQueue(sid,false)]);
+      _doMerge(snapshot);
     };
     const clearBtn=document.createElement('button');
     clearBtn.className='queue-card-icon-btn';
     clearBtn.title='Clear all queued messages';
     clearBtn.setAttribute('aria-label','Clear all queued messages');
     clearBtn.innerHTML=li('x',13);
-    clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
+    clearBtn.onclick=()=>{
+      q.forEach(entry=>{
+        if(entry&&entry._server_owned&&entry._server_queue_id){
+          fetch(new URL('api/session/queue/delete',document.baseURI||location.href).href,{
+            method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({session_id:sid,id:entry._server_queue_id}),
+          }).catch(()=>{});
+        }
+      });
+      q.length=0;_saveAndRefresh();
+    };
     actions.appendChild(mergeBtn);
     actions.appendChild(clearBtn);
     // Hide button — collapses flyout entirely; queue pill re-shows it
@@ -8145,6 +8289,12 @@ function _renderQueueChips(sid){
         if(idx!==-1){
           liveQ[idx]={...liveQ[idx],text:newText};
           _persistSessionQueueStorage(sid,liveQ);
+          if(liveQ[idx]._server_owned&&liveQ[idx]._server_queue_id){
+            fetch(new URL('api/session/queue/update',document.baseURI||location.href).href,{
+              method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({session_id:sid,id:liveQ[idx]._server_queue_id,text:newText}),
+            }).catch(()=>{});
+          }
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
         }
@@ -8182,7 +8332,16 @@ function _renderQueueChips(sid){
     delBtn.onclick=()=>{
       const liveQ=_getSessionQueue(sid,false);
       const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
-      if(idx!==-1) liveQ.splice(idx,1);
+      if(idx!==-1){
+        const removed=liveQ[idx];
+        liveQ.splice(idx,1);
+        if(removed&&removed._server_owned&&removed._server_queue_id){
+          fetch(new URL('api/session/queue/delete',document.baseURI||location.href).href,{
+            method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({session_id:sid,id:removed._server_queue_id}),
+          }).catch(()=>{});
+        }
+      }
       if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
       else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
       delete _queueRenderKeys[sid];

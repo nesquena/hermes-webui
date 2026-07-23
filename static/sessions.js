@@ -1545,6 +1545,7 @@ async function newSession(flash, options={}){
       });
     }
     updateQueueBadge(S.session.session_id);
+    if(typeof syncBackendSessionQueue==='function') syncBackendSessionQueue(S.session.session_id);
     syncTopbar();renderMessages();
     if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);
     // Keep new-chat first paint instant. The workspace tree / git badge can
@@ -2031,6 +2032,7 @@ async function loadSession(sid){
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
+  if(typeof syncBackendSessionQueue==='function') syncBackendSessionQueue(S.session.session_id);
 
 
   function _mergePendingSessionMessage(session,messages){
