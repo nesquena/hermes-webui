@@ -829,9 +829,9 @@ def test_system_health_route_does_not_wait_for_busy_config_cache(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["available"] is True
     assert payload["errors"] == []
-    assert payload["webui_runtime"]["sessions"] == system_health._zero_webui_runtime_payload()[
-        "sessions"
-    ]
+    sessions = payload["webui_runtime"]["sessions"]
+    assert sessions["effective_cap"] == config.get_sessions_cache_max({})
+    assert sessions["resident_count"] == len(config.SESSIONS)
 
 
 def test_system_health_route_does_not_wait_for_production_session_lock_holder(
