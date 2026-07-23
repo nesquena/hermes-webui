@@ -517,80 +517,6 @@ def test_png_accepts_sub_byte_rows_all_filter_types_and_consecutive_idat() -> No
     assert validate_wallpaper(image).height == 5
 
 
-def test_png_streams_high_cardinality_idat_without_retaining_chunks(monkeypatch) -> None:
-    import gc
-
-    import api.wallpaper as wallpaper
-
-    raw = _png_raw_rows(1, 1, 8, 6)
-    compressed = zlib.compress(raw)
-    image = _png_from_chunks(
-        _png_ihdr(),
-        *(_png_chunk(b"IDAT") for _ in range(10_000)),
-        _png_chunk(b"IDAT", compressed),
-        _png_chunk(b"IEND"),
-    )
-    real_crc32 = wallpaper.zlib.crc32
-    real_decompressobj = wallpaper.zlib.decompressobj
-    inflater_calls = []
-    idat_payload_calls = 0
-    retained_views_at_last_idat = None
-
-    def _instrumented_crc32(data, value=0):
-        nonlocal idat_payload_calls, retained_views_at_last_idat
-        if isinstance(data, memoryview) and data.obj is image:
-            idat_payload_calls += 1
-            if idat_payload_calls == 10_001:
-                retained_views_at_last_idat = sum(
-                    isinstance(candidate, memoryview) and candidate.obj is image
-                    for candidate in gc.get_objects()
-                )
-        return real_crc32(data, value)
-
-    def _instrumented_decompressobj():
-        inflater = real_decompressobj()
-        inflater_calls.append(inflater)
-        return inflater
-
-    monkeypatch.setattr(wallpaper.zlib, "crc32", _instrumented_crc32)
-    monkeypatch.setattr(wallpaper.zlib, "decompressobj", _instrumented_decompressobj)
-
-    assert wallpaper.validate_wallpaper(image).mime_type == "image/png"
-    assert len(inflater_calls) == 1
-    assert retained_views_at_last_idat is not None
-    assert retained_views_at_last_idat < 20
-
-
-def test_png_streams_inflated_image_over_64k_across_idat_boundaries() -> None:
-    from api.wallpaper import validate_wallpaper
-
-    width = 16_384
-    height = 2
-    raw = _png_raw_rows(width, height, 16, 6, filters=(4, 1))
-    compressed = zlib.compress(raw, level=0)
-    split_points = sorted(
-        {
-            1,
-            len(compressed) // 2,
-            max(1, len(compressed) - 5),
-            len(compressed) - 1,
-        }
-    )
-    parts = []
-    start = 0
-    for end in split_points + [len(compressed)]:
-        parts.append(compressed[start:end])
-        start = end
-    image = _png_from_chunks(
-        _png_ihdr(width=width, height=height, bit_depth=16, color_type=6),
-        *(_png_chunk(b"IDAT", part) for part in parts),
-        _png_chunk(b"IEND"),
-    )
-
-    result = validate_wallpaper(image)
-    assert (result.width, result.height) == (width, height)
-
-
 @pytest.mark.parametrize(
     "image",
     [
@@ -623,195 +549,31 @@ def test_png_accepts_exact_allowed_ancillary_chunks(image: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    "image",
-    [
-        _png_from_chunks(_png_chunk(b"IDAT", zlib.compress(b"\x00\x00")), _png_ihdr(), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_chunk(b"IHDR", b""), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(), _png_ihdr(), _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00\x00")), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(), _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00\x00")), _png_ihdr(), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(width=0), _png_chunk(b"IDAT", zlib.compress(b"")), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(width=16_385), _png_chunk(b"IDAT", zlib.compress(b"")), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(width=10_000, height=5_001), _png_chunk(b"IDAT", zlib.compress(b"")), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(compression=1), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(filter_method=1), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(interlace=1), _png_chunk(b"IEND")),
-        _png_image(bit_depth=4, color_type=2),
-        _png_image(bit_depth=1, color_type=4),
-        _png_from_chunks(_png_ihdr(bit_depth=8, color_type=1), _png_chunk(b"IDAT", zlib.compress(b"")), _png_chunk(b"IEND")),
-    ],
-)
-def test_png_rejects_invalid_ihdr_and_dimensions(image: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        _PNG_SIGNATURE + struct.pack(">I", 0x80000000) + b"IHDR",
-        _PNG_SIGNATURE + struct.pack(">I", 13) + b"IHDR" + b"short",
-        _png_from_chunks(_png_ihdr()[:-1]),
-        _png_from_chunks(_png_chunk(b"1HDR"), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_chunk(b"IHdR"), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(), _png_chunk(b"AB1D"), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(), _png_chunk(b"ABcD"), _png_chunk(b"IEND")),
-        _png_from_chunks(_png_ihdr(), _png_chunk(b"ABCD"), _png_chunk(b"IEND")),
-    ],
-)
-def test_png_rejects_illegal_chunk_lengths_names_and_unknown_critical(
-    image: bytes,
-) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
-
-
-@pytest.mark.parametrize("chunk_name", [b"IHDR", b"PLTE", b"IDAT", b"sRGB", b"IEND"])
-def test_png_rejects_bad_crc_on_every_chunk_class(chunk_name: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    plte = _png_chunk(b"PLTE", b"\x00\x00\x00")
-    chunks = [
-        _png_ihdr(color_type=3),
-        _png_chunk(b"sRGB", b"\x00"),
-        plte,
-        _png_chunk(b"IDAT", zlib.compress(b"\x00\x00")),
-        _png_chunk(b"IEND"),
-    ]
-    for index, chunk in enumerate(chunks):
-        if chunk[4:8] == chunk_name:
-            chunks[index] = chunk[:-4] + struct.pack(">I", (struct.unpack(">I", chunk[-4:])[0] + 1) & 0xFFFFFFFF)
-            break
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_png_from_chunks(*chunks))
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        _png_image(color_type=3, plte=b""),
-        _png_image(color_type=3, plte=b"\x00\x00"),
-        _png_image(color_type=3, plte=b"\x00\x00\x00\x00"),
-        _png_image(bit_depth=1, color_type=3, plte=b"\x00\x00\x00" * 3),
-        _png_image(color_type=3, plte=None).replace(_png_chunk(b"PLTE", b"\x00\x00\x00"), b""),
-        _png_image(color_type=0, plte=b"\x00\x00\x00"),
-        _png_image(color_type=4, plte=b"\x00\x00\x00"),
-        _png_image(plte=b"\x00\x00\x00" * 257),
-        _png_image(after_idat=(_png_chunk(b"PLTE", b"\x00\x00\x00"),)),
-        _png_image(plte=b"\x00\x00\x00", before_idat=(_png_chunk(b"PLTE", b"\x00\x00\x00"),)),
-    ],
-)
-def test_png_rejects_invalid_plte_rules(image: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        _png_from_chunks(_png_ihdr(), _png_chunk(b"IEND")),
-        _png_image(after_idat=(_png_chunk(b"pHYs", struct.pack(">IIB", 1, 1, 0)), _png_chunk(b"IDAT", zlib.compress(b"")))),
-        _png_from_chunks(_png_ihdr(), _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00\x00")), _png_chunk(b"IEND", b"x")),
-        _png_image() + _png_chunk(b"IEND"),
-        _png_image() + b"trailing",
-    ],
-)
-def test_png_rejects_idat_and_terminal_iend_violations(image: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
-
-
-@pytest.mark.parametrize("name", [b"acTL", b"fcTL", b"fdAT"])
-def test_png_rejects_apng_chunks(name: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_png_image(before_idat=(_png_chunk(name),)))
-
-
-@pytest.mark.parametrize(
     "name",
     [b"cHRM", b"iCCP", b"sBIT", b"bKGD", b"hIST", b"tEXt", b"zTXt", b"iTXt", b"tIME", b"vpAg", b"aaAa"],
 )
-def test_png_rejects_unsupported_or_unknown_ancillary_chunks(name: bytes) -> None:
+def test_png_accepts_ancillary_chunks_without_inspecting_metadata(name: bytes) -> None:
+    from api.wallpaper import validate_wallpaper
+
+    result = validate_wallpaper(_png_image(before_idat=(_png_chunk(name),)))
+
+    assert (result.mime_type, result.width, result.height) == ("image/png", 1, 1)
+
+
+def test_png_accepts_interlaced_header_without_decoding_pixels() -> None:
+    from api.wallpaper import validate_wallpaper
+
+    image = _png_from_chunks(_png_ihdr(width=7, height=5, interlace=1))
+
+    result = validate_wallpaper(image)
+
+    assert (result.mime_type, result.width, result.height) == ("image/png", 7, 5)
+
+
+def test_png_header_probe_rejects_invalid_ihdr_coding_fields() -> None:
     from api.wallpaper import WallpaperValidationError, validate_wallpaper
 
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_png_image(before_idat=(_png_chunk(name),)))
-
-
-@pytest.mark.parametrize(
-    "chunk",
-    [
-        _png_chunk(b"sRGB", b""),
-        _png_chunk(b"sRGB", b"\x04"),
-        _png_chunk(b"gAMA", b"\x00\x00\x00"),
-        _png_chunk(b"gAMA", b"\x00\x00\x00\x00"),
-        _png_chunk(b"pHYs", b"\x00" * 8),
-        _png_chunk(b"pHYs", struct.pack(">IIB", 1, 1, 2)),
-    ],
-)
-def test_png_rejects_invalid_allowed_ancillary_values(chunk: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_png_image(before_idat=(chunk,)))
-
-
-@pytest.mark.parametrize("name,payload", [(b"sRGB", b"\x00"), (b"gAMA", b"\x00\x00\x00\x01"), (b"pHYs", b"\x00" * 9)])
-def test_png_rejects_duplicate_allowed_ancillary_chunks(name: bytes, payload: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    chunk = _png_chunk(name, payload)
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_png_image(before_idat=(chunk, chunk)))
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        _png_image(after_idat=(_png_chunk(b"sRGB", b"\x00"),)),
-        _png_image(after_idat=(_png_chunk(b"gAMA", b"\x00\x00\x00\x01"),)),
-        _png_image(after_idat=(_png_chunk(b"pHYs", b"\x00" * 9),)),
-        _png_image(plte=b"\x00\x00\x00", before_idat=(_png_chunk(b"sRGB", b"\x00"),)),
-        _png_image(plte=b"\x00\x00\x00", before_idat=(_png_chunk(b"gAMA", b"\x00\x00\x00\x01"),)),
-    ],
-)
-def test_png_rejects_late_allowed_ancillary_chunks(image: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        _png_image(color_type=0, before_idat=(_png_chunk(b"tRNS", b"\x00"),)),
-        _png_image(bit_depth=4, color_type=0, before_idat=(_png_chunk(b"tRNS", struct.pack(">H", 16)),)),
-        _png_image(color_type=2, before_idat=(_png_chunk(b"tRNS", b"\x00" * 5),)),
-        _png_image(bit_depth=8, color_type=2, before_idat=(_png_chunk(b"tRNS", struct.pack(">HHH", 256, 0, 0)),)),
-        _png_image(color_type=3, plte=b"\x00\x00\x00", before_plte=(_png_chunk(b"tRNS", b"\x00"),)),
-        _png_image(color_type=3, plte=b"\x00\x00\x00", before_idat=(_png_chunk(b"tRNS", b""),)),
-        _png_image(color_type=3, plte=b"\x00\x00\x00", before_idat=(_png_chunk(b"tRNS", b"\x00\xff"),)),
-        _png_image(color_type=4, before_idat=(_png_chunk(b"tRNS", b"\x00\x00"),)),
-        _png_image(color_type=6, before_idat=(_png_chunk(b"tRNS", b"\x00" * 6),)),
-        _png_image(color_type=0, before_idat=(_png_chunk(b"tRNS", b"\x00\x00"), _png_chunk(b"tRNS", b"\x00\x00"))),
-        _png_image(color_type=0, after_idat=(_png_chunk(b"tRNS", b"\x00\x00"),)),
-    ],
-)
-def test_png_rejects_invalid_trns_cardinality_order_and_sample_ranges(
-    image: bytes,
-) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
+    image = _png_from_chunks(_png_ihdr(compression=1))
 
     with pytest.raises(WallpaperValidationError):
         validate_wallpaper(image)
@@ -829,26 +591,6 @@ def _png_with_raw_stream(raw: bytes, *, compressed: bytes | None = None) -> byte
 def _png_non_eof_stream(raw: bytes) -> bytes:
     compressor = zlib.compressobj()
     return compressor.compress(raw) + compressor.flush(zlib.Z_SYNC_FLUSH)
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        _png_with_raw_stream(b"\x05\x00\x00\x00\x00"),
-        _png_with_raw_stream(b"\x00\x00\x00\x00"),
-        _png_with_raw_stream(b"\x00\x00\x00\x00\x00\x00"),
-        _png_with_raw_stream(b"", compressed=b"not-zlib"),
-        _png_with_raw_stream(b"", compressed=zlib.compress(b"\x00\x00\x00\x00\x00") + zlib.compress(b"extra")),
-        _png_with_raw_stream(b"", compressed=zlib.compress(b"\x00\x00\x00\x00\x00") + b"trailing"),
-        _png_with_raw_stream(b"", compressed=zlib.compress(b"\x00\x00\x00\x00\x00")[:-1]),
-        _png_with_raw_stream(b"", compressed=_png_non_eof_stream(b"\x00\x00\x00\x00\x00")),
-    ],
-)
-def test_png_rejects_invalid_bounded_zlib_output_and_filters(image: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
 
 
 def _webp_chunk(name: bytes, payload: bytes, *, pad: bytes | None = None) -> bytes:
@@ -972,10 +714,10 @@ def test_webp_accepts_generated_simple_vp8_and_red_vp8l() -> None:
         assert result.digest == hashlib.sha256(image).hexdigest()
 
 
-def test_webp_accepts_exact_extended_order_flags_metadata_and_raw_alpha() -> None:
+def test_webp_accepts_extended_metadata_without_decoding_pixels() -> None:
     from api.wallpaper import validate_wallpaper
 
-    vp8_with_alpha = _webp_riff(
+    image = _webp_riff(
         _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x3C)),
         _webp_chunk(b"ICCP", b"profile"),
         _webp_chunk(b"ALPH", b"\x1c\xff\x80"),
@@ -983,300 +725,56 @@ def test_webp_accepts_exact_extended_order_flags_metadata_and_raw_alpha() -> Non
         _webp_chunk(b"EXIF", b"exif"),
         _webp_chunk(b"XMP ", b"xmp"),
     )
-    vp8l_with_alpha = _webp_riff(
-        _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-        _webp_chunk(b"VP8L", _webp_vp8l_payload(alpha=True)),
-    )
 
-    assert validate_wallpaper(vp8_with_alpha).width == 2
-    assert validate_wallpaper(vp8l_with_alpha).height == 1
+    assert validate_wallpaper(image).width == 2
 
 
-@pytest.mark.parametrize(
-    "image",
-    [
-        b"RIFX\x04\x00\x00\x00WEBP",
-        _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload()), form=b"WEPB"),
-        _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload()))[:4]
-        + struct.pack("<I", 1)
-        + _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload()))[8:],
-        _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload()), trailing=b"after"),
-        _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload(), pad=b"")),
-        _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload(), pad=b"\x01")),
-        _webp_riff(_webp_chunk(b"VP8 ", _webp_vp8_payload(), pad=b"\x00\x00")),
-        b"RIFF\xff\xff\xff\xffWEBP",
-    ],
-)
-def test_webp_rejects_bad_riff_boundary_type_and_padding(image: bytes) -> None:
+def test_webp_header_probe_rejects_vp8x_without_image_chunk() -> None:
     from api.wallpaper import WallpaperValidationError, validate_wallpaper
+
+    image = _webp_riff(_webp_chunk(b"VP8X", _webp_vp8x_payload()))
 
     with pytest.raises(WallpaperValidationError):
         validate_wallpaper(image)
 
 
-def test_webp_rejects_chunk_count_before_amplifying_retained_objects(
-    monkeypatch,
-) -> None:
-    import api.wallpaper as wallpaper
-
-    image = _webp_riff(*(_webp_chunk(b"JUNK", b"") for _ in range(10_000)))
-    real_chunk = wallpaper._WebpChunk
-    constructed = []
-
-    def _counted_chunk(*args, **kwargs):
-        constructed.append(None)
-        return real_chunk(*args, **kwargs)
-
-    monkeypatch.setattr(wallpaper, "_WebpChunk", _counted_chunk)
-
-    with pytest.raises(wallpaper.WallpaperValidationError):
-        wallpaper.validate_wallpaper(image)
-    assert len(constructed) <= 6
-
-
-@pytest.mark.parametrize(
-    "chunks",
-    [
-        (),
-        (_webp_chunk(b"VP8 ", _webp_vp8_payload()),) * 2,
-        (
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-            _webp_chunk(b"VP8L", _webp_vp8l_payload()),
-        ),
-        (_webp_chunk(b"VP8X", _webp_vp8x_payload()),),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (_webp_chunk(b"JUNK", b""), _webp_chunk(b"VP8 ", _webp_vp8_payload())),
-        (_webp_chunk(b"ICCP", b"profile"), _webp_chunk(b"VP8 ", _webp_vp8_payload())),
-    ],
-)
-def test_webp_rejects_missing_duplicate_multiple_and_unknown_chunks(
-    chunks: tuple[bytes, ...],
-) -> None:
+def test_webp_header_probe_uses_image_dimensions_not_vp8x_canvas() -> None:
     from api.wallpaper import WallpaperValidationError, validate_wallpaper
 
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(*chunks))
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        _webp_vp8_payload(key_frame=False),
-        _webp_vp8_payload(version=4),
-        _webp_vp8_payload(show_frame=False),
-        _webp_vp8_payload(partition_length=0),
-        _webp_vp8_payload(partition_length=2, partition=b"\x00"),
-        _webp_vp8_payload(start_code=b"bad"),
-        _webp_vp8_payload(width=0),
-        _webp_vp8_payload(height=0),
-        _webp_vp8_payload(horizontal_scale=1),
-        _webp_vp8_payload(vertical_scale=1),
-        _webp_vp8_payload()[:10],
-        _webp_vp8_payload()[:9],
-    ],
-)
-def test_webp_rejects_invalid_vp8_frame_header_and_partition(payload: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(_webp_chunk(b"VP8 ", payload)))
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        _webp_vp8l_payload(signature=0x2E),
-        _webp_vp8l_payload(version=1),
-        _webp_vp8l_payload(entropy=b""),
-        _webp_vp8l_payload(entropy=_webp_bits((1, 1))),
-        _webp_vp8l_payload(entropy=_webp_bits((0, 1), (1, 1))),
-        _webp_vp8l_payload(entropy=_webp_bits((0, 1), (0, 1), (1, 1))),
-        _webp_vp8l_payload(distance=1),
-        _webp_vp8l_payload()[:-1],
-        _webp_vp8l_payload() + b"\x00",
-        _webp_vp8l_payload()[:-1] + bytes([_webp_vp8l_payload()[-1] | 0x80]),
-    ],
-)
-def test_webp_rejects_invalid_or_unsupported_vp8l_stream(payload: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(_webp_chunk(b"VP8L", payload)))
-
-
-@pytest.mark.parametrize(
-    "first_tree_fields",
-    [
-        ((0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1)),
-        ((1, 1), (1, 1), (0, 1), (0, 1), (1, 8)),
-        ((1, 1), (0, 1), (0, 1), (0, 1)),
-    ],
-    ids=("non_simple", "two_symbol", "one_bit_symbol"),
-)
-def test_webp_rejects_complete_vp8l_stream_outside_explicit_tree_subset(
-    first_tree_fields: tuple[tuple[int, int], ...],
-) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    payload = _webp_vp8l_payload(
-        entropy=_webp_vp8l_entropy_with_first_tree(*first_tree_fields)
+    image = _webp_riff(
+        _webp_chunk(b"VP8X", _webp_vp8x_payload(width=1, height=1)),
+        _webp_chunk(b"VP8L", _webp_vp8l_payload(width=10_000, height=5_001)),
     )
 
     with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(_webp_chunk(b"VP8L", payload)))
+        validate_wallpaper(image)
 
 
-@pytest.mark.parametrize(
-    "chunks",
-    [
-        (
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x80)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(reserved=b"\x01\x00\x00")),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(width=1)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-            _webp_chunk(b"JUNK", b""),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-    ],
-)
-def test_webp_rejects_invalid_vp8x_cardinality_flags_canvas_and_order(
-    chunks: tuple[bytes, ...],
-) -> None:
+def test_webp_header_probe_rejects_multiple_images_and_malformed_tail() -> None:
     from api.wallpaper import WallpaperValidationError, validate_wallpaper
 
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(*chunks))
-
-
-@pytest.mark.parametrize(
-    "chunks",
-    [
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"ALPH", b""),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"ALPH", b"\x01\x00\x00"),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"ALPH", b"\xc0\x00\x00"),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"ALPH", b"\x20\x00\x00"),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"ALPH", b"\x00\x00"),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-            _webp_chunk(b"ALPH", b"\x00\x00\x00"),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"ALPH", b"\x00\x00\x00"),
-            _webp_chunk(b"VP8L", _webp_vp8l_payload(alpha=True)),
-        ),
-    ],
-)
-def test_webp_rejects_invalid_alph_header_length_coding_and_order(
-    chunks: tuple[bytes, ...],
-) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(*chunks))
-
-
-@pytest.mark.parametrize(
-    "chunks",
-    [
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x20)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(b"ICCP", b"profile"),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x08)),
-            _webp_chunk(b"EXIF", b"exif"),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x0C)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-            _webp_chunk(b"XMP ", b"xmp"),
-            _webp_chunk(b"EXIF", b"exif"),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x10)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        (
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(b"VP8L", _webp_vp8l_payload(alpha=True)),
-        ),
-    ],
-)
-def test_webp_rejects_metadata_and_alpha_flag_presence_or_order_mismatch(
-    chunks: tuple[bytes, ...],
-) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_webp_riff(*chunks))
-
-
-@pytest.mark.parametrize("name", [b"ANIM", b"ANMF"])
-def test_webp_rejects_animation_flags_and_chunks(name: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    images = (
-        _webp_riff(
-            _webp_chunk(b"VP8X", _webp_vp8x_payload(flags=0x02)),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
-        _webp_riff(
-            _webp_chunk(b"VP8X", _webp_vp8x_payload()),
-            _webp_chunk(name, b""),
-            _webp_chunk(b"VP8 ", _webp_vp8_payload()),
-        ),
+    image = _webp_riff(
+        _webp_chunk(b"VP8L", _webp_vp8l_payload()),
+        _webp_chunk(b"VP8L", _webp_vp8l_payload()),
     )
-    for image in images:
+    malformed_tail = _webp_riff(
+        _webp_chunk(b"VP8L", _webp_vp8l_payload()),
+        b"JUNK",
+    )
+
+    for candidate in (image, malformed_tail):
+        with pytest.raises(WallpaperValidationError):
+            validate_wallpaper(candidate)
+
+
+def test_webp_header_probe_rejects_invalid_riff_and_chunk_boundaries() -> None:
+    from api.wallpaper import WallpaperValidationError, validate_wallpaper
+
+    valid = _webp_riff(_webp_chunk(b"VP8L", _webp_vp8l_payload()))
+    bad_riff = valid[:4] + b"\x00\x00\x00\x00" + valid[8:]
+    bad_chunk = valid[:16] + b"\xff\xff\xff\xff" + valid[20:]
+
+    for image in (bad_riff, bad_chunk):
         with pytest.raises(WallpaperValidationError):
             validate_wallpaper(image)
 
@@ -1405,14 +903,14 @@ def test_wallpaper_public_boundary_snapshots_mutable_input(monkeypatch) -> None:
 
     image = bytearray(_baseline_jpeg())
     original = bytes(image)
-    real_validate = wallpaper._validate_jpeg
+    real_probe = wallpaper._probe_jpeg_dimensions
 
     def _mutate_after_validation(data):
-        dimensions = real_validate(data)
+        dimensions = real_probe(data)
         image[-3] ^= 0x01
         return dimensions
 
-    monkeypatch.setattr(wallpaper, "_validate_jpeg", _mutate_after_validation)
+    monkeypatch.setattr(wallpaper, "_probe_jpeg_dimensions", _mutate_after_validation)
 
     assert wallpaper.validate_wallpaper(image).digest == hashlib.sha256(original).hexdigest()
 
@@ -1428,7 +926,7 @@ def test_wallpaper_public_boundary_hashes_only_after_structural_validation(
     monkeypatch.setattr(wallpaper.hashlib, "sha256", _unexpected_hash)
 
     with pytest.raises(wallpaper.WallpaperValidationError):
-        wallpaper.validate_wallpaper(_baseline_jpeg(eoi=b""))
+        wallpaper.validate_wallpaper(b"\xff\xd8\xff\xe0\x00")
 
 
 @pytest.mark.parametrize(
@@ -1444,6 +942,15 @@ def test_jpeg_accepts_baseline_progressive_stuffing_and_fill(image: bytes) -> No
     from api.wallpaper import validate_wallpaper
 
     assert validate_wallpaper(image).mime_type == "image/jpeg"
+
+
+def test_jpeg_header_probe_requires_complete_frame_component_header() -> None:
+    from api.wallpaper import WallpaperValidationError, validate_wallpaper
+
+    image = b"\xff\xd8\xff\xc0\x00\x07\x08\x00\x01\x00\x01"
+
+    with pytest.raises(WallpaperValidationError):
+        validate_wallpaper(image)
 
 
 def test_jpeg_accepts_progressive_ac_eobrun_huffman_symbol_before_sof() -> None:
@@ -1463,18 +970,6 @@ def test_jpeg_accepts_progressive_ac_eobrun_huffman_symbol_before_sof() -> None:
     )
 
     assert validate_wallpaper(image).mime_type == "image/jpeg"
-
-
-def test_jpeg_rejects_huffman_tree_using_reserved_all_ones_terminal_code() -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    saturated_dc_dht = _jpeg_segment(
-        0xC4,
-        b"\x00" + b"\x02" + (b"\x00" * 15) + b"\x00\x01",
-    )
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_baseline_jpeg(before_sof=saturated_dc_dht))
 
 
 def test_jpeg_accepts_restarts_and_dri_changes_between_scans() -> None:
@@ -1497,90 +992,6 @@ def test_jpeg_accepts_restarts_and_dri_changes_between_scans() -> None:
     )
 
     assert validate_wallpaper(image).width == 1
-
-
-@pytest.mark.parametrize(
-    "image",
-    [
-        b"\xff\xd8" + b"\xff\xe0\x00\x01" + b"\xff\xd9",
-        b"\xff\xd8" + b"\xff\xe0\x00\x08abc",
-        _jpeg_tables() + _jpeg_sof() + _jpeg_sos() + b"\x01\xff\xd9",
-        b"\xff\xd8" + _jpeg_tables() + _jpeg_sos() + b"\x01\xff\xd9",
-        b"\xff\xd8" + _jpeg_tables() + _jpeg_sof() + b"\xff\xd9",
-        _baseline_jpeg(eoi=b""),
-        _baseline_jpeg(before_sof=_jpeg_sof()),
-        _baseline_jpeg(
-            sos=_jpeg_sos(((2, 0),)), components=((1, 0x11, 0),)
-        ),
-        _baseline_jpeg(
-            sos=_jpeg_sos(((1, 0), (1, 0))), components=((1, 0x11, 0),)
-        ),
-        _baseline_jpeg(sos=_jpeg_sos(ss=1, se=63)),
-        _baseline_jpeg(entropy=b"\x01\xff\xd0"),
-        _baseline_jpeg(
-            between_sof_and_sos=_jpeg_segment(0xDD, b"\x00\x01"),
-            entropy=b"\x01\xff\xd1",
-        ),
-        _baseline_jpeg(sof_marker=0xC1),
-        _baseline_jpeg(sof_marker=0xC3),
-        _baseline_jpeg(sof_marker=0xC5),
-        _baseline_jpeg(sof_marker=0xC9),
-        _baseline_jpeg(before_sof=_jpeg_segment(0xCC, b"")),
-        _baseline_jpeg(after_scan=_jpeg_segment(0xE1) + b"garbage"),
-        _baseline_jpeg(entropy=b"\x01\xff\xff\x00\x02"),
-        _baseline_jpeg(entropy=b"\x01\xff\x01"),
-        _baseline_jpeg() + b"trailing",
-    ],
-)
-def test_jpeg_rejects_invalid_structure_and_unsupported_coding(image: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
-
-
-@pytest.mark.parametrize(
-    "segment",
-    [
-        _jpeg_segment(0xDB, b""),
-        _jpeg_segment(0xDB, b"\x04" + bytes(64)),
-        _jpeg_segment(0xDB, b"\x10" + bytes(64)),
-        _jpeg_segment(0xDB, b"\x00" + bytes(64)),
-        _jpeg_segment(0xDB, b"\x10" + (b"\x00\x00" * 64)),
-        _jpeg_segment(0xC4, b""),
-        _jpeg_segment(0xC4, b"\x04" + bytes(16)),
-        _jpeg_segment(0xC4, b"\x00" + b"\x01" * 16),
-        _jpeg_segment(0xDD, b"\x00"),
-        _jpeg_segment(0xDD, b"\x00\x01\x00"),
-    ],
-)
-def test_jpeg_rejects_malformed_tables_and_dri(segment: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_baseline_jpeg(before_sof=segment))
-
-
-@pytest.mark.parametrize(
-    "sof",
-    [
-        _jpeg_sof(precision=12),
-        _jpeg_sof(width=0),
-        _jpeg_sof(height=0),
-        _jpeg_sof(components=()),
-        _jpeg_sof(components=((1, 0x11, 0), (2, 0x11, 0))),
-        _jpeg_sof(components=((1, 0x11, 0), (1, 0x11, 0), (3, 0x11, 0))),
-        _jpeg_sof(components=((1, 0x01, 0),)),
-        _jpeg_sof(components=((1, 0x51, 0),)),
-        _jpeg_sof(components=((1, 0x11, 4),)),
-    ],
-)
-def test_jpeg_rejects_invalid_frame_fields(sof: bytes) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    image = b"\xff\xd8" + _jpeg_tables() + sof + _jpeg_sos() + b"\x01\xff\xd9"
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(image)
 
 
 def _progressive_with_scans(scans: list[tuple[tuple, int, int, int, int]]) -> bytes:
@@ -1607,28 +1018,6 @@ def test_jpeg_accepts_progressive_initialization_and_refinement() -> None:
         )
 
     assert validate_wallpaper(_progressive_with_scans(scans)).height == 1
-
-
-@pytest.mark.parametrize(
-    "scans",
-    [
-        [(((1, 0),), 0, 1, 0, 0)],
-        [(((1, 0), (2, 0)), 1, 63, 0, 0)],
-        [(((1, 0),), 3, 2, 0, 0)],
-        [(((1, 0),), 1, 64, 0, 0)],
-        [(((1, 0),), 0, 0, 14, 13)],
-        [(((1, 0),), 0, 0, 1, 0)],
-        [(((1, 0),), 0, 0, 0, 0), (((1, 0),), 0, 0, 0, 0)],
-        [(((1, 0),), 1, 20, 0, 0), (((1, 0),), 20, 30, 0, 0)],
-        [(((1, 0),), 0, 0, 0, 2), (((1, 0),), 0, 0, 1, 0)],
-        [(((1, 0),), 0, 0, 0, 2), (((1, 0),), 0, 0, 2, 0)],
-    ],
-)
-def test_jpeg_rejects_invalid_progressive_scan_bookkeeping(scans) -> None:
-    from api.wallpaper import WallpaperValidationError, validate_wallpaper
-
-    with pytest.raises(WallpaperValidationError):
-        validate_wallpaper(_progressive_with_scans(scans))
 
 
 # Descriptor-root and filesystem-security tests use only pytest-owned temporary
