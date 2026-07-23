@@ -115,6 +115,7 @@ def test_done_owner_gate_rejects_same_pane_newer_stream():
         "loading_only_session_switch",
         "session_switch",
         "completed_session_switch",
+        "stream_just_finished_timer_owner_rotation",
     ],
 )
 def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
@@ -214,7 +215,7 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._resetStreamScrollFollow = () => {};
         global._suspendSessionStreamForLiveChat = () => {};
         global._bindStreamHiddenTracker = () => {};
-        global._shouldUseLiveProseFade = () => true;
+        global._shouldUseLiveProseFade = () => scenario !== 'stream_just_finished_timer_owner_rotation';
         global._shouldUseTransparentStreamFade = () => false;
         global._isDocumentVisibleAndFocused = () => true;
         global._isSessionActivelyViewed = sid => S.session && S.session.session_id === sid;
@@ -229,6 +230,12 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._renderMessagesWithScrollSnapshot = () => { renderCount += 1; };
         global.renderMessages = () => { renderCount += 1; };
         global.syncTopbar = () => {};
+        global.api = (_url, opts) => {
+          if(opts && opts.body){
+            try{ calls.anchorPersist.push(JSON.parse(opts.body)); }catch(_){}
+          }
+          return Promise.resolve({});
+        };
         global.renderSessionList = () => { calls.renderSessionList += 1; };
         global.setBusy = value => { calls.setBusy.push(value); S.busy = !!value; };
         global.setComposerStatus = value => { calls.composerStatus.push(value); };
@@ -239,8 +246,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global.clearLiveToolCards = () => {};
         global.removeThinking = () => {};
         global.finalizeThinkingCard = () => { calls.finalizeThinking += 1; };
-        global._clearApprovalPendingForSession = () => {};
-        global._clearClarifyPendingForSession = () => {};
+        global._clearApprovalPendingForSession = sid => { calls.clearApprovalPending.push(sid); };
+        global._clearClarifyPendingForSession = sid => { calls.clearClarifyPending.push(sid); };
         global.stopApprovalPolling = () => { calls.stopApproval += 1; };
         global.stopClarifyPolling = () => { calls.stopClarify += 1; };
         global.hideApprovalCard = () => { calls.hideApproval += 1; };
@@ -286,6 +293,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           status:[],
           clearInflight:0,
           clearInflightState:[],
+          clearApprovalPending:[],
+          clearClarifyPending:[],
           finalizeThinking:0,
           stopApproval:0,
           stopClarify:0,
@@ -294,6 +303,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           renderSessionList:0,
           playNotification:0,
           browserNotification:0,
+          anchorEvents:[],
+          anchorPersist:[],
         };
         let renderCount = 0;
         const S = global.S = {
@@ -310,6 +321,44 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
         global._desktopBackgroundedForNotifications = false;
         global._approvalSessionId = null;
         global._clarifySessionId = null;
+        window.HermesAssistantTurnAnchors = {
+          createAssistantTurnAnchorRegistry(){
+            return {anchor:{activity_events:[], lifecycle:{}, identity:{session_id:'sid-1', stream_id:'stream-old'}}};
+          },
+          applyAssistantTurnAnchorSourceEvent(registry, event){
+            calls.anchorEvents.push({...event});
+            const sourceType = String(event && event.source_event_type || '');
+            if(sourceType === 'done'){
+              registry.anchor.lifecycle = {status:'completed', terminal_state:'completed'};
+              registry.anchor.activity_events.push({
+                row_id:'done',
+                role:'terminal',
+                kind:'terminal_status',
+                source_event_type:'done',
+              });
+            }else if(sourceType === 'token'){
+              registry.anchor.activity_events.push({
+                row_id:'token',
+                role:'prose',
+                kind:'process_prose',
+                source_event_type:'token',
+                text:String(event && event.text || ''),
+              });
+            }
+            return {applied:true};
+          },
+          projectAssistantTurnAnchorActivityScene(registry){
+            const hasTerminal = (registry.anchor.activity_events || []).some(row => row && row.role === 'terminal');
+            return {
+              version:'activity_scene_v1',
+              mode:'compact_worklog',
+              identity:{session_id:'sid-1', stream_id:'stream-old'},
+              lifecycle:{...(registry.anchor.lifecycle || {})},
+              terminal_state:(registry.anchor.lifecycle && registry.anchor.lifecycle.terminal_state) || null,
+              activity_rows:hasTerminal ? [...(registry.anchor.activity_events || [])] : [],
+            };
+          },
+        };
 
         class FakeEventSource {
           static instances = [];
@@ -346,6 +395,8 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           calls.status = [];
           calls.clearInflight = 0;
           calls.clearInflightState = [];
+          calls.clearApprovalPending = [];
+          calls.clearClarifyPending = [];
           calls.finalizeThinking = 0;
           calls.stopApproval = 0;
           calls.stopClarify = 0;
@@ -374,16 +425,32 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           ],
         };
         if(scenario === 'origin_continuation_new_stream') doneSession.parent_session_id = 'sid-1';
+        if(scenario === 'loading_only_session_switch'){
+          global._loadingSessionId = 'sid-2';
+          context._loadingSessionId = 'sid-2';
+          resetMutationCalls();
+        }
         source.emit('done', {
           session: {
             ...doneSession,
           },
           usage:{duration_seconds:1},
         });
-        assert.ok(timeoutQueue.length > 0, 'fade-enabled done should remain pending behind a timeout');
+        if(scenario === 'stream_just_finished_timer_owner_rotation'){
+          assert.strictEqual(window._streamJustFinished, true, 'active done should arm the external-refresh cooldown');
+          S.activeStreamId = 'stream-new';
+          attachLiveStream('sid-1', 'stream-new');
+          assert.strictEqual(window._streamJustFinished, true, 'new owner attach must not clear the old cooldown synchronously');
+          drainQueuedWork();
+          assert.strictEqual(window._streamJustFinished, false, 'old done cooldown timer must clear its own flag after owner rotation');
+          assert.strictEqual(window._streamJustFinishedOwner, undefined, 'old done cooldown owner token should be retired');
+          process.stdout.write(JSON.stringify({streamJustFinished:window._streamJustFinished}));
+          process.exit(0);
+        }
+        if(scenario !== 'loading_only_session_switch'){
+          assert.ok(timeoutQueue.length > 0, 'fade-enabled done should remain pending behind a timeout');
+        }
         if(scenario === 'loading_only_session_switch'){
-          global._loadingSessionId = 'sid-2';
-          resetMutationCalls();
           drainQueuedWork();
           assert.strictEqual(calls.highlight, 0, 'loading-only old done must not highlight the transitioning pane');
           assert.strictEqual(calls.copy, 0, 'loading-only old done must not add copy buttons to the transitioning pane');
@@ -392,18 +459,30 @@ def test_done_postprocess_raf_rechecks_stream_owner_before_mutating(scenario):
           assert.deepStrictEqual(calls.composerStatus, [], 'loading-only old done must not clear composer status');
           assert.deepStrictEqual(calls.status, [], 'loading-only old done must not clear status');
           assert.strictEqual(calls.clearInflight, 0, 'loading-only old done must not clear active-pane inflight state');
-          assert.deepStrictEqual(calls.clearInflightState, [], 'loading-only old done must not clear persisted inflight state');
+          assert.deepStrictEqual(calls.clearInflightState, ['sid-1'], 'loading-only old done must retire the owner persisted inflight state');
+          assert.strictEqual(INFLIGHT['sid-1'], undefined, 'loading-only old done must delete the owner INFLIGHT entry');
+          assert.deepStrictEqual(calls.clearApprovalPending, ['sid-1'], 'loading-only old done must retire old-session approval pending state');
+          assert.deepStrictEqual(calls.clearClarifyPending, ['sid-1'], 'loading-only old done must retire old-session clarify pending state');
           assert.strictEqual(calls.finalizeThinking, 0, 'loading-only old done must not finalize Thinking UI');
+          assert.strictEqual(calls.stopApproval, 0, 'loading-only old done must not stop active-pane approval polling');
+          assert.strictEqual(calls.stopClarify, 0, 'loading-only old done must not stop active-pane clarify polling');
           assert.strictEqual(calls.hideApproval, 0, 'loading-only old done must not hide approval UI');
           assert.strictEqual(calls.hideClarify, 0, 'loading-only old done must not hide clarify UI');
           assert.strictEqual(renderCount, 0, 'loading-only old done must not render the transitioning pane');
           assert.deepStrictEqual(window._removeIdleLiveAssistantTurnCalls, [], 'loading-only old done must not remove live turns');
+          const persistedTerminal = calls.anchorPersist
+            .map(entry => entry && entry.scene)
+            .find(scene => scene && scene.lifecycle && scene.lifecycle.terminal_state === 'completed');
+          assert.ok(persistedTerminal, 'loading-only old done must persist a terminal Anchor lifecycle for the owner session');
           S.session = {session_id:'sid-2', message_count:1, pending_started_at:1};
           S.messages = [{role:'user', content:'next question'}];
           S.activeStreamId = 'stream-new';
           attachLiveStream('sid-2', 'stream-new');
         }else if(scenario === 'session_switch' || scenario === 'completed_session_switch'){
-          if(scenario === 'session_switch') global._loadingSessionId = 'sid-2';
+          if(scenario === 'session_switch'){
+            global._loadingSessionId = 'sid-2';
+            context._loadingSessionId = 'sid-2';
+          }
           S.session = {
             session_id: scenario === 'session_switch' ? 'sid-1' : 'sid-2',
             message_count:1,
