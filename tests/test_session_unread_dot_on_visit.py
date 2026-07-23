@@ -637,3 +637,74 @@ def test_visible_tab_message_load_still_syncs_viewed_count():
         "an actively-viewed session must still sync its viewed count to the "
         "loaded message count"
     )
+
+
+def _completion_rotation_script(*, final_exists: bool) -> str:
+    mark_completed = _extract("_markSessionCompletedInList")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    sessions = "[{session_id: 'old'}]"
+    if final_exists:
+        sessions = "[{session_id: 'old'}, {session_id: 'final'}]"
+    final_marker = ""
+    if final_exists:
+        final_marker = "unread.final = {message_count: 8, completed_at: 99, source: 'completion'};"
+    save_unread = save_unread.replace(
+        "function _saveSessionCompletionUnread() {",
+        "function _saveSessionCompletionUnread() { saves += 1;",
+    )
+    return f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+let _sessionCompletionUnread = null;
+let _allSessions = {sessions};
+const _sessionStreamingById = new Map();
+const _sessionListSnapshotById = new Map();
+const _sessionListSourceById = new Map();
+let saves = 0;
+function _rememberSessionListSource() {{}}
+function _forgetObservedStreamingSession() {{}}
+function renderSessionListFromCache() {{}}
+{get_unread}
+{save_unread}
+{mark_completed}
+const unread = _getSessionCompletionUnread();
+unread.old = {{message_count: 4, completed_at: 10, manual: true, manual_pending: true}};
+{final_marker}
+_saveSessionCompletionUnread();
+saves = 0;
+_markSessionCompletedInList({{session_id: 'final', message_count: 8, last_message_at: 20}}, 'old');
+console.log(JSON.stringify({{
+  old_present: Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'old'),
+  final_marker: _getSessionCompletionUnread().final,
+  saves,
+  session_ids: _allSessions.map((s) => s.session_id),
+}}));
+"""
+
+
+def test_live_completion_rotates_manual_unread_marker_to_final_sid():
+    out = _run_node(_completion_rotation_script(final_exists=False))
+    assert out["old_present"] is False
+    assert out["final_marker"]["manual"] is True
+    assert out["final_marker"]["manual_pending"] is True
+    assert out["saves"] == 1
+    assert out["session_ids"] == ["final"]
+
+
+def test_settled_rotation_merges_manual_state_with_newer_completion_metadata():
+    out = _run_node(_completion_rotation_script(final_exists=True))
+    assert out["old_present"] is False
+    assert out["final_marker"] == {
+        "message_count": 8,
+        "completed_at": 99,
+        "source": "completion",
+        "manual": True,
+        "manual_pending": True,
+    }
+    assert out["saves"] == 1
+    assert out["session_ids"] == ["final"]
