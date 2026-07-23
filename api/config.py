@@ -866,7 +866,7 @@ def _discover_default_workspace() -> Path:
 
 
 DEFAULT_WORKSPACE = _discover_default_workspace()
-DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "")  # Empty = use provider default; avoids showing unavailable OpenAI model to non-OpenAI users (#646)
+DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "").strip()  # Empty = use provider default; avoids showing unavailable OpenAI model to non-OpenAI users (#646)
 
 
 # ── Startup diagnostics ───────────────────────────────────────────────────────
@@ -3205,6 +3205,8 @@ def _default_model_has_explicit_source(config_data: dict | None = None) -> bool:
     if isinstance(model_cfg, dict):
         if str(model_cfg.get("default") or "").strip():
             return True
+    if str(DEFAULT_MODEL or "").strip():
+        return True
     env_model = (
         os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
     )

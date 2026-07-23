@@ -8,8 +8,10 @@ model-state writes pointless or let later model-list refreshes reset a live
 in-page selection.
 """
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -340,28 +342,46 @@ def test_boot_marks_nonexplicit_static_selection_provisional():
 
 
 @pytest.mark.parametrize(
-    ("config_data", "env_model", "expected_model", "expected_provider", "expected_explicit"),
+    (
+        "config_data",
+        "webui_default_model",
+        "env_model",
+        "expected_model",
+        "expected_provider",
+        "expected_explicit",
+    ),
     [
-        ({"model": {"provider": "safe"}}, None, config_api.DEFAULT_MODEL, "safe", False),
-        ({"model": "legacy-explicit-model"}, None, "legacy-explicit-model", None, True),
+        ({"model": {"provider": "safe"}}, "", None, "", "safe", False),
+        (
+            {"model": {"provider": "safe"}},
+            "webui-env-default-model",
+            None,
+            "webui-env-default-model",
+            "safe",
+            True,
+        ),
+        ({"model": "legacy-explicit-model"}, "", None, "legacy-explicit-model", None, True),
         (
             {"model": {"provider": "safe", "default": "dict-explicit-model"}},
+            "",
             None,
             "dict-explicit-model",
             "safe",
             True,
         ),
-        ({"model": {"provider": "safe"}}, "env-explicit-model", "env-explicit-model", "safe", True),
+        ({"model": {"provider": "safe"}}, "", "env-explicit-model", "env-explicit-model", "safe", True),
     ],
 )
 def test_load_settings_exposes_default_model_explicit_source(
     monkeypatch,
     config_data,
+    webui_default_model,
     env_model,
     expected_model,
     expected_provider,
     expected_explicit,
 ):
+    monkeypatch.setattr(config_api, "DEFAULT_MODEL", webui_default_model, raising=False)
     monkeypatch.setattr(config_api, "cfg", dict(config_data), raising=False)
     monkeypatch.setattr(config_api, "_read_raw_settings_file", lambda: {})
     for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
@@ -377,6 +397,148 @@ def test_load_settings_exposes_default_model_explicit_source(
         assert settings["default_model_provider"] == expected_provider
     else:
         assert "default_model_provider" not in settings
+
+
+def test_load_settings_marks_webui_default_model_env_source_explicit(monkeypatch):
+    monkeypatch.setattr(config_api, "DEFAULT_MODEL", "custom/env-model", raising=False)
+    monkeypatch.setattr(
+        config_api,
+        "cfg",
+        {"model": {"provider": "safe"}, "providers": {}, "fallback_providers": []},
+        raising=False,
+    )
+    monkeypatch.setattr(config_api, "_read_raw_settings_file", lambda: {})
+    for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = config_api.load_settings()
+
+    assert config_api.get_effective_default_model(config_api.cfg) == "custom/env-model"
+    assert settings["default_model"] == "custom/env-model"
+    assert settings["default_model_has_explicit_source"] is True
+    assert settings["default_model_provider"] == "safe"
+
+
+def test_webui_default_model_env_survives_fresh_import_catalogs(tmp_path):
+    env = os.environ.copy()
+    for key in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        env.pop(key, None)
+    env["HERMES_WEBUI_DEFAULT_MODEL"] = "custom/env-model"
+    env["HERMES_HOME"] = str(tmp_path / "home")
+    env["HERMES_BASE_HOME"] = str(tmp_path / "home")
+    env["HERMES_WEBUI_STATE_DIR"] = str(tmp_path / "state")
+    env["HERMES_WEBUI_DEFAULT_WORKSPACE"] = str(tmp_path / "workspace")
+    env["HERMES_CONFIG_PATH"] = str(tmp_path / "home" / "config.yaml")
+
+    code = r"""
+import json
+import sys
+import types
+from api import config
+
+fake_pkg = types.ModuleType("hermes_cli")
+fake_pkg.__path__ = []
+fake_models = types.ModuleType("hermes_cli.models")
+fake_models.list_available_providers = lambda: [
+    {"id": "openai-codex", "authenticated": True},
+]
+fake_auth = types.ModuleType("hermes_cli.auth")
+fake_auth.get_auth_status = lambda pid: {"key_source": "env", "logged_in": True}
+sys.modules["hermes_cli"] = fake_pkg
+sys.modules["hermes_cli.models"] = fake_models
+sys.modules["hermes_cli.auth"] = fake_auth
+
+config.cfg = {
+    "model": {"provider": "openai-codex"},
+    "providers": {},
+    "fallback_providers": [],
+}
+config._read_raw_settings_file = lambda: {}
+try:
+    config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+except Exception:
+    config._cfg_mtime = 0.0
+config.invalidate_models_cache()
+
+def catalog_has_model(catalog, model_id):
+    return any(
+        str(model.get("id") or "") == model_id
+        for group in catalog.get("groups", [])
+        for bucket in ("models", "extra_models")
+        for model in group.get(bucket, [])
+    )
+
+def catalog_has_real_provider_models(catalog):
+    return any(
+        str(group.get("provider_id") or "") not in ("", "default")
+        and any(str(model.get("id") or "").strip() for model in group.get("models", []))
+        for group in catalog.get("groups", [])
+    )
+
+def badge_for(catalog, model_id):
+    badges = catalog.get("configured_model_badges") or {}
+    direct = badges.get(model_id)
+    if direct:
+        return direct
+    matches = [
+        badge
+        for key, badge in badges.items()
+        if model_id in str(key)
+    ]
+    return matches[0] if matches else None
+
+settings = config.load_settings()
+static_catalog = config._static_models_catalog_without_live_probes()
+config.invalidate_models_cache()
+live_catalog = config.get_available_models(force_refresh=True)
+
+print(json.dumps({
+    "DEFAULT_MODEL": config.DEFAULT_MODEL,
+    "effective": config.get_effective_default_model(config.cfg),
+    "explicit": config._default_model_has_explicit_source(config.cfg),
+    "settings_default": settings.get("default_model"),
+    "settings_explicit": settings.get("default_model_has_explicit_source"),
+    "settings_provider": settings.get("default_model_provider"),
+    "static_default": static_catalog.get("default_model"),
+    "static_explicit": static_catalog.get("default_model_has_explicit_source"),
+    "static_has_real_provider_models": catalog_has_real_provider_models(static_catalog),
+    "static_has_override": catalog_has_model(static_catalog, "custom/env-model"),
+    "static_badge": badge_for(static_catalog, "custom/env-model"),
+    "live_default": live_catalog.get("default_model"),
+    "live_explicit": live_catalog.get("default_model_has_explicit_source"),
+    "live_has_real_provider_models": catalog_has_real_provider_models(live_catalog),
+    "live_has_override": catalog_has_model(live_catalog, "custom/env-model"),
+    "live_badge": badge_for(live_catalog, "custom/env-model"),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    assert payload["DEFAULT_MODEL"] == "custom/env-model"
+    assert payload["effective"] == "custom/env-model"
+    assert payload["explicit"] is True
+    assert payload["settings_default"] == "custom/env-model"
+    assert payload["settings_explicit"] is True
+    assert payload["settings_provider"] == "openai-codex"
+
+    for prefix in ("static", "live"):
+        assert payload[f"{prefix}_default"] == "custom/env-model"
+        assert payload[f"{prefix}_explicit"] is True
+        assert payload[f"{prefix}_has_real_provider_models"] is True
+        assert payload[f"{prefix}_has_override"] is True
+        assert payload[f"{prefix}_badge"] == {
+            "role": "primary",
+            "label": "Primary",
+            "provider": "openai-codex",
+        }
 
 
 def test_save_settings_drops_derived_default_model_metadata(monkeypatch, tmp_path):
@@ -498,6 +660,46 @@ def test_boot_model_refresh_does_not_synthesize_nonexplicit_fallback_when_catalo
     assert f"@safe:{fallback_model}" not in got["optionValues"]
     assert got["defaultModelHasExplicitSource"] is False
     assert got["defaultModelEligibleForFreshBoot"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_boot_model_refresh_applies_explicit_env_default_when_catalog_has_models(
+    populate_driver_path,
+):
+    env_default = "custom/env-model"
+    got = _run_populate_driver(
+        populate_driver_path,
+        initial_value="@expensive:gpt-5.5",
+        opts={"preferProfileDefaultOnFreshBoot": True},
+        session=None,
+        settings={
+            "default_model": env_default,
+            "default_model_provider": "safe",
+            "default_model_has_explicit_source": True,
+        },
+        api_default_model=env_default,
+        api_default_model_has_explicit_source=True,
+        api_active_provider="safe",
+        api_groups=[
+            {"provider": "Safe", "provider_id": "safe", "models": [{"id": "@safe:gpt-4o-mini", "label": "GPT-4o mini"}]},
+            {"provider": "Expensive", "provider_id": "expensive", "models": [{"id": "@expensive:gpt-5.5", "label": "GPT-5.5"}]},
+        ],
+        initial_options=[
+            {"provider": "expensive", "value": "@expensive:gpt-5.5", "label": "GPT-5.5"},
+        ],
+        local_storage=_persisted_model_storage("@expensive:gpt-5.5", "expensive"),
+        apply_boot_saved_state=True,
+    )
+
+    assert got["selectedState"] == {
+        "model": env_default,
+        "model_provider": "safe",
+    }
+    assert got["selectedProvider"] == "safe"
+    assert env_default in got["selectValue"]
+    assert "@expensive:gpt-5.5" in got["localStorage"]["hermes-webui-model"]
+    assert got["defaultModelHasExplicitSource"] is True
+    assert got["defaultModelEligibleForFreshBoot"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

@@ -134,9 +134,10 @@ def _scrub_provider_env(monkeypatch):
         # as the highest-priority default-model source, above config. A runner
         # exporting HERMES_MODEL (e.g. a live agent session on "opus-4.8") injects
         # that id into the picker/catalog and breaks capacity/symmetry assertions.
-        "HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL",
+        "HERMES_WEBUI_DEFAULT_MODEL", "HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(config, "DEFAULT_MODEL", "")
 
 
 def _catalog_model_ids(data: dict) -> set[str]:
@@ -148,6 +149,15 @@ def _catalog_model_ids(data: dict) -> set[str]:
                 if model_id:
                     ids.add(model_id)
     return ids
+
+
+def _primary_badge_for(data: dict, model_id: str, provider: str) -> dict | None:
+    badges = data.get("configured_model_badges", {}) or {}
+    for key in (model_id, f"{provider}/{model_id}", f"@{provider}:{model_id}"):
+        badge = badges.get(key)
+        if badge:
+            return badge
+    return None
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -344,57 +354,59 @@ class TestApiModelsLargeCatalog:
 
 
 class TestApiModelsCatalogDefaults:
-    """Catalog defaults must distinguish explicit user config from fallback."""
+    """Catalog defaults distinguish explicit env/config from blank fallback."""
 
-    def test_live_provider_only_catalog_suppresses_fallback_default_badge(
+    def test_live_provider_only_catalog_keeps_webui_default_env_badge(
         self,
         monkeypatch,
         tmp_path,
     ):
         _scrub_provider_env(monkeypatch)
-        fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+        webui_env_model = "fallback/model-that-is-not-in-provider-catalog"
         catalog = ["anthropic/claude-opus-4.7", "openai/gpt-5.5"]
         _install_fake_hermes_cli(monkeypatch, nous_ids=catalog)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr(config, "DEFAULT_MODEL", fallback_model)
+        monkeypatch.setattr(config, "DEFAULT_MODEL", webui_env_model)
 
         restore = _swap_in_test_config({"model": {"provider": "nous"}})
         try:
             data = config.get_available_models()
-            badges = data.get("configured_model_badges", {})
             ids = _catalog_model_ids(data)
 
-            assert data.get("default_model") == fallback_model
-            assert data.get("default_model_has_explicit_source") is False
-            assert fallback_model not in ids
-            assert f"@nous:{fallback_model}" not in ids
-            assert fallback_model not in badges
-            assert f"@nous:{fallback_model}" not in badges
+            assert data.get("default_model") == webui_env_model
+            assert data.get("default_model_has_explicit_source") is True
+            assert webui_env_model in ids or f"@nous:{webui_env_model}" in ids
+            assert _primary_badge_for(data, webui_env_model, "nous") == {
+                "role": "primary",
+                "label": "Primary",
+                "provider": "nous",
+            }
         finally:
             restore()
 
-    def test_static_provider_only_catalog_suppresses_fallback_default_badge(
+    def test_static_provider_only_catalog_keeps_webui_default_env_badge(
         self,
         monkeypatch,
         tmp_path,
     ):
         _scrub_provider_env(monkeypatch)
-        fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+        webui_env_model = "fallback/model-that-is-not-in-provider-catalog"
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr(config, "DEFAULT_MODEL", fallback_model)
+        monkeypatch.setattr(config, "DEFAULT_MODEL", webui_env_model)
 
         restore = _swap_in_test_config({"model": {"provider": "nous"}})
         try:
             data = config._static_models_catalog_without_live_probes()
-            badges = data.get("configured_model_badges", {})
             ids = _catalog_model_ids(data)
 
-            assert data.get("default_model") == fallback_model
-            assert data.get("default_model_has_explicit_source") is False
-            assert fallback_model not in ids
-            assert f"@nous:{fallback_model}" not in ids
-            assert fallback_model not in badges
-            assert f"@nous:{fallback_model}" not in badges
+            assert data.get("default_model") == webui_env_model
+            assert data.get("default_model_has_explicit_source") is True
+            assert webui_env_model in ids or f"@nous:{webui_env_model}" in ids
+            assert _primary_badge_for(data, webui_env_model, "nous") == {
+                "role": "primary",
+                "label": "Primary",
+                "provider": "nous",
+            }
         finally:
             restore()
 
@@ -425,27 +437,27 @@ class TestApiModelsCatalogDefaults:
         finally:
             restore()
 
-    def test_empty_provider_catalog_keeps_emergency_fallback(
+    def test_empty_provider_catalog_keeps_webui_default_env(
         self,
         monkeypatch,
         tmp_path,
     ):
         _scrub_provider_env(monkeypatch)
-        fallback_model = "fallback/model-that-is-not-in-provider-catalog"
+        webui_env_model = "fallback/model-that-is-not-in-provider-catalog"
         _install_fake_hermes_cli(
             monkeypatch,
             nous_ids=[],
             auth_status_logged_in=True,
         )
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr(config, "DEFAULT_MODEL", fallback_model)
+        monkeypatch.setattr(config, "DEFAULT_MODEL", webui_env_model)
 
         restore = _swap_in_test_config({"model": {"provider": "nous"}})
         try:
             data = config.get_available_models()
-            assert data.get("default_model") == fallback_model
-            assert data.get("default_model_has_explicit_source") is False
-            assert fallback_model in _catalog_model_ids(data)
+            assert data.get("default_model") == webui_env_model
+            assert data.get("default_model_has_explicit_source") is True
+            assert webui_env_model in _catalog_model_ids(data)
             assert not [
                 group for group in data.get("groups", [])
                 if group.get("provider_id") == "nous" and group.get("provider") != "Default"
