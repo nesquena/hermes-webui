@@ -65,7 +65,7 @@ def test_selected_text_reply_collects_named_context_blocks_without_dumping_into_
     assert "function _renderSelectionChips()" in js
     assert "function _flushSelectionBlocksToComposer()" in js
     assert "_pendingSelections.push({id, name, text})" in js
-    assert "const text=_selectedTextReplyLiveText();" in js
+    assert "const text=_consumeSelectedTextReplySelection();" in js
     assert "_addNamedContextBlock(text)" in js
     assert "**${s.name}:**\\n${_formatSelectedTextReplyQuote(s.text)}" in js
     assert "composer.dispatchEvent(new Event('input',{bubbles:true}))" in js

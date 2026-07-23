@@ -797,39 +797,40 @@ function _formatSelectedTextReplyQuote(text, includeMarker=true){
   return includeMarker?`<!-- hermes-selected-context -->\n${quote}`:quote;
 }
 
-function insertSavedPromptIntoComposer(text){
+function _appendComposerText(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
   const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
   if(typeof autoResize==='function') autoResize();
 }
 
-function _seedSelectedTextRefineDraft(text){
-  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
-  const quote=_formatSelectedTextReplyQuote(text, false);
-  const instruction=_selectedTextReplyT('selected_text_refine_instruction','Refine instruction:');
-  if(!composer||!quote||!instruction)return;
-  const current=String(composer.value||'');
-  const addition=`${quote}\n\n${instruction}`;
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${addition}`:addition;
-  composer.focus();
-  try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
-  composer.dispatchEvent(new Event('input',{bubbles:true}));
-  if(typeof autoResize==='function')autoResize();
+function insertSavedPromptIntoComposer(text){
+  if(!text)return;
+  _appendComposerText(`${text}\n\n`);
 }
 
-function _selectedTextReplyLiveText(){
+function _seedSelectedTextRefineDraft(text){
+  const quote=_formatSelectedTextReplyQuote(text, false);
+  const instruction=_selectedTextReplyT('selected_text_refine_instruction','Refine instruction:');
+  if(!quote||!instruction)return;
+  _appendComposerText(`${quote}\n\n${instruction} `);
+}
+
+function _consumeSelectedTextReplySelection(){
   const info=_selectedTextReplySelection();
   if(!info){
     _hideSelectedTextReplyButton();
     return '';
   }
-  _selectedTextReplyText=info.text;
-  return info.text;
+  const text=info.text;
+  _hideSelectedTextReplyButton();
+  const selection=window.getSelection&&window.getSelection();
+  if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+  return text;
 }
 
 let _savedPromptsCache=null;
@@ -1096,12 +1097,9 @@ function _selectedTextReplyButton(){
   btn.addEventListener('mousedown', e=>e.preventDefault());
   btn.addEventListener('click', e=>{
     e.preventDefault();
-    const text=_selectedTextReplyLiveText();
+    const text=_consumeSelectedTextReplySelection();
     if(text){
       _addNamedContextBlock(text);
-      _hideSelectedTextReplyButton();
-      const selection=window.getSelection&&window.getSelection();
-      if(selection&&selection.removeAllRanges)selection.removeAllRanges();
     }
   });
   const refine=document.createElement('button');
@@ -1117,12 +1115,9 @@ function _selectedTextReplyButton(){
   refine.addEventListener('mousedown', e=>e.preventDefault());
   refine.addEventListener('click', e=>{
     e.preventDefault();
-    const text=_selectedTextReplyLiveText();
+    const text=_consumeSelectedTextReplySelection();
     if(text){
       _seedSelectedTextRefineDraft(text);
-      _hideSelectedTextReplyButton();
-      const selection=window.getSelection&&window.getSelection();
-      if(selection&&selection.removeAllRanges)selection.removeAllRanges();
     }
   });
   group.appendChild(btn);

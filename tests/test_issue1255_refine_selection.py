@@ -1,6 +1,8 @@
 """Runtime regression coverage for refine-from-selection (#1255)."""
 
 import json
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,7 +13,7 @@ from tests.test_selected_context_user_render_runtime import _run_user_renderer
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MESSAGES_JS = ROOT / "static" / "messages.js"
+MESSAGES_JS = Path(os.environ.get("HERMES_ISSUE1255_MESSAGES_JS") or (ROOT / "static" / "messages.js"))
 I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
@@ -19,10 +21,37 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is required")
 
 
+def _locale_blocks(src: str) -> dict[str, str]:
+    matches = list(
+        re.finditer(
+            r"\n  (?:(['\"])([A-Za-z][A-Za-z0-9-]*)\1|([A-Za-z][A-Za-z0-9-]*)): \{",
+            src,
+        )
+    )
+    blocks: dict[str, str] = {}
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else src.rfind("\n};")
+        blocks[match.group(2) or match.group(3)] = src[start:end]
+    return blocks
+
+
+def _instruction_values(src: str) -> list[str]:
+    blocks = _locale_blocks(src)
+    values: list[str] = []
+    pattern = re.compile(r"^\s{4}selected_text_refine_instruction:\s*(['\"])(.*?)\1,", re.MULTILINE)
+    for block in blocks.values():
+        match = pattern.search(block)
+        assert match, "selected_text_refine_instruction missing from locale block"
+        values.append(match.group(2))
+    return values
+
+
 _DRIVER = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[1], 'utf8');
 const scenario = process.argv[2];
+const scenarioArg = process.argv[3] || '';
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
@@ -77,6 +106,14 @@ function extractFunc(name) {
   throw new Error(name + ' brace scan failed');
 }
 
+function hasFunc(name) {
+  return new RegExp('function\\s+' + name + '\\s*\\(').test(src);
+}
+
+const liveSelectionHelper = hasFunc('_consumeSelectedTextReplySelection')
+  ? '_consumeSelectedTextReplySelection'
+  : '_selectedTextReplyLiveText';
+
 let _selectedTextReplyBtn = null;
 let _selectedTextRefineBtn = null;
 let _selectedTextReplyGroup = null;
@@ -94,6 +131,16 @@ const i18n = {
   selected_text_refine_instruction: 'Refine instruction:',
 };
 
+global.__log = [];
+global.__replyCalls = [];
+global.__sendCalls = 0;
+global.__autoResizeCalls = 0;
+global.__selectionClears = 0;
+
+function pushLog(entry) {
+  global.__log.push(entry);
+}
+
 function makeClassList(owner) {
   return {
     add(name) { owner._classes.add(name); },
@@ -103,6 +150,7 @@ function makeClassList(owner) {
 }
 
 function makeElement(tagName) {
+  let value = '';
   const el = {
     nodeType: 1,
     tagName: String(tagName || 'div').toUpperCase(),
@@ -116,10 +164,12 @@ function makeElement(tagName) {
     _events: [],
     textContent: '',
     title: '',
-    value: '',
     id: '',
     className: '',
     selectionRange: null,
+    selectionStart: 0,
+    selectionEnd: 0,
+    focused: false,
     classList: null,
     appendChild(child) {
       child.parentElement = el;
@@ -140,14 +190,19 @@ function makeElement(tagName) {
       event.target = event.target || el;
       event.preventDefault ||= (() => {});
       el._events.push(event.type);
+      if (event.type === 'input') pushLog(`input:${el.id || el.tagName.toLowerCase()}`);
       for (const handler of el._listeners[event.type] || []) handler(event);
       return true;
     },
     focus() {
       el.focused = true;
+      pushLog(`focus:${el.id || el.tagName.toLowerCase()}`);
     },
     setSelectionRange(start, end) {
       el.selectionRange = [start, end];
+      el.selectionStart = start;
+      el.selectionEnd = end;
+      pushLog(`setSelectionRange:${el.id || el.tagName.toLowerCase()}:${start}:${end}`);
     },
     getBoundingClientRect() {
       return el._rect || {left: 0, top: 0, width: 180, height: 36};
@@ -171,6 +226,17 @@ function makeElement(tagName) {
       return null;
     },
   };
+  Object.defineProperty(el, 'value', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      return value;
+    },
+    set(next) {
+      value = String(next);
+      pushLog(`value:${el.id || el.tagName.toLowerCase()}:${value.length}`);
+    },
+  });
   el.classList = makeClassList(el);
   return el;
 }
@@ -224,12 +290,12 @@ global.window = {
 global.$ = (id) => document.getElementById(id);
 global.t = (key) => i18n[key];
 global.autoResize = () => {
-  global.__autoResizeCalls = (global.__autoResizeCalls || 0) + 1;
+  global.__autoResizeCalls += 1;
+  pushLog('autoResize');
 };
 global.applyLocaleToDOM = () => {};
-global.__replyCalls = [];
-global.__sendCalls = 0;
 global._addNamedContextBlock = (text) => {
+  pushLog('addNamedContextBlock');
   global.__replyCalls.push(text);
 };
 global.send = () => {
@@ -241,8 +307,10 @@ eval(extractFunc('_selectedTextReplyRoot'));
 eval(extractFunc('_selectedTextReplyNodeInChat'));
 eval(extractFunc('_selectedTextReplySelection'));
 eval(extractFunc('_formatSelectedTextReplyQuote'));
+if (hasFunc('_appendComposerText')) eval(extractFunc('_appendComposerText'));
+eval(extractFunc('insertSavedPromptIntoComposer'));
 eval(extractFunc('_seedSelectedTextRefineDraft'));
-eval(extractFunc('_selectedTextReplyLiveText'));
+eval(extractFunc(liveSelectionHelper));
 eval(extractFunc('_selectedTextReplyButton'));
 eval(extractFunc('_hideSelectedTextReplyButton'));
 eval(extractFunc('_positionSelectedTextReplyButton'));
@@ -256,8 +324,10 @@ if (scenario === 'browser_fixture') {
       extractFunc('_selectedTextReplyNodeInChat'),
       extractFunc('_selectedTextReplySelection'),
       extractFunc('_formatSelectedTextReplyQuote'),
+      ...(hasFunc('_appendComposerText') ? [extractFunc('_appendComposerText')] : []),
+      extractFunc('insertSavedPromptIntoComposer'),
       extractFunc('_seedSelectedTextRefineDraft'),
-      extractFunc('_selectedTextReplyLiveText'),
+      extractFunc(liveSelectionHelper),
       extractFunc('_selectedTextReplyButton'),
       extractFunc('_hideSelectedTextReplyButton'),
       extractFunc('_positionSelectedTextReplyButton'),
@@ -267,7 +337,22 @@ if (scenario === 'browser_fixture') {
   process.exit(0);
 }
 
+function resetSignals() {
+  global.__log = [];
+  global.__replyCalls = [];
+  global.__sendCalls = 0;
+  global.__autoResizeCalls = 0;
+  global.__selectionClears = 0;
+}
+
 function buildShell() {
+  _selectedTextReplyBtn = null;
+  _selectedTextRefineBtn = null;
+  _selectedTextReplyGroup = null;
+  _selectedTextReplyText = '';
+  _pendingSelections = [];
+  _selectionIdCounter = 0;
+  S = {pendingFiles: ['keep.bin']};
   body.children = [];
   const messages = makeElement('div');
   messages.id = 'messages';
@@ -278,21 +363,28 @@ function buildShell() {
   textNode.parentElement = bubble;
   textNode.parentNode = bubble;
   bubble.children.push(textNode);
+  const outside = makeElement('div');
+  outside.id = 'outside';
+  const outsideText = makeText('Outside');
+  outsideText.parentElement = outside;
+  outsideText.parentNode = outside;
+  outside.children.push(outsideText);
   const composer = makeElement('textarea');
   composer.id = 'msg';
   body.appendChild(messages);
+  body.appendChild(outside);
   body.appendChild(composer);
-  return {messages, bubble, textNode, composer};
+  return {messages, bubble, textNode, outside, outsideText, composer};
 }
 
-function selectionFor(textNode, text, rect, collapsed = false) {
+function selectionFor(startNode, endNode, text, rect, collapsed = false) {
   return {
     isCollapsed: collapsed,
     rangeCount: 1,
     getRangeAt() {
       return {
-        startContainer: textNode,
-        endContainer: textNode,
+        startContainer: startNode,
+        endContainer: endNode,
         getBoundingClientRect() {
           return rect;
         },
@@ -302,14 +394,15 @@ function selectionFor(textNode, text, rect, collapsed = false) {
       return text;
     },
     removeAllRanges() {
-      global.__selectionClears = (global.__selectionClears || 0) + 1;
+      global.__selectionClears += 1;
+      pushLog('removeAllRanges');
     },
   };
 }
 
 function runVisibilityScenario() {
   const {textNode} = buildShell();
-  currentSelection = selectionFor(textNode, 'Alpha\nBeta', {left: 160, top: 120, width: 90, height: 18});
+  currentSelection = selectionFor(textNode, textNode, 'Alpha\nBeta', {left: 160, top: 120, width: 90, height: 18});
   _updateSelectedTextReplyButton();
   const group = document.getElementById('selectedTextActionGroup');
   const reply = document.getElementById('selectedTextReplyBtn');
@@ -322,7 +415,7 @@ function runVisibilityScenario() {
     left: group.style.left,
     top: group.style.top,
   };
-  currentSelection = selectionFor(textNode, 'Alpha\nBeta', {left: 160, top: 120, width: 90, height: 18}, true);
+  currentSelection = selectionFor(textNode, textNode, 'Alpha\nBeta', {left: 160, top: 120, width: 90, height: 18}, true);
   _updateSelectedTextReplyButton();
   return {
     valid,
@@ -333,59 +426,152 @@ function runVisibilityScenario() {
 function runReplyScenario() {
   const {textNode, composer} = buildShell();
   composer.value = 'Existing draft';
-  currentSelection = selectionFor(textNode, 'Quoted context', {left: 120, top: 100, width: 90, height: 18});
+  currentSelection = selectionFor(textNode, textNode, 'Quoted context', {left: 120, top: 100, width: 90, height: 18});
   const reply = _selectedTextReplyButton();
   _selectedTextReplyText = 'Quoted context';
   _selectedTextReplyGroup.classList.add('visible');
+  resetSignals();
   reply.dispatchEvent({type: 'click', preventDefault() {}});
   return {
     replyCalls: global.__replyCalls,
     composerValue: composer.value,
+    composerFocused: !!composer.focused,
     hidden: !_selectedTextReplyGroup.classList.contains('visible'),
-    selectionClears: global.__selectionClears || 0,
+    selectionClears: global.__selectionClears,
     sendCalls: global.__sendCalls,
-    refineCalls: global.__autoResizeCalls || 0,
+    autoResizeCalls: global.__autoResizeCalls,
+    pendingFiles: S.pendingFiles.slice(),
+    log: global.__log.slice(),
   };
 }
 
-function runRefineScenario() {
+function runRefineScenario(instructionOverride) {
   const {textNode, composer} = buildShell();
   composer.value = 'Existing draft';
-  currentSelection = selectionFor(textNode, 'Quoted context\nSecond line', {left: 120, top: 100, width: 120, height: 18});
-  const reply = _selectedTextReplyButton();
+  if (instructionOverride) i18n.selected_text_refine_instruction = instructionOverride;
+  currentSelection = selectionFor(textNode, textNode, 'Quoted context\nSecond line', {left: 120, top: 100, width: 120, height: 18});
+  _selectedTextReplyButton();
   const refine = document.getElementById('selectedTextRefineBtn');
   _selectedTextReplyText = 'Quoted context\nSecond line';
   _selectedTextReplyGroup.classList.add('visible');
+  resetSignals();
   refine.dispatchEvent({type: 'click', preventDefault() {}});
   return {
-    replyText: reply.textContent,
-    refineText: refine.textContent,
     composerValue: composer.value,
     selectionRange: composer.selectionRange,
+    selectionStart: composer.selectionStart,
+    selectionEnd: composer.selectionEnd,
     inputEvents: composer._events.filter((event) => event === 'input').length,
     focused: !!composer.focused,
     hidden: !_selectedTextReplyGroup.classList.contains('visible'),
-    selectionClears: global.__selectionClears || 0,
-    autoResizeCalls: global.__autoResizeCalls || 0,
+    selectionClears: global.__selectionClears,
+    autoResizeCalls: global.__autoResizeCalls,
     pendingFiles: S.pendingFiles.slice(),
     pendingSelections: _pendingSelections.slice(),
     sendCalls: global.__sendCalls,
+    log: global.__log.slice(),
   };
 }
 
-function runInvalidRefineScenario() {
-  const {textNode, composer} = buildShell();
-  currentSelection = selectionFor(textNode, 'Quoted context', {left: 120, top: 100, width: 90, height: 18}, true);
-  _selectedTextReplyButton();
-  const refine = document.getElementById('selectedTextRefineBtn');
-  _selectedTextReplyText = 'Stale text';
-  _selectedTextReplyGroup.classList.add('visible');
-  refine.dispatchEvent({type: 'click', preventDefault() {}});
+function runInvalidMatrixScenario() {
+  const cases = {};
+
+  {
+    const {textNode, composer} = buildShell();
+    composer.value = 'Untouched draft';
+    _selectedTextReplyButton();
+    const refine = document.getElementById('selectedTextRefineBtn');
+    _selectedTextReplyText = 'Stale text';
+    _selectedTextReplyGroup.classList.add('visible');
+    currentSelection = selectionFor(textNode, textNode, 'Quoted context', {left: 120, top: 100, width: 90, height: 18}, true);
+    resetSignals();
+    refine.dispatchEvent({type: 'click', preventDefault() {}});
+    cases.collapsed = {
+      composerValue: composer.value,
+      hidden: !_selectedTextReplyGroup.classList.contains('visible'),
+      selectionClears: global.__selectionClears,
+      autoResizeCalls: global.__autoResizeCalls,
+      sendCalls: global.__sendCalls,
+      pendingSelections: _pendingSelections.slice(),
+    };
+  }
+
+  {
+    const {textNode, outsideText, composer} = buildShell();
+    composer.value = 'Untouched draft';
+    _selectedTextReplyButton();
+    const refine = document.getElementById('selectedTextRefineBtn');
+    _selectedTextReplyText = 'Stale text';
+    _selectedTextReplyGroup.classList.add('visible');
+    currentSelection = selectionFor(textNode, outsideText, 'Mixed context', {left: 120, top: 100, width: 90, height: 18});
+    resetSignals();
+    refine.dispatchEvent({type: 'click', preventDefault() {}});
+    cases.outside = {
+      composerValue: composer.value,
+      hidden: !_selectedTextReplyGroup.classList.contains('visible'),
+      selectionClears: global.__selectionClears,
+      autoResizeCalls: global.__autoResizeCalls,
+      sendCalls: global.__sendCalls,
+      pendingSelections: _pendingSelections.slice(),
+    };
+  }
+
+  {
+    const {textNode, composer} = buildShell();
+    composer.value = 'Untouched draft';
+    _selectedTextReplyButton();
+    const refine = document.getElementById('selectedTextRefineBtn');
+    _selectedTextReplyText = 'Stale text';
+    _selectedTextReplyGroup.classList.add('visible');
+    currentSelection = selectionFor(textNode, textNode, 'Quoted context', {left: 120, top: 100, width: 0, height: 0});
+    resetSignals();
+    refine.dispatchEvent({type: 'click', preventDefault() {}});
+    cases.zero_rect = {
+      composerValue: composer.value,
+      hidden: !_selectedTextReplyGroup.classList.contains('visible'),
+      selectionClears: global.__selectionClears,
+      autoResizeCalls: global.__autoResizeCalls,
+      sendCalls: global.__sendCalls,
+      pendingSelections: _pendingSelections.slice(),
+    };
+  }
+
+  {
+    const {composer} = buildShell();
+    composer.value = 'Untouched draft';
+    _selectedTextReplyButton();
+    const refine = document.getElementById('selectedTextRefineBtn');
+    _selectedTextReplyText = 'Stale text';
+    _selectedTextReplyGroup.classList.add('visible');
+    currentSelection = null;
+    resetSignals();
+    refine.dispatchEvent({type: 'click', preventDefault() {}});
+    cases.stale = {
+      composerValue: composer.value,
+      hidden: !_selectedTextReplyGroup.classList.contains('visible'),
+      selectionClears: global.__selectionClears,
+      autoResizeCalls: global.__autoResizeCalls,
+      sendCalls: global.__sendCalls,
+      pendingSelections: _pendingSelections.slice(),
+    };
+  }
+
+  return cases;
+}
+
+function runSavedPromptScenario() {
+  const {composer} = buildShell();
+  composer.value = 'Draft tail \n\t';
+  resetSignals();
+  insertSavedPromptIntoComposer('Saved prompt');
   return {
     composerValue: composer.value,
-    hidden: !_selectedTextReplyGroup.classList.contains('visible'),
-    selectionClears: global.__selectionClears || 0,
-    autoResizeCalls: global.__autoResizeCalls || 0,
+    selectionStart: composer.selectionStart,
+    selectionEnd: composer.selectionEnd,
+    inputEvents: composer._events.filter((event) => event === 'input').length,
+    focused: !!composer.focused,
+    autoResizeCalls: global.__autoResizeCalls,
+    pendingFiles: S.pendingFiles.slice(),
     sendCalls: global.__sendCalls,
   };
 }
@@ -393,22 +579,28 @@ function runInvalidRefineScenario() {
 const out =
   scenario === 'visibility' ? runVisibilityScenario() :
   scenario === 'reply' ? runReplyScenario() :
-  scenario === 'refine' ? runRefineScenario() :
-  scenario === 'invalid_refine' ? runInvalidRefineScenario() :
+  scenario === 'refine' ? runRefineScenario('') :
+  scenario === 'refine_with_instruction' ? runRefineScenario(scenarioArg) :
+  scenario === 'invalid_matrix' ? runInvalidMatrixScenario() :
+  scenario === 'saved_prompt' ? runSavedPromptScenario() :
   (() => { throw new Error('unknown scenario: ' + scenario); })();
 
 process.stdout.write(JSON.stringify(out));
 """
 
 
-def _run_js(scenario: str) -> dict:
+def _run_js(scenario: str, arg: str = "") -> dict:
     completed = subprocess.run(
-        [NODE, "-e", _DRIVER, str(MESSAGES_JS), scenario],
+        [NODE, "-e", _DRIVER, str(MESSAGES_JS), scenario, arg],
         check=True,
         capture_output=True,
         text=True,
     )
     return json.loads(completed.stdout)
+
+
+def _log_index(log: list[str], prefix: str) -> int:
+    return next(idx for idx, entry in enumerate(log) if entry.startswith(prefix))
 
 
 def test_valid_in_chat_selection_exposes_reply_and_refine_actions():
@@ -426,24 +618,36 @@ def test_reply_action_still_creates_one_named_context_block_without_touching_com
     out = _run_js("reply")
     assert out["replyCalls"] == ["Quoted context"]
     assert out["composerValue"] == "Existing draft"
+    assert out["composerFocused"] is False
     assert out["hidden"] is True
     assert out["selectionClears"] == 1
     assert out["sendCalls"] == 0
-    assert out["refineCalls"] == 0
+    assert out["autoResizeCalls"] == 0
+    assert out["pendingFiles"] == ["keep.bin"]
 
 
-def test_refine_seeds_editable_draft_without_send():
+def test_transcript_selection_is_consumed_before_composer_focus():
+    reply = _run_js("reply")
+    refine = _run_js("refine")
+
+    assert _log_index(reply["log"], "removeAllRanges") < _log_index(reply["log"], "addNamedContextBlock")
+    assert _log_index(refine["log"], "removeAllRanges") < _log_index(refine["log"], "value:msg:")
+    assert _log_index(refine["log"], "removeAllRanges") < _log_index(refine["log"], "focus:msg")
+    assert _log_index(refine["log"], "removeAllRanges") < _log_index(refine["log"], "setSelectionRange:msg:")
+
+
+def test_refine_seeds_marker_free_draft_ending_in_localized_instruction_and_space_without_send():
     out = _run_js("refine")
-    assert out["replyText"] == "Reply with selection"
-    assert out["refineText"] == "Refine"
     assert out["composerValue"] == (
         "Existing draft\n\n"
         "> Quoted context\n"
         "> Second line\n\n"
-        "Refine instruction:"
+        "Refine instruction: "
     )
     assert "hermes-selected-context" not in out["composerValue"]
     assert out["selectionRange"] == [len(out["composerValue"]), len(out["composerValue"])]
+    assert out["selectionStart"] == len(out["composerValue"])
+    assert out["selectionEnd"] == len(out["composerValue"])
     assert out["inputEvents"] == 1
     assert out["focused"] is True
     assert out["hidden"] is True
@@ -454,13 +658,22 @@ def test_refine_seeds_editable_draft_without_send():
     assert out["sendCalls"] == 0
 
 
-def test_invalid_selection_keeps_refine_inert():
-    out = _run_js("invalid_refine")
-    assert out["composerValue"] == ""
-    assert out["hidden"] is True
-    assert out["selectionClears"] == 0
-    assert out["autoResizeCalls"] == 0
+def test_refine_preserves_existing_draft_and_pending_files():
+    out = _run_js("refine")
+    assert out["composerValue"].startswith("Existing draft\n\n> Quoted context")
+    assert out["pendingFiles"] == ["keep.bin"]
     assert out["sendCalls"] == 0
+
+
+def test_invalid_selection_keeps_refine_inert():
+    out = _run_js("invalid_matrix")
+    for case in out.values():
+        assert case["composerValue"] == "Untouched draft"
+        assert case["hidden"] is True
+        assert case["selectionClears"] == 0
+        assert case["autoResizeCalls"] == 0
+        assert case["sendCalls"] == 0
+        assert case["pendingSelections"] == []
 
 
 def test_refine_output_stays_marker_free_in_sent_user_rendering():
@@ -472,16 +685,30 @@ def test_refine_output_stays_marker_free_in_sent_user_rendering():
     assert 'class="sent-selection-context"' not in rendered
     assert "&lt;!-- hermes-selected-context --&gt;" not in rendered
     assert "&gt; Quoted context" in rendered
-    assert "Refine instruction:" in rendered
+    assert "Refine instruction: " in rendered
 
 
-def test_refine_keys_exist_in_all_locale_blocks():
-    assert I18N.count("selected_text_refine:") == 15
-    assert I18N.count("selected_text_refine_title:") == 15
-    assert I18N.count("selected_text_refine_instruction:") == 15
+def test_refine_draft_ends_with_localized_instruction_and_one_space_across_all_locales():
+    values = _instruction_values(I18N)
+    assert len(values) == 15
+    for instruction in values:
+        out = _run_js("refine_with_instruction", instruction)
+        assert out["composerValue"].endswith(f"{instruction} ")
 
 
-def test_selected_text_mousedown_preserves_selection_until_click_revalidation_in_browser():
+def test_saved_prompt_wrapper_preserves_existing_output_shape_and_effects():
+    out = _run_js("saved_prompt")
+    assert out["composerValue"] == "Draft tail\n\nSaved prompt\n\n"
+    assert out["selectionStart"] == len(out["composerValue"])
+    assert out["selectionEnd"] == len(out["composerValue"])
+    assert out["inputEvents"] == 1
+    assert out["focused"] is True
+    assert out["autoResizeCalls"] == 1
+    assert out["pendingFiles"] == ["keep.bin"]
+    assert out["sendCalls"] == 0
+
+
+def test_refine_click_transfers_native_caret_after_consuming_selection():
     try:
         from playwright.sync_api import sync_playwright
     except Exception:  # pragma: no cover - dependency missing path
@@ -509,6 +736,7 @@ def test_selected_text_mousedown_preserves_selection_until_click_revalidation_in
                 "let _selectedTextReplyRaf = 0;"
                 "let _pendingSelections = [];"
                 "let _selectionIdCounter = 0;"
+                "let S = {pendingFiles:['keep.bin']};"
                 + fixture
             )
         )
@@ -523,6 +751,7 @@ def test_selected_text_mousedown_preserves_selection_until_click_revalidation_in
               selected_text_refine_instruction: 'Refine instruction:',
             }[key] || key);
             window.autoResize = () => {};
+            window.applyLocaleToDOM = () => {};
             const range = document.createRange();
             const text = document.getElementById('transcript').firstChild;
             range.setStart(text, 0);
@@ -539,16 +768,50 @@ def test_selected_text_mousedown_preserves_selection_until_click_revalidation_in
         page.mouse.down()
         selection_after_mousedown = page.evaluate("window.getSelection().toString()")
         page.mouse.up()
-        result = page.evaluate(
-            "({draft: document.getElementById('msg').value, selection: window.getSelection().toString()})"
+        immediate = page.evaluate(
+            """
+            () => {
+              const msg = document.getElementById('msg');
+              return {
+                draft: msg.value,
+                activeElement: document.activeElement && document.activeElement.id,
+                selectionStart: msg.selectionStart,
+                selectionEnd: msg.selectionEnd,
+                valueLength: msg.value.length,
+                selection: window.getSelection().toString(),
+              };
+            }
+            """
+        )
+        next_frame = page.evaluate(
+            """
+            () => new Promise(resolve => {
+              requestAnimationFrame(() => {
+                const msg = document.getElementById('msg');
+                resolve({
+                  selectionStart: msg.selectionStart,
+                  selectionEnd: msg.selectionEnd,
+                  valueLength: msg.value.length,
+                  selection: window.getSelection().toString(),
+                });
+              });
+            })
+            """
         )
         browser.close()
 
     assert selection_after_mousedown == "Alpha Beta"
-    assert result == {
-        "draft": (
-            "> Alpha Beta\n\n"
-            "Refine instruction:"
-        ),
+    assert immediate == {
+        "draft": "> Alpha Beta\n\nRefine instruction: ",
+        "activeElement": "msg",
+        "selectionStart": len("> Alpha Beta\n\nRefine instruction: "),
+        "selectionEnd": len("> Alpha Beta\n\nRefine instruction: "),
+        "valueLength": len("> Alpha Beta\n\nRefine instruction: "),
+        "selection": "",
+    }
+    assert next_frame == {
+        "selectionStart": len("> Alpha Beta\n\nRefine instruction: "),
+        "selectionEnd": len("> Alpha Beta\n\nRefine instruction: "),
+        "valueLength": len("> Alpha Beta\n\nRefine instruction: "),
         "selection": "",
     }
