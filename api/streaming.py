@@ -9332,6 +9332,9 @@ def _run_agent_streaming(
                     # over the just-preserved snapshot back to the original fork
                     # parent, losing access to the recoverable history in old_sid.json.
                     s.parent_session_id = old_sid
+                    s.terminal_replay_origin_session_id = old_sid
+                    s.terminal_replay_run_id = stream_id
+                    s.terminal_replay_stream_id = stream_id
                     with LOCK:
                         cached_old_session = SESSIONS.pop(old_sid, None)
                         if cached_old_session is not None and cached_old_session is not s:

@@ -1224,6 +1224,9 @@ class Session:
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
                 parent_session_id: str=None,
+                terminal_replay_origin_session_id: str=None,
+                terminal_replay_run_id: str=None,
+                terminal_replay_stream_id: str=None,
                 worktree_path=None,
                 worktree_branch=None,
                  worktree_repo_root=None,
@@ -1307,6 +1310,21 @@ class Session:
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        self.terminal_replay_origin_session_id = (
+            str(terminal_replay_origin_session_id).strip()
+            if terminal_replay_origin_session_id
+            else None
+        )
+        self.terminal_replay_run_id = (
+            str(terminal_replay_run_id).strip()
+            if terminal_replay_run_id
+            else None
+        )
+        self.terminal_replay_stream_id = (
+            str(terminal_replay_stream_id).strip()
+            if terminal_replay_stream_id
+            else None
+        )
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1392,6 +1410,7 @@ class Session:
             'clear_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
+            'terminal_replay_origin_session_id', 'terminal_replay_run_id', 'terminal_replay_stream_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
@@ -1755,6 +1774,15 @@ class Session:
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+            **({
+                'terminal_replay_origin_session_id': self.terminal_replay_origin_session_id,
+                'terminal_replay_run_id': self.terminal_replay_run_id,
+                'terminal_replay_stream_id': self.terminal_replay_stream_id,
+            } if (
+                self.terminal_replay_origin_session_id
+                or self.terminal_replay_run_id
+                or self.terminal_replay_stream_id
+            ) else {}),
             **({
                 'compression_recovery_source_session_id': self.compression_recovery_source_session_id,
                 'compression_recovery_action': self.compression_recovery_action,

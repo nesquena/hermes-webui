@@ -9314,6 +9314,7 @@ function restoreLiveTurnHtmlForSession(sid){
   if(!restored) return false;
   restored.id='liveAssistantTurn';
   if(S.session) restored.dataset.sessionId=S.session.session_id;
+  if(inflight.streamId) restored.setAttribute('data-anchor-stream-id',String(inflight.streamId));
   const existing=$('liveAssistantTurn');
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
@@ -13853,6 +13854,7 @@ function placeLiveRunStatusHost(){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;
+    if(S.activeStreamId) turn.setAttribute('data-anchor-stream-id',String(S.activeStreamId));
     const inner=$('msgInner');
     if(inner) inner.appendChild(turn);
   }
@@ -14122,6 +14124,7 @@ function appendLiveCompressionCard(state){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;
+    if(S.activeStreamId) turn.setAttribute('data-anchor-stream-id',String(S.activeStreamId));
     $('msgInner').appendChild(turn);
   }
   const inner=_assistantTurnBlocks(turn);
@@ -16284,6 +16287,7 @@ function renderMessages(options){
       // right session's DOM (the user may have switched tabs/sessions
       // while this stream is still streaming). See #1366.
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
+      if(S.activeStreamId) currentAssistantTurn.setAttribute('data-anchor-stream-id',String(S.activeStreamId));
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
@@ -17990,6 +17994,7 @@ function appendLiveToolCard(tc){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;  // see #1366
+    if(opts.streamId||S.activeStreamId) turn.setAttribute('data-anchor-stream-id',String(opts.streamId||S.activeStreamId));
     $('msgInner').appendChild(turn);
   }
   const inner=_assistantTurnBlocks(turn);
@@ -18156,13 +18161,16 @@ function clearLiveToolCards(){
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
 }
-function _removeIdleLiveAssistantTurn(sessionId){
+function _removeIdleLiveAssistantTurn(sessionId, streamId){
   const turn=$('liveAssistantTurn');
   if(!turn) return false;
   const expectedSid=String(sessionId||'');
+  const expectedStreamId=String(streamId||'');
   const currentSid=String(S&&S.session&&S.session.session_id||'');
   const turnSid=String(turn.dataset&&turn.dataset.sessionId||'');
+  const turnStreamId=String(turn.getAttribute&&turn.getAttribute('data-anchor-stream-id')||turn.dataset&&turn.dataset.streamId||'');
   if(expectedSid&&turnSid&&turnSid!==expectedSid) return false;
+  if(expectedStreamId&&turnStreamId!==expectedStreamId) return false;
   if(expectedSid&&currentSid&&currentSid!==expectedSid) return false;
   if(S&&S.activeStreamId) return false;
   if(expectedSid&&typeof INFLIGHT==='object'&&INFLIGHT&&INFLIGHT[expectedSid]) return false;
@@ -18233,6 +18241,7 @@ function ensureLiveWorklogShell(){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;
+    if(S.activeStreamId) turn.setAttribute('data-anchor-stream-id',String(S.activeStreamId));
     $('msgInner').appendChild(turn);
   }
   const blocks=_assistantTurnBlocks(turn);
@@ -19210,6 +19219,7 @@ function appendThinking(text='', options){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;
+    if(S.activeStreamId) turn.setAttribute('data-anchor-stream-id',String(S.activeStreamId));
     const inner=$('msgInner');
     if(inner) inner.appendChild(turn);
   }

@@ -641,6 +641,9 @@ def test_replay_run_journal_hydrates_compacted_continuation_terminal_session(tmp
             {"role": "assistant", "content": "continuation final", "_ts": 4.0},
         ],
         parent_session_id=origin_session_id,
+        terminal_replay_origin_session_id=origin_session_id,
+        terminal_replay_run_id=run_id,
+        terminal_replay_stream_id=run_id,
     )
     origin.save(skip_index=True)
     continuation.save(skip_index=True)
@@ -694,8 +697,170 @@ def test_replay_run_journal_hydrates_compacted_continuation_terminal_session(tmp
     data = json.loads(data_line.removeprefix("data: "))
     assert data["session"]["session_id"] == continuation_session_id
     assert data["session"]["parent_session_id"] == origin_session_id
+    assert data["session"]["terminal_replay_origin_session_id"] == origin_session_id
+    assert data["session"]["terminal_replay_run_id"] == run_id
+    assert data["session"]["terminal_replay_stream_id"] == run_id
     assert data["session"]["messages"][0]["content"] == "continue"
     assert data["session"]["messages"][1]["content"] == "continuation final"
+
+
+def test_replay_run_journal_fails_closed_for_same_parent_sibling_continuation(tmp_path, monkeypatch):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "compression_origin_same_parent"
+    target_run_id = "run_owned_continuation"
+    sibling_run_id = "run_sibling_continuation"
+    sibling_session_id = "compression_sibling_continuation"
+    assistant = {"role": "assistant", "content": "sibling final", "_ts": 6.0}
+    sibling = Session(
+        session_id=sibling_session_id,
+        messages=[
+            {"role": "user", "content": "sibling prompt", "timestamp": 5.0},
+            assistant,
+        ],
+        parent_session_id=origin_session_id,
+        terminal_replay_origin_session_id=origin_session_id,
+        terminal_replay_run_id=sibling_run_id,
+        terminal_replay_stream_id=sibling_run_id,
+    )
+    sibling.save(skip_index=True)
+    run_journal.append_run_event(
+        origin_session_id,
+        target_run_id,
+        "token",
+        {"text": "must not leak before bad terminal"},
+        session_dir=session_dir,
+    )
+    run_journal.append_run_event(
+        origin_session_id,
+        target_run_id,
+        "done",
+        {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": sibling_session_id,
+            "session_id": sibling_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": sibling_session_id,
+            "continuation_session_id": sibling_session_id,
+            "session": sibling.compact()
+            | {"messages": list(sibling.messages), "message_count": len(sibling.messages)},
+        },
+        session_dir=session_dir,
+    )
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, target_run_id, 0, include_stale=False) is False
+    assert handler.wfile.getvalue() == b""
+
+
+def test_replay_run_journal_fails_closed_for_wrong_terminal_target_run(tmp_path, monkeypatch):
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    origin_session_id = "compression_origin_wrong_run"
+    continuation_session_id = "compression_continuation_wrong_run"
+    run_id = "run_expected_terminal"
+    assistant = {"role": "assistant", "content": "continuation final", "_ts": 4.0}
+    continuation = Session(
+        session_id=continuation_session_id,
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 3.0},
+            assistant,
+        ],
+        parent_session_id=origin_session_id,
+        terminal_replay_origin_session_id=origin_session_id,
+        terminal_replay_run_id=run_id,
+        terminal_replay_stream_id=run_id,
+    )
+    continuation.save(skip_index=True)
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "token",
+        {"text": "must not leak before bad terminal"},
+        session_dir=session_dir,
+    )
+    run_journal.append_run_event(
+        origin_session_id,
+        run_id,
+        "done",
+        {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": continuation_session_id,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "terminal_message_target": {
+                "version": "terminal_message_target_v1",
+                "session_id": continuation_session_id,
+                "run_id": "run_attacker_rewrite",
+                "stream_id": run_id,
+                "message_index": 1,
+                "message_ref": routes._assistant_anchor_scene_message_ref(assistant),
+            },
+            "session": continuation.compact()
+            | {"messages": list(continuation.messages), "message_count": len(continuation.messages)},
+        },
+        session_dir=session_dir,
+    )
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: run_journal.find_run_summary(stream_id, session_dir=session_dir),
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: run_journal.read_run_events(
+            session_id,
+            run_id,
+            after_seq=after_seq,
+            max_seq=max_seq,
+            session_dir=session_dir,
+        ),
+    )
+    handler = SimpleNamespace(wfile=io.BytesIO())
+
+    assert routes._replay_run_journal(handler, run_id, 0, include_stale=False) is False
+    assert handler.wfile.getvalue() == b""
 
 
 def test_replay_run_journal_fails_closed_for_bad_continuation_lineage(tmp_path, monkeypatch):

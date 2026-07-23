@@ -58,12 +58,52 @@ def test_terminal_done_removes_idle_live_turn_after_settled_render():
         "if(typeof _renderMessagesWithScrollSnapshot==='function') "
         "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});"
     )
-    cleanup_idx = done_block.index("_removeIdleLiveAssistantTurn?.(activeSid)")
+    cleanup_idx = done_block.index("_removeIdleLiveAssistantTurn?.(activeSid,streamId)")
 
     assert final_render_idx < cleanup_idx, (
         "the done handler must remove any stale #liveAssistantTurn only after "
         "the final settled render has put the completed assistant message in the DOM"
     )
+
+
+def test_delayed_done_bails_before_mutating_newer_active_stream():
+    done_block = _event_listener_body(MESSAGES_JS, "done")
+
+    owner_guard_idx = done_block.index("_streamDoneWouldOverwriteNewerPane(activeSid,streamId)")
+    assert owner_guard_idx < done_block.index("_applyToAnchor('done'")
+    assert owner_guard_idx < done_block.index("_clearOwnerInflightState()")
+    assert owner_guard_idx < done_block.index("S.activeStreamId=null")
+    assert owner_guard_idx < done_block.index("S.session=d.session")
+    assert owner_guard_idx < done_block.index("_removeIdleLiveAssistantTurn?.(activeSid,streamId)")
+
+
+def test_done_owner_gate_rejects_same_pane_newer_stream():
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+
+    helper = _function_body(MESSAGES_JS, "_streamDoneWouldOverwriteNewerPane")
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        let S = {{activeStreamId:'stream-old', session:{{session_id:'sid-1'}}}};
+        let INFLIGHT = {{'sid-1': {{streamId:'stream-old'}}}};
+        function _isSessionCurrentPane(sid){{ return S.session && S.session.session_id === sid; }}
+        {helper}
+
+        assert.strictEqual(_streamDoneWouldOverwriteNewerPane('sid-1','stream-old'), false);
+        S.activeStreamId = 'stream-new';
+        assert.strictEqual(_streamDoneWouldOverwriteNewerPane('sid-1','stream-old'), true);
+        S.activeStreamId = 'stream-old';
+        INFLIGHT['sid-1'] = {{streamId:'stream-new'}};
+        assert.strictEqual(_streamDoneWouldOverwriteNewerPane('sid-1','stream-old'), true);
+        S.session = {{session_id:'sid-2'}};
+        assert.strictEqual(_streamDoneWouldOverwriteNewerPane('sid-1','stream-old'), false);
+        """
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_remove_idle_live_assistant_turn_is_session_and_liveness_guarded():
@@ -84,33 +124,42 @@ def test_remove_idle_live_assistant_turn_is_session_and_liveness_guarded():
         let currentTurn = null;
         function $(id){{ return id === 'liveAssistantTurn' ? currentTurn : null; }}
         {helper}
-        function turn(sid){{
+        function turn(sid, streamId){{
           return {{
             dataset: {{sessionId: sid}},
+            getAttribute(name){{ return name === 'data-anchor-stream-id' ? streamId : ''; }},
             removed: false,
             remove(){{ this.removed = true; }},
           }};
         }}
 
-        currentTurn = turn('sid-1');
-        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), true);
+        currentTurn = turn('sid-1','stream-1');
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1','stream-1'), true);
         assert.strictEqual(currentTurn.removed, true);
         assert.deepStrictEqual(cacheDeletes, ['sid-1']);
         assert.strictEqual(_sessionHtmlCacheSid, null);
 
-        currentTurn = turn('sid-1');
+        currentTurn = turn('sid-1','stream-1');
         S.activeStreamId = 'stream-1';
-        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), false);
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1','stream-1'), false);
         assert.strictEqual(currentTurn.removed, false);
 
         S.activeStreamId = null;
         INFLIGHT = {{'sid-1': {{streamId:'stream-1'}}}};
-        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), false);
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1','stream-1'), false);
         assert.strictEqual(currentTurn.removed, false);
 
         INFLIGHT = {{}};
-        currentTurn = turn('sid-2');
-        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1'), false);
+        currentTurn = turn('sid-2','stream-1');
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1','stream-1'), false);
+        assert.strictEqual(currentTurn.removed, false);
+
+        currentTurn = turn('sid-1','stream-2');
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1','stream-1'), false);
+        assert.strictEqual(currentTurn.removed, false);
+
+        currentTurn = turn('sid-1','');
+        assert.strictEqual(_removeIdleLiveAssistantTurn('sid-1','stream-1'), false);
         assert.strictEqual(currentTurn.removed, false);
         """
     )

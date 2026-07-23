@@ -184,7 +184,7 @@ def test_run_journal_compacts_continuation_terminal_without_rewriting_session_id
     }
 
 
-def test_run_journal_does_not_omit_unpersisted_terminal_session_payload(tmp_path):
+def test_run_journal_bounds_unpersisted_terminal_session_payload(tmp_path):
     session_id = "session_save_failed"
     run_id = "run_save_failed"
     assistant = {"role": "assistant", "content": "only journal has me", "_ts": 5.0}
@@ -206,7 +206,49 @@ def test_run_journal_does_not_omit_unpersisted_terminal_session_payload(tmp_path
     event_payload = journal["events"][0]["payload"]
     assert event_payload["session"]["messages"][-1] == assistant
     assert "messages_omitted" not in event_payload["session"]
+    assert event_payload["session"]["terminal_recovery_delta"]["version"] == "terminal_recovery_delta_v1"
     assert "terminal_message_target" not in event_payload
+
+
+def test_run_journal_emits_recovery_control_when_unpersisted_terminal_payload_cannot_fit(tmp_path):
+    session_id = "session_save_failed_huge"
+    run_id = "run_save_failed_huge"
+    payload = {
+        "terminal_session_persisted": False,
+        "session": {
+            "session_id": session_id,
+            "messages": [
+                {"role": "user", "content": "please answer", "timestamp": 4.0},
+                {"role": "assistant", "content": "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000), "_ts": 5.0},
+            ],
+            "message_count": 2,
+        },
+    }
+
+    append_run_event(session_id, run_id, "apperror", payload, session_dir=tmp_path)
+
+    journal = read_run_events(session_id, run_id, session_dir=tmp_path)
+    assert journal["complete"] is True
+    event_payload = journal["events"][0]["payload"]
+    compact_session = event_payload["session"]
+    assert "messages" not in compact_session
+    assert compact_session["messages_omitted"]["reason"] == "terminal_session_save_failed_payload_too_large"
+    assert event_payload["terminal_recovery_control"] == {
+        "version": "terminal_recovery_control_v1",
+        "reason": "terminal_session_save_failed_payload_too_large",
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "terminal_state": "errored",
+    }
+    assert event_payload["terminal_disposition"] == {
+        "version": "terminal_disposition_v1",
+        "kind": "consumed_non_materializable",
+        "reason": "terminal_session_save_failed_payload_too_large",
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+    }
 
 
 def test_run_journal_fails_closed_on_physical_seq_reorder(tmp_path):

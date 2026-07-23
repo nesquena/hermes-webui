@@ -64,6 +64,10 @@ _RUN_EVENTS_MAX_BYTES = 2 * 1024 * 1024
 _RUN_EVENTS_MAX_ROWS = 2048
 _TERMINAL_PAYLOAD_MAX_CHARS = 64 * 1024
 _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION = "terminal_session_payload_omitted_v1"
+_TERMINAL_RECOVERY_DELTA_VERSION = "terminal_recovery_delta_v1"
+_TERMINAL_RECOVERY_CONTROL_VERSION = "terminal_recovery_control_v1"
+_TERMINAL_RECOVERY_DELTA_MAX_BYTES = 48 * 1024
+_TERMINAL_RECOVERY_TAIL_MESSAGES = 4
 _TERMINAL_INDEX_MAX_BYTES = 512 * 1024
 _TERMINAL_INDEX_MAX_ROWS = 1024
 _TERMINAL_INDEX_COMPACT_TRIGGER_BYTES = _TERMINAL_INDEX_MAX_BYTES * 2
@@ -553,6 +557,9 @@ _TERMINAL_SESSION_METADATA_KEYS = {
     "pending_user_message",
     "pending_started_at",
     "parent_session_id",
+    "terminal_replay_origin_session_id",
+    "terminal_replay_run_id",
+    "terminal_replay_stream_id",
     "source_tag",
     "raw_source",
     "session_source",
@@ -596,6 +603,136 @@ def _compact_terminal_session_payload(session_payload: dict) -> dict:
     return compact
 
 
+def _json_size_bytes(value: Any) -> int:
+    try:
+        return len(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+    except (TypeError, ValueError):
+        return _RUN_EVENTS_MAX_BYTES + 1
+
+
+def _terminal_recovery_delta_marker(
+    *,
+    reason: str,
+    message_count: int,
+    messages_offset: int,
+) -> dict:
+    return {
+        "version": _TERMINAL_RECOVERY_DELTA_VERSION,
+        "reason": reason,
+        "message_count": int(message_count),
+        "messages_offset": int(messages_offset),
+    }
+
+
+def _terminal_recovery_control(
+    session_id: str,
+    run_id: str,
+    terminal_state: str | None,
+) -> dict:
+    return {
+        "version": _TERMINAL_RECOVERY_CONTROL_VERSION,
+        "reason": "terminal_session_save_failed_payload_too_large",
+        "session_id": str(session_id or ""),
+        "run_id": str(run_id or ""),
+        "stream_id": str(run_id or ""),
+        "terminal_state": str(terminal_state or ""),
+    }
+
+
+def _terminal_non_materializable_disposition(
+    session_id: str,
+    run_id: str,
+    reason: str,
+) -> dict:
+    return {
+        "version": "terminal_disposition_v1",
+        "kind": "consumed_non_materializable",
+        "reason": str(reason or "non_materializable_terminal").strip(),
+        "session_id": str(session_id or ""),
+        "run_id": str(run_id or ""),
+        "stream_id": str(run_id or ""),
+    }
+
+
+def _compact_unpersisted_terminal_session_payload(
+    session_id: str,
+    run_id: str,
+    session_payload: dict,
+    terminal_state: str | None,
+) -> tuple[dict, dict | None, dict | None]:
+    target_session_id = str(session_payload.get("session_id") or session_id or "").strip()
+    compact: dict[str, Any] = {}
+    budget = {"remaining": _TERMINAL_PAYLOAD_MAX_CHARS // 2}
+    for key, value in session_payload.items():
+        if key not in _TERMINAL_SESSION_METADATA_KEYS:
+            continue
+        compact[key] = _bound_run_journal_snapshot_value(value, budget, 0)
+    compact.setdefault("session_id", target_session_id or str(session_id or ""))
+
+    messages = session_payload.get("messages")
+    message_count = session_payload.get("message_count")
+    if not isinstance(message_count, int) or isinstance(message_count, bool):
+        message_count = len(messages) if isinstance(messages, list) else 0
+    try:
+        base_offset = int(session_payload.get("_messages_offset") or 0)
+    except (TypeError, ValueError):
+        base_offset = 0
+    compact["message_count"] = int(message_count)
+
+    if not isinstance(messages, list):
+        compact["terminal_recovery_delta"] = _terminal_recovery_delta_marker(
+            reason="terminal_session_save_failed",
+            message_count=int(message_count),
+            messages_offset=base_offset,
+        )
+        return compact, None, None
+    if not messages:
+        compact["messages"] = []
+        compact["_messages_offset"] = base_offset
+        compact["_messages_truncated"] = base_offset > 0
+        compact["terminal_recovery_delta"] = _terminal_recovery_delta_marker(
+            reason="terminal_session_save_failed",
+            message_count=int(message_count),
+            messages_offset=base_offset,
+        )
+        return compact, None, None
+
+    max_tail = min(len(messages), _TERMINAL_RECOVERY_TAIL_MESSAGES)
+    for tail_count in range(max_tail, 0, -1):
+        tail_offset = max(0, len(messages) - tail_count)
+        candidate = dict(compact)
+        candidate["messages"] = list(messages[tail_offset:])
+        candidate["_messages_offset"] = base_offset + tail_offset
+        candidate["_messages_truncated"] = base_offset + tail_offset > 0
+        candidate["terminal_recovery_delta"] = _terminal_recovery_delta_marker(
+            reason="terminal_session_save_failed",
+            message_count=int(message_count),
+            messages_offset=base_offset + tail_offset,
+        )
+        if _json_size_bytes(candidate) <= _TERMINAL_RECOVERY_DELTA_MAX_BYTES:
+            return candidate, None, None
+
+    compact["messages_omitted"] = {
+        "version": _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION,
+        "reason": "terminal_session_save_failed_payload_too_large",
+        "message_count": int(message_count),
+    }
+    compact["terminal_recovery_delta"] = _terminal_recovery_delta_marker(
+        reason="terminal_session_save_failed_payload_too_large",
+        message_count=int(message_count),
+        messages_offset=base_offset + len(messages),
+    )
+    control = _terminal_recovery_control(target_session_id or session_id, run_id, terminal_state)
+    disposition = _terminal_non_materializable_disposition(
+        target_session_id or session_id,
+        run_id,
+        "terminal_session_save_failed_payload_too_large",
+    )
+    return compact, control, disposition
+
+
 def _compact_terminal_payload_for_journal(
     session_id: str,
     run_id: str,
@@ -620,7 +757,19 @@ def _compact_terminal_payload_for_journal(
                 )
                 compact[key_str] = _compact_terminal_session_payload(value)
             else:
-                compact[key_str] = value
+                compact_session, recovery_control, recovery_disposition = (
+                    _compact_unpersisted_terminal_session_payload(
+                        session_id,
+                        run_id,
+                        value,
+                        terminal_state,
+                    )
+                )
+                compact[key_str] = compact_session
+                if recovery_control is not None:
+                    compact["terminal_recovery_control"] = recovery_control
+                if recovery_disposition is not None and "terminal_disposition" not in payload:
+                    compact["terminal_disposition"] = recovery_disposition
             continue
         if key_str in {"terminal_message_target", "terminal_disposition"}:
             compact[key_str] = _bound_run_journal_snapshot_value(

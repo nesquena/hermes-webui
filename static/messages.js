@@ -82,6 +82,16 @@ function _isSessionCurrentPane(sid) {
   return true;
 }
 
+function _streamDoneWouldOverwriteNewerPane(activeSid, streamId){
+  if(!_isSessionCurrentPane(activeSid)) return false;
+  const expectedStreamId=String(streamId||'');
+  const activeStreamId=String(S&&S.activeStreamId||'');
+  if(activeStreamId&&activeStreamId!==expectedStreamId) return true;
+  const inflight=INFLIGHT&&INFLIGHT[activeSid];
+  const inflightStreamId=String(inflight&&inflight.streamId||'');
+  return !!(inflightStreamId&&inflightStreamId!==expectedStreamId);
+}
+
 function _isSessionActivelyViewed(sid) {
   if(!_isSessionCurrentPane(sid)) return false;
   if(!_isDocumentVisibleAndFocused()) return false;
@@ -5874,6 +5884,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
       const _finishDone=()=>{
+        if(_streamDoneWouldOverwriteNewerPane(activeSid,streamId)){_closeSource(source);return;}
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
         // can reintroduce a stale thinking card or duplicate content.
@@ -6127,7 +6138,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
           else renderMessages({preserveScroll:true});
-          window._removeIdleLiveAssistantTurn?.(activeSid);
+          window._removeIdleLiveAssistantTurn?.(activeSid,streamId);
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });

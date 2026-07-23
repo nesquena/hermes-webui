@@ -18394,7 +18394,12 @@ def _compact_terminal_session_requires_hydration(session_payload: dict) -> bool:
     return False
 
 
-def _terminal_replay_target_from_payload(payload: dict, payload_session_id: str) -> dict | None:
+def _terminal_replay_target_from_payload(
+    payload: dict,
+    payload_session_id: str,
+    run_id: str,
+    stream_id: str,
+) -> dict | None:
     raw_target = payload.get("terminal_message_target")
     if not isinstance(raw_target, dict):
         return None
@@ -18404,10 +18409,20 @@ def _terminal_replay_target_from_payload(payload: dict, payload_session_id: str)
     if not isinstance(raw_message_index, int) or isinstance(raw_message_index, bool) or raw_message_index < 0:
         return None
     target_session_id = str(raw_target.get("session_id") or "").strip()
+    target_run_id = str(raw_target.get("run_id") or "").strip()
+    target_stream_id = str(raw_target.get("stream_id") or "").strip()
     target_message_ref = _normalize_anchor_scene_message_ref(raw_target.get("message_ref") or "")
-    if target_session_id != payload_session_id or not target_message_ref:
+    if (
+        target_session_id != payload_session_id
+        or target_run_id != str(run_id or "").strip()
+        or target_stream_id != str(stream_id or "").strip()
+        or not target_message_ref
+    ):
         return None
     return {
+        "session_id": target_session_id,
+        "run_id": target_run_id,
+        "stream_id": target_stream_id,
         "message_index": raw_message_index,
         "message_ref": target_message_ref,
     }
@@ -18426,7 +18441,30 @@ def _terminal_replay_target_matches_session(session, target: dict) -> bool:
     return _assistant_anchor_scene_message_ref(message) == target.get("message_ref")
 
 
-def _hydrate_replayed_terminal_payload(session_id: str, payload):
+def _terminal_replay_binding_matches_session(
+    session,
+    origin_session_id: str,
+    run_id: str,
+    stream_id: str,
+    target_session_id: str,
+) -> bool:
+    origin_session_id = str(origin_session_id or "").strip()
+    run_id = str(run_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    target_session_id = str(target_session_id or "").strip()
+    if not origin_session_id or not run_id or not stream_id or not target_session_id:
+        return False
+    if target_session_id == origin_session_id:
+        return True
+    return (
+        str(getattr(session, "terminal_replay_origin_session_id", "") or "").strip()
+        == origin_session_id
+        and str(getattr(session, "terminal_replay_run_id", "") or "").strip() == run_id
+        and str(getattr(session, "terminal_replay_stream_id", "") or "").strip() == stream_id
+    )
+
+
+def _hydrate_replayed_terminal_payload(session_id: str, run_id: str, payload):
     if not isinstance(payload, dict):
         return payload
     session_payload = payload.get("session")
@@ -18440,7 +18478,7 @@ def _hydrate_replayed_terminal_payload(session_id: str, payload):
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     if not _terminal_payload_session_persisted(payload, session_payload):
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
-    target = _terminal_replay_target_from_payload(payload, payload_session_id)
+    target = _terminal_replay_target_from_payload(payload, payload_session_id, run_id, run_id)
     if target is None:
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     if not _terminal_payload_lineage_valid(
@@ -18469,6 +18507,14 @@ def _hydrate_replayed_terminal_payload(session_id: str, payload):
         persisted_parent_session_id=getattr(session, "parent_session_id", None),
     ):
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_binding_matches_session(
+        session,
+        session_id,
+        run_id,
+        run_id,
+        payload_session_id,
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     if not _terminal_replay_target_matches_session(session, target):
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     try:
@@ -18493,6 +18539,14 @@ def _hydrate_replayed_terminal_payload(session_id: str, payload):
         payload,
         hydrated,
         persisted_parent_session_id=getattr(session, "parent_session_id", None),
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_binding_matches_session(
+        session,
+        session_id,
+        run_id,
+        run_id,
+        str(hydrated.get("session_id") or "").strip(),
     ):
         return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
     if not _terminal_replay_target_matches_session(session, target):
@@ -18530,7 +18584,7 @@ def _replay_run_journal(
         event_name = entry.get("event") or entry.get("type") or "message"
         payload = entry.get("payload")
         if entry.get("terminal"):
-            payload = _hydrate_replayed_terminal_payload(session_id, payload)
+            payload = _hydrate_replayed_terminal_payload(session_id, stream_id, payload)
             if payload is _TERMINAL_REPLAY_HYDRATION_FAILED:
                 return False
         replay_frames.append((event_name, payload, entry.get("event_id")))
