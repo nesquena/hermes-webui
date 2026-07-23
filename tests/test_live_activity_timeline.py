@@ -140,7 +140,7 @@ def test_reattach_normalizes_live_activity_group_placement_by_burst_anchor():
 def test_done_handler_preserves_live_tool_burst_metadata_for_settled_render():
     assert "function _mergeSettledToolCallsWithLiveMetadata(rawCalls)" in MESSAGES_JS
     assert "activityBurstId" in MESSAGES_JS
-    assert "S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);" in MESSAGES_JS
+    assert "S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(_settledSession.tool_calls);" in MESSAGES_JS
     assert "S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);" in MESSAGES_JS
 
 

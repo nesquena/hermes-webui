@@ -116,7 +116,7 @@ def test_load_existing_session_clears_staged_toolsets():
     loadSession() assigns S.session=data.session on the success path; the staged
     value is cleared there so a subsequent New Chat does not inherit it (#4490).
     """
-    body = _function_body(SESSIONS_JS, "async function loadSession")
+    body = _function_body(SESSIONS_JS, "async function _loadSessionOnce")
     compact = body.replace(" ", "")
     assign = compact.index("S.session=data.session")
     # The clear must accompany the real-session assignment, not only the create path.

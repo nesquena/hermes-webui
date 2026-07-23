@@ -2183,12 +2183,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     stopClarifyPolling();
     hideClarifyCard(true, reason||'terminal');
   }
-  function _clearOwnerInflightState(){
-    if(_isActiveSession() && S.activeStreamId!==streamId) return;
+  function _clearOwnerInflightState(options){
+    if(_isActiveSession() && S.activeStreamId!==streamId) return false;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
-    _resumeSessionStreamAfterLiveChat(activeSid);
+    if(!(options&&options.deferSessionStreamResume)){
+      _resumeSessionStreamAfterLiveChat(activeSid);
+    }
+    return true;
   }
   function _isMarkerOnlyAssistantMessage(m){
     if(!m||m.role!=='assistant') return false;
@@ -5767,7 +5770,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
-      const _finishDone=()=>{
+      const _finishDone=async()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
         // can reintroduce a stale thinking card or duplicate content.
@@ -5797,7 +5800,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         },_doneEvent);
         _scheduleAnchorRegistryCleanup();
         _clearAnchorProseIncrementalNode();
-        const isActiveSession=_isSessionCurrentPane(activeSid);
+        let isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
@@ -5816,16 +5819,66 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
-        _clearOwnerInflightState();
+        const _settledDoneInflightSnapshot=isActiveSession&&INFLIGHT[activeSid]
+          ? {
+            messages:Array.isArray(INFLIGHT[activeSid].messages)
+              ? INFLIGHT[activeSid].messages.map(m=>({...m}))
+              : [],
+            toolCalls:Array.isArray(INFLIGHT[activeSid].toolCalls)
+              ? INFLIGHT[activeSid].toolCalls.map(tc=>({...tc}))
+              : [],
+          }
+          : null;
+        let _deferredOwnerSessionStreamResume=false;
+        try{
+        _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
         _clearApprovalForOwner();
         _clearClarifyForOwner('terminal');
+        const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
+        let _settledDoneWindow=null;
+        let _settledDoneWindowFailed=false;
+        let _settledDoneFallbackMessages=null;
+        let _settledDoneFallbackToolCalls=null;
+        const _settledDoneWasTruncated=!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+        const _settledDonePriorOldestIdx=(typeof _oldestIdx!=='undefined')?(_oldestIdx||0):0;
+        if(isActiveSession&&_settledDoneWasTruncated&&typeof _fetchSettledSessionMessageWindow==='function'){
+          _settledDoneFallbackMessages=Array.isArray(_settledDoneInflightSnapshot&&_settledDoneInflightSnapshot.messages)
+            ? _settledDoneInflightSnapshot.messages
+            : (Array.isArray(S.messages)?S.messages.map(m=>({...m})):[]);
+          _settledDoneFallbackToolCalls=Array.isArray(_settledDoneInflightSnapshot&&_settledDoneInflightSnapshot.toolCalls)
+            ? _settledDoneInflightSnapshot.toolCalls
+            : (Array.isArray(S.toolCalls)?S.toolCalls.map(tc=>({...tc})):[]);
+          try{
+            _settledDoneWindow=await _fetchSettledSessionMessageWindow(completedSid,completedSession);
+          }catch(_settledWindowError){
+            _settledDoneWindowFailed=true;
+            if(typeof console!=='undefined'&&console.warn){
+              console.warn('settled session window refresh failed; keeping bounded local transcript',_settledWindowError);
+            }
+          }
+        }
+        // The bounded refresh awaits a second session request. Pane identity
+        // alone is not enough here: a new chat stream can take ownership of the
+        // same session while the old stream is settling. Only the exact
+        // registered owner may install terminal state or clear activeStreamId.
+        if(isActiveSession){
+          const _settledLiveOwner=LIVE_STREAMS[activeSid];
+          const _settlementStillOwnsPane=
+            _isSessionCurrentPane(activeSid)&&
+            S.activeStreamId===streamId&&
+            !!(_settledLiveOwner&&_settledLiveOwner.streamId===streamId&&_settledLiveOwner.source===source);
+          if(!_settlementStillOwnsPane) isActiveSession=false;
+        }
+        // The bounded window fetch above can take long enough for the reader
+        // to scroll away from the tail. Re-evaluate follow intent only after
+        // the await and pane-ownership check; a pre-fetch snapshot would yank
+        // a reader back to the bottom after they deliberately scrolled up.
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
-        const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
         if(isActiveSession){
           S.activeStreamId=null;
         }
@@ -5840,9 +5893,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
-          // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
-          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
+          const _settledSession=_settledDoneWindow
+            ? {..._settledDoneWindow,...d.session}
+            : (_settledDoneWindowFailed
+              ? {...d.session,messages:_settledDoneFallbackMessages||[],tool_calls:_settledDoneFallbackToolCalls||[],_messages_truncated:true,_messages_offset:_settledDonePriorOldestIdx}
+              : d.session);
+          if(_settledDoneWindow){
+            _settledSession.messages=_settledDoneWindow.messages||[];
+            _settledSession.tool_calls=_settledDoneWindow.tool_calls||[];
+            _settledSession._messages_truncated=!!_settledDoneWindow._messages_truncated;
+            _settledSession._messages_offset=_settledDoneWindow._messages_offset||0;
+          }
+          S.session=_settledSession;
+          S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _settledSession.messages||[]);
+          if(typeof _messagesTruncated!=='undefined'){
+            _messagesTruncated=_settledDoneWasTruncated
+              ? (_settledDoneWindowFailed||!!_settledSession._messages_truncated)
+              : !!_settledSession._messages_truncated;
+          }
+          if(typeof _oldestIdx!=='undefined'){
+            _oldestIdx=_settledDoneWasTruncated
+              ? (_settledDoneWindowFailed?_settledDonePriorOldestIdx:(_settledSession._messages_offset||0))
+              : (_settledSession._messages_offset||0);
+          }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -5932,9 +6005,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
             return hasTc||hasPartialTc||hasTu;
           });
-          if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>tc);
-            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
+          if(!hasMessageToolMetadata&&_settledSession.tool_calls&&_settledSession.tool_calls.length){
+            S.toolCalls=_settledSession.tool_calls.map(tc=>tc);
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(_settledSession.tool_calls);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
@@ -5964,11 +6037,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // delivered the final messages and tool calls.
           if(typeof window!=='undefined') window._streamJustFinished=true;
           setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
-          // Expand render window to cover all messages so the done render
-          // doesn't hide Activity behind a tiny window (winSize=50).
-          if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-            _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
-          }
           // #4650 review: the agent turn that just completed may have changed
           // server-side reasoning config (e.g. a `/reasoning <level>` slash
           // command writes agent.reasoning_effort) WITHOUT changing the model/
@@ -5997,7 +6065,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
           else renderMessages({preserveScroll:true});
-          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          if(typeof _followSettledDoneIfStillPinned==='function') _followSettledDoneIfStillPinned();
+          else if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
@@ -6033,6 +6102,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        }finally{
+          if(_deferredOwnerSessionStreamResume){
+            _resumeSessionStreamAfterLiveChat(completedSid);
+          }
+        }
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -6579,7 +6653,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const restoreUrl=typeof _settledSessionMessageWindowUrl==='function'
+        ? _settledSessionMessageWindowUrl(activeSid,null,{reserveNewTurn:true,forceBounded:true})
+        : `/api/session?session_id=${encodeURIComponent(activeSid)}`;
+      const data=await api(restoreUrl);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -6633,6 +6710,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         if(S.session&&S.session.session_id){
@@ -6659,10 +6738,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.toolCalls=[];
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
-        // Expand render window so the settled render doesn't hide Activity.
-        if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-          _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
-        }
         syncTopbar();renderMessages({preserveScroll:true});
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
@@ -7574,6 +7649,34 @@ function _resumeSessionStreamAfterLiveChat(sid) {
   }, 0);
 }
 
+function _queueSessionUpdatedRefresh(sid, serverCount) {
+  const loadingSid=(typeof _loadingSessionId!=='undefined') ? _loadingSessionId : null;
+  // A load for another session owns the pane transition; an event from the
+  // session being left must remain suppressed. A load for this same session is
+  // different: loadSession() will await/coalesce it and schedule one bounded
+  // follow-up if the active request did not reach serverCount.
+  if(loadingSid&&loadingSid!==sid) return false;
+  const localCount=(S.session&&S.session.session_id===sid&&Number.isFinite(Number(S.session.message_count)))
+    ? Number(S.session.message_count)
+    : (Array.isArray(S.messages)?S.messages.length:0);
+  if(!Number.isFinite(serverCount)||serverCount<=localCount) return false;
+  if(typeof loadSession!=='function') return false;
+  void loadSession(sid,{
+    force:true,
+    externalRefreshReason:'session-updated',
+    keepStaleUntilLoaded:true,
+    minimumMessageCount:serverCount,
+  });
+  return true;
+}
+
+function _followSettledDoneIfStillPinned(){
+  const shouldFollow=(typeof _shouldFollowMessagesOnDomReplace==='function')
+    ? _shouldFollowMessagesOnDomReplace()
+    : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200));
+  if(shouldFollow&&typeof scrollToBottom==='function') scrollToBottom();
+}
+
 function startSessionStream(sid) {
   if (!sid) return;
   // Already on this session? No-op (loadSession is a no-op when re-selecting
@@ -7676,16 +7779,7 @@ function startSessionStream(sid) {
           : (S.session && S.session.session_id === sid);
         if (!isCurrent) return;
         if (S.activeStreamId) return;
-        // Re-check against our CURRENT known count — a concurrent load may have
-        // already caught us up between the server's emit and now.
-        const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
-          ? Number(S.session.message_count)
-          : (Array.isArray(S.messages) ? S.messages.length : 0);
-        const serverCount = Number(d.message_count);
-        if (!Number.isFinite(serverCount) || serverCount <= localCount) return;
-        if (typeof loadSession === 'function') {
-          void loadSession(sid, {force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true});
-        }
+        _queueSessionUpdatedRefresh(sid, Number(d.message_count));
       } catch (_) {}
     });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────

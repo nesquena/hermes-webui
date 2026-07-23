@@ -273,6 +273,42 @@ block. If the browser disconnects mid-stream, the daemon thread runs to completi
 then cleans up. The queue fills and the put_nowait() calls fail silently (queue.Full
 is caught).
 
+#### 4.3.1 Settled transcript windowing
+
+The SSE `done` payload is intentionally a full terminal snapshot so the browser can
+reconcile canonical session metadata, usage, and the completed turn. It is not always
+the correct display payload: a session may already be loaded through the paginated
+`/api/session?msg_limit=...` contract, especially when transcript virtualization is
+disabled.
+
+When the browser's current session is truncated, `sessions.js` requests its loaded
+settled window from the same `/api/session` endpoint before applying the terminal
+snapshot. Windows within the server-advertised `msg_limit` ceiling stay bounded. A
+larger loaded window omits `msg_limit` and fetches the authoritative transcript rather
+than accepting a clamped response that would discard older loaded rows. The server
+remains authoritative for visible-row counting, tool-result carry-through,
+`_messages_offset`, and activity-scene hydration. `messages.js` merges that replacement
+window with the terminal metadata and preserves the existing pagination cursor. SSE
+recovery uses the same path.
+
+The terminal paths do not promote `_messageRenderWindowSize` to the full transcript.
+Explicit history actions such as loading older messages, session-start navigation,
+and export may still request or render the full session. Edit/regenerate targets
+already visible in a paginated window keep the server-facing absolute `keep_count`
+but slice only the loaded local window; they do not expand the transcript merely to
+submit the mutation. Reconnect/refresh recovery also preserves the loaded window
+width. If a refresh fails, the browser keeps its bounded in-flight/local transcript
+rather than replacing it with the full SSE payload. This keeps the visible transcript
+and pagination state coherent without changing the experimental virtualization
+preference or the Agent repository.
+
+Session mutations that shrink a transcript, including WebUI `/undo` and `/retry`,
+reuse the same bounded same-session reload path after the server-side mutation. They
+must not issue an unbounded follow-up `GET /api/session` or manually replace
+`S.messages`, because that would promote a long session back into a full browser DOM
+and discard its pagination cursor. Older-message paging updates the canonical session
+count and refreshes the top-bar `loaded of total` metadata after each window change.
+
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 
@@ -1092,6 +1128,36 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
 
 This section records what was actually built and changed in each sprint. It is the
 permanent history of the codebase. Update it at the end of every sprint.
+
+### July 2026: Bounded Settled Transcript Windows
+
+The WebUI's terminal `done` event carries a full session snapshot, but the browser
+now preserves an already-paginated session window when applying that snapshot. It
+refreshes the canonical bounded tail through `/api/session?msg_limit=...`, retaining
+server-owned offsets, tool-result rows, activity metadata, and the newly completed
+turn without rendering thousands of older messages after every completion. SSE error,
+`stream_end`, and reconnect recovery use the same bounded request. Editing or
+regenerating a visible message uses the absolute server keep-count while trimming
+only the local window. Explicit history-loading actions remain unchanged, and a
+failed refresh keeps the bounded local/in-flight view instead of promoting the full
+terminal payload.
+
+Same-session force refreshes (metadata reconciliation and SSE recovery) keep the
+existing per-session SSE subscription alive while the bounded window is fetched.
+Reconnect recovery also derives its request limit from the currently displayed
+bounded window when no force-reload hint exists, so an expanded 90-row view does
+not collapse back to the initial 30-row tail. Completion follow intent is
+re-evaluated after the bounded fetch and pane-ownership check, so a reader who
+scrolls upward while that request is pending is not pulled back to the bottom.
+The browser shares the active load promise with duplicate same-session callers.
+Mutation refreshes from `/undo` and `/retry`, plus same-session `session-updated`
+events, queue at most one bounded follow-up after that promise settles; an event
+follow-up is skipped when the active load already reached its reported message
+count. Events for a different session remain suppressed while navigation owns the
+pane. This avoids an artificial subscribe gap that can repeatedly re-enter
+recovery for a large settled session, prevents a stale event from hijacking a
+user-initiated session switch, and keeps mutation callers from continuing against
+an unfinished transcript refresh.
 
 ### Sprint 1 (March 30, 2026): Bug Fixes, Arch Foundations, First Tests
 

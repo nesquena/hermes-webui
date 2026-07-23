@@ -133,7 +133,7 @@ def test_scroll_snapshot_restore_reinstates_unpinned_state_when_reader_is_mid_an
 
 
 def test_same_session_force_refresh_does_not_reset_scroll_direction_tracker():
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     compact = _compact(body)
 
     assert "constcurrentSid=S.session?S.session.session_id:null;" in compact

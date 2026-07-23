@@ -671,7 +671,7 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
 
 
 def test_load_session_schedules_session_visit_model_refresh_before_message_load():
-    body = _extract_function_body(_read_static("sessions.js"), "async function loadSession(")
+    body = _extract_function_body(_read_static("sessions.js"), "async function _loadSessionOnce(")
 
     assign_idx = body.index("S.session=data.session")
     message_load_idx = body.index("await _ensureMessagesLoaded(sid", assign_idx)
@@ -695,7 +695,7 @@ def test_session_visit_model_refresh_is_deferred_until_after_first_paint():
     sessions = _read_static("sessions.js")
     defer_helper = _extract_function_body(sessions, "function _afterSessionFirstPaint(")
     side_effect_helper = _extract_function_body(sessions, "function _deferSessionSideEffect(")
-    load_body = _extract_function_body(sessions, "async function loadSession(")
+    load_body = _extract_function_body(sessions, "async function _loadSessionOnce(")
 
     assert "requestAnimationFrame(()=>requestAnimationFrame(run))" in defer_helper
     assert "requestIdleCallback(invoke,{timeout:1500})" in defer_helper

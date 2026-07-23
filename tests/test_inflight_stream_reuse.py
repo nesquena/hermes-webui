@@ -138,7 +138,7 @@ def test_attach_live_stream_different_stream_still_reopens_transport():
 
 def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions():
     """The session switch-back path should still route through attachLiveStream()."""
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     # Anchor without the `const`/`let` keyword: the declaration was widened to
     # `let` so the race-guard can re-read activeStreamId after the awaited
     # message load (#5248). The invariant this test pins — the snapshot is taken
@@ -165,7 +165,7 @@ def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
     ownership). If a different sid is loading, the guard must not short-circuit
     so pending switch-back keeps progressing.
     """
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     compact = re.sub(r"\s+", "", body)
     # The same-session no-op now opens a block so re-selecting the already-open
     # session can clear a stale unread dot before returning (#4946). The
@@ -193,7 +193,7 @@ def test_load_session_preserves_existing_worklog_content_without_destructive_fal
     the destructive fallback must not call clearLiveToolCards() and rebuild a blank
     Running shell over the preserved timeline.
     """
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     content_pos = body.find("const hasCurrentWorklogContent=")
     clear_pos = body.find("clearLiveToolCards();", content_pos)
     assert content_pos != -1
@@ -274,7 +274,7 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     `INFLIGHT[sid].reattach && activeStreamId` gate is enough — this test
     pins the gate's shape so future refactors don't drop the flag check.
     """
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence): #3899
     # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would grab
     # the wrong one. rfind = the substantive restore branch.
@@ -303,7 +303,7 @@ def test_load_session_attaches_sse_before_auxiliary_work():
     before attachLiveStream(), because any synchronous failure in those paths
     would otherwise leave the backend stream active with no browser subscriber.
     """
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     active_branch = body[body.find("if(activeStreamId){") : body.find("}else{", body.find("if(activeStreamId){"))]
     active_attach = active_branch.find("attachLiveStream(sid, activeStreamId")
     assert active_attach != -1
@@ -853,7 +853,7 @@ assert.strictEqual(inflight.toolCalls[0].activitySegmentSeq, 1);
 
 
 def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
     prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
@@ -875,7 +875,7 @@ def test_load_session_prefers_structured_inflight_state_over_live_turn_snapshot(
     per-burst live tail, old snapshots can alternately erase progress text and
     leave Activity groups piled at the bottom of the turn.
     """
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     structured_pos = body.find("const hasStructuredLiveState=!!(INFLIGHT[sid]&&(")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
     fallback_pos = body.find("if(!restoredLiveTurn){", restore_pos)
@@ -896,7 +896,7 @@ def test_load_session_prefers_structured_inflight_state_over_live_turn_snapshot(
 
 def test_load_session_restores_worklog_shell_before_reattach_replay():
     """Reattaching before replay/new SSE should not leave the active stream blank."""
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     fallback_pos = body.find("if(!restoredLiveTurn){")
     assert fallback_pos != -1, "loadSession must have a live-turn fallback branch"
     refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
@@ -920,7 +920,7 @@ def test_restore_succeeded_reconnect_replays_tool_cards():
     """When reconnect replay succeeds in restoring the live turn HTML, tool cards
     are still repainted from the persisted live-call list instead of waiting for a
     future SSE event to reintroduce them."""
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
     reattach_pos = body.find("if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function')")
     restore_pos = body.find("restoreLiveTurnHtmlForSession", reattach_pos if reattach_pos != -1 else 0)
@@ -951,7 +951,7 @@ def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
     duplicate, so the restore-success reconnect path should only replay unkeyed
     tools when the restored turn has no visible tool rows to preserve.
     """
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
     restore_replay_pos = body.find("if(restoredLiveTurn&&didReconnect){")
     fallback_pos = body.find("if(!restoredLiveTurn){", restore_replay_pos)
@@ -1009,7 +1009,7 @@ assert.deepStrictEqual(
 
 
 def test_load_session_does_not_advance_replay_cursor_from_session_journal_summary():
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     assert "INFLIGHT[sid].lastRunJournalSeq=journalSeq;" not in body
     assert "const journalSeq=_runJournalSeqFromSession(S.session);" not in body
     assert "function _runJournalSeqFromSession" not in SESSIONS_JS
@@ -1017,7 +1017,7 @@ def test_load_session_does_not_advance_replay_cursor_from_session_journal_summar
 
 def test_session_switch_reattach_discards_tail_cache_for_full_journal_replay():
     close_body = _function_body(MESSAGES_JS, "closeLiveStream")
-    load_body = _function_body(SESSIONS_JS, "loadSession")
+    load_body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     compact_body = _function_body(UI_JS, "_compactInflightState")
 
     assert "INFLIGHT[sessionId].journalReplayFromStart=true" in close_body
@@ -1036,7 +1036,7 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     lastRunJournalSeq cursor but lost visible INFLIGHT content, reattaching from
     that cursor makes the session look blank after switching away and back.
     """
-    load_body = _function_body(SESSIONS_JS, "loadSession")
+    load_body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     helper_start = SESSIONS_JS.index("function _inflightHasVisibleLiveState")
     helper_body = SESSIONS_JS[
         helper_start : SESSIONS_JS.index("function _rememberRenderedSessionSnapshot", helper_start)
@@ -1165,7 +1165,7 @@ assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
 
-    load_body = _function_body(SESSIONS_JS, "loadSession")
+    load_body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     attach_body = _function_body(MESSAGES_JS, "attachLiveStream")
     close_body = _function_body(MESSAGES_JS, "closeLiveStream")
     compact_body = _function_body(UI_JS, "_compactInflightState")

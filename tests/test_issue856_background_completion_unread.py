@@ -91,7 +91,7 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     done_block = _done_block()
 
     marker_idx = done_block.find("_markSessionCompletionUnread(completedSid")
-    cleanup_idx = done_block.find("_clearOwnerInflightState();")
+    cleanup_idx = done_block.find("_clearOwnerInflightState({deferSessionStreamResume:true});")
     if cleanup_idx == -1:
         cleanup_idx = done_block.find("delete INFLIGHT[activeSid];")
     cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid);")
@@ -434,10 +434,10 @@ def test_active_done_marks_viewed_without_setting_unread_marker():
 def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     done_block = _done_block()
 
-    active_const_idx = done_block.find("const isActiveSession=_isSessionCurrentPane(activeSid);")
+    active_const_idx = done_block.find("let isActiveSession=_isSessionCurrentPane(activeSid);")
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
-    session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
+    session_update_idx = done_block.find("S.session=_settledSession", active_guard_idx)
     render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("preservePreview", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)
@@ -445,7 +445,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     assert active_const_idx != -1, "done handler must compute active/current pane separately"
     assert viewed_const_idx != -1, "done handler must still compute visible/focused read state"
     assert active_const_idx < viewed_const_idx
-    assert session_update_idx != -1, "active hidden completion must still refresh S.session"
+    assert session_update_idx != -1, "active hidden completion must still refresh the settled S.session"
     assert render_idx != -1, "active hidden completion must still render the final assistant response"
     assert load_dir_idx != -1, "active hidden completion must keep normal active-session finalization"
     assert mark_viewed_idx != -1, "read-state write must stay gated by visible/focused viewing"
@@ -518,7 +518,7 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
 
 
 def test_completion_unread_clears_only_when_session_is_opened():
-    load_idx = SESSIONS_JS.find("async function loadSession(sid")
+    load_idx = SESSIONS_JS.find("async function _loadSessionOnce(sid")
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 

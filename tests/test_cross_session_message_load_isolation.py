@@ -21,6 +21,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_SRC = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -88,9 +89,23 @@ def _extract_function(source: str, name: str) -> str:
 
 
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
+LOAD_SESSION_ONCE_SRC = _extract_function(SESSIONS_SRC, "_loadSessionOnce")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
+SESSION_UPDATED_HELPER_SRC = _extract_function(MESSAGES_SRC, "_queueSessionUpdatedRefresh")
+LOAD_SESSION_COORDINATION_SRC = "\n\n".join(
+    _extract_function(SESSIONS_SRC, name)
+    for name in (
+        "_canonicalSessionLoadId",
+        "_sessionLoadNeedsFollowUp",
+        "_sessionLoadCurrentMessageCount",
+        "_startSessionLoad",
+        "_runQueuedSessionLoad",
+        "_queueSessionLoadAfterActive",
+        "_sessionMessageReloadUrl",
+    )
+)
 
 
 def _normalise_ws(s: str) -> str:
@@ -98,7 +113,7 @@ def _normalise_ws(s: str) -> str:
 
 
 def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded():
-    body = LOAD_SESSION_SRC
+    body = LOAD_SESSION_ONCE_SRC
     assert "_loadSessionGeneration" in body, (
         "loadSession() must use a global generation counter so superseded loads "
         "can be rejected by continuation ownership checks"
@@ -122,9 +137,26 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
     )
     assert (
-        "showToast('Failed to load session" in LOAD_SESSION_SRC
-        or "showToast('Failed to load conversation messages" in LOAD_SESSION_SRC
+        "showToast('Failed to load session" in LOAD_SESSION_ONCE_SRC
+        or "showToast('Failed to load conversation messages" in LOAD_SESSION_ONCE_SRC
     ), "loadSession() should preserve toast-based failure paths"
+
+
+def test_same_session_reload_callers_wait_or_queue_a_follow_up():
+    body = LOAD_SESSION_SRC
+    assert "const activeLoad=_activeSessionLoad;" in body
+    assert "return _sessionLoadNeedsFollowUp(opts)" in body
+    assert "_queueSessionLoadAfterActive(sid,opts,activeLoad)" in body
+    assert "return activeLoad.promise" in body
+    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" not in SESSIONS_SRC
+
+
+def test_session_updated_refresh_preserves_cross_session_suppression_and_queues_same_session():
+    body = SESSION_UPDATED_HELPER_SRC
+    assert "if(loadingSid&&loadingSid!==sid) return false;" in body
+    assert "externalRefreshReason:'session-updated'" in body
+    assert "minimumMessageCount:serverCount" in body
+    assert "_queueSessionUpdatedRefresh(sid, Number(d.message_count));" in MESSAGES_SRC
 
 
 def test_ensure_messages_loaded_ownership_guard_pre_and_post_await():
@@ -203,8 +235,10 @@ function createEnvironment() {
     activeStreamId: null,
   };
   globalThis._loadingSessionId = null;
+  globalThis._activeSessionLoad = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._sessionLoadIntentGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -348,8 +382,11 @@ let toastCalls = [];
 // Source under test
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
+__LOAD_SESSION_COORDINATION_SRC__
 __LOAD_SESSION_SRC__
+__LOAD_SESSION_ONCE_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
+__SESSION_UPDATED_HELPER_SRC__
 
 async function waitForQueued(apiHost, url) {
   const target = String(url);
@@ -518,25 +555,25 @@ async function runStaleRejectedIdleCatch() {
   globalThis.apiHost = apiHost;
   globalThis.api = apiHost.api;
 
-  S.session = { session_id: 'sid-atlas', message_count: 0 };
+  S.session = { session_id: 'sid-beacon', message_count: 0 };
 
   const calls = {
-    firstMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
-    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+    firstMeta: apiHost.enqueue(buildMessageUrl('sid-beacon', 0)),
+    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-beacon', 1)),
     secondMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
     secondMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
   };
 
-  const first = loadSession('sid-atlas', { force: true });
-  calls.firstMeta._resolve(API_ATLAS_META);
+  const first = loadSession('sid-beacon', { force: true });
+  calls.firstMeta._resolve(API_BEACON_META);
 
   // Ensure the first load has entered the messages fetch and owns the pending API
-  // call before the superseding same-session load begins.
+  // call before the superseding cross-session load begins.
   await waitForQueued(apiHost, calls.firstMsgs.url);
 
   const second = loadSession('sid-atlas', { force: true });
 
-  // The stale first request rejects while the second newer request is in flight.
+  // The stale Beacon request rejects while the newer Atlas request is in flight.
   calls.firstMsgs._reject(new Error('owner lost while load was in-flight'));
   calls.secondMeta._resolve(API_ATLAS_RELOAD_META);
   calls.secondMsgs._resolve(API_ATLAS_RELOAD_MSGS);
@@ -544,7 +581,7 @@ async function runStaleRejectedIdleCatch() {
   await Promise.all([first, second]);
 
   return {
-    scenario: 'stale-idle-catch',
+    scenario: 'stale-cross-session-catch',
     finalSid: S.session && S.session.session_id,
     messages: snapshotState().messages,
     toolCalls: snapshotState().toolCalls,
@@ -559,11 +596,139 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runSameSessionMutationRefreshQueue() {
+  createEnvironment();
+  S.session = { session_id: 'sid-atlas', message_count: 21 };
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const afterMutationMeta = {
+    session: { ...API_ATLAS_META.session, message_count: 22 },
+  };
+  const afterMutationMsgs = {
+    session: {
+      ...API_ATLAS_MSGS.session,
+      message_count: 22,
+      messages: [{ role: 'assistant', content: 'after-mutation-transcript' }],
+    },
+  };
+  const calls = {
+    firstMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+    secondMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    secondMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+  };
+
+  const first = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'external-refresh',
+  });
+  await waitForQueued(apiHost, calls.firstMeta.url);
+  calls.firstMeta._resolve(API_ATLAS_META);
+  await waitForQueued(apiHost, calls.firstMsgs.url);
+
+  let duplicateSettled = false;
+  const duplicate = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'external-refresh',
+  });
+  duplicate.then(() => { duplicateSettled = true; });
+  await Promise.resolve();
+  const duplicateSettledBeforeFirst = duplicateSettled;
+
+  const eventQueued = _queueSessionUpdatedRefresh('sid-atlas', 22);
+  let secondSettled = false;
+  const second = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'undo',
+  });
+  second.then(() => { secondSettled = true; });
+  await Promise.resolve();
+  const secondSettledBeforeFirst = secondSettled;
+
+  calls.firstMsgs._resolve(API_ATLAS_MSGS);
+  await first;
+  await duplicate;
+  await waitForQueued(apiHost, calls.secondMeta.url);
+  calls.secondMeta._resolve(afterMutationMeta);
+  await waitForQueued(apiHost, calls.secondMsgs.url);
+  calls.secondMsgs._resolve(afterMutationMsgs);
+  await second;
+
+  return {
+    eventQueued,
+    duplicateSettledBeforeFirst,
+    secondSettledBeforeFirst,
+    apiCalls: apiHost.apiCalls.slice(),
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+  };
+}
+
+async function runQueuedMutationSupersededByNavigation() {
+  createEnvironment();
+  S.session = { session_id: 'sid-atlas', message_count: 21 };
+  const apiCalls = [];
+  let resolveAtlasMessages;
+  let resolveBeaconMeta;
+  const atlasMessagesPending = new Promise((resolve) => { resolveAtlasMessages = resolve; });
+  const beaconMetaPending = new Promise((resolve) => { resolveBeaconMeta = resolve; });
+  let atlasMetaCalls = 0;
+  globalThis.api = async (url) => {
+    const value = String(url);
+    apiCalls.push(value);
+    if (value === buildMessageUrl('sid-atlas', 0)) {
+      atlasMetaCalls += 1;
+      return atlasMetaCalls === 1 ? API_ATLAS_META : API_ATLAS_RELOAD_META;
+    }
+    if (value === buildMessageUrl('sid-atlas', 1)) {
+      return atlasMetaCalls === 1 ? atlasMessagesPending : API_ATLAS_RELOAD_MSGS;
+    }
+    if (value === buildMessageUrl('sid-beacon', 0)) return beaconMetaPending;
+    if (value === buildMessageUrl('sid-beacon', 1)) return API_BEACON_MSGS;
+    throw new Error('Unexpected API call: ' + value);
+  };
+
+  const active = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'external-refresh',
+  });
+  while (!apiCalls.includes(buildMessageUrl('sid-atlas', 1))) await Promise.resolve();
+
+  const queued = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'undo',
+  });
+  const navigation = loadSession('sid-beacon', { force: true });
+  while (!apiCalls.includes(buildMessageUrl('sid-beacon', 0))) await Promise.resolve();
+
+  resolveAtlasMessages(API_ATLAS_MSGS);
+  await active;
+  resolveBeaconMeta(API_BEACON_META);
+  await Promise.all([queued, navigation]);
+
+  return {
+    apiCalls,
+    atlasMetaCalls,
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    loadingGeneration: snapshotState().loadingGeneration,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    sameSessionMutationQueue: await runSameSessionMutationRefreshQueue(),
+    queuedMutationVsNavigation: await runQueuedMutationSupersededByNavigation(),
   };
 }
 
@@ -592,6 +757,44 @@ def _run_node(script: str) -> dict:
     return json.loads(output_lines[-1])
 
 
+_SESSION_UPDATED_HELPER_NODE_TEMPLATE = r'''
+globalThis.S = {
+  session: { session_id: 'sid-atlas', message_count: 10 },
+  messages: [],
+};
+globalThis._loadingSessionId = 'sid-atlas';
+const calls = [];
+globalThis.loadSession = (sid, opts) => {
+  calls.push({ sid, opts });
+  return Promise.resolve();
+};
+__SESSION_UPDATED_HELPER_SRC__
+
+const sameSessionQueued = _queueSessionUpdatedRefresh('sid-atlas', 11);
+globalThis._loadingSessionId = 'sid-beacon';
+const crossSessionSuppressed = _queueSessionUpdatedRefresh('sid-atlas', 12);
+globalThis._loadingSessionId = 'sid-atlas';
+S.session.message_count = 11;
+const alreadyCaughtUp = _queueSessionUpdatedRefresh('sid-atlas', 11);
+console.log(JSON.stringify({ sameSessionQueued, crossSessionSuppressed, alreadyCaughtUp, calls }));
+'''
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_updated_helper_routes_same_session_events_safely():
+    body = _run_node(
+        _SESSION_UPDATED_HELPER_NODE_TEMPLATE.replace(
+            "__SESSION_UPDATED_HELPER_SRC__", SESSION_UPDATED_HELPER_SRC
+        )
+    )
+    assert body["sameSessionQueued"] is True
+    assert body["crossSessionSuppressed"] is False
+    assert body["alreadyCaughtUp"] is False
+    assert len(body["calls"]) == 1
+    assert body["calls"][0]["sid"] == "sid-atlas"
+    assert body["calls"][0]["opts"]["minimumMessageCount"] == 11
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     script = (
@@ -601,14 +804,19 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
         .replace(
             "__SELECT_LIVE_RECOVERY_INFLIGHT_SRC__", SELECT_LIVE_RECOVERY_INFLIGHT_SRC
         )
+        .replace("__LOAD_SESSION_COORDINATION_SRC__", LOAD_SESSION_COORDINATION_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
+        .replace("__LOAD_SESSION_ONCE_SRC__", LOAD_SESSION_ONCE_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
+        .replace("__SESSION_UPDATED_HELPER_SRC__", SESSION_UPDATED_HELPER_SRC)
     )
     body = _run_node(script)
 
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    mutation_queue = body["sameSessionMutationQueue"]
+    queued_vs_navigation = body["queuedMutationVsNavigation"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -663,17 +871,49 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     _assert_atlas_wins(observed, label="observed-idle-cross-session-ordering")
     assert observed["toastCalls"] == [], "stale Beacon return in idle-path race should not show toast"
 
-    # 3) Stale rejected idle-branch catch must be ownership-guarded and not mutate shared pane.
+    # 3) A rejected stale cross-session idle-branch load must be ownership-guarded
+    #    and must not mutate the newly active pane.
+    assert stale["finalSid"] == "sid-atlas", "stale rejection must leave Atlas active"
     assert stale["messages"] == ["reloaded-active-transcript"], "stale catch must not keep stale transcript"
     assert stale["toolCalls"] == [{"name": "tool-atlas-new", "done": True}], "stale catch must not overwrite tool state"
     assert stale["truncated"] is True and stale["oldestIdx"] == 33, "active owner should install latest metadata"
-    assert stale["msgInner"] == "INIT_LOADING", (
+    assert "Failed to load messages" not in stale["msgInner"], (
         "stale reject from superseded load must not write failure placeholder"
+    )
+    assert "Loading conversation..." in stale["msgInner"], (
+        "the active cross-session load may retain its loading placeholder"
     )
     assert stale["toastCalls"] == [], "stale reject must not surface toast for superseded load"
     assert stale["apiCalls"].count(
+        "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
+    ) == 1, "stale Beacon transcript should be attempted once"
+    assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
-    ) == 2, "both old and active loads should have attempted message fetch"
+    ) == 1, "active Atlas transcript should be attempted once"
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
+
+    assert mutation_queue["secondSettledBeforeFirst"] is False, (
+        "a same-session mutation refresh must remain pending until the active load settles"
+    )
+    assert mutation_queue["duplicateSettledBeforeFirst"] is False, (
+        "a same-session duplicate refresh must await the active load"
+    )
+    assert mutation_queue["eventQueued"] is True, (
+        "a same-session session-updated event must join the active load and queue a follow-up"
+    )
+    assert mutation_queue["apiCalls"] == [
+        "/api/session?session_id=sid-atlas&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+        "/api/session?session_id=sid-atlas&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+    ], "queued mutation refresh should run exactly one bounded follow-up load"
+    assert mutation_queue["finalSid"] == "sid-atlas"
+    assert mutation_queue["messages"] == ["after-mutation-transcript"]
+
+    assert queued_vs_navigation["atlasMetaCalls"] == 1, (
+        "a queued Atlas mutation refresh must be abandoned after newer Beacon navigation intent"
+    )
+    assert queued_vs_navigation["finalSid"] == "sid-beacon"
+    assert queued_vs_navigation["messages"] == ["stale-beacon-transcript"]

@@ -19,7 +19,7 @@ def _btn_new_chat_handler() -> str:
 
 
 def _load_session_clear_block() -> str:
-    start = SESSIONS_JS.find("async function loadSession(")
+    start = SESSIONS_JS.find("async function _loadSessionOnce(")
     clear_start = SESSIONS_JS.find("if (currentSid !== sid || forceReload) {", start)
     clear_end = SESSIONS_JS.find("// Phase 1: Load metadata only", clear_start)
     assert start != -1, "loadSession not found"
@@ -29,7 +29,7 @@ def _load_session_clear_block() -> str:
 
 def test_new_session_remembers_regular_empty_session_id():
     start = SESSIONS_JS.find("async function newSession(")
-    end = SESSIONS_JS.find("async function loadSession(", start)
+    end = SESSIONS_JS.find("async function _loadSessionOnce(", start)
     assert start != -1 and end != -1, "newSession block not found"
     body = SESSIONS_JS[start:end]
     assign_idx = body.find("S.session=data.session")

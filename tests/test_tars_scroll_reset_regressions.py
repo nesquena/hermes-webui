@@ -25,7 +25,9 @@ def _scroll_listener_block() -> str:
 
 
 def test_clicking_current_session_is_noop_before_load_session_side_effects():
-    load_session = _function_body(SESSIONS_JS, "async function loadSession")
+    # The public loadSession() wrapper now coordinates same-session callers;
+    # the navigation/no-op side effects live in its async core.
+    load_session = _function_body(SESSIONS_JS, "async function _loadSessionOnce")
 
     current_idx = load_session.index("const currentSid = S.session ? S.session.session_id : null")
     noop_idx = load_session.index("if(currentSid===sid && !forceReload) return")
@@ -127,7 +129,7 @@ def test_external_active_refresh_defers_while_reader_is_manually_unpinned():
 
 
 def test_session_switch_clears_deferred_active_refresh_reason():
-    load = _function_body(SESSIONS_JS, "async function loadSession")
+    load = _function_body(SESSIONS_JS, "async function _loadSessionOnce")
     assert "function _clearDeferredActiveSessionExternalRefresh()" in SESSIONS_JS
     assert "_deferredActiveSessionExternalRefreshReason = '';" in SESSIONS_JS
     assert "if (currentSid !== sid) {\n    _clearDeferredActiveSessionExternalRefresh();\n  }" in load

@@ -868,7 +868,7 @@ class TestFrontendWiring:
         )
         upload_body = ui[ui.index("async function uploadPendingFiles") :]
         sessions = (Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
-        load_body = _source_between(sessions, "async function loadSession", "\nfunction _isMessagingSession")
+        load_body = _source_between(sessions, "async function _loadSessionOnce", "\nfunction _isMessagingSession")
         assert "_uploadPendingFilesSyncProgressForSession(sid)" in load_body
         assert "_uploadPendingFilesProgressBySession.set(owner,{percent:clamped})" in progress_helper
         assert "function _uploadPendingFilesSyncProgressForSession" in progress_helper

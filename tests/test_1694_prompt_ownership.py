@@ -96,7 +96,7 @@ def test_polling_empty_state_clears_only_the_owner_prompt():
 
 
 def test_load_session_rerenders_cached_prompt_for_new_active_session():
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     assert "_renderPendingPromptsForActiveSession();" in body
 
 

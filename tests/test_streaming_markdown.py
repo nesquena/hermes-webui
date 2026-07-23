@@ -22,12 +22,16 @@ Tests are static (regex / AST-level) — no browser required.
 import pathlib
 import re
 import json
+import shutil
 import subprocess
+
+import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -558,6 +562,55 @@ class TestDoneEventSmd:
             "the possibly-stale _scrollPinned flag."
         )
 
+    def test_done_follow_decision_is_revalidated_after_bounded_fetch(self):
+        """Completion must not carry pre-fetch follow intent across the await."""
+        fn = self.get_fn()
+        assert fn, "'done' handler not found"
+        fetch_idx = fn.index("await _fetchSettledSessionMessageWindow")
+        ownership_idx = fn.index("const _settlementStillOwnsPane=", fetch_idx)
+        decision_idx = fn.index("const shouldFollowOnDone", ownership_idx)
+        render_idx = fn.index("renderMessages({preserveScroll:true})", decision_idx)
+        helper_idx = fn.index("_followSettledDoneIfStillPinned();", render_idx)
+        assert fetch_idx < ownership_idx < decision_idx < render_idx < helper_idx
+
+    @pytest.mark.skipif(NODE is None, reason="node is required for follow-intent runtime tests")
+    def test_done_follow_helper_uses_live_intent_after_fetch(self):
+        helper = extract_fn(MESSAGES_JS, "_followSettledDoneIfStillPinned")
+        script = f"""
+{helper}
+let follow = true;
+let scrollCalls = 0;
+let release;
+function _shouldFollowMessagesOnDomReplace() {{ return follow; }}
+function scrollToBottom() {{ scrollCalls += 1; }}
+async function run() {{
+  const pending = new Promise(resolve => {{ release = resolve; }});
+  const completion = (async () => {{
+    await pending;
+    _followSettledDoneIfStillPinned();
+  }})();
+  release();
+  follow = false;
+  await completion;
+  const afterReaderScrolledUp = scrollCalls;
+  follow = true;
+  _followSettledDoneIfStillPinned();
+  console.log(JSON.stringify({{afterReaderScrolledUp, finalScrollCalls: scrollCalls}}));
+}}
+run().catch(err => {{ console.error(err.stack || err); process.exit(1); }});
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            cwd=str(REPO),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        outcome = json.loads(result.stdout.strip())
+        assert outcome == {"afterReaderScrolledUp": 0, "finalScrollCalls": 1}
+
     def test_dom_replace_follow_threshold_is_not_broad_reader_zone(self):
         """Completion must not snap readers who scrolled slightly up mid-stream.
 
@@ -584,7 +637,7 @@ class TestDoneEventSmd:
         assert fn, "'done' handler not found"
         done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
         assert "const hasMessageToolMetadata=S.messages.some" in done_before_render
-        assert "!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length" in done_before_render
+        assert "!hasMessageToolMetadata&&_settledSession.tool_calls&&_settledSession.tool_calls.length" in done_before_render
         assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in done_before_render
 
 

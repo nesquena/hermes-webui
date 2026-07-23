@@ -30,7 +30,7 @@ def _extract_function(src: str, signature: str) -> str:
 
 
 def test_load_session_initial_metadata_request_defers_model_resolution_until_after_state_assignment():
-    body = _extract_function(SESSIONS_JS, "async function loadSession(sid")
+    body = _extract_function(SESSIONS_JS, "async function _loadSessionOnce(sid")
     fast_metadata_fetch = "messages=0&resolve_model=0"
     deferred_metadata_fetch = "messages=0&resolve_model=1"
     assignment = "S.session=data.session"

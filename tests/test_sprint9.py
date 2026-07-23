@@ -42,7 +42,8 @@ def test_workspace_js_served(cleanup_test_sessions):
 def test_sessions_js_served(cleanup_test_sessions):
     src = get_text("/static/sessions.js")
     assert "async function newSession(" in src
-    assert "async function loadSession(" in src
+    assert "function loadSession(sid)" in src
+    assert "async function _loadSessionOnce(" in src
     assert "async function renderSessionList(" in src
 
 def test_messages_js_served(cleanup_test_sessions):

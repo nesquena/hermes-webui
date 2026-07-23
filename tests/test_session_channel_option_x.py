@@ -938,7 +938,7 @@ def test_load_session_rearms_stream_on_every_early_return():
     # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
     # added inside loadSession pushed the fetch-error catch's stream restart past
     # the old 14000-char cutoff.
-    fn_ix = js.index("async function loadSession(")
+    fn_ix = js.index("async function _loadSessionOnce(")
     body = js[fn_ix:fn_ix + 16000]
 
     # The unconditional teardown must still be there (this is what creates the

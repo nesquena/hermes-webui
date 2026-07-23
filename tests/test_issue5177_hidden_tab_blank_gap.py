@@ -40,10 +40,10 @@ def _compact(text: str) -> str:
 
 
 def _load_session_block(compact: str) -> str:
-    """Slice from the start of ``async function loadSession`` to the matching
+    """Slice from the start of the async load core to the matching
     close brace, using brace counting so future code growth in the function
     cannot push assertions out of a fixed window."""
-    marker = "asyncfunctionloadSession(sid){"
+    marker = "asyncfunction_loadSessionOnce(sid){"
     start = compact.find(marker)
     assert start != -1, "expected the loadSession definition"
     i = start + len(marker) - 1  # position of the opening brace

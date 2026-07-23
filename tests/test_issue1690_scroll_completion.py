@@ -84,7 +84,7 @@ def test_cached_render_path_uses_same_scroll_policy_as_fresh_render():
 
 
 def test_session_switch_and_idle_session_load_keep_default_bottom_pin_behavior():
-    load_session = _function_body(SESSIONS_JS, "loadSession")
+    load_session = _function_body(SESSIONS_JS, "_loadSessionOnce")
     idle_branch = load_session[load_session.index("}else{\n      S.busy=false;") : load_session.index("// Sync context usage indicator")]
 
     # #3326: the idle branch now renders with a CONDITIONAL preserveScroll —

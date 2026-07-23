@@ -93,5 +93,6 @@ def test_frontend_declares_live_ceiling_at_module_scope_with_fallback():
 
 def test_frontend_reload_width_paths_read_the_live_ceiling():
     """Both reload-width decisions read the live `_msgLimitMax`, not the mirror."""
-    assert "reloadLimit <= _msgLimitMax" in _SESSIONS_JS       # _ensureMessagesLoaded
-    assert "requestedLimit >= _msgLimitMax" in _SESSIONS_JS    # _loadOlderMessages
+    assert "numericLimit>0&&numericLimit<=_msgLimitMax" in _SESSIONS_JS  # shared URL policy
+    assert "_sessionMessageReloadUrl(sid,reloadLimit)" in _SESSIONS_JS   # _ensureMessagesLoaded
+    assert "requestedLimit >= _msgLimitMax" in _SESSIONS_JS              # _loadOlderMessages

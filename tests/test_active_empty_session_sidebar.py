@@ -17,7 +17,7 @@ def test_active_empty_session_is_injected_into_sidebar_rows():
 
 
 def test_new_session_switches_sidebar_back_to_webui_source():
-    new_session = SESSIONS_JS[SESSIONS_JS.index("async function newSession"):SESSIONS_JS.index("async function loadSession")]
+    new_session = SESSIONS_JS[SESSIONS_JS.index("async function newSession"):SESSIONS_JS.index("async function _loadSessionOnce")]
     assert "if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';" in new_session
 
 

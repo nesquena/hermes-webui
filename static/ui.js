@@ -9564,16 +9564,29 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    // Reconnect/refresh is a recovery path, not an explicit history export.
+    // Preserve the loaded session window. The shared URL policy keeps ordinary
+    // truncated windows bounded, but omits msg_limit when a server clamp would
+    // otherwise replace the pane with fewer rows than are already loaded.
+    const sid=S.session.session_id;
+    const refreshLimit=typeof _messageReloadLimitForSession==='function'
+      ? _messageReloadLimitForSession(sid)
+      : 30;
+    const refreshUrl=typeof _sessionMessageReloadUrl==='function'
+      ? _sessionMessageReloadUrl(sid,refreshLimit)
+      : `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+    const data = await api(refreshUrl);
     S.session = data.session;
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
+    if(typeof _msgLimitMax!=='undefined') _msgLimitMax=data.session._msg_limit_max||_MSG_LIMIT_MAX;
     const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
-
+    S.session._modelResolutionDeferred=true;
     syncTopbar(); _renderMessagesWithScrollSnapshot();
+    if(typeof _resolveSessionModelForDisplaySoon==='function') _resolveSessionModelForDisplaySoon(sid);
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
@@ -18340,6 +18353,17 @@ function ensureLiveWorklogShell(){
 
 // ── Edit + Regenerate ──
 
+// Edit/regenerate targets are rendered from the current message window, but the
+// truncate API expects an absolute position in the server transcript.  When the
+// current window starts at _oldestIdx, convert the absolute keep count back to a
+// local slice end after truncation instead of loading the entire history merely
+// to make Array#slice use the same coordinate system.
+function _loadedMessageSliceEndForKeepCount(absoluteKeepCount, windowOffset, windowTruncated){
+  const absolute=Math.max(0,Number(absoluteKeepCount)||0);
+  const offset=Math.max(0,Number(windowOffset)||0);
+  return windowTruncated?Math.max(0,absolute-offset):absolute;
+}
+
 function editMessage(btn) {
   if(S.busy) return;
   const row = btn.closest('[data-msg-idx]');
@@ -18394,13 +18418,23 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
+  const initialWindowOffset = Math.max(0, Number(_oldestIdx)||0);
+  const initialWindowTruncated = !!(
+    typeof _messagesTruncated !== 'undefined' &&
+    _messagesTruncated &&
+    initialWindowOffset > 0
+  );
   const absoluteKeepCount = _oldestIdx + msgIdx;
   // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
   // initialSid — a non-default session model (vs profile default), which is
   // inference-free and survives the failed send's marker consumption. See
   // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
   const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  if(typeof _ensureAllMessagesLoaded==='function'){
+  // The target row is necessarily inside S.messages, so a truncated window
+  // already contains everything needed to calculate the absolute keep_count.
+  // Full history is still used for non-paginated/legacy states where the local
+  // index cannot be safely translated into an absolute coordinate.
+  if(!initialWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
@@ -18409,11 +18443,17 @@ async function submitEdit(msgIdx, newText) {
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
-    // #5924 SILENT-race guard: a session switch during the truncate await must not
-    // let this recovery apply session A's intent (truncate/re-arm/send) to the
-    // newly-visible session.
     if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
+    const currentWindowOffset=Math.max(0,Number(_oldestIdx)||0);
+    const currentWindowTruncated=!!(
+      typeof _messagesTruncated!=='undefined'&&
+      _messagesTruncated&&
+      currentWindowOffset>0
+    );
+    S.messages = S.messages.slice(
+      0,
+      _loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)
+    );
     renderMessages();
     $('msg').value = newText;
     // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
@@ -18430,6 +18470,12 @@ async function regenerateResponse(btn) {
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
+  const initialWindowOffset = Math.max(0, Number(_oldestIdx)||0);
+  const initialWindowTruncated = !!(
+    typeof _messagesTruncated !== 'undefined' &&
+    _messagesTruncated &&
+    initialWindowOffset > 0
+  );
   const absoluteKeepCount = _oldestIdx + assistantIdx;
   const initialSid = S.session.session_id;
   let lastUserText = '';
@@ -18438,7 +18484,7 @@ async function regenerateResponse(btn) {
     if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
   }
   if(!lastUserText) return;
-  if(typeof _ensureAllMessagesLoaded==='function'){
+  if(!initialWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
@@ -18447,7 +18493,17 @@ async function regenerateResponse(btn) {
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, absoluteKeepCount);
+    if(!S.session || S.session.session_id !== initialSid) return;
+    const currentWindowOffset=Math.max(0,Number(_oldestIdx)||0);
+    const currentWindowTruncated=!!(
+      typeof _messagesTruncated!=='undefined'&&
+      _messagesTruncated&&
+      currentWindowOffset>0
+    );
+    S.messages = S.messages.slice(
+      0,
+      _loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)
+    );
     renderMessages();
     $('msg').value = lastUserText;
     await send();

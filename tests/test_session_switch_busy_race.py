@@ -33,7 +33,7 @@ def _function_body(src: str, signature: str) -> str:
 
 
 def test_loadSession_clears_busy_before_async_message_load_when_server_idle():
-    body = _function_body(SESSIONS_SRC, "async function loadSession(")
+    body = _function_body(SESSIONS_SRC, "async function _loadSessionOnce(")
 
     idle_reset = body.find("if(!activeStreamId){")
     assert idle_reset != -1, "loadSession must gate idle cleanup on missing active_stream_id"
@@ -50,7 +50,7 @@ def test_loadSession_clears_busy_before_async_message_load_when_server_idle():
 
 
 def test_loadSession_snapshots_live_turn_before_wiping_message_pane():
-    body = _function_body(SESSIONS_SRC, "async function loadSession(")
+    body = _function_body(SESSIONS_SRC, "async function _loadSessionOnce(")
 
     snap_pos = body.find("snapshotLiveTurnHtmlForSession(currentSid)")
     # Anchor on the actual loading-placeholder marker (unique), not the
@@ -63,7 +63,7 @@ def test_loadSession_snapshots_live_turn_before_wiping_message_pane():
 
 
 def test_loadSession_restores_live_turn_on_active_stream_return_path():
-    body = _function_body(SESSIONS_SRC, "async function loadSession(")
+    body = _function_body(SESSIONS_SRC, "async function _loadSessionOnce(")
 
     # The restore that actually fires on switch-back is the Phase 2a path: after
     # loadInflightState() rehydrates INFLIGHT for an active stream, the streaming

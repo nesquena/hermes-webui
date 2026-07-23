@@ -578,7 +578,7 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     not on same-session navigation/force-reload code paths.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    load_start = src.find("async function loadSession(sid){")
+    load_start = src.find("async function _loadSessionOnce(sid){")
     assert load_start >= 0
     load_end = src.find("  // Sync context usage indicator from session data", load_start)
     load_body = src[load_start:load_end]

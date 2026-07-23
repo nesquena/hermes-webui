@@ -24,6 +24,119 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+// Tracks user-visible load intent separately from request generations. A queued
+// same-session follow-up belongs to the intent that created its active load and
+// must not start after a newer cross-session navigation has taken ownership.
+let _sessionLoadIntentGeneration = 0;
+// The generation token protects shared state from stale continuations, while
+// this promise coordinates callers that target the same session. A caller that
+// arrives during an active same-session refresh must not continue on an already
+// resolved `return;` path.
+let _activeSessionLoad = null;
+
+function _canonicalSessionLoadId(sid, opts) {
+  if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
+    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
+    if(resolvedSid&&resolvedSid!==sid) return resolvedSid;
+  }
+  return sid;
+}
+
+function _sessionLoadNeedsFollowUp(opts) {
+  const reason=String(opts&&opts.externalRefreshReason||'');
+  return reason==='retry'||reason==='undo'||reason==='session-updated';
+}
+
+function _sessionLoadCurrentMessageCount(sid) {
+  if(typeof S==='undefined'||!S.session||S.session.session_id!==sid) return null;
+  const count=Number(S.session.message_count);
+  return Number.isFinite(count)?count:null;
+}
+
+function _startSessionLoad(sid, opts, intentGeneration) {
+  const promise=_loadSessionOnce(sid, opts||{});
+  const entry={
+    sid,
+    promise,
+    intentGeneration,
+    followUpPromise:null,
+    followUpOptions:null,
+    followUpRequiresMutation:false,
+    minimumMessageCount:Number(opts&&opts.minimumMessageCount),
+  };
+  _activeSessionLoad=entry;
+  const clearActive=()=>{
+    if(_activeSessionLoad===entry) _activeSessionLoad=null;
+  };
+  // Use both handlers so a failed load cannot leave a stale coordinator entry,
+  // and do not create an unhandled rejected promise from `.finally()`.
+  promise.then(clearActive,clearActive);
+  return promise;
+}
+
+function _runQueuedSessionLoad(sid, entry) {
+  if(entry.intentGeneration!==_sessionLoadIntentGeneration) return;
+  if(typeof S==='undefined'||!S.session||S.session.session_id!==sid) return;
+  if(!entry.followUpRequiresMutation){
+    const minimum=entry.minimumMessageCount;
+    const current=_sessionLoadCurrentMessageCount(sid);
+    if(Number.isFinite(minimum)&&current!==null&&current>=minimum) return;
+  }
+  const opts={...(entry.followUpOptions||{}),_forceNew:true};
+  if(Number.isFinite(entry.minimumMessageCount)){
+    opts.minimumMessageCount=entry.minimumMessageCount;
+  }
+  return _startSessionLoad(sid,opts,entry.intentGeneration);
+}
+
+function _queueSessionLoadAfterActive(sid, opts, entry) {
+  const reason=String(opts&&opts.externalRefreshReason||'');
+  const minimum=Number(opts&&opts.minimumMessageCount);
+  if(Number.isFinite(minimum)){
+    const current=Number(entry.minimumMessageCount);
+    entry.minimumMessageCount=Number.isFinite(current)
+      ? Math.max(current,minimum)
+      : minimum;
+  }
+  if(reason==='retry'||reason==='undo'){
+    entry.followUpRequiresMutation=true;
+    entry.followUpOptions={...opts};
+  }else if(!entry.followUpOptions){
+    entry.followUpOptions={...opts};
+  }
+  if(!entry.followUpPromise){
+    entry.followUpPromise=entry.promise.then(
+      ()=>_runQueuedSessionLoad(sid,entry),
+      ()=>_runQueuedSessionLoad(sid,entry)
+    );
+  }
+  return entry.followUpPromise;
+}
+
+function loadSession(sid) {
+  const opts=arguments[1]||{};
+  sid=_canonicalSessionLoadId(sid,opts);
+  // Extension pre-open hooks belong to the public coordinator, not the
+  // execution core. This keeps coalesced, profile-retry, and continuation
+  // loads from notifying extensions more than once for one navigation.
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
+    const preResult=_hermesNotifySessionOpen(sid,null,{preload:true,opts});
+    if(preResult&&preResult.cancel===true) return;
+  }
+  const forceReload=!!opts.force;
+  const currentSid=typeof S!=='undefined'&&S.session ? S.session.session_id : null;
+  const activeLoad=_activeSessionLoad;
+  if(!opts._forceNew&&activeLoad&&activeLoad.sid===sid){
+    if(forceReload&&currentSid===sid){
+      return _sessionLoadNeedsFollowUp(opts)
+        ? _queueSessionLoadAfterActive(sid,opts,activeLoad)
+        : activeLoad.promise;
+    }
+    if(!forceReload&&currentSid===sid) return activeLoad.promise;
+  }
+  return _startSessionLoad(sid,opts,++_sessionLoadIntentGeneration);
+}
+
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -1666,24 +1779,8 @@ async function _switchProfileForSessionLoad(profile){
   }
 }
 
-async function loadSession(sid){
+async function _loadSessionOnce(sid){
   const opts = arguments[1] || {};
-  // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
-  // notifications so extensions always see the canonical session id, not the
-  // raw sidebar click id (which may differ after lineage folding).
-  if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
-  }
-  // Extension pre-open hook — fires once per sidebar click, not on every call.
-  // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
-  // when loadSession runs the actual navigation inside it.
-  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
-    var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
-    if(_preResult&&_preResult.cancel===true){
-      return;
-    }
-  }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
@@ -1724,7 +1821,13 @@ async function loadSession(sid){
     _scrollPinned = true;
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
-  if(typeof stopSessionStream==='function') stopSessionStream();
+  // A same-session force reload is a transcript refresh, not a navigation.
+  // Keep the healthy per-session SSE subscription alive while the metadata and
+  // bounded message window are fetched. Tearing it down here creates an
+  // artificial subscribe gap; the server can then emit its recovery event,
+  // which re-enters loadSession() and repeats the cycle for large sessions.
+  // Cross-session navigation still closes the old session's stream.
+  if(!sameSessionForceReload&&typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
@@ -1840,7 +1943,7 @@ async function loadSession(sid){
           return;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+        return _loadSessionOnce(sid,{...opts,skipProfileResolve:true,force:true});
       }catch(switchErr){
         e=switchErr;
       }
@@ -1951,8 +2054,8 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    if (_isCurrentLoad()) _loadingSessionId=null;
+    return _loadSessionOnce(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
   }
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
@@ -3033,6 +3136,74 @@ function _currentLoadedRenderableMessageCount(){
   return count;
 }
 
+// Settled SSE payloads intentionally carry the full transcript, but the
+// browser may currently be showing only a paginated tail. Keep terminal
+// settlement on the same server-owned window contract as initial loads and
+// older-message paging instead of promoting a truncated pane to full history.
+// The caller supplies the next session metadata when it is available so the
+// newly completed turn has room in the requested window. Recovery paths do
+// not have that metadata before their first request and reserve one normal
+// page as a conservative completion allowance.
+function _settledSessionMessageWindowLimit(nextSession, options){
+  const forceBounded=!!(options&&options.forceBounded);
+  if(typeof _messagesTruncated==='undefined'||(!_messagesTruncated&&!forceBounded)) return null;
+  const loadedRenderableCount=_currentLoadedRenderableMessageCount();
+  const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
+  // A populated non-truncated pane is already complete. Even force-bounded
+  // recovery must preserve that contract; requesting the default tail would
+  // replace the complete pane with 30 rows. An empty pre-load recovery may still
+  // reserve the normal initial window below.
+  if(!_messagesTruncated&&(loadedRenderableCount>0||loadedMessageCount>0)) return null;
+  const loadedWindow=Math.max(0,loadedRenderableCount);
+  const priorMessageCount=Math.max(
+    0,
+    Number(S.session&&S.session.message_count)||loadedMessageCount
+  );
+  const nextMessageCount=Math.max(
+    priorMessageCount,
+    Number(nextSession&&nextSession.message_count)||priorMessageCount
+  );
+  const appendedRawCount=Math.max(0,nextMessageCount-priorMessageCount);
+  const recoveryAllowance=options&&options.reserveNewTurn?_INITIAL_MSG_LIMIT:0;
+  return Math.max(
+    _INITIAL_MSG_LIMIT,
+    loadedWindow,
+    loadedWindow+appendedRawCount,
+    loadedWindow+recoveryAllowance
+  );
+}
+
+function _sessionMessageReloadUrl(sid, requestedLimit){
+  const base=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+  const numericLimit=Number(requestedLimit);
+  const boundedLimit=Number.isFinite(numericLimit)&&numericLimit>0&&numericLimit<=_msgLimitMax
+    ? Math.floor(numericLimit)
+    : null;
+  // A replace-oriented request above the server ceiling would be clamped and
+  // silently discard already-loaded older rows. Omitting msg_limit asks for the
+  // authoritative full transcript instead. The same omission also preserves a
+  // fully loaded, non-truncated pane instead of collapsing it to the default 30.
+  return boundedLimit===null
+    ? base
+    : `${base}&msg_limit=${encodeURIComponent(boundedLimit)}&expand_renderable=1`;
+}
+
+function _settledSessionMessageWindowUrl(sid, nextSession, options){
+  const limit=_settledSessionMessageWindowLimit(nextSession,options);
+  return _sessionMessageReloadUrl(sid,limit);
+}
+
+async function _fetchSettledSessionMessageWindow(sid, nextSession, options){
+  const limit=_settledSessionMessageWindowLimit(nextSession,options);
+  if(limit===null) return null;
+  const data=await api(
+    _settledSessionMessageWindowUrl(sid,nextSession,options),
+    {timeoutMs:120000}
+  );
+  if(!data||!data.session) throw new Error('Settled session window unavailable');
+  return data.session;
+}
+
 function _captureSameSessionForceReloadHint(sid){
   const loadedRenderableCount=_currentLoadedRenderableMessageCount();
   const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
@@ -3059,16 +3230,31 @@ function _messageReloadLimitForSession(sid){
   const hint=_sameSessionForceReloadHint;
   if(hint&&hint.session_id===sid){
     const loadedRenderableCount=Math.max(0,Number(hint.loaded_renderable_count)||0);
+    // S.messages also contains hidden role:"tool" rows. `msg_limit` is a
+    // renderable-row budget, so raw array length must never widen a mutation
+    // reload window (a 30-row view with 30 tool rows would otherwise request
+    // 60 visible rows on /undo or /retry).
     const loadedMessageCount=Math.max(0,Number(hint.loaded_message_count)||0);
     if(loadedRenderableCount>0 || loadedMessageCount>0){
       if(!hint.truncated) return null;
       const previousMessageCount=Math.max(0,Number(hint.message_count)||0);
       const currentMessageCount=Math.max(0,Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0);
       const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
-      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+      return Math.max(
+        _INITIAL_MSG_LIMIT,
+        loadedRenderableCount,
+        loadedRenderableCount+appendedMessageCount
+      );
     }
   }
-  return _INITIAL_MSG_LIMIT;
+  const loadedRenderableCount=_currentLoadedRenderableMessageCount();
+  const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
+  // An empty pane is an initial/cold load and should use the default tail.
+  if(loadedRenderableCount<=0&&loadedMessageCount<=0) return _INITIAL_MSG_LIMIT;
+  // A populated non-truncated pane is already complete. Recovery must omit
+  // msg_limit so replacing S.messages cannot collapse it to the default tail.
+  if(!_messagesTruncated) return null;
+  return _settledSessionMessageWindowLimit(null);
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3130,16 +3316,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   // window exceeds the ceiling, fall back to the bare full-transcript request
   // (no msg_limit / no expand_renderable) so a same-session refresh never drops
   // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
-  // Older frontends used expand_renderable=1 to request visible-row expansion.
-  // The server now counts msg_limit by visible transcript rows by default; keep
-  // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const reloadUrl=_sessionMessageReloadUrl(sid,reloadLimit);
   let data;
   try {
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      reloadUrl,
       {timeoutMs:120000}
     );
   } finally {
@@ -3725,7 +3906,16 @@ async function _loadOlderMessages() {
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
-    if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
+    if (!olderMsgs.length) {
+      _messagesTruncated = !!responseSession._messages_truncated;
+      _oldestIdx = responseSession._messages_offset || 0;
+      const serverMessageCount = Number(responseSession.message_count);
+      if (S.session && S.session.session_id === sid && Number.isFinite(serverMessageCount)) {
+        S.session.message_count = serverMessageCount;
+      }
+      if (typeof syncTopbar === 'function') syncTopbar();
+      return;
+    }
     // Replace with the larger tail window and preserve scroll as if older
     // messages were prepended. When the suffix check fails, nextMessages
     // already encodes the legacy prepend fallback so the visible behavior
@@ -3764,7 +3954,12 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
+    const serverMessageCount = Number(responseSession.message_count);
+    if (S.session && S.session.session_id === sid && Number.isFinite(serverMessageCount)) {
+      S.session.message_count = serverMessageCount;
+    }
     renderMessages({ preserveScroll: true });
+    if (typeof syncTopbar === 'function') syncTopbar();
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the

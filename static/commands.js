@@ -1701,11 +1701,8 @@ async function cmdRetry(){
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    // #5924 SILENT-race guard: a session switch during the GET await must not let
-    // this recovery apply session A's intent to whatever session is now visible.
+    await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'retry',skipExtHooks:true});
     if(!S.session||S.session.session_id!==activeSid)return;
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
     // pick — but only if it's still safe at fire time (session unchanged, current
@@ -1723,8 +1720,8 @@ async function cmdUndo(){
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo',skipExtHooks:true});
+    if(!S.session||S.session.session_id!==activeSid)return;
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }

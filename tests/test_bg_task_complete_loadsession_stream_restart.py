@@ -42,10 +42,10 @@ def _read_sessions_js() -> str:
 
 
 def _load_session_body() -> str:
-    """Return the source slice of ``async function loadSession(`` start →
+    """Return the source slice of the async load core start →
     next top-level ``function`` / ``async function`` declaration."""
     js = _read_sessions_js()
-    start = js.index("async function loadSession(")
+    start = js.index("async function _loadSessionOnce(")
     rest = js[start + 1 :]
     m = re.search(r"\n(async function |function )", rest)
     end = start + 1 + (m.start() if m else len(rest))
