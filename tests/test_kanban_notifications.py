@@ -6015,12 +6015,13 @@ def test_claim_candidates_excludes_rows_claimed_by_another_consumer():
     assert claimed_b2 == cand
 
 
-def test_claim_candidates_fails_closed_when_claim_columns_absent():
-    """Finding 2: the Agent-owned schema has no claim columns (RFC §5 — the
-    watcher must not migrate it), so the claim UPDATE raises. We must fail
-    CLOSED: NO candidate is claimed, so nothing is dispatched. Dispatching
-    without a proven exclusive claim would let two WebUI processes sharing
-    one Kanban DB both wake the same session on the same terminal event."""
+def test_claim_candidates_fails_open_when_claim_columns_absent():
+    """Finding 2 + Greptile P1: the Agent-owned schema has no claim columns
+    (RFC §5 — the watcher must not migrate it), so the claim UPDATE raises
+    sqlite3.OperationalError. In a single-process deployment there is no
+    second WebUI to compete — we fail OPEN: return all candidates so the
+    feature actually works on a standard Agent install. The claim columns
+    are optional; exclusivity is enforced only when the schema supports it."""
     mod = _fresh_mod()
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -6031,7 +6032,7 @@ def test_claim_candidates_fails_closed_when_claim_columns_absent():
         {"task_id": "t1", "chat_id": "chat-a", "thread_id": ""},
         {"task_id": "t2", "chat_id": "chat-b", "thread_id": ""},
     ]
-    assert mod._claim_candidates(conn, "default", cand, "consumer-A") == []
+    assert mod._claim_candidates(conn, "default", cand, "consumer-A") == cand
 
 
 def test_is_dispatch_accepted_rejects_already_delivered():

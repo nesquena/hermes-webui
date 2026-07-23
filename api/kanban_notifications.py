@@ -700,15 +700,28 @@ def _claim_candidates(
             cur = conn.execute(sql, params)
             if int(getattr(cur, "rowcount", 0) or 0) > 0:
                 claimed.append(cand)
-    except Exception:
-        # No claim columns on this (Agent-owned) schema — DB-backed claims
-        # are unavailable. Fail CLOSED: claim nothing so a second process
-        # cannot double-dispatch the same terminal event.
+    except sqlite3.OperationalError:
+        # Claim columns (consumer_id, claimed_at, claim_expires_at) do not
+        # exist on this Agent-owned schema. In a single-process deployment
+        # there is no second WebUI to compete — fail OPEN: return all
+        # candidates so the watcher actually dispatches. The columns are
+        # optional; the feature MUST function on a standard Agent install.
         logger.warning(
             "kanban notification: DB-backed claim unavailable for board=%s "
-            "(claim columns absent?); failing CLOSED — no candidates claimed "
-            "this iteration (dispatching without a proven exclusive claim "
-            "could duplicate a wakeup across WebUI processes)",
+            "(claim columns absent — single-process deployment assumed); "
+            "failing OPEN — all candidates pass through",
+            board,
+            exc_info=True,
+        )
+        return list(candidates)
+    except Exception:
+        # Claim columns exist but the UPDATE failed for another reason
+        # (locked DB, corrupt file). Fail CLOSED: claim nothing so a second
+        # process cannot double-dispatch the same terminal event.
+        logger.warning(
+            "kanban notification: DB-backed claim UPDATE failed for board=%s "
+            "(claim columns exist but query error); failing CLOSED — no "
+            "candidates claimed this iteration",
             board,
             exc_info=True,
         )
