@@ -547,6 +547,75 @@ class TestEmptyMessagesGuard:
         assert s.pending_user_message is None
         assert s.active_stream_id is None
 
+    def test_repeated_pending_prompt_uses_current_checkpoint_identity(self, hermes_home, monkeypatch):
+        """Historical identical text must not suppress the current pending turn."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "repeat this", "timestamp": 111, "attachments": [{"name": "old.png"}]},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+            context_messages=[
+                {"role": "user", "content": "repeat this", "timestamp": 111, "attachments": [{"name": "old.png"}]},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        s.pending_user_message = "repeat this"
+        s.pending_started_at = 222.0
+        s.pending_attachments = [{"name": "current.png"}]
+        s.active_stream_id = "stream_1"
+        lock = config._get_session_agent_lock(s.session_id)
+
+        with lock:
+            core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
+            result = _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1",
+            )
+
+        assert result is True
+        users = [m for m in s.messages if m.get("role") == "user"]
+        assert len(users) == 2
+        assert users[-1]["timestamp"] == 222
+        assert users[-1]["attachments"] == [{"name": "current.png"}]
+        context_users = [m for m in s.context_messages if m.get("role") == "user"]
+        assert len(context_users) == 2
+        assert context_users[-1]["timestamp"] == 222
+        assert context_users[-1]["attachments"] == [{"name": "current.png"}]
+
+    def test_recovered_assistant_context_row_still_deduplicates(self):
+        s = _make_session(
+            context_messages=[{"role": "assistant", "content": "Recovered answer"}],
+        )
+        recovered = {
+            "role": "assistant",
+            "content": "Recovered answer",
+            "timestamp": 222,
+        }
+
+        models._append_recovered_turn_to_context(s, recovered)
+
+        assert s.context_messages == [{"role": "assistant", "content": "Recovered answer"}]
+
+    def test_recovered_user_context_row_requires_tail_checkpoint(self):
+        s = _make_session(
+            context_messages=[
+                {"role": "user", "content": "repeat this", "timestamp": 222, "attachments": [{"name": "same.png"}]},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        recovered = {
+            "role": "user",
+            "content": "repeat this",
+            "timestamp": 222,
+            "attachments": [{"name": "same.png"}],
+            "_recovered": True,
+        }
+
+        models._append_recovered_turn_to_context(s, recovered)
+
+        context_users = [m for m in s.context_messages if m.get("role") == "user"]
+        assert len(context_users) == 2
+        assert context_users[-1]["timestamp"] == 222
+
     def test_bails_when_pending_user_message_none(self, hermes_home, monkeypatch):
         """If pending_user_message is None, repair bails out."""
         s = _make_session(messages=[])
@@ -694,9 +763,11 @@ class TestNonEmptyMessagesPendingCleared:
         assert "partial output above was recovered" in error_msgs[0]["content"]
         assert "no agent output was recovered" not in error_msgs[0]["content"]
 
-    def test_journal_recovery_does_not_materialize_reasoning_only_events(self, hermes_home, monkeypatch):
-        """Run-journal repair must not turn hidden reasoning into visible chat
-        transcript content."""
+    def test_journal_recovery_restores_reasoning_only_as_display_metadata(
+        self, hermes_home, monkeypatch,
+    ):
+        """Run-journal repair keeps live Thinking without making it chat prose
+        or provider-facing history."""
         s = _make_session(messages=[{"role": "user", "content": "existing turn"}])
         s.pending_user_message = "Keep going"
         s.pending_started_at = time.time() - 120
@@ -720,16 +791,14 @@ class TestNonEmptyMessagesPendingCleared:
         assert result is True
         contents = [m.get("content", "") for m in s.messages]
         assert not any("private scratchpad text" in c for c in contents)
+        reasoning_msgs = [m for m in s.messages if m.get("reasoning")]
+        assert [m.get("reasoning") for m in reasoning_msgs] == ["private scratchpad text"]
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        # Reasoning-only events do not count as visible output, so the marker
-        # arms the lazy-retry hook (stream id is known, journal may have more
-        # events appear on a later read). The legacy "no agent output was
-        # recovered" wording is now reserved for the no-stream-id case.
-        assert error_msgs[0].get("_pending_journal_recovery") is True
-        assert error_msgs[0].get("_journal_retry_stream_id") == "reasoning_only_stream"
-        assert "no agent output was recovered" not in error_msgs[0]["content"]
-        assert "Recovering the partial output" in error_msgs[0]["content"]
+        assert error_msgs[0].get("_pending_journal_recovery") is not True
+        assert "partial output above was recovered" in error_msgs[0]["content"]
+        provider_history = streaming._sanitize_messages_for_api(s.messages)
+        assert "private scratchpad text" not in json.dumps(provider_history)
 
     def test_journal_recovery_keeps_consecutive_tools_on_one_anchor(self, hermes_home, monkeypatch):
         """Consecutive journaled tools without an intervening visible update

@@ -63,6 +63,18 @@ HERMES_WEBUI_GATEWAY_API_KEY=... \
 ./ctl.sh restart
 ```
 
+Gateway-backed approval prompts need one more explicit opt-in because they use the Gateway runs API path:
+
+```bash
+HERMES_WEBUI_CHAT_BACKEND=gateway \
+HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_GATEWAY_API_KEY=... \
+HERMES_WEBUI_GATEWAY_USE_RUNS_API=true \
+./ctl.sh restart
+```
+
+Use this when the connected gateway advertises approval support and you want tool approval cards to appear in WebUI. Without `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`, gateway chat stays on the legacy chat-completions transport and approval-capable commands can remain pending in the agent without a WebUI approval card.
+
 `HERMES_WEBUI_CHAT_BACKEND` is intentionally strict: only `gateway`,
 `api_server`, or `api-server` enable the bridge. Generic truthy values such as
 `1` or `true` are ignored so existing deployments do not change execution

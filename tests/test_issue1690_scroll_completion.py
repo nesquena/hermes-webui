@@ -66,7 +66,13 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
     assert "if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;\n    _restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);\n    return;\n  }" in scroll_helper
     assert "_shouldFollowMessagesOnDomReplace()" in follow_helper
     assert "scrollToBottom();" in follow_helper
-    assert "if(S.activeStreamId){\n    scrollIfPinned();\n    return;\n  }" in scroll_helper
+    # Mid-stream re-render branch (issue: wipe-rows0 scrollHeight-collapse jump-back).
+    # An unpinned reader (scrolled up into history) must have their pre-wipe viewport
+    # RESTORED — scrollIfPinned() is a no-op for the unpinned case and cannot undo the
+    # browser's scrollTop clamp from the inner.innerHTML='' wipe, so it stranded the
+    # reader at the top. Pinned/tail-following readers still take scrollIfPinned().
+    assert "if(S.activeStreamId){" in scroll_helper
+    assert "if(_messageUserUnpinned && scrollSnapshot){\n      _restoreMessageScrollSnapshot(scrollSnapshot);\n      _maybeShowNewMessageScrollCue(scrollSnapshot);\n      return;\n    }\n    scrollIfPinned();\n    return;\n  }" in scroll_helper
 
 
 def test_cached_render_path_uses_same_scroll_policy_as_fresh_render():

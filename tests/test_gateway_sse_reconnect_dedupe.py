@@ -129,7 +129,7 @@ if(!_isDuplicateGatewaySessionSnapshot([null, {session_id:'web-2', session_sourc
 def test_load_session_persists_only_after_metadata_loads():
     """Do not overwrite the last good localStorage sid before /api/session succeeds."""
     src = _read(SESSIONS_JS)
-    load = _block(src, "async function loadSession(sid)", "activeStreamId=S.session.active_stream_id")
+    load = _block(src, "async function loadSession(sid)", "function _mergePendingSessionMessage")
     api_pos = load.index("data = await api(`/api/session")
     persist_pos = load.index("localStorage.setItem('hermes-webui-session',S.session.session_id)")
 

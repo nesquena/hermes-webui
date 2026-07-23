@@ -29,13 +29,19 @@ contributor guidance; it does not change runtime behavior or CI gates.
   repairs. Start here for narrow fixes that keep the existing WebUI execution
   path.
 - [`docs/rfcs/live-to-final-assistant-replies.md`](rfcs/live-to-final-assistant-replies.md):
-  proposed product model for long-running assistant replies, live process text,
+  accepted product model for long-running assistant replies, live process text,
   tool activity, recovery, terminal outcomes, and final-answer boundaries. Start
   here for UI/UX changes to running-session assistant reply rendering.
+- [`docs/rfcs/stable-assistant-turn-anchors.md`](rfcs/stable-assistant-turn-anchors.md):
+  implemented presentation/reconciliation model that attaches live, settled,
+  replayed, and recovered activity to one assistant-turn owner and projects one
+  `activity_scene_v1` into Compact Worklog, Transparent Stream, or Final answer
+  only. Remaining hardening stays tracked under #3400.
 - [`docs/architecture/stable-assistant-turn-anchor-phase0.md`](architecture/stable-assistant-turn-anchor-phase0.md):
-  current Phase 0 inventory for the Stable Assistant Turn Anchors work under
-  #3926. Use this before wiring anchor helpers into live SSE, replay,
-  settlement, `INFLIGHT`, or `renderMessages()` paths.
+  cumulative implementation inventory for the Stable Assistant Turn Anchors
+  work under #3926. Use it to distinguish shipped wiring from historical slice
+  boundaries before changing live SSE, replay, settlement, `INFLIGHT`, or
+  `renderMessages()` paths.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
@@ -60,6 +66,15 @@ contributor guidance; it does not change runtime behavior or CI gates.
   queued messages, interrupt replacement, steer visibility, or leftover-steer
   recovery changes.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
+- [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md):
+  proposed contract vocabulary, cursor/resume semantics, replay identity, snapshot
+  fallback, event taxonomy, and implementation gates for the per-session SSE
+  stream `GET /api/sessions/{session_id}/events` (#4812). Distinct from the
+  existing global session-list stream `GET /api/sessions/events`. Start here for
+  any work that touches per-session SSE, `Last-Event-ID` replay, or session
+  lifecycle event delivery. The Phase 1 server contract is now shipped; the RFC
+  remains the vocabulary reference while broader client and platform claims stay
+  behind the recorded proof gates.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

@@ -30,7 +30,7 @@ const COMMANDS=[
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -801,7 +801,9 @@ async function cmdTerminal(){
       const first=(data&&data.workspaces||[])[0];
       S._profileSwitchWorkspace=(data&&data.last)||(first&&first.path)||null;
     }
-    await newSession();
+    // System-minted session (#6022): opening the terminal auto-creates a
+    // session — explicit worktree:false so the config default can't leak.
+    await newSession(false, {worktree: false});
     if(typeof renderSessionList==='function') await renderSessionList();
   }
   if(!S.session||!S.session.workspace){
@@ -1211,7 +1213,10 @@ async function cmdPersonality(args){
 async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
-  if(typeof cancelStream==='function'){await cancelStream('slash-stop');showToast(t('stream_stopped'));}
+  if(typeof cancelStream==='function'){
+    if(await cancelStream('slash-stop')) showToast(t('stream_stopped'));
+    else showToast(t('cancel_failed'),null,'error');
+  }
   else showToast(t('cancel_unavailable'));
 }
 
@@ -1317,8 +1322,10 @@ async function cmdInterrupt(args){
   updateQueueBadge(S.session.session_id);
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){await cancelStream('slash-interrupt');}
-  showToast(t('cmd_interrupt_confirm'),2000);
+  if(typeof cancelStream==='function'){
+    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
+    else showToast(t('cancel_failed'),null,'error');
+  }
 }
 
 /**
@@ -1336,7 +1343,8 @@ async function cmdInterrupt(args){
  */
 async function cmdSteer(args){
   const msg=(args||'').trim();
-  if(!msg){showToast(t('cmd_steer_no_msg'));return;}
+  const hasPendingFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length>0;
+  if(!msg&&!hasPendingFiles){showToast(t('cmd_steer_no_msg'));return;}
   // If nothing is running, /steer <msg> just sends like a normal message
   if(!S.busy||!S.activeStreamId){
     const inp=$('msg');
@@ -1349,6 +1357,7 @@ async function cmdSteer(args){
 }
 
 function _steerFailureMessageKey(fallback) {
+  if(fallback==='gateway_steer_queued')return 'steer_fail_no_cached_agent';
   const key = 'steer_fail_' + (fallback || 'unknown');
   return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
     ? key : 'steer_fail_unknown';
@@ -1387,10 +1396,21 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   el.appendChild(label);
   const retryBtn = document.createElement('button');
   retryBtn.className = 'steer-recovery-retry';
-  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.textContent = t(_steerFallbackIsDeadRun(fallback)?'clarify_send':'steer_recovery_retry');
   retryBtn.addEventListener('click', () => {
     el.remove();
-    void _trySteer(msg, explicitSteer).catch(console.error);
+    if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){
+      if(explicitSteer){
+        const inp=$('msg');
+        if(inp){
+          inp.value=String(msg||'').trim();
+          if(typeof autoResize==='function')autoResize();
+        }
+      }
+      void send({literalSlash:true}).catch(console.error);
+    }else{
+      void _trySteer(msg, explicitSteer).catch(console.error);
+    }
   });
   el.appendChild(retryBtn);
   const dismissBtn = document.createElement('button');
@@ -1417,38 +1437,231 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
  * @returns {Promise<boolean>} true when the steer was delivered, false when the
  *   draft was restored and the active stream was left untouched.
  */
+function _steerUploadedAttachmentPaths(uploaded){
+  if(!Array.isArray(uploaded))return[];
+  return uploaded.map(u=>{
+    if(!u)return'';
+    if(typeof u==='string')return u;
+    return u.path||u.name||u.filename||'';
+  }).map(v=>String(v||'').trim()).filter(Boolean);
+}
+
+function _steerOwnerIsCurrent(ownerSid){
+  return !!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid);
+}
+
+function _steerFallbackIsDeadRun(fallback){
+  return fallback==='stream_dead';
+}
+
+function _steerOwnerStreamIsCurrent(ownerSid, ownerStreamId){
+  if(!_steerOwnerIsCurrent(ownerSid)||typeof S==='undefined'||!ownerStreamId)return false;
+  const activeIds=[S.activeStreamId,S.session&&S.session.active_stream_id].filter(Boolean).map(String);
+  return activeIds.length>0&&activeIds.every(id=>id===String(ownerStreamId));
+}
+
+function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
+  if(!_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId))return false;
+  let changed=false;
+  if(S.busy){S.busy=false;changed=true;}
+  if(S.activeStreamId){S.activeStreamId=null;changed=true;}
+  if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
+  if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
+    delete INFLIGHT[ownerSid];
+    changed=true;
+  }
+  if(changed&&typeof clearInflightState==='function')clearInflightState(ownerSid);
+  if(changed){
+    // Finish the stale-busy cleanup idiom the rest of the app uses so a recovered
+    // dead run leaves no lingering status line, elapsed timer, or streaming badge
+    // (#5744 UX-gate). Deliberately does NOT call setBusy(false): its queue-drain
+    // would clobber the draft text this recovery path restores.
+    if(typeof setStatus==='function')setStatus('');
+    if(typeof setComposerStatus==='function')setComposerStatus('');
+    if(typeof _clearActivityElapsedTimer==='function')_clearActivityElapsedTimer();
+    if(typeof clearOptimisticSessionStreaming==='function')clearOptimisticSessionStreaming(ownerSid);
+  }
+  if(changed&&typeof updateSendBtn==='function')updateSendBtn();
+  return changed;
+}
+
+function _steerSetComposerStatusForOwner(ownerSid,text){
+  if(_steerOwnerIsCurrent(ownerSid)&&typeof setComposerStatus==='function')setComposerStatus(text);
+}
+
+function _steerRestoreText(originalMsg, explicitSteer){
+  return explicitSteer?`/steer ${originalMsg}`:originalMsg;
+}
+
+function _steerIndicatorText(originalMsg, filesSnapshot){
+  const text=String(originalMsg||'').trim();
+  if(text)return text;
+  const names=(Array.isArray(filesSnapshot)?filesSnapshot:[])
+    .map(f=>f&&(f.name||f.filename||f.path||''))
+    .map(v=>String(v||'').trim())
+    .filter(Boolean);
+  return names.length?`Attached files: ${names.join(', ')}`:'Attached files';
+}
+
+async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
+  if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
+  await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
+}
+
+// #5459 gate: cache successful steer uploads by owner session so a failed-steer
+// RETRY reuses the uploaded paths instead of re-uploading the same File objects.
+// Keyed by ownerSid; invalidated when the staged file set changes or on accepted
+// steer (see _steerUploadCacheMatches / clearing below).
+let _steerUploadCache = null; // { sid, sig, paths }
+function _steerFilesSignature(files){
+  try{
+    return (Array.isArray(files)?files:[]).map(f=>f&&(f.name+':'+(f.size||0)+':'+(f.lastModified||0))).join('|');
+  }catch(_){return String(Date.now());}
+}
+
+async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
+  const base=String(msg||'').trim();
+  const pendingFiles=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  if(!pendingFiles.length)return base;
+  if(typeof uploadPendingFiles!=='function')return base;
+  const sig=_steerFilesSignature(pendingFiles);
+  // Reuse a prior successful upload for the same session + identical staged file
+  // set (a steer that failed and is being retried) — don't upload twice.
+  let paths=null;
+  if(_steerUploadCache&&_steerUploadCache.sid===ownerSid&&_steerUploadCache.sig===sig&&Array.isArray(_steerUploadCache.paths)&&_steerUploadCache.paths.length){
+    paths=_steerUploadCache.paths;
+  }else{
+    _steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…');
+    let uploaded=[];
+    try{
+      // Keep File objects staged until /api/chat/steer confirms acceptance. If
+      // steer falls back, the draft and chips stay available for Queue/Interrupt.
+      uploaded=await uploadPendingFiles({clearPending:false,sessionId:ownerSid,files:pendingFiles});
+    }finally{
+      _steerSetComposerStatusForOwner(ownerSid,'');
+    }
+    paths=_steerUploadedAttachmentPaths(uploaded);
+    if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths};
+  }
+  if(!paths||!paths.length)return base;
+  const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
+  return base?`${base}\n\n${note}`:note;
+}
+
 async function _trySteer(msg, explicitSteer){
   let result=null;
+  const originalMsg=String(msg||'').trim();
+  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
+  const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const ownerProfile=typeof S!=='undefined'&&(S.activeProfile||'default');
+  const ownerModelState=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:(typeof S!=='undefined'&&S.session&&S.session.model)||'',model_provider:(typeof S!=='undefined'&&S.session&&S.session.model_provider)||''};
+  if(!ownerSid){showToast(t('no_active_session'));return false;}
+  let steerText=originalMsg;
+  try{
+    steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot);
+  }catch(e){
+    if(_steerOwnerIsCurrent(ownerSid)){
+      const inp=$('msg');
+      if(inp){
+        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        if(typeof autoResize==='function')autoResize();
+      }
+      if(typeof renderTray==='function')renderTray();
+    }else{
+      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+    }
+    _steerSetComposerStatusForOwner(ownerSid,'');
+    showToast(`${t('upload_failed')}${e&&e.message?e.message:e}`,3500);
+    return false;
+  }
+  if(!steerText){
+    if(_steerOwnerIsCurrent(ownerSid)){
+      const inp=$('msg');
+      if(inp){
+        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        if(typeof autoResize==='function')autoResize();
+      }
+      if(typeof renderTray==='function')renderTray();
+    }else{
+      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+    }
+    showToast(t('cmd_steer_no_msg'));
+    return false;
+  }
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
-      body:JSON.stringify({session_id:S.session.session_id,text:msg}),
+      body:JSON.stringify({session_id:ownerSid,text:steerText}),
     });
   }catch(e){
     // Network or server error — keep the active stream running and restore the draft.
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    // The captured files+text were delivered to ownerSid — clear that session's
+    // draft (it may not be the live session anymore if the user switched during
+    // the upload/API await, which is fine: we're clearing the OWNER's draft).
+    _steerUploadCache=null; // delivered — invalidate the retry cache
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
     // The indicator self-removes when the turn completes (done/cancel/error
-    // all call renderMessages which rebuilds msgInner).
-    _showSteerIndicator(msg);
+    // all call renderMessages which rebuilds msgInner). Only mutate the visible
+    // tray/DOM if the user is still looking at the owning session.
+    if(_steerOwnerIsCurrent(ownerSid)){
+      // Remove ONLY the files we captured+delivered, by object identity, so any
+      // files staged during the upload/API await are preserved (#5459 gate).
+      if(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
+        const _delivered=new Set(pendingFilesSnapshot);
+        const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
+        if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
+      }
+      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+    }
     showToast(t('cmd_steer_delivered'),2500);
+    return true;
+  }
+  if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
+    _steerUploadCache=null;
+    queueSessionMessage(ownerSid,{
+      text:originalMsg,
+      files:pendingFilesSnapshot,
+      model:ownerModelState.model,
+      model_provider:ownerModelState.model_provider,
+      profile:ownerProfile,
+    });
+    if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    if(_steerOwnerIsCurrent(ownerSid)&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
+      const _queued=new Set(pendingFilesSnapshot);
+      const _remaining=S.pendingFiles.filter(f=>!_queued.has(f));
+      if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
+    }
+    showToast(t('steer_leftover_queued'),3000);
     return true;
   }
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
   // Interrupt if that is what they want next. Pending files remain staged.
-  const inp=$('msg');
-  if(inp){
-    inp.value=explicitSteer?`/steer ${msg}`:msg;
-    if(typeof autoResize==='function')autoResize();
-  }
-  if(typeof renderTray==='function')renderTray();
   const fallbackCode = result && result.fallback;
-  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
-  _showSteerRecovery(msg, explicitSteer, fallbackCode);
+  const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
+  const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
+  if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
+    const inp=$('msg');
+    if(inp){
+      inp.value=_steerRestoreText(originalMsg,explicitSteer);
+      if(typeof autoResize==='function')autoResize();
+    }
+    if(typeof renderTray==='function')renderTray();
+  }else{
+    await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+  }
+  const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
+  if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  if(_steerOwnerIsCurrent(ownerSid)&&(!deadRunFallback||clearedDeadRun)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
   return false;
 }
 
@@ -1474,13 +1687,32 @@ async function cmdRetry(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
   const activeSid=S.session.session_id;
+  // #5924: honor a genuine deliberate model pick across a recovery /retry without
+  // forcing explicit_model_pick when there is no real pick. The single-shot marker
+  // is already consumed by the failed send (messages.js clears it before
+  // /api/chat/start regardless of outcome), so we can't read it back. Instead
+  // derive the deliberate-pick signal the SAME way send()'s persistent path does:
+  // the session's own model is a non-default pick vs the profile default. This is
+  // NOT provider inference (no false positive) and survives marker consumption (no
+  // false negative for an already-applied pick). Captured pre-await, scoped to
+  // activeSid. No non-default pick → no re-arm → server compatible-model resolution runs.
+  const _recoveryPick=_deliberateSessionModelPick(activeSid);
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    // #5924 SILENT-race guard: a session switch during the GET await must not let
+    // this recovery apply session A's intent to whatever session is now visible.
+    if(!S.session||S.session.session_id!==activeSid)return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
-    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
+    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
+    // Re-arm the single-shot explicit-pick marker from the captured non-default
+    // pick — but only if it's still safe at fire time (session unchanged, current
+    // model still matches the pick, and no newer onchange marker to clobber). See
+    // _reArmRecoveryPick. Scoped to activeSid so it can't leak to another session.
+    _reArmRecoveryPick(activeSid, _recoveryPick);
+    await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
 async function cmdUndo(){
@@ -1593,13 +1825,13 @@ function cmdReasoning(args){
   const BRAIN='\uD83E\uDDE0';
   // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
   // Keep this WebUI effort list in sync with hermes-agent#29248.
-  const EFFORTS=['none','minimal','low','medium','high','xhigh'];
+  const EFFORTS=['none','minimal','low','medium','high','xhigh','max'];
   // Shared status renderer used by the no-args branch and as a fallback.
   function _fmtStatus(st){
     const vis=(st && st.show_reasoning===false)?'off':'on';
     const eff=(st && st.reasoning_effort)||'default';
     return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
-      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh';
+      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh|max';
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
@@ -1689,7 +1921,10 @@ async function cmdBranch(args){
   const readOnlySession=typeof _isReadOnlySession==='function'
     ? _isReadOnlySession(S.session)
     : !!(S.session&&(S.session.read_only||S.session.is_read_only));
-  if(readOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
+  const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
+    ? _isBranchableReadOnlySession(S.session)
+    : false;
+  if(readOnlySession&&!branchableReadOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
   const customTitle=(args||'').trim()||null;
   try{
     const data=await api('/api/session/branch',{
@@ -1716,11 +1951,26 @@ async function cmdBranch(args){
 // count (_oldestIdx + msgIdx) BEFORE awaiting _ensureAllMessagesLoaded,
 // which resets _oldestIdx to 0 after its wholesale replace.  See #2184.
 async function forkFromMessage(msgIdx){
-  if(!S.session||S.busy)return;
+  if(!S.session)return;
+  // During streaming, only block fork if the clicked message is the
+  // currently-streaming (live) message itself.  Past messages that are
+  // already committed server-side can be forked immediately without
+  // waiting for the stream to finish.
+  if(S.busy){
+    const _msg=(Array.isArray(S.messages)&&S.messages[msgIdx-1])||null;
+    const _isLastMsg=msgIdx>=(Array.isArray(S.messages)?S.messages.length:0);
+    if((_msg&&(_msg._live||_msg._pending))||_isLastMsg){
+      showToast('Cannot fork a message still being generated.',3000);
+      return;
+    }
+  }
   const readOnlySession=typeof _isReadOnlySession==='function'
     ? _isReadOnlySession(S.session)
     : !!(S.session&&(S.session.read_only||S.session.is_read_only));
-  if(readOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
+  const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
+    ? _isBranchableReadOnlySession(S.session)
+    : false;
+  if(readOnlySession&&!branchableReadOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
   const initialSid = S.session.session_id;
   // Capture the absolute keep_count before any async work that may
   // reset _oldestIdx.  _oldestIdx is 0 when the full transcript is
@@ -1728,7 +1978,9 @@ async function forkFromMessage(msgIdx){
   const absoluteKeepCount = _oldestIdx + msgIdx;
   // Ensure the full transcript is loaded so the forked session renders
   // correctly and subsequent operations see the complete history.
-  if(typeof _ensureAllMessagesLoaded==='function'){
+  // Skip during streaming to avoid visual flicker — the fork data
+  // (absoluteKeepCount) was already captured above and is unaffected.
+  if(!S.busy && typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;

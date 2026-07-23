@@ -30,6 +30,7 @@ def _configure_codex(monkeypatch, tmp_path, default="gpt-5.3-codex-spark"):
         "fallback_providers": [],
     })
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path(), raising=False)
     config.invalidate_models_cache()
 
 

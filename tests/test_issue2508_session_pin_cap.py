@@ -11,9 +11,9 @@ from tests._pytest_port import BASE, TEST_STATE_DIR
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ROUTES_PY = (ROOT / "api" / "routes.py").read_text()
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text()
-STYLE_CSS = (ROOT / "static" / "style.css").read_text()
+ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def post(path, body=None):

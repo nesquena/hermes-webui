@@ -270,6 +270,34 @@ def test_recover_all_sessions_on_startup_restores_orphan_bak(temp_session_dir):
     assert len(restored["messages"]) == 293
 
 
+def test_recover_all_sessions_on_startup_skips_tombstoned_orphan_bak(temp_session_dir):
+    """A deleted WebUI session must NOT be resurrected from its surviving .bak.
+
+    Regression for #5498 / #5504: the double-failure delete (backup unlink +
+    state.db delete both fail) leaves a surviving <sid>.json.bak plus the
+    durable deleted-WebUI tombstone. Startup recovery must honor the tombstone
+    and NOT recreate the sidecar (otherwise the deleted transcript reappears in
+    the sidebar on the next boot — the literal ghost the fix exists to kill).
+    """
+    import api.models as _m
+
+    sid = _make_session_on_disk(temp_session_dir, n_msgs=42)
+    live_path = temp_session_dir / f"{sid}.json"
+    bak_path = temp_session_dir / f"{sid}.json.bak"
+    bak_path.write_text(live_path.read_text(encoding="utf-8"), encoding="utf-8")
+    live_path.unlink()
+    # Simulate the delete route's durable tombstone for this deleted sid.
+    _m._record_webui_deleted_session_tombstone(sid)
+    try:
+        from api.session_recovery import recover_all_sessions_on_startup
+        result = recover_all_sessions_on_startup(temp_session_dir)
+
+        assert result["restored"] == 0, "tombstoned orphan .bak must not be restored"
+        assert not live_path.exists(), "deleted session sidecar must not be recreated on boot"
+    finally:
+        _m._clear_webui_deleted_session_tombstone(sid)
+
+
 def test_recover_all_sessions_on_startup_rebuilds_missing_index_without_restores(temp_session_dir, monkeypatch):
     """Startup recovery must rebuild a missing index even when no .bak restore runs."""
     import api.models as _m

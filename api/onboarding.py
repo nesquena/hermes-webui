@@ -28,6 +28,7 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from api.paths import _atomic_write_text
 from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
 
@@ -251,7 +252,8 @@ def _save_yaml_config(config_path: Path, config: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
+    _atomic_write_text(
+        config_path,
         _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -732,15 +734,18 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
             )
 
     chat_ready = bool(_HERMES_FOUND and imports_ok and provider_ready)
+    note_args: list[str] = []
 
     if not _HERMES_FOUND or not imports_ok:
         state = "agent_unavailable"
+        note_key = "onboarding_notice_system_unavailable"
         note = (
             "Hermes is not fully importable from the Web UI yet. Finish bootstrap or fix the "
             "agent install before provider setup will work."
         )
     elif chat_ready:
         state = "ready"
+        note_key = "onboarding_notice_system_ready"
         provider_name = _PROVIDER_DISPLAY.get(
             provider, provider.title() if provider else "Hermes"
         )
@@ -748,11 +753,15 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     elif provider_configured:
         state = "provider_incomplete"
         if provider == "custom" and not base_url:
+            note_key = "onboarding_notice_custom_base_url_required"
             note = (
-                "Hermes has a saved provider/model selection but still needs the "
-                "base URL and API key required to chat."
+                "Hermes has a saved provider/model selection, but the custom "
+                "provider still needs a base URL. Add the API key too if that "
+                "server requires one."
             )
         elif provider not in _SUPPORTED_PROVIDER_SETUPS:
+            note_key = "onboarding_notice_provider_auth_required"
+            note_args = [provider]
             # OAuth / unsupported provider: avoid misleading "API key" wording.
             note = (
                 f"Provider '{provider}' is configured but not yet authenticated. "
@@ -760,12 +769,14 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
                 "setup, then reload the Web UI."
             )
         else:
+            note_key = "onboarding_notice_provider_api_key_required"
             note = (
                 "Hermes has a saved provider/model selection but still needs the "
                 "API key required to chat."
             )
     else:
         state = "needs_provider"
+        note_key = "onboarding_notice_provider_choice_required"
         note = "Hermes is installed, but you still need to choose a provider and save working credentials."
 
     return {
@@ -774,6 +785,8 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         "chat_ready": chat_ready,
         "setup_state": state,
         "provider_note": note,
+        "provider_note_key": note_key,
+        "provider_note_args": note_args,
         "current_provider": provider or None,
         "current_model": model or None,
         "current_base_url": base_url or None,

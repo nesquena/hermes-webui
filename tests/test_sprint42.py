@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
+STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 
 
 # ── Shared helpers for sprint-42 additional tests ────────────────────────────
@@ -70,6 +70,15 @@ class TestSessionDBInjection(unittest.TestCase):
             pattern,
             "SessionDB init helper must use try/except for non-fatal error handling",
         )
+
+    def test_sessiondb_retry_only_targets_transient_sqlite_errors(self):
+        """Permanent constructor errors must leave the retry loop immediately."""
+        helper_start = STREAMING_PY.find("def _build_session_db_for_stream")
+        helper_end = STREAMING_PY.find("\n\ndef _attempt_credential_self_heal", helper_start)
+        helper_src = STREAMING_PY[helper_start:helper_end]
+        self.assertIn("except sqlite3.OperationalError as _db_err", helper_src)
+        self.assertIn('"locked" in _db_err_text or "busy" in _db_err_text', helper_src)
+        self.assertIn("raise _last_error or RuntimeError", helper_src)
 
     def test_sessiondb_failure_logs_warning(self):
         """A failure initializing SessionDB must print a WARNING (not silently drop the error)."""
@@ -717,7 +726,7 @@ def test_cleanTitle_is_let_not_const():
 # ── Sprint 42 additional tests: thinking panel persistence (#427) ────────
 def test_streaming_persists_reasoning_in_session():
     """streaming.py must accumulate reasoning and patch assistant messages."""
-    src = (REPO / 'api' / 'streaming.py').read_text()
+    src = (REPO / 'api' / 'streaming.py').read_text(encoding="utf-8")
 
     # #3587: per-message reasoning segments replaced the flat _reasoning_text accumulator
     assert "_reasoning_segments" in src, \
@@ -752,7 +761,7 @@ def test_streaming_persists_reasoning_in_session():
 
 def test_done_handler_patches_reasoning_field():
     """messages.js done SSE handler must patch reasoningText onto the last assistant message."""
-    src = (REPO / 'static' / 'messages.js').read_text()
+    src = (REPO / 'static' / 'messages.js').read_text(encoding="utf-8")
 
     # The persistence comment must be present inside the done handler
     assert "Persist reasoning trace for Worklog Thinking Cards" in src, \
@@ -778,7 +787,7 @@ def test_done_handler_patches_reasoning_field():
 
 def test_rendermessages_keeps_reasoning_metadata_out_of_worklog_display():
     """ui.js renderMessages must not promote provider reasoning metadata into Worklog prose."""
-    src = (REPO / 'static' / 'ui.js').read_text()
+    src = (REPO / 'static' / 'ui.js').read_text(encoding="utf-8")
 
     sig_fn = src.split("function _messageHasReasoningPayload(m)", 1)[1].split("function", 1)[0]
     assert 'm.reasoning' in sig_fn, \
@@ -801,7 +810,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     history before saving the session, including reinserting dropped
     reasoning-only assistant segments.
     """
-    src = (REPO / 'api' / 'streaming.py').read_text()
+    src = (REPO / 'api' / 'streaming.py').read_text(encoding="utf-8")
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
     assert "_next_context_messages" in src and "s.context_messages" in src, \
@@ -814,7 +823,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
 
 def test_routes_restores_prior_reasoning_metadata_after_followup():
     """The non-streaming route path must preserve prior reasoning metadata too."""
-    src = (REPO / 'api' / 'routes.py').read_text()
+    src = (REPO / 'api' / 'routes.py').read_text(encoding="utf-8")
     assert "_restore_reasoning_metadata" in src, \
         "routes.py must import reasoning metadata restoration helper"
     assert "_next_context_messages" in src and "s.context_messages" in src, \

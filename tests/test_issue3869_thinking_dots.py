@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text()
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:

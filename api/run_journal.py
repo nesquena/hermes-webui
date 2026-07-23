@@ -10,17 +10,44 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
+# Next-seq to assign per run-journal file path, kept in memory so repeat appends
+# to the same run do not re-parse the whole file on every call. The per-path
+# ``_lock_for(path)`` serializes same-path reserve→append so seqs stay monotonic
+# and file order matches; ``_SEQ_CACHE_LOCK`` (below) additionally guards every
+# *structural* access to the dict (reserve/note/evict) so ``delete_run_journal``
+# can iterate + drop keys while a concurrent append on ANOTHER path inserts one,
+# without a ``dictionary changed size during iteration`` crash. See
+# ``_reserve_next_seq`` and ``delete_run_journal`` (which evicts stale entries).
+_SEQ_CACHE: dict[str, int] = {}
+_SEQ_CACHE_LOCK = threading.Lock()
+# Summary callers only need terminal state and the latest cursor. Re-parsing a
+# completed journal's full payload (which can include multi-megabyte tool or
+# session results) on every status/reconnect probe is needless. This process
+# cache is keyed by a complete stat identity, so it is never used after an
+# atomic replacement, append, truncate, or same-path file recreation.
+_SUMMARY_CACHE_MAX_ENTRIES = 128
+_SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
+_SUMMARY_CACHE_LOCK = threading.Lock()
 _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
+_SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
+_SESSION_REPLAY_MAX_ROWS = 4096
+_SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_SNAPSHOT_ARGS_MAX_ITEMS = 64
+_SNAPSHOT_ARGS_MAX_DEPTH = 8
+_SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
+_SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
+_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
 
 
 def _default_session_dir() -> Path:
@@ -53,6 +80,68 @@ def _lock_for(path: Path) -> threading.Lock:
         return lock
 
 
+def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return the complete filesystem identity used for summary-cache validity.
+
+    Includes ``st_ctime_ns`` so a same-inode, same-size rewrite that restores the
+    original ``mtime_ns`` (e.g. an atomic replace) still invalidates the cache —
+    ctime advances on any metadata/content change and cannot be forged back.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _get_cached_summary(path: Path) -> dict | None:
+    signature = _summary_cache_signature(path)
+    if signature is None:
+        return None
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        cached = _SUMMARY_CACHE.get(key)
+        if cached is None:
+            return None
+        cached_signature, summary = cached
+        if cached_signature != signature:
+            _SUMMARY_CACHE.pop(key, None)
+            return None
+        _SUMMARY_CACHE.move_to_end(key)
+        return dict(summary)
+
+
+def _cache_summary(
+    path: Path,
+    summary: dict,
+    *,
+    expected_signature: tuple[int, int, int, int, int] | None = None,
+) -> None:
+    signature = _summary_cache_signature(path)
+    # The pre-read signature is an enforced TOCTOU precondition. In particular,
+    # a journal created after a missing-file read has ``None -> signature`` and
+    # must not cache the empty/unknown result under the new file's identity.
+    if signature is None or signature != expected_signature:
+        return
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[key] = (signature, dict(summary))
+        _SUMMARY_CACHE.move_to_end(key)
+        while len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ENTRIES:
+            _SUMMARY_CACHE.popitem(last=False)
+
+
+def _discard_cached_summary(path: Path) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.pop(str(path), None)
+
+
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
     events: list[dict] = []
     malformed: list[dict] = []
@@ -75,10 +164,127 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
     return events, malformed
 
 
+def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
+    raw = str(raw or "").strip()
+    if not raw:
+        return None, None
+    if ":" in raw:
+        run_id, tail = raw.rsplit(":", 1)
+    else:
+        run_id, tail = None, raw
+    try:
+        seq = max(0, int(tail))
+    except (TypeError, ValueError):
+        return run_id or None, None
+    return run_id or None, seq
+
+
+def _snapshot_args_take_budget(budget: dict[str, int], amount: int) -> int:
+    remaining = max(0, int(budget.get("remaining") or 0))
+    take = min(remaining, max(0, amount))
+    budget["remaining"] = remaining - take
+    return take
+
+
+def _bound_snapshot_args_string(value: str, budget: dict[str, int]) -> str:
+    max_chars = min(len(value), _SNAPSHOT_ARGS_MAX_STRING_CHARS)
+    take = _snapshot_args_take_budget(budget, max_chars)
+    out = value[:take]
+    if take < len(value):
+        suffix_take = _snapshot_args_take_budget(budget, len(_SNAPSHOT_ARGS_TRUNCATED_SUFFIX))
+        out += _SNAPSHOT_ARGS_TRUNCATED_SUFFIX[:suffix_take]
+    return out
+
+
+def _bound_run_journal_snapshot_value(value: Any, budget: dict[str, int], depth: int) -> Any:
+    if budget.get("remaining", 0) <= 0:
+        return None
+    if isinstance(value, str):
+        return _bound_snapshot_args_string(value, budget)
+    if isinstance(value, dict):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return {}
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _SNAPSHOT_ARGS_MAX_ITEMS or budget.get("remaining", 0) <= 0:
+                break
+            bounded_key = _bound_snapshot_args_string(str(key), budget)
+            if not bounded_key:
+                continue
+            out[bounded_key] = _bound_run_journal_snapshot_value(item, budget, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return []
+        return [
+            _bound_run_journal_snapshot_value(item, budget, depth + 1)
+            for item in value[:_SNAPSHOT_ARGS_MAX_ITEMS]
+            if budget.get("remaining", 0) > 0
+        ]
+    if isinstance(value, (bool, int, float)) or value is None:
+        try:
+            _snapshot_args_take_budget(budget, len(json.dumps(value)))
+        except (TypeError, ValueError):
+            return None
+        return value
+    return _bound_snapshot_args_string(str(value), budget)
+
+
+def bound_run_journal_snapshot_args(args: Any) -> Any:
+    """Return recovery tool args with realistic values intact and pathological payloads bounded."""
+    if args is None:
+        return {}
+    budget = {"remaining": _SNAPSHOT_ARGS_MAX_TOTAL_CHARS}
+    return _bound_run_journal_snapshot_value(args, budget, 0)
+
+
 def _next_seq(path: Path) -> int:
     events, _malformed = _read_jsonl(path)
     seqs = [int(event.get("seq") or 0) for event in events if isinstance(event.get("seq"), int)]
     return (max(seqs) + 1) if seqs else 1
+
+
+def _reserve_next_seq(path: Path) -> int:
+    """Reserve and return the next seq for ``path``, advancing the in-memory cache.
+
+    Callers MUST hold ``_lock_for(path)``. The first append per path in this
+    process seeds the cache from ``_next_seq(path)`` (one file read); every later
+    append is a pure in-memory increment, avoiding the O(n) re-parse that
+    re-reading the whole journal on every append caused (O(n^2) over a run).
+    Because ``RunJournalWriter`` and the free ``append_run_event`` share this one
+    cache under the same per-path lock, their seqs stay monotonic and gapless
+    even when both write the same path. ``_SEQ_CACHE_LOCK`` additionally makes the
+    dict get+set atomic against a concurrent cross-path eviction.
+    """
+    key = str(path)
+    with _SEQ_CACHE_LOCK:
+        nxt = _SEQ_CACHE.get(key)
+        if nxt is not None:
+            _SEQ_CACHE[key] = nxt + 1
+            return nxt
+    # Cache miss: seed from disk WITHOUT holding the module-global lock, so a
+    # slow first-access file read for one path can't block every other path's
+    # cache ops. The caller holds the per-path lock, so only one thread per path
+    # can reach this branch — no double-seed, and no same-path writer can race
+    # the value in between.
+    seeded = _next_seq(path)
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE[key] = seeded + 1
+        return seeded
+
+
+def _note_assigned_seq(path: Path, seq: int) -> None:
+    """Keep the cache at least one past an explicitly-supplied ``seq``.
+
+    Callers MUST hold ``_lock_for(path)``. When an append carries a caller-chosen
+    ``seq`` rather than drawing from the cache, advance the cache so a later
+    cache-based append on the same path cannot re-issue an already-used seq.
+    """
+    key = str(path)
+    nxt = int(seq) + 1
+    with _SEQ_CACHE_LOCK:
+        if _SEQ_CACHE.get(key, 0) < nxt:
+            _SEQ_CACHE[key] = nxt
 
 
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
@@ -128,6 +334,49 @@ def _fsync_parent_dir(path: Path) -> None:
         pass
 
 
+def _event_created_at(event: dict, *, fallback: float = 0.0) -> float:
+    try:
+        return float(event.get("created_at") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _iter_bounded_raw_jsonl_lines(path: Path, *, max_bytes: int, retained_bytes: int = 0):
+    line_no = 0
+    buffered = bytearray()
+    total_bytes = int(retained_bytes)
+    try:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(_SESSION_REPLAY_READ_CHUNK_BYTES)
+                if not chunk:
+                    if buffered:
+                        if total_bytes + len(buffered) > max_bytes:
+                            raise ValueError("replay_limit_bytes")
+                        line_no += 1
+                        total_bytes += len(buffered)
+                        yield line_no, bytes(buffered), total_bytes
+                    return
+                start = 0
+                while start < len(chunk):
+                    newline = chunk.find(b"\n", start)
+                    if newline == -1:
+                        buffered.extend(chunk[start:])
+                        if total_bytes + len(buffered) > max_bytes:
+                            raise ValueError("replay_limit_bytes")
+                        break
+                    buffered.extend(chunk[start : newline + 1])
+                    if total_bytes + len(buffered) > max_bytes:
+                        raise ValueError("replay_limit_bytes")
+                    line_no += 1
+                    total_bytes += len(buffered)
+                    yield line_no, bytes(buffered), total_bytes
+                    buffered.clear()
+                    start = newline + 1
+    except FileNotFoundError:
+        return
+
+
 def append_run_event(
     session_id: str,
     run_id: str,
@@ -145,7 +394,11 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
-        assigned_seq = int(seq) if seq is not None else _next_seq(path)
+        if seq is not None:
+            assigned_seq = int(seq)
+            _note_assigned_seq(path, assigned_seq)
+        else:
+            assigned_seq = _reserve_next_seq(path)
         terminal_state = _terminal_state_for_event(event_name, payload)
         event = {
             "version": 1,
@@ -169,6 +422,7 @@ def append_run_event(
             fh.flush()
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
+        _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
         return event
@@ -183,13 +437,13 @@ class RunJournalWriter:
         self.session_dir = Path(session_dir) if session_dir is not None else None
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
-        with self._lock:
-            self._next_seq = _next_seq(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
+        # Draw from the shared module-level seq cache under the per-path lock so
+        # this writer and any direct append_run_event() call on the same path
+        # agree on one monotonic, gapless sequence.
         with self._lock:
-            seq = self._next_seq
-            self._next_seq += 1
+            seq = _reserve_next_seq(self._path)
         return append_run_event(
             self.session_id,
             self.run_id,
@@ -245,8 +499,49 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
 
 
 def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
-    journal = read_run_events(session_id, run_id, session_dir=session_dir)
-    return _summary_from_events(session_id, run_id, journal.get("events") or [])
+    path = _run_path(session_id, run_id, session_dir=session_dir)
+    cached = _get_cached_summary(path)
+    if cached is not None:
+        return cached
+    pre_read_signature = _summary_cache_signature(path)
+    events, _malformed = _read_jsonl(path)
+    summary = _summary_from_events(session_id, run_id, events)
+    _cache_summary(path, summary, expected_signature=pre_read_signature)
+    return summary
+
+
+def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = None) -> tuple[int, float, int]:
+    """Cheap, bounded fingerprint of a session's run journal: (file_count, max_mtime, total_size).
+
+    Reads only directory + per-file stat metadata (never parses journal bodies), so it stays
+    O(runs) and cannot be tipped over by a large ``done`` row. Used to detect that the journal
+    advanced during an idle live-subscribe wait — a run that starts AND finishes inside a single
+    keepalive tick leaves the journal changed but never materializes a live in-memory stream, so a
+    no-cursor idle subscriber would otherwise miss it until a manual refresh. Returns (0, 0.0, 0)
+    when the session has no journal yet. Invalid ids resolve to the empty fingerprint rather than
+    raising so callers can probe unconditionally.
+    """
+    try:
+        sid = _validate_id(session_id, "session_id")
+    except ValueError:
+        return (0, 0.0, 0)
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_root.exists():
+        return (0, 0.0, 0)
+    count = 0
+    max_mtime = 0.0
+    total_size = 0
+    for path in session_root.glob("*.jsonl"):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        count += 1
+        total_size += st.st_size
+        if st.st_mtime > max_mtime:
+            max_mtime = st.st_mtime
+    return (count, max_mtime, total_size)
 
 
 def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | None:
@@ -255,11 +550,131 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     journal_root = root / RUN_JOURNAL_DIR_NAME
     for path in journal_root.glob(f"*/{rid}.jsonl"):
         session_id = path.parent.name
-        events, _malformed = _read_jsonl(path)
-        summary = _summary_from_events(session_id, rid, events)
+        summary = _get_cached_summary(path)
+        if summary is None:
+            pre_read_signature = _summary_cache_signature(path)
+            events, _malformed = _read_jsonl(path)
+            summary = _summary_from_events(session_id, rid, events)
+            _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
     return None
+
+
+def read_session_run_events(
+    session_id: str,
+    *,
+    after_event_id: str | None = None,
+    session_dir: Path | None = None,
+    max_bytes: int = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int = _SESSION_REPLAY_MAX_ROWS,
+) -> dict:
+    """Replay durable run-journal rows for one session after an opaque cursor."""
+    sid = _validate_id(session_id, "session_id")
+    cursor_run_id, cursor_seq = _parse_run_journal_event_id(after_event_id)
+    raw_cursor = str(after_event_id or "").strip()
+    if raw_cursor and cursor_run_id is not None:
+        try:
+            cursor_run_id = _validate_id(cursor_run_id, "run_id")
+        except ValueError:
+            cursor_seq = None
+    if raw_cursor:
+        try:
+            if int(raw_cursor.rsplit(":", 1)[-1]) < 0:
+                cursor_seq = None
+        except (TypeError, ValueError):
+            pass
+    if raw_cursor and (cursor_run_id is None or cursor_seq is None or cursor_seq <= 0):
+        return {
+            "session_id": sid,
+            "cursor_run_id": cursor_run_id,
+            "cursor_seq": cursor_seq,
+            "status": "cursor_invalid",
+            "events": [],
+        }
+    if not raw_cursor:
+        return {
+            "session_id": sid,
+            "cursor_run_id": None,
+            "cursor_seq": None,
+            "status": "ok",
+            "events": [],
+        }
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    runs: list[tuple[float, str, list[dict]]] = []
+    retained_rows = 0
+    retained_bytes = 0
+    for path in sorted(session_root.glob("*.jsonl")) if session_root.exists() else []:
+        run_id = path.stem
+        try:
+            run_id = _validate_id(run_id, "run_id")
+        except ValueError:
+            continue
+        events: list[dict] = []
+        expected_seq = 1
+        try:
+            for _line_no, raw, total_bytes in _iter_bounded_raw_jsonl_lines(
+                path,
+                max_bytes=max_bytes,
+                retained_bytes=retained_bytes,
+            ):
+                retained_bytes = total_bytes
+                if not raw.strip():
+                    continue
+                try:
+                    event = json.loads(raw.decode("utf-8"))
+                    seq = int(event.get("seq")) if isinstance(event, dict) else 0
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_malformed", "events": []}
+                if (
+                    seq != expected_seq
+                    or event.get("event_id") != f"{run_id}:{seq}"
+                    or event.get("run_id") != run_id
+                    or event.get("session_id") != sid
+                ):
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_noncontiguous", "events": []}
+                expected_seq += 1
+                retained_rows += 1
+                if retained_rows > max_rows:
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_rows", "events": []}
+                events.append(event)
+        except FileNotFoundError:
+            continue
+        except ValueError as exc:
+            if str(exc) == "replay_limit_bytes":
+                return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_bytes", "events": []}
+            raise
+        created_at = min((_event_created_at(event) for event in events), default=path.stat().st_mtime)
+        runs.append((created_at, run_id, events))
+    runs.sort(key=lambda run: (run[0], run[1]))
+    cursor_index = next((index for index, (_created_at, run_id, _events) in enumerate(runs) if run_id == cursor_run_id), None)
+    if cursor_index is None:
+        foreign_paths = root.joinpath(RUN_JOURNAL_DIR_NAME).glob(f"*/{cursor_run_id}.jsonl") if cursor_run_id else []
+        foreign_session_id = next((path.parent.name for path in foreign_paths if path.parent.name != sid), "")
+        status = "cursor_run_missing"
+        if foreign_session_id:
+            status = "cursor_session_mismatch"
+        return {
+            "session_id": sid,
+            "cursor_run_id": cursor_run_id,
+            "cursor_seq": cursor_seq,
+            "status": status,
+            "events": [],
+        }
+    cursor_events = runs[cursor_index][2]
+    if cursor_seq is None or cursor_seq > len(cursor_events):
+        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "cursor_event_missing", "events": []}
+    replay_events = [event for event in cursor_events if event["seq"] > cursor_seq]
+    for _created_at, _run_id, events in runs[cursor_index + 1:]:
+        replay_events.extend(events)
+    return {
+        "session_id": sid,
+        "cursor_run_id": cursor_run_id,
+        "cursor_seq": cursor_seq,
+        "status": "ok",
+        "events": replay_events,
+    }
 
 
 def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> bool:
@@ -285,7 +700,35 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
     if not session_journal_dir.exists():
         return False
     shutil.rmtree(session_journal_dir, ignore_errors=True)
-    return not session_journal_dir.exists()
+    removed = not session_journal_dir.exists()
+    # Evict any writer locks the removed runs left behind. `_lock_for` keys are
+    # ``(str(path.parent), path.name, pid)`` and every run file for this session
+    # lives directly under ``session_journal_dir``, so drop all keys whose parent
+    # dir matches — pid-independent — to keep `_WRITER_LOCKS` from growing forever.
+    # Guard on confirmed removal: `rmtree(ignore_errors=True)` can silently leave
+    # the directory (locked files on Windows, permission transients). If the files
+    # still exist their locks are still live — evicting them would hand a later
+    # `_lock_for` caller a brand-new Lock, breaking mutual exclusion with a writer
+    # still holding the old one.
+    if removed:
+        dir_key = str(session_journal_dir)
+        with _WRITER_LOCKS_GUARD:
+            for key in [k for k in _WRITER_LOCKS if k[0] == dir_key]:
+                del _WRITER_LOCKS[key]
+        # Drop cached next-seq entries for the removed runs too. Every run file
+        # for this session lives directly under ``session_journal_dir``, so its
+        # cache key's parent dir matches. Without this, a run re-created at the
+        # same path would resume the stale cached seq instead of restarting at 1.
+        # Hold ``_SEQ_CACHE_LOCK`` — the SAME mutex ``_reserve_next_seq``/
+        # ``_note_assigned_seq`` take — so a concurrent append on another path
+        # cannot mutate the dict mid-iteration (``dictionary changed size``).
+        with _SEQ_CACHE_LOCK:
+            for cache_key in [entry for entry in _SEQ_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SEQ_CACHE[cache_key]
+        with _SUMMARY_CACHE_LOCK:
+            for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SUMMARY_CACHE[cache_key]
+    return removed
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:

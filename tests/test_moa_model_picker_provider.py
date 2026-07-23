@@ -84,7 +84,9 @@ def test_resolve_moa_config_uses_selected_preset(monkeypatch):
     }
 
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
-    hermes_cli_pkg.__path__ = []
+    # monkeypatch.setattr restores the REAL hermes_cli.__path__ on teardown;
+    # emptying it in place would strand the package for the rest of the suite.
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
     moa_config = ModuleType("hermes_cli.moa_config")
 
     def normalize_moa_config(raw):
@@ -126,7 +128,9 @@ def test_resolve_moa_config_falls_back_when_preset_resolution_raises(monkeypatch
         }
     }
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
-    hermes_cli_pkg.__path__ = []
+    # monkeypatch.setattr restores the REAL hermes_cli.__path__ on teardown;
+    # emptying it in place would strand the package for the rest of the suite.
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
     moa_config = ModuleType("hermes_cli.moa_config")
 
     def normalize_moa_config(raw):
@@ -167,7 +171,9 @@ def test_resolve_moa_config_ignores_non_dict_preset_result(monkeypatch):
         }
     }
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
-    hermes_cli_pkg.__path__ = []
+    # monkeypatch.setattr restores the REAL hermes_cli.__path__ on teardown;
+    # emptying it in place would strand the package for the rest of the suite.
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
     moa_config = ModuleType("hermes_cli.moa_config")
 
     def normalize_moa_config(raw):

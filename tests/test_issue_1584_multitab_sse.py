@@ -1,5 +1,6 @@
 import io
 import threading
+import time
 from types import SimpleNamespace
 
 from api.config import STREAMS, STREAMS_LOCK, create_stream_channel
@@ -63,6 +64,28 @@ def test_same_stream_in_two_tabs_receives_identical_token_sequence():
     try:
         for thread in threads:
             thread.start()
+
+        # Wait until BOTH tabs have actually subscribed before producing any
+        # events. StreamChannel.put_nowait() buffers events in _offline_buffer
+        # only while there are ZERO subscribers, and clears that buffer the
+        # moment the first subscriber attaches and it broadcasts live. If we
+        # put tokens in the window after tab A subscribes but before tab B
+        # does, tab B subscribes to an already-cleared buffer, never receives
+        # stream_end, and hangs -> thread.join times out (the ~20% timing flake
+        # on slow CI runners, issue #5628). Synchronize on the real subscriber
+        # count so the test is deterministic regardless of thread-start timing.
+        deadline = time.monotonic() + 5.0
+        subscribed = 0
+        while time.monotonic() < deadline:
+            with stream._lock:
+                subscribed = len(stream._subscribers)
+            if subscribed >= len(handlers):
+                break
+            time.sleep(0.005)
+        else:
+            raise AssertionError(
+                f"only {subscribed}/{len(handlers)} tabs subscribed before timeout"
+            )
 
         stream.put_nowait(("token", {"text": "H"}))
         stream.put_nowait(("token", {"text": "allo"}))

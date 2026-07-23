@@ -203,7 +203,7 @@ def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
 
     assert "await switchToProfile(targetProfile);" in ensure_body
     assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
-    assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id, loadOpts);")
+    assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id,")
     assert "await _openSidebarSession(s);" in src
     assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in src
     assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in src
@@ -323,6 +323,37 @@ class _ProfileScopedSession:
         }
 
 
+# Keys the profile-mismatch 409 envelope is ALLOWED to contain. Any key beyond
+# these would mean session content is leaking across the profile boundary.
+_ALLOWED_MISMATCH_KEYS = {"error", "code", "session_id", "profile"}
+
+
+def _assert_profile_mismatch_envelope(captured, session_id, profile, *, leak_msg):
+    """#5419: a valid-but-wrong-profile /api/session load now returns a
+    structured 409 ``session_profile_mismatch`` envelope (so the frontend can
+    switch to the owning profile) instead of a misleading 404. This asserts the
+    new contract WHILE preserving the isolation guarantee this suite exists to
+    protect: the response body must carry ONLY the error envelope — never any
+    transcript/messages/title/content from the foreign-profile session.
+    """
+    assert "bad" not in captured, (
+        "wrong-profile session should no longer 404 via bad(); expected the 409 envelope"
+    )
+    entry = captured.get("json")
+    assert entry is not None, "expected a structured 409 profile-mismatch response"
+    assert entry.get("status") == 409, f"expected status 409, got {entry.get('status')}"
+    data = entry.get("data") or {}
+    assert data.get("code") == "session_profile_mismatch"
+    assert data.get("profile") == profile
+    assert data.get("session_id") == session_id
+    assert "error" in data
+    # Boundary guard: no foreign-profile content may ride along in the envelope.
+    extra = set(data.keys()) - _ALLOWED_MISMATCH_KEYS
+    assert not extra, f"{leak_msg} (unexpected keys leaked: {sorted(extra)})"
+    for forbidden in ("messages", "content", "title", "workspace", "model", "tool_calls"):
+        assert forbidden not in data, f"{leak_msg} ('{forbidden}' present in envelope)"
+
+
 def test_get_session_rejects_session_from_inactive_profile():
     """A known session_id from another profile must not bypass /api/sessions scoping.
 
@@ -352,8 +383,12 @@ def test_get_session_rejects_session_from_inactive_profile():
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
 
-    assert captured.get("bad", {}).get("status") == 404
-    assert "json" not in captured, "foreign-profile transcript must not be returned"
+    # #5419: a valid-but-wrong-profile session now returns a structured 409
+    # (session_profile_mismatch) so the frontend can switch profiles, instead
+    # of a misleading 404. The isolation boundary this suite protects still
+    # holds: the response carries ONLY the error envelope, never any transcript.
+    _assert_profile_mismatch_envelope(captured, "foreign_001", "other",
+                                      leak_msg="foreign-profile transcript must not be returned")
 
 
 def test_get_session_rejects_metadata_only_session_from_inactive_profile():
@@ -377,8 +412,8 @@ def test_get_session_rejects_metadata_only_session_from_inactive_profile():
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
 
-    assert captured.get("bad", {}).get("status") == 404
-    assert "json" not in captured, "foreign-profile metadata must not be returned"
+    _assert_profile_mismatch_envelope(captured, "foreign_001", "other",
+                                      leak_msg="foreign-profile metadata must not be returned")
 
 
 def test_get_session_rejects_cookieless_session_from_inactive_profile():
@@ -402,8 +437,8 @@ def test_get_session_rejects_cookieless_session_from_inactive_profile():
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(headers={}), parsed)
 
-    assert captured.get("bad", {}).get("status") == 404
-    assert "json" not in captured, "cookieless foreign-profile metadata must not be returned"
+    _assert_profile_mismatch_envelope(captured, "foreign_001", "other",
+                                      leak_msg="cookieless foreign-profile metadata must not be returned")
 
 
 def test_get_session_rejects_cli_session_from_inactive_profile():
@@ -430,8 +465,76 @@ def test_get_session_rejects_cli_session_from_inactive_profile():
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
 
-    assert captured.get("bad", {}).get("status") == 404
-    assert "json" not in captured, "foreign-profile CLI transcript must not be returned"
+    _assert_profile_mismatch_envelope(captured, "cli_foreign", "other",
+                                      leak_msg="foreign-profile CLI transcript must not be returned")
+
+
+def test_missing_session_under_nondefault_profile_still_404_primary_branch():
+    """#5419 regression (Fable Finding 1): a truly-missing/legacy session whose
+    owning profile is UNKNOWN (None) must keep the 404 self-heal path even when
+    the active profile is non-default — NOT emit a useless 409 with profile=null.
+
+    _profiles_match coerces a None row-profile to 'default', so visibility fails
+    against a non-default active profile; the fix must fall back to 404 (not 409)
+    when _session_profile is falsy so the frontend self-heal + empty-state still
+    fire (and it doesn't spin the SSE reconnect against a dead session id).
+    """
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    # None-profile sidecar (legacy/missing) + a NON-DEFAULT active profile.
+    parsed = urlparse("/api/session?session_id=ghost_001&messages=0&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="research"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession(session_id="ghost_001", profile=None)), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=research"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404, (
+        "unknown-profile (None) session must 404 for self-heal, not a profile=null 409"
+    )
+    assert "json" not in captured, "must not emit a 409 envelope for an unknown-profile session"
+
+
+def test_missing_session_under_nondefault_profile_still_404_cli_branch():
+    """#5419 regression (Fable Finding 1), CLI/foreign fallback branch: a truly
+    missing session (cli_meta={} -> profile=None) under a non-default active
+    profile must keep the 404 self-heal, not a profile=null 409."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=ghost_cli&messages=1&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="research"), \
+         patch("api.routes.get_session", side_effect=KeyError), \
+         patch("api.routes.SESSION_INDEX_FILE", SimpleNamespace(exists=lambda: False)), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=research"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404, (
+        "missing CLI session must 404 for self-heal, not a profile=null 409"
+    )
+    assert "json" not in captured, "must not emit a 409 envelope for a missing CLI session"
 
 
 # ── Direct session export must also honor active profile ─────────────────

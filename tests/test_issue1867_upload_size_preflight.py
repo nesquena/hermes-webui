@@ -11,7 +11,8 @@ UPLOAD_PY = ROOT / "api" / "upload.py"
 def _function_body(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.index(marker)
-    brace = src.index("{", start)
+    signature_end = src.index(")", start)
+    brace = src.index("{", signature_end)
     depth = 0
     for idx in range(brace, len(src)):
         if src[idx] == "{":

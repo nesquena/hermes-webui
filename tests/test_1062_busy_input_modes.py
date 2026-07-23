@@ -11,6 +11,8 @@ Issue: #720 (configurable busy-input behaviour)
 """
 from pathlib import Path
 
+from tests.helpers import source_between as _source_between
+
 ROOT = Path(__file__).parent.parent
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
@@ -94,21 +96,26 @@ class TestSlashCommandHandlers:
         assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
 
     def test_cmd_steer_delegates_to_try_steer(self):
-        """/steer delegates to _trySteer which calls /api/chat/steer with
-        a non-destructive fallback. The fallback path is exercised by tests
-        in test_real_steer.py — this test just pins the delegation."""
+        """/steer delegates to _trySteer which calls /api/chat/steer.
+        Fallback behavior is covered in test_real_steer.py; this test pins
+        delegation and blocks the old cancel-on-failure path."""
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        # cmdSteer delegates to _trySteer; fallback must not queue+cancel.
+        # cmdSteer delegates to _trySteer; fallback must not cancel.
         assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
-        # The shared helper must contain the non-destructive fallback path.
+        # The shared helper must contain the non-cancelling fallback path.
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
-        helper_body = COMMANDS_JS[helper_idx:helper_idx + 2000]
-        assert "queueSessionMessage" not in helper_body
+        helper_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         assert "cancelStream" not in helper_body
+        gateway_fallback_idx = helper_body.find("result&&result.fallback==='gateway_steer_queued'")
+        gateway_queue_idx = helper_body.find("queueSessionMessage", gateway_fallback_idx)
+        assert gateway_fallback_idx >= 0
+        assert gateway_queue_idx > gateway_fallback_idx
         assert "inp.value" in helper_body
+        assert "if(result&&result.accepted)" in helper_body
+        assert "S.pendingFiles=_remaining" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
 
@@ -135,13 +142,22 @@ class TestSlashCommandHandlers:
             assert "renderTray()" in body, (
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
-        # cmdSteer delegates to _trySteer; the helper must not clear files in
-        # the fallback path because the draft is restored instead of queued.
-        idx_try = COMMANDS_JS.find("function _trySteer(")
-        assert idx_try >= 0, "_trySteer not found"
-        try_body = COMMANDS_JS[idx_try:idx_try + 1600]
-        assert "S.pendingFiles=[]" not in try_body
-        assert "renderTray()" in try_body
+        # cmdSteer delegates to _trySteer; the helper clears files only on
+        # accepted steer, and (post-#5459-gate) removes ONLY the delivered files
+        # by identity so files staged during the upload await are preserved. The
+        # fallback path restores the draft and keeps staged files available.
+        try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+        accepted_idx = try_body.find("if(result&&result.accepted)")
+        failure_idx = try_body.find("// Do not fall back to interrupt")
+        # Identity-based removal of the delivered snapshot on accepted steer.
+        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
+        assert accepted_idx >= 0, "_trySteer must branch on accepted steer responses"
+        assert clear_idx > accepted_idx, "accepted steer should clear the delivered staged files"
+        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body, (
+            "accepted steer must remove only the delivered files by identity, preserving newly staged ones"
+        )
+        assert failure_idx > clear_idx, "staged files must not be cleared in the failure path"
+        assert "renderTray()" in try_body[failure_idx:]
 
 
 class TestBusySendButton:
@@ -310,10 +326,54 @@ class TestSendBusyBranchDispatch:
         assert send_idx >= 0, "send() not found"
         steer_idx = MESSAGES_JS.find("defaultMessageMode==='steer'", send_idx)
         assert steer_idx >= 0, "busy steer branch not found"
-        branch = MESSAGES_JS[steer_idx:steer_idx + 900]
-        assert "const _steerDelivered=await _trySteer" in branch
-        assert "if(_steerDelivered){S.pendingFiles=[];renderTray();}" in branch
-        assert branch.index("const _steerDelivered=await _trySteer") < branch.index("if(_steerDelivered){S.pendingFiles=[];renderTray();}")
+        branch_end = MESSAGES_JS.find("} else if(defaultMessageMode==='interrupt')", steer_idx)
+        assert branch_end > steer_idx, "busy steer branch end not found"
+        branch = MESSAGES_JS[steer_idx:branch_end]
+        assert "await _trySteer(text, /*explicitSteer=*/false)" in branch
+        assert "_trySteer captures the owner session/files before awaiting uploads" in branch
+        assert "_trySteer clears staged files only after /api/chat/steer accepts" in branch
+        assert "_clearComposerDraft(S.session.session_id,text" not in branch
+        try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+        accepted_idx = try_body.find("if(result&&result.accepted)")
+        failure_idx = try_body.find("// Do not fall back to interrupt")
+        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
+        assert accepted_idx >= 0 and clear_idx > accepted_idx
+        assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_body
+        assert failure_idx > clear_idx, "failed steer must leave staged files intact"
+
+    def test_reentrant_send_does_not_queue_staged_files_while_steer_uploads(self):
+        """Repeated Enter during steer upload must not double-send staged files.
+
+        _trySteer uploads with clearPending=false, so S.pendingFiles intentionally
+        stays populated until the steer endpoint accepts. The early reentrant
+        guard must therefore be text-only; file-only busy submissions are handled
+        by the normal busy branch after the first send call owns the turn.
+        """
+        send_idx = MESSAGES_JS.find("async function send(")
+        assert send_idx >= 0, "send() not found"
+        guard_start = MESSAGES_JS.find("if (_sendInProgress)", send_idx)
+        guard_end = MESSAGES_JS.find("_sendInProgress = true", guard_start)
+        assert guard_start >= 0 and guard_end > guard_start, "send() reentrant guard not found"
+        guard = MESSAGES_JS[guard_start:guard_end]
+        assert "if(_text && _targetSid)" in guard
+        assert "S.pendingFiles.length" not in guard
+        assert "files:[...S.pendingFiles]" in guard
+
+    def test_steer_upload_is_cached_and_delivered_files_removed_by_identity(self):
+        """#5459 gate fixes: (1) a failed-steer RETRY reuses the cached upload
+        instead of re-uploading the same File objects; (2) accepted steer removes
+        ONLY the delivered files by identity, preserving files staged during the
+        upload/API await."""
+        try_body = _source_between(COMMANDS_JS, "async function _steerTextWithPendingFiles(", "\nasync function cmdTitle")
+        # (1) upload cache keyed by session + file signature, reused on retry,
+        # invalidated on delivery.
+        assert "_steerUploadCache" in try_body
+        assert "_steerFilesSignature(" in try_body
+        assert "_steerUploadCache={sid:ownerSid,sig,paths}" in try_body
+        assert "_steerUploadCache=null" in try_body
+        # (2) identity-based removal of only the delivered snapshot.
+        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body
+        assert "S.pendingFiles=_remaining" in try_body
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):

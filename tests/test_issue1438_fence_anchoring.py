@@ -36,7 +36,7 @@ import pytest
 from tests.test_sprint16 import render_md  # Python mirror of renderMd()
 
 
-UI_JS = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text()
+UI_JS = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _strip_pre_blocks(out: str) -> str:

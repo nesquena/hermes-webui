@@ -27,12 +27,14 @@ def _force_env_fallback(monkeypatch):
 def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
     monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: tmp_path, raising=False)
     config.cfg.clear()
     config.cfg.update(cfg)
     config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
     config.invalidate_models_cache()
     try:
         return config.get_available_models()
@@ -40,6 +42,7 @@ def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
         config.invalidate_models_cache()
 
 

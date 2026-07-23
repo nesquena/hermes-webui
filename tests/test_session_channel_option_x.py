@@ -935,9 +935,11 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body.
+    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
+    # added inside loadSession pushed the fetch-error catch's stream restart past
+    # the old 14000-char cutoff.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 14000]
+    body = js[fn_ix:fn_ix + 16000]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -956,10 +958,11 @@ def test_load_session_rearms_stream_on_every_early_return():
 
     # Specifically: the same-session no-op guard must be PRECEDED by a re-arm
     # so re-selecting a session whose stream a prior failed load killed revives
-    # it. The re-arm sits before the guard (not inside a wrapping block) so the
-    # guard stays the exact one-liner other tests assert; it's idempotent so
+    # it. The re-arm sits before the guard (not inside a wrapping block), with
+    # the updated authoritative-load check that still permits the same-session
+    # guard when no different in-flight load is running; it's idempotent so
     # the real-switch path is unaffected.
-    guard_ix = body.index("currentSid===sid && !forceReload && !_loadingSessionId")
+    guard_ix = body.index("currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)")
     pre_guard = body[max(0, guard_ix - 600):guard_ix]
     assert "_rearmActiveSessionStream()" in pre_guard, (
         "a re-arm must run before the same-session no-op guard so a "

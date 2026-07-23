@@ -38,4 +38,4 @@ def test_verdigris_has_no_light_variant():
 def test_verdigris_i18n_lists_skin_in_all_locales():
     # There are 12 locales; each should now include verdigris as the trailing skin.
     # 10 locales use ASCII closing paren, 2 Chinese locales use full-width paren.
-    assert I18N_JS.count("verdigris)") + I18N_JS.count("verdigris）") == 14
+    assert I18N_JS.count("verdigris)") + I18N_JS.count("verdigris）") == 15

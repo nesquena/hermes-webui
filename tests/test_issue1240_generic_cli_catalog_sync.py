@@ -96,6 +96,7 @@ def _configure(monkeypatch, tmp_path, *, provider: str, default: str = ""):
         },
     )
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path(), raising=False)
     config.invalidate_models_cache()
 
 

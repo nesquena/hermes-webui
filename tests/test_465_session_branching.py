@@ -25,6 +25,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = ROOT / "static" / "commands.js"
+SESSIONS_JS = ROOT / "static" / "sessions.js"
 NODE = shutil.which("node")
 
 
@@ -35,6 +36,23 @@ def _read(path: str) -> str:
 def _extract_async_function(source: str, name: str) -> str:
     start = source.find(f"async function {name}(")
     assert start != -1, f"Could not find async function {name}"
+    brace = source.find("{", start)
+    assert brace != -1, f"Could not find opening brace for {name}"
+    depth = 0
+    for idx in range(brace, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:idx + 1]
+    pytest.fail(f"Could not extract complete function body for {name}")
+
+
+def _extract_function(source: str, name: str) -> str:
+    start = source.find(f"function {name}(")
+    assert start != -1, f"Could not find function {name}"
     brace = source.find("{", start)
     assert brace != -1, f"Could not find opening brace for {name}"
     depth = 0
@@ -69,8 +87,11 @@ def _run_node(script: str) -> str:
 
 def _commands_harness(body: str) -> str:
     source = COMMANDS_JS.read_text(encoding="utf-8")
+    session_source = SESSIONS_JS.read_text(encoding="utf-8")
     cmd_branch = _extract_async_function(source, "cmdBranch")
     fork_from = _extract_async_function(source, "forkFromMessage")
+    is_read_only = _extract_function(session_source, "_isReadOnlySession")
+    is_branchable_read_only = _extract_function(session_source, "_isBranchableReadOnlySession")
     return _run_node(
         "\n".join([
             "const calls = [];",
@@ -93,9 +114,8 @@ def _commands_harness(body: str) -> str:
             "const loadSession = async (sid) => { loadedSessions.push(sid); };",
             "const renderSessionList = async () => { renderCalls += 1; };",
             "const _ensureAllMessagesLoaded = async () => { ensureCalls += 1; };",
-            "function _isReadOnlySession(session) {",
-            "  return !!(session && (session.read_only || session.is_read_only));",
-            "}",
+            is_read_only,
+            is_branchable_read_only,
             cmd_branch,
             fork_from,
             "(async () => {",
@@ -186,7 +206,8 @@ def test_branch_endpoint_consults_foreign_session_guard_on_missing_sidecar():
     assert '_load_branch_source_or_refuse(handler, body["session_id"])' in block, \
         "Branch handler should delegate source-load/refusal to the shared helper"
 
-    # The helper itself must carry the foreign-session classification + 403.
+    # The helper itself must carry the foreign-session classification and pass
+    # read-only cron-like sources to the branch builder without saving them.
     helper_match = re.search(
         r'def _load_branch_source_or_refuse\(.*?\)(.*?)(?=\ndef )',
         src, re.DOTALL
@@ -197,10 +218,52 @@ def test_branch_endpoint_consults_foreign_session_guard_on_missing_sidecar():
         "Helper should classify missing-sidecar foreign sessions before returning"
     assert 'if _reason == "not_claimable":' in helper, \
         "Helper should branch on not_claimable foreign ownership"
-    assert 'return bad(handler, "Read-only sessions cannot be branched from WebUI", 403)' in helper \
-        or ('bad(handler, "Read-only sessions cannot be branched from WebUI", 403)' in helper
-            and 'return None' in helper), \
-        "Helper should return a provenance-correct 403 for read-only foreign sessions"
+    assert '_source_kind == "cron"' in helper, \
+        "Helper should narrow read-only branch sources to resolved cron source metadata"
+    assert 'is_cron_session(' not in helper, \
+        "Helper should not use the cron_ session-id prefix as a branch permission gate"
+    assert '_foreign_session._branch_source_readonly = True' in helper, \
+        "Helper should mark synthesized read-only sources so branch does not save them"
+    assert 'return _foreign_session' in helper, \
+        "Helper should return synthesized read-only sources to the branch builder"
+    assert 'bad(handler, "Read-only sessions cannot be branched from WebUI", 403)' in helper, \
+        "Helper should keep non-cron not_claimable sources refused"
+
+
+def test_branch_helper_gates_persisted_read_only_sources_too():
+    """A PERSISTED (stored) read-only session must hit the same branch gate as a
+    synthesized foreign one — not slip through `get_session(sid)` (#5555 gate fix).
+
+    Codex found that a stored `read_only=True, source_tag="messaging"` session could
+    be branched (200) and its source .save()d because the read-only check only lived
+    on the missing-sidecar (except KeyError) path. The loaded-session path must:
+    only allow a canonical-cron read-only source, mark it read-only-for-branch, and
+    403 every other read-only source.
+    """
+    src = _read('api/routes.py')
+    helper_match = re.search(
+        r'def _load_branch_source_or_refuse\(.*?\)(.*?)(?=\ndef )',
+        src, re.DOTALL
+    )
+    assert helper_match, "Could not find _load_branch_source_or_refuse helper"
+    helper = helper_match.group(1)
+    # The loaded (non-KeyError) path assigns the session to a local, not a bare return.
+    assert 'source = get_session(sid)' in helper, \
+        "Loaded session must be captured so it can be gated (not returned unconditionally)"
+    # The loaded path applies the read-only gate.
+    assert 'getattr(source, "read_only", False)' in helper, \
+        "Loaded read-only sessions must be gated for branching"
+    # Only canonical cron read-only sources pass, marked so the fork won't save them.
+    assert 'source._branch_source_readonly = True' in helper, \
+        "Loaded read-only cron sources must be marked read-only-for-branch"
+    # Verify the read-only gate + 403 come BEFORE the final unconditional return.
+    ro_idx = helper.index('getattr(source, "read_only", False)')
+    final_return_idx = helper.rindex('return source')
+    assert ro_idx < final_return_idx, \
+        "The read-only gate must run before the loaded session is returned"
+    # The 403 refusal exists on the loaded path (two occurrences now: synth + loaded).
+    assert helper.count('bad(handler, "Read-only sessions cannot be branched from WebUI", 403)') >= 2, \
+        "Both the synthesized and persisted read-only non-cron paths must 403"
 
 
 def test_branch_endpoint_returns_new_session_id():
@@ -333,8 +396,8 @@ def test_branch_auto_title():
     assert '(fork)' in block, "Branch handler should auto-title as '(fork)'"
 
 
-def test_branch_route_rejects_not_claimable_foreign_sessions_with_403(monkeypatch):
-    """Direct or stale branch POSTs for read-only foreign sessions must refuse clearly."""
+def test_branch_route_allows_not_claimable_cron_sessions_to_fork(monkeypatch):
+    """Direct or stale branch POSTs for read-only cron sessions should create a fork."""
     handler = _FakeHandler()
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "cron-1"})
@@ -343,14 +406,24 @@ def test_branch_route_rejects_not_claimable_foreign_sessions_with_403(monkeypatc
         "get_session",
         lambda _sid, metadata_only=False: (_ for _ in ()).throw(KeyError("Session not found")),
     )
-    monkeypatch.setattr(
-        routes,
-        "_claim_or_synthesize_cli_session",
-        lambda _sid: (object(), "not_claimable"),
+    source = routes.Session(
+        session_id="cron-1",
+        title="Cron Run",
+        workspace=".",
+        model="claude-sonnet",
+        messages=[{"role": "user", "content": "summarize"}],
+        source_tag="cron",
+        raw_source="cron",
+        session_source="other",
     )
+    monkeypatch.setattr(routes, "_claim_or_synthesize_cli_session", lambda _sid: (source, "not_claimable"))
     cap = _capture_route(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/branch"))
-    assert cap["bad"] == ("Read-only sessions cannot be branched from WebUI", 403)
+    assert "bad" not in cap
+    assert cap["status"] == 200
+    assert cap["ok"]["title"] == "Cron Run (fork)"
+    assert cap["ok"]["parent_session_id"] == "cron-1"
+    assert cap["ok"]["session_id"] in routes.SESSIONS
 
 
 def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
@@ -485,18 +558,31 @@ def test_fork_button_in_message_actions():
 
 
 def test_fork_button_is_hidden_for_read_only_sessions():
-    """Read-only sessions should not render the message-level fork affordance."""
+    """Non-cron read-only sessions should not render the message-level fork affordance."""
     src = _read('static/ui.js')
     assert "const readOnlySession=typeof _isReadOnlySession==='function'" in src, \
         "ui.js should derive a read-only session flag from the shared helper"
-    assert "const forkBtn  = readOnlySession ? '' :" in src, \
-        "fork button should be suppressed when the active session is read-only"
+    assert "const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'" in src, \
+        "ui.js should derive a branchable read-only flag from the shared helper"
+    assert "const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' :" in src, \
+        "fork button should be suppressed when a read-only session is not branchable"
+
+
+def test_branchable_read_only_helper_accepts_cron_sources():
+    """Read-only cron sessions should be forkable follow-up sources."""
+    src = _read('static/sessions.js')
+    assert "function _isBranchableReadOnlySession(session)" in src
+    assert "session && session.source_tag" in src
+    assert "session && session.raw_source" in src
+    assert "sources.includes('cron')" in src
+    assert "sid.startsWith('cron_')" not in src
+    assert "sid.startsWith('cron-')" not in src
 
 
 def test_cmdBranch_rejects_read_only_sessions_without_posting():
-    """The /branch command must not POST for read-only sessions."""
+    """The /branch command must not POST for non-cron read-only sessions."""
     result = _commands_harness(
-        "S.session = { session_id: 'cron-1', read_only: true };\n"
+        "S.session = { session_id: 'subagent-1', session_source: 'subagent', read_only: true };\n"
         "await cmdBranch('');\n"
         "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
     )
@@ -509,10 +595,29 @@ def test_cmdBranch_rejects_read_only_sessions_without_posting():
     assert payload["toasts"][0][0] == "Read-only sessions cannot be forked."
 
 
-def test_forkFromMessage_rejects_read_only_sessions_without_loading_or_posting():
-    """Read-only message forks must stop before the load/post path."""
+def test_cmdBranch_allows_read_only_cron_sessions_to_post():
+    """The /branch command should POST for read-only cron sessions."""
     result = _commands_harness(
-        "S.session = { session_id: 'cron-1', read_only: true };\n"
+        "S.session = { session_id: 'daily-summary', session_source: 'other', raw_source: 'cron', read_only: true };\n"
+        "await cmdBranch('Follow-up');\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert len(payload["calls"]) == 1, "read-only cron /branch should POST once"
+    call = payload["calls"][0]
+    assert call["url"] == "/api/session/branch"
+    assert call["body"]["session_id"] == "daily-summary"
+    assert call["body"]["title"] == "Follow-up"
+    assert payload["ensureCalls"] == 0, "cmdBranch should not trigger message loading"
+    assert payload["loadedSessions"] == ["forked-session"], "cron /branch should load the forked session"
+    assert payload["renderCalls"] == 1, "cron /branch should refresh the session list"
+    assert payload["toasts"][0][0] == "Forked into new session"
+
+
+def test_forkFromMessage_rejects_read_only_non_cron_sessions_without_loading_or_posting():
+    """Non-cron read-only message forks must stop before the load/post path."""
+    result = _commands_harness(
+        "S.session = { session_id: 'subagent-1', session_source: 'subagent', read_only: true };\n"
         "await forkFromMessage(1);\n"
         "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
     )
@@ -522,6 +627,37 @@ def test_forkFromMessage_rejects_read_only_sessions_without_loading_or_posting()
     assert payload["loadedSessions"] == [], "read-only forkFromMessage should not switch sessions"
     assert payload["renderCalls"] == 0, "read-only forkFromMessage should not refresh the session list"
     assert payload["toasts"], "read-only forkFromMessage should surface a toast"
+    assert payload["toasts"][0][0] == "Read-only sessions cannot be forked."
+
+
+def test_forkFromMessage_allows_read_only_cron_sessions_to_post():
+    """Read-only cron message forks should reach the existing keep_count path."""
+    result = _commands_harness(
+        "S.session = { session_id: 'cron_1', raw_source: 'cron', read_only: true };\n"
+        "_oldestIdx = 2;\n"
+        "await forkFromMessage(4);\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert len(payload["calls"]) == 1, "read-only cron forkFromMessage should POST once"
+    call = payload["calls"][0]
+    assert call["url"] == "/api/session/branch"
+    assert call["body"]["session_id"] == "cron_1"
+    assert call["body"]["keep_count"] == 6
+    assert payload["ensureCalls"] == 2, "cron forkFromMessage should preserve the full-load flow"
+    assert payload["loadedSessions"] == ["forked-session"], "cron forkFromMessage should load the fork"
+    assert payload["renderCalls"] == 1, "cron forkFromMessage should refresh the session list"
+
+
+def test_cmdBranch_rejects_cron_prefixed_id_without_canonical_source():
+    """Only canonical cron source fields should unlock read-only branching."""
+    result = _commands_harness(
+        "S.session = { session_id: 'cron_spoof_messaging', session_source: 'other', read_only: true };\n"
+        "await cmdBranch('');\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == [], "cron_ id alone should not unlock read-only /branch"
     assert payload["toasts"][0][0] == "Read-only sessions cannot be forked."
 
 

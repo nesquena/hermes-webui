@@ -7,8 +7,8 @@
 >
 > Keep this document updated as architecture changes are made.
 
-> Current shipped build: `v0.51.192` (May 31, 2026).
-> Automated coverage: ~7,150 tests via `pytest tests/ --collect-only -q`. CI runs on
+> Current shipped build: `v0.51.792` (July 1, 2026).
+> Automated coverage: ~11,500 tests via `pytest tests/ --collect-only -q`. CI runs on
 > Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >
@@ -50,7 +50,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
     ctl.sh                 Daemon lifecycle wrapper (start/stop/restart/status/logs) for homelab installs.
-    pyproject.toml         Tooling config (ruff lint gate). NOT a packaged distribution.
+    pyproject.toml         Standard build metadata plus the Ruff lint gate; source-checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh.
     Dockerfile             python:3.12-slim container image
     docker-compose.yml     Compose config with named volume and optional auth
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
@@ -86,7 +86,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       sw.js                Service worker: offline shell cache, version-pinned assets
     tests/
       conftest.py          Isolated test server/state fixtures
-      ~700 test files      ~7,150 tests collected via pytest (run `pytest --collect-only -q` for exact)
+      ~1,150 test files    ~11,500 tests collected via pytest (run `pytest --collect-only -q` for exact)
       test_regressions.py  Permanent regression gate
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.
@@ -718,7 +718,7 @@ Current structure:
         ui.js, workspace.js, sessions.js, messages.js, panels.js, commands.js, boot.js
       tests/
         conftest.py           Isolated test server/state fixtures
-        488 test files        5303 tests collected
+        ~1,150 test files     ~11,500 tests collected
         test_regressions.py   Permanent regression gate
 
 Route extraction to api/routes.py completed in Sprint 11. server.py remains a
@@ -818,7 +818,7 @@ Optional password gate for non-SSH-tunnel deployments.
 
 ### Phase I: Test Infrastructure -- COMPLETE
 
-5303 tests across 488 test files + regression gates. The pytest fixture derives
+~11,500 tests across ~1,150 test files + regression gates. The pytest fixture derives
 an isolated port and state directory from the repo path unless
 `HERMES_WEBUI_TEST_PORT` / `HERMES_WEBUI_TEST_STATE_DIR` pin them explicitly.
 Production data never touched.
@@ -1307,6 +1307,8 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
+    /share/<token>             Public read-only HTML shell for a sanitized shared transcript snapshot
+    /api/share/<token>         Public JSON payload for a sanitized shared transcript snapshot
     /api/chat/stream           ?stream_id=X -> SSE stream. Long-lived. Emits token/tool/
                                approval/done/error events.
     /api/chat/stream/status    ?stream_id=X -> {"active": true/false, "stream_id": X}
@@ -1327,6 +1329,8 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.
+    /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link
+    /api/share/revoke          {"session_id"} -> revokes the current public snapshot link
     /api/approval/respond      {"session_id", "choice": once|session|always|deny}
                                -> {"ok": true, "choice": choice}
 

@@ -15,7 +15,7 @@ REPO = pathlib.Path(__file__).parent.parent
 
 
 def read(rel):
-    return (REPO / rel).read_text()
+    return (REPO / rel).read_text(encoding="utf-8")
 
 
 # ── Bug #702 — XML tool-call leak on DeepSeek ────────────────────────────────

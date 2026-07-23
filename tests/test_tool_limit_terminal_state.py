@@ -255,8 +255,9 @@ def test_streaming_tool_limit_with_final_answer_persists_clean_done_state(tmp_pa
     assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
 
 
-def test_streaming_tool_limit_without_final_answer_emits_no_final_apperror(tmp_path, monkeypatch):
+def test_streaming_tool_limit_partial_without_final_answer_emits_no_final_apperror(tmp_path, monkeypatch):
     result = {
+        "status": "partial",
         "turn_exit_reason": "max_iterations_reached(30/30)",
         "messages": [
             {"role": "user", "content": "Do the long task."},
@@ -280,7 +281,136 @@ def test_streaming_tool_limit_without_final_answer_emits_no_final_apperror(tmp_p
     )
 
 
-def test_streaming_tool_limit_terminal_failure_does_not_mark_final_answer(tmp_path, monkeypatch):
+def test_streaming_tool_limit_with_fallback_final_response_surfaces_closure_text(tmp_path, monkeypatch):
+    """#5494 — handle_max_iterations() guarantees a non-empty ``final_response``
+    on iteration-limit exhaustion. This test pins the WebUI contract that,
+    when ``messages`` ends without a final assistant turn and ``final_response``
+    is set, the user sees that closure text instead of a bare
+    ``tool_limit_reached`` error. Serves both as a live-bug fix pin and as a
+    regression guard for the agent's "delivered final_response ⇒ assistant
+    row" invariant: if a future agent regression drops that invariant, this
+    test still passes because the WebUI honors the contract locally.
+    """
+    graceful = "I reached the iteration limit and couldn't generate a summary."
+    result = {
+        "turn_exit_reason": "max_iterations_reached(30/30)",
+        "final_response": graceful,
+        "messages": [
+            {"role": "user", "content": "Do the long task."},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+            {"role": "user", "content": streaming._MAX_ITERATION_SUMMARY_REQUEST},
+        ],
+    }
+
+    events, payload = _run_streaming_with_fake_agent(tmp_path, monkeypatch, result)
+
+    # The user sees the graceful fallback, not a bare tool_limit_reached error.
+    # Either (a) we synthesized the fallback here, or (b) the agent guarantee
+    # already added an assistant row and `_mark_latest_assistant_tool_limit_status`
+    # attached the status card. Both routes satisfy the contract.
+    assert not [
+        ap for ev, ap in events if ev == "apperror"
+        and ap.get("type") == "tool_limit_reached"
+    ], "expected no tool_limit_reached apperror when fallback was returned"
+    done_payloads = [payload for event, payload in events if event == "done"]
+    assert done_payloads, "expected done SSE payload"
+    assert done_payloads[-1]["terminal_state"] == "tool_limit_reached"
+
+    # Fallback text is shown as a final assistant message and is annotated
+    # with the status card so the UI can render the 'limit reached' chip.
+    assistant = payload["messages"][-1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == graceful
+    assert assistant["_terminal_state"] == "tool_limit_reached"
+    assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
+    # Synthetic scaffolding turn was still dropped, even after fallback injection.
+    assert all(
+        message.get("content") != streaming._MAX_ITERATION_SUMMARY_REQUEST
+        for message in payload["messages"]
+    )
+
+
+def test_streaming_tool_limit_with_fallback_does_not_double_inject_when_assistant_exists(tmp_path, monkeypatch):
+    """#5494 — when the agent already appended a model-generated summary
+    AND ``final_response`` carries the same text, the WebUI must not duplicate
+    the assistant turn. Pins the no-op contract on the synthesis path.
+    """
+    summary = "I reached the limit; here is the summary."
+    result = {
+        "turn_exit_reason": "max_iterations_reached(30/30)",
+        "final_response": summary,
+        "messages": [
+            {"role": "user", "content": "Do the long task."},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+            {"role": "user", "content": streaming._MAX_ITERATION_SUMMARY_REQUEST},
+            {"role": "assistant", "content": summary},
+        ],
+    }
+
+    events, payload = _run_streaming_with_fake_agent(tmp_path, monkeypatch, result)
+
+    done_payloads = [payload for event, payload in events if event == "done"]
+    assert done_payloads
+    assistant_msgs = [
+        m for m in payload["messages"]
+        if m.get("role") == "assistant" and m.get("content") == summary
+    ]
+    assert len(assistant_msgs) == 1, "fallback must not duplicate the existing summary"
+    assert assistant_msgs[0]["_terminal_state"] == "tool_limit_reached"
+
+
+def test_maybe_inject_max_iteration_summary_fallback_unit():
+    """Unit-level coverage for the injection helper."""
+    messages = [
+        {"role": "user", "content": "Do the long task."},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+    ]
+    graceful = "I reached the iteration limit and couldn't generate a summary."
+    result = {"final_response": graceful}
+
+    injected = streaming._maybe_inject_max_iteration_summary_fallback(messages, result)
+
+    assert injected[-1]["role"] == "assistant"
+    assert injected[-1]["content"] == graceful
+    assert injected[-1]["_max_iteration_summary_fallback"] is True
+
+
+def test_maybe_inject_max_iteration_summary_fallback_skips_when_assistant_present():
+    messages = [
+        {"role": "user", "content": "Do the long task."},
+        {"role": "assistant", "content": "real summary"},
+    ]
+    result = {"final_response": "fallback text"}
+
+    out = streaming._maybe_inject_max_iteration_summary_fallback(messages, result)
+    assert out == messages
+
+
+def test_maybe_inject_max_iteration_summary_fallback_skips_when_no_fallback():
+    messages = [
+        {"role": "user", "content": "Do the long task."},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+    ]
+
+    out = streaming._maybe_inject_max_iteration_summary_fallback(messages, {})
+    assert out == messages
+
+    out = streaming._maybe_inject_max_iteration_summary_fallback(
+        messages, {"final_response": "   "}
+    )
+    assert out == messages
+
+    out = streaming._maybe_inject_max_iteration_summary_fallback(messages, None)
+    assert out == messages
+
+
+def test_streaming_tool_limit_partial_with_final_answer_suppresses_false_no_response(
+    tmp_path,
+    monkeypatch,
+):
     result = {
         "status": "partial",
         "turn_exit_reason": "max_iterations_reached(30/30)",
@@ -292,19 +422,21 @@ def test_streaming_tool_limit_terminal_failure_does_not_mark_final_answer(tmp_pa
 
     events, payload = _run_streaming_with_fake_agent(tmp_path, monkeypatch, result)
 
-    apperror_payloads = [payload for event, payload in events if event == "apperror"]
-    assert apperror_payloads, "expected terminal-failure apperror"
-    assert apperror_payloads[-1]["type"] == "tool_limit_reached"
-    assert not [payload for event, payload in events if event == "done"]
+    assert not [event_payload for event, event_payload in events if event == "apperror"]
+    done_payloads = [event_payload for event, event_payload in events if event == "done"]
+    assert done_payloads, "expected done SSE payload"
+    assert done_payloads[-1]["terminal_state"] == "tool_limit_reached"
+    assert done_payloads[-1]["terminal_reason"] == "max_iterations"
     assistant = next(
         message
         for message in payload["messages"]
         if message.get("role") == "assistant"
         and message.get("content") == "I reached the limit; here is the summary."
     )
-    assert "_terminal_state" not in assistant
-    assert "_statusCard" not in assistant
-    assert payload["messages"][-1]["_error"] is True
+    assert assistant["_terminal_state"] == "tool_limit_reached"
+    assert assistant["_terminal_reason"] == "max_iterations"
+    assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
+    assert payload["messages"][-1] is assistant
 
 
 def test_streaming_historical_synthetic_prompt_normal_result_does_not_emit_tool_limit(tmp_path, monkeypatch):

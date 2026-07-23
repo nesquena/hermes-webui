@@ -6,14 +6,42 @@ from unittest.mock import patch
 def fake_get_model_context_length(model, base_url="", **kwargs):
     return 1048576
 
-# Ensure a mock of 'agent' exists in sys.modules to prevent ModuleNotFoundError in routes imports.
-fake_agent = types.ModuleType("agent")
-fake_agent.__path__ = []
-metadata = types.ModuleType("agent.model_metadata")
-fake_agent.model_metadata = metadata  # type: ignore[attr-defined]
-sys.modules["agent"] = fake_agent
-sys.modules["agent.model_metadata"] = metadata
-metadata.get_model_context_length = fake_get_model_context_length
+# Ensure an 'agent' module exists in sys.modules to prevent ModuleNotFoundError
+# when api.routes is imported on a CI runner that has ONLY the WebUI repo (no
+# hermes-agent package). CRITICAL: only install the fake when the REAL agent
+# package is not importable. Unconditionally doing `sys.modules["agent"] = fake`
+# with `fake.__path__ = []` clobbers the genuine, importable agent package for
+# the WHOLE process (this runs at collection time and is never restored) — a
+# later `from agent.<sub> import ...` in the full suite (e.g. hermes_state's
+# `from agent.memory_manager import sanitize_context`) then fails with
+# ModuleNotFoundError. Guarding on find_spec keeps the real package intact
+# locally while preserving the CI import path. Nothing in this module asserts
+# against the fake metadata, so the shim is purely an import guard.
+def _real_agent_metadata_importable() -> bool:
+    """True only if the genuine agent.model_metadata can actually be imported.
+
+    ``importlib.util.find_spec`` RAISES ``ValueError: agent.__spec__ is None``
+    when a spec-less partial ``agent`` module is already in ``sys.modules`` (which
+    happens during CI collection), so it can't be probed bare. Attempt the real
+    import defensively instead: ANY failure means the genuine package isn't
+    usable here, so the shim should be installed.
+    """
+    try:
+        import agent.model_metadata as _amm  # noqa: F401
+        return getattr(_amm, "get_model_context_length", None) is not None
+    except Exception:
+        return False
+
+
+if not _real_agent_metadata_importable():
+    fake_agent = sys.modules.get("agent") or types.ModuleType("agent")
+    if not hasattr(fake_agent, "__path__"):
+        fake_agent.__path__ = []
+    metadata = types.ModuleType("agent.model_metadata")
+    metadata.get_model_context_length = fake_get_model_context_length
+    fake_agent.model_metadata = metadata  # type: ignore[attr-defined]
+    sys.modules["agent"] = fake_agent
+    sys.modules["agent.model_metadata"] = metadata
 
 from api.routes import _normalize_provider_id, _resolve_compatible_session_model_state
 

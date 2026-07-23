@@ -3,9 +3,7 @@
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
-Full parity with the CLI experience - everything you can do from a terminal,
-you can do from this UI. No build step, no framework, no bundler. Just Python
-and vanilla JS.
+Full parity with the CLI experience - everything you can do from a terminal, you can do from this UI. No build step, no framework, no bundler. Just Python and vanilla JS.
 
 Layout: three-panel. Left sidebar for sessions and navigation, center for chat,
 right for workspace file browsing. Model, profile, and workspace controls live in
@@ -13,7 +11,9 @@ the **composer footer** — always visible while composing. A circular context r
 shows token usage at a glance. All settings and session tools are in the
 **Hermes Control Center** (launcher at the sidebar bottom).
 
-<img width="2448" height="1748" alt="Hermes Web UI — three-panel layout" src="https://github.com/user-attachments/assets/6bf8af4c-209d-441e-8b92-6515d7a0c369" />
+Setup Hermes so you can access it natively on every device:
+
+<img width="1467" height="881" alt="image" src="https://github.com/user-attachments/assets/9a72cdf3-a5b4-45ed-a836-a715ce46287e" />
 
 <table>
   <tr>
@@ -47,10 +47,14 @@ This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** wh
 
 ## Contents
 
+[<img width="750" alt="image" src="https://github.com/user-attachments/assets/7e9544a7-ba47-4fc7-8142-1d9d16b17065" />
+](https://get-hermes.ai/setup/) 
+
 - [Why Hermes](#why-hermes) — what it is and how it compares
 - [Quick start](#quick-start) — clone + `bootstrap.py` / `start.sh` / `ctl.sh`
 - [Features](#features) — chat, sessions, workspace, voice, profiles, security, themes, panels, mobile
 - [Configuration & access](#configuration--access) — auto-discovery, overrides, remote/Tailscale/phone, manual launch
+- [Nix flake/module](#nix-flake-and-nixos-module) — declarative install and service
 - [Docker](#docker) — single- and multi-container deploys
 - [Running tests](#running-tests)
 - [Architecture](#architecture) — backend/frontend layout, state dir
@@ -220,6 +224,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
+- Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
@@ -257,6 +262,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
+- Installed PWAs work best with WebUI's own password. Reverse proxies are supported, but proxy basic auth can block the service-worker update fetches an installed app needs and leave it on a blank screen after an update; see `docs/troubleshooting.md` for recovery steps.
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
@@ -283,7 +289,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Token usage display toggle (off by default, also via `/usage` command)
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
-- Cron completion alerts -- toast notifications and unread badge on Tasks tab
+- Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
 - Background agent error alerts -- banner when a non-active session encounters an error
 
 ### Slash commands
@@ -319,7 +325,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 | Thing | How it finds it |
 |---|---|
-| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR` env, then `$HERMES_HOME/hermes-agent` (Windows default `%LOCALAPPDATA%\hermes\hermes-agent`, POSIX default `~/.hermes/hermes-agent`), then sibling `../hermes-agent` |
+| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR`, then known checkout paths, the `hermes` launcher on `PATH`, and finally the installed `run_agent` module exposed by `HERMES_WEBUI_PYTHON` |
 | Python executable | Agent venv first, then `.venv` in this repo, then system `python3` |
 | State directory | `HERMES_WEBUI_STATE_DIR` env, then `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) |
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
@@ -349,7 +355,7 @@ Full list of environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the hermes-agent checkout |
+| `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the Hermes Agent source or installed module root |
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
@@ -367,11 +373,73 @@ Full list of environment variables:
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
-| `HERMES_WEBUI_SESSIONS_MAX` | `300` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions — an evicted session lazily reloads from its JSON sidecar on next access |
+| `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions; an evicted session lazily reloads from its JSON sidecar on next access |
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 
 ---
+
+### Nix flake and NixOS module
+
+Hermes WebUI has a Nix flake package and a NixOS service module so you can run it declaratively.
+
+Install the latest package with:
+
+```bash
+nix shell github:nesquena/hermes-webui#default
+```
+
+Use this flake input in your system configuration:
+
+```nix
+inputs.hermes-webui.url = "github:nesquena/hermes-webui";
+```
+
+Then add the module and configure it in `nixosModules`:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    hermes-agent.url = "github:NousResearch/hermes-agent";
+    hermes-webui.url = "github:nesquena/hermes-webui";
+  };
+
+  outputs = { self, nixpkgs, hermes-agent, hermes-webui, ... }: {
+    nixosConfigurations.<host> = nixpkgs.lib.nixosSystem {
+      modules = [
+        hermes-agent.nixosModules.default
+        hermes-webui.nixosModules.default
+        ({ pkgs, ... }: {
+          services.hermes-agent.enable = true;
+          services.hermes-webui = {
+            enable = true;
+            host = "127.0.0.1";
+            port = 8787;
+            stateDir = "/var/lib/hermes-webui";
+            user = "hermes";
+            group = "hermes";
+            hermesHome = "/var/lib/hermes/.hermes";
+            agent.package = hermes-agent.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            environmentFiles = [ "/run/secrets/hermes-webui.env" ];
+          };
+        })
+      ];
+    };
+  };
+}
+```
+
+The module defaults to `127.0.0.1`. Set `host = "0.0.0.0"` and `openFirewall = true` only when you want direct network access, and pair that with auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`.
+
+The published Hermes Agent package exposes `passthru.hermesVenv`, so the module derives `HERMES_WEBUI_PYTHON` from its interpreter. Bootstrap then locates the installed `run_agent.py` through that interpreter without importing Agent code and exports its parent as `HERMES_WEBUI_AGENT_DIR`. Packages may expose `passthru.hermesAgentDir` as a direct path instead. Use `agent.dir` and `agent.python` as explicit overrides for custom package layouts.
+
+When WebUI reads shared Hermes Agent state, run the service as a user that can already read that state. For a co-located Hermes Agent service, set `user` and `group` to the agent service account; the module only creates the default `hermes-webui` account and never changes ownership of an existing `hermesHome`.
+
+The module maps directly onto existing WebUI environment variables, including:
+`HERMES_WEBUI_HOST`, `HERMES_WEBUI_PORT`, `HERMES_WEBUI_STATE_DIR`, `HERMES_HOME`, `HERMES_WEBUI_AGENT_DIR`, and `HERMES_WEBUI_PYTHON`.
+
+Set `environmentFiles` for secrets like API keys. Protected WebUI runtime keys from the module are rejected there, so keep host, port, state, and agent wiring in the module options. Keep reverse proxy and TLS configuration in your surrounding deployment module because those details are deployment-specific.
 
 ### Remote access (SSH tunnel, Tailscale, phone)
 
@@ -521,7 +589,7 @@ system/Homebrew interpreter.
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
-**~7,150 tests collected** across **~700 test files**, run in CI on Python 3.11,
+**~11,500 tests collected** across **~1,150 test files**, run in CI on Python 3.11,
 3.12, and 3.13 (3 parallel shards each).
 
 ---
@@ -567,8 +635,8 @@ boot.js           Mobile nav, voice input, theme/skin boot, bfcache handler
 **Tests + packaging**
 
 ```
-tests/            Pytest suite (~7,150 tests; isolated server/state fixtures)
-pyproject.toml    Tooling config (ruff lint gate) — not a packaged distribution
+tests/            Pytest suite (~11,500 tests; isolated server/state fixtures)
+pyproject.toml    Standard build metadata plus the Ruff lint gate; checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh
 Dockerfile        python:3.12-slim container image
 docker-compose.yml  Compose with named volume and optional auth
 .github/workflows/  CI: ruff + sharded pytest, browser smoke, Docker smoke,
@@ -639,24 +707,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **304 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **326 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 289 | `v0.49.3` → `v0.51.721` |
-| 2 | [@rodboev](https://github.com/rodboev) | 265 | `v0.51.223` → `v0.51.731` |
+| 1 | [@rodboev](https://github.com/rodboev) | 336 | `v0.51.223` → `v0.51.893` |
+| 2 | [@franksong2702](https://github.com/franksong2702) | 301 | `v0.49.3` → `v0.51.893` |
 | 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 116 | `v0.50.279` → `v0.51.519` |
-| 5 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.527` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 121 | `v0.50.279` → `v0.51.835` |
+| 5 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.703` |
 | 6 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
 | 7 | [@dso2ng](https://github.com/dso2ng) | 43 | `v0.50.227` → `v0.51.578` |
-| 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 27 | `v0.50.292` → `v0.51.484` |
-| 9 | [@starship-s](https://github.com/starship-s) | 27 | `v0.50.123` → `v0.51.638` |
-| 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 23 | `v0.50.10` → `v0.51.522` |
+| 8 | [@starship-s](https://github.com/starship-s) | 28 | `v0.50.123` → `v0.51.763` |
+| 9 | [@Sanjays2402](https://github.com/Sanjays2402) | 27 | `v0.50.292` → `v0.51.484` |
+| 10 | [@allenliang2022](https://github.com/allenliang2022) | 24 | `v0.51.185` → `v0.51.869` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 304 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 326 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions

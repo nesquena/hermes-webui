@@ -130,7 +130,7 @@ def test_i18n_new_keys_in_all_locales():
     ]
     for key in required:
         count = I18N_JS.count(f"{key}:")
-        assert count == 14, f"Key '{key}' appears {count} times, expected 14 (one per locale)"
+        assert count == 15, f"Key '{key}' appears {count} times, expected 15 (one per locale)"
 
 
 def test_backend_already_accepts_new_fields():

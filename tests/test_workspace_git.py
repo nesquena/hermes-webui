@@ -2515,3 +2515,61 @@ def test_dirty_worktree_uses_filter_neutralization(tmp_path):
     _dirty_worktree(ctx)
 
     assert not marker.exists()
+
+
+def test_run_git_passes_windows_hide_flags(monkeypatch, tmp_path):
+    """_run_git must pass creationflags=_windows_hide_flags() so git child
+    processes don't accumulate visible console windows on Windows (#5692).
+    windows_hide_flags() is 0 on non-Windows, so this is a safe no-op there;
+    the test asserts the kwarg is wired regardless of platform."""
+    import api.workspace_git as wg
+    from api.workspace_git import _windows_hide_flags
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _commit_all(repo)
+
+    captured = {}
+    real_run = subprocess.run
+
+    def fake_run(*args, **kwargs):
+        captured["creationflags"] = kwargs.get("creationflags", "MISSING")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(wg.subprocess, "run", fake_run)
+    wg._run_git(repo, ["rev-parse", "HEAD"])
+
+    assert captured.get("creationflags") == _windows_hide_flags(), (
+        "_run_git must pass creationflags=_windows_hide_flags() to subprocess.run"
+    )
+
+
+def test_config_names_for_scope_passes_windows_hide_flags(monkeypatch, tmp_path):
+    """_config_names_for_scope must also pass creationflags=_windows_hide_flags()
+    (#5692) — the git-config probe spawns a console window on Windows too."""
+    import re as _re
+    import api.workspace_git as wg
+    from api.workspace_git import _windows_hide_flags
+
+    repo = _init_repo(tmp_path / "repo")
+
+    captured = {}
+    real_run = subprocess.run
+
+    def fake_run(*args, **kwargs):
+        captured["creationflags"] = kwargs.get("creationflags", "MISSING")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(wg.subprocess, "run", fake_run)
+    wg._config_names_for_scope(
+        "--local",
+        repo,
+        {},
+        "filter\\..*",
+        _re.compile(r"^filter\."),
+        ignore_unsupported=True,
+    )
+
+    assert captured.get("creationflags") == _windows_hide_flags(), (
+        "_config_names_for_scope must pass creationflags=_windows_hide_flags()"
+    )

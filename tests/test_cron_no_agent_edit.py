@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PANELS_JS = (ROOT / "static" / "panels.js").read_text()
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 
 def _function_body(name: str) -> str:

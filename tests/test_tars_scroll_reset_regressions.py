@@ -100,7 +100,18 @@ def test_user_scroll_cancels_delayed_bottom_settling():
     assert "_cancelBottomSettle();" in record
     assert "_lastNonMessageScrollIntentMs=performance.now();" in record
     assert "_scrollPinned=false" in record
-    assert "if(_messageUserUnpinned) return;" in pinned
+    # scrollIfPinned() may now re-pin auto-follow (#5544), but ONLY when the
+    # reader has genuinely returned to the true bottom tail (<=80px) AND no
+    # recent scroll intent is active — it must never fight a manual scroll-up.
+    # Assert those guards are present instead of the old "bail unconditionally
+    # when unpinned" lock.
+    _pinned_compact = pinned.replace(" ", "")
+    assert "_messageBottomDistance()>80" in _pinned_compact, (
+        "scrollIfPinned() re-pin must require the true bottom tail (<=80px), not mere proximity"
+    )
+    assert "_recentMessageWheelIntent()" in _pinned_compact and "_recentMessageKeyScrollIntent()" in _pinned_compact, (
+        "scrollIfPinned() re-pin must bail on recent wheel/key scroll intent so it can't fight a reader"
+    )
     assert "_messageUserUnpinned" in final and "return" in final
     assert "_recentMessageUpwardIntent()" not in pinned
 

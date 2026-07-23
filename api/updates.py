@@ -24,7 +24,9 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
+from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 
 logger = logging.getLogger(__name__)
@@ -35,13 +37,14 @@ try:
 except ImportError:
     _AGENT_DIR = None
 
-_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}
+_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+_AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -58,6 +61,24 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+_RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
+# Phrases git emits when its own short-lived index/refs lock files block a
+# subsequent operation. Tuned to match only the true "lock file already exists"
+# semantics that warrant a lock-conflict response -- v2 deliberately drops the
+# broad "lock file" substring from the prior version to avoid false positives
+# on unrelated errors like "lock file lost during ref transaction".
+# Matched case-insensitively in _is_git_lock_error().
+_GIT_LOCK_SIGNATURES = (
+    "index.lock': file exists",
+    ".lock': file exists",
+    'another git process seems to be running',
+    'unable to create .git/index.lock',
+)
+# Lock files we previously enumerated for auto-removal in v2. v2.2 no longer
+# removes anything on the server, so the enumerable list is no longer needed;
+# ``_inventory_locks`` reports whatever ``.git/**/*.lock`` files currently exist
+# via plain ``rglob``.
+
 
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -214,12 +235,193 @@ def _run_git(args, cwd, timeout=10):
         return f'git failed to start: {exc}', False
 
 
+def _is_git_lock_error(output: str) -> bool:
+    if not output:
+        return False
+    lower_out = output.lower()
+    return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
+
+
+def _inventory_locks(path: Path) -> dict:
+    """Return a snapshot of lock files currently present under ``path/.git``.
+
+    v2.2: replaced v2's `_is_lock_held` + `_try_remove_lock` machinery with
+    pure inventory. Round-2 cert (gate-fail) proved that `fcntl.flock`
+    cannot detect a live git lock, because git uses `O_CREAT|O_EXCL` and
+    `rename(2)`, NOT advisory locking. Any auto-delete path can therefore
+    race against a running `git add` and corrupt the index. v2.2 stops
+    deleting locks from the server entirely: the only thing that removes
+    a lock is the user, on the host, via the manual command surfaced in
+    the response. Once the lock is gone, the user re-clicks Update Now
+    and the normal non-destructive apply path runs.
+    """
+    git_dir = path / '.git'
+    out = {
+        'well_known_lock_present': False,  # ``.git/index.lock`` exists?
+        'well_known_lock_path': None,      # absolute path of ``.git/index.lock``
+        'other_locks': [],                  # any other lock files, by relative path
+    }
+    if not git_dir.exists():
+        return out
+    well_known = git_dir / 'index.lock'
+    try:
+        out['well_known_lock_present'] = well_known.exists()
+    except OSError:
+        # Permission problem reading the directory -- treat conservatively.
+        out['well_known_lock_present'] = True
+    out['well_known_lock_path'] = str(well_known)
+
+    # Enumerate every other lock file under .git/ for diagnostic reporting.
+    # We never touch them; this is purely an inventory.
+    try:
+        for entry in sorted(git_dir.rglob('*.lock')):
+            try:
+                rel = entry.relative_to(git_dir).as_posix()
+            except ValueError:
+                continue
+            if rel == 'index.lock':
+                continue
+            out['other_locks'].append(rel)
+    except OSError:
+        # rglob can fail on unreadable subtrees; skip quietly.
+        pass
+    return out
+
+
+def apply_clear_lock(target: str) -> dict:
+    """Manual-instruction lock recovery for ``target``.
+
+    v2.2: NEVER removes a lock file. Strategy:
+
+      - If ``.git/index.lock`` is absent: re-run the normal non-destructive
+        apply path so the user lands on the latest version without ever
+        touching destructive git operations.
+      - If ``.git/index.lock`` is present: do NOT touch it -- the server
+        has no reliable proof that no live git process is still using
+        it (round-2 cert showed `fcntl.flock` does not detect git's
+        actual ``O_CREAT|O_EXCL`` locking). Return a response with the
+        exact manual command the operator can run, plus the inventory of
+        any other lock files so they can investigate. The frontend then
+        surfaces a copyable ``rm`` line and a "I've removed the lock --
+        try update again" button that re-invokes this endpoint, which
+        (now that the lock is gone) will take the success branch and
+        re-run the normal apply.
+    """
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
+
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+
+    try:
+        if target == 'webui':
+            path = REPO_ROOT
+        elif target == 'agent':
+            path = _AGENT_DIR
+        else:
+            return {'ok': False, 'message': f'Unknown target: {target}'}
+
+        if path is None or not (path / '.git').exists():
+            return {'ok': False, 'message': 'Not a git repository'}
+
+        inv = _inventory_locks(path)
+        manual_command = f"rm -f {inv['well_known_lock_path']}"
+
+        if not inv['well_known_lock_present']:
+            # Lock is gone. Run the normal non-destructive update flow and
+            # annotate the response with what we found for the user's
+            # records. Pass the configured channel through — otherwise an
+            # experimental-channel WebUI lock-recovery retry silently falls back
+            # to stable (Codex gate: _apply_update_inner defaults to stable).
+            with _cache_lock:
+                _update_cache['checked_at'] = 0
+            retry_result = _apply_update_inner(target, _read_update_channel())
+            retry_result = dict(retry_result)
+            retry_result['lock_recovery'] = {
+                'action': 'no-lock-found',
+                'manual_command': manual_command,
+                'other_locks': inv['other_locks'],
+            }
+            return retry_result
+
+        # Lock is present. The server cannot prove it's safe to delete;
+        # the only safe path is to ask the operator.
+        message = (
+            'A git lock file (.git/index.lock) is present. The server does '
+            'not delete locks automatically -- git uses O_CREAT|O_EXCL '
+            'locking, which cannot be detected with advisory probes. To '
+            'recover: confirm no other git process is running against '
+            f'this checkout, then run: {manual_command}  '
+            'Click "Retry update" once you have removed it.'
+        )
+        return {
+            'ok': False,
+            'message': message,
+            'lock_held': True,
+            'target': target,
+            'manual_command': manual_command,
+            'well_known_lock_path': inv['well_known_lock_path'],
+            'other_locks': inv['other_locks'],
+        }
+    finally:
+        _apply_lock.release()
+
+
+def _windows_git_from_registry():
+    """Best-effort resolve git.exe from the Git-for-Windows registry key.
+
+    Git for Windows records its install root at
+    ``HKLM\\SOFTWARE\\GitForWindows\\InstallPath`` (and the WOW6432Node mirror
+    for a 32-bit install on 64-bit Windows). ``git.exe`` lives under
+    ``<InstallPath>\\cmd\\git.exe``. This is the reliable way to find git when
+    it is installed but NOT on the launching process's PATH — e.g. the WebUI
+    server started from a venv python whose environment does not inherit the
+    interactive shell PATH, which otherwise degrades WEBUI_VERSION to
+    ``'unknown'`` and freezes the ``?v=`` static-asset cache-busting stamp.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for hive, flag in (
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY),
+        (winreg.HKEY_CURRENT_USER, 0),
+    ):
+        try:
+            with winreg.OpenKey(
+                hive, r'SOFTWARE\GitForWindows', 0,
+                winreg.KEY_READ | flag,
+            ) as key:
+                install_path, _ = winreg.QueryValueEx(key, 'InstallPath')
+        except OSError:
+            continue
+        if not install_path:
+            continue
+        candidate = os.path.join(install_path, 'cmd', 'git.exe')
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _resolve_git_executable():
     git_executable = shutil.which('git')
     if git_executable:
         return git_executable
     if sys.platform == 'darwin' and os.path.exists('/usr/bin/git'):
         return '/usr/bin/git'
+    if sys.platform == 'win32':
+        from_registry = _windows_git_from_registry()
+        if from_registry:
+            return from_registry
+        for candidate in (
+            os.path.expandvars(r'%ProgramFiles%\Git\cmd\git.exe'),
+            os.path.expandvars(r'%ProgramFiles(x86)%\Git\cmd\git.exe'),
+            os.path.expandvars(r'%LocalAppData%\Programs\Git\cmd\git.exe'),
+        ):
+            if candidate and os.path.exists(candidate):
+                return candidate
     return None
 
 
@@ -254,7 +456,7 @@ def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | No
 
 
 def _detect_webui_version() -> str:
-    """Detect the running WebUI version from git or a baked-in fallback file.
+    """Detect the running WebUI version from git or installed fallback files.
 
     Resolution order:
       1. ``git describe --tags --always --dirty`` — works in any git checkout.
@@ -264,7 +466,9 @@ def _detect_webui_version() -> str:
       2. ``api/_version.py`` — a fallback written by the Docker / CI release
          workflow when ``.git`` is not present in the image.  Expected to define
          ``__version__ = 'vX.Y.Z'``.
-      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+      3. ``api/_scm_version.py`` — setuptools-scm output in an installed wheel.
+         Its PEP 440 value is normalized to the channel-neutral ``v...`` form.
+      4. ``'unknown'`` — last resort; displayed as-is in the settings badge.
     """
     # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
     # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
@@ -287,6 +491,16 @@ def _detect_webui_version() -> str:
                 return m.group(1)
         except Exception:
             pass
+
+    # Installed-wheel fallback: setuptools-scm writes a generated module that
+    # is separate from the Docker/Nix-owned _version.py contract above.
+    try:
+        from api._scm_version import __version__ as scm_version
+        scm_version = str(scm_version).strip()
+        if scm_version:
+            return scm_version if scm_version.startswith(('v', 'exp-v')) else f'v{scm_version}'
+    except Exception:
+        pass
 
     return 'unknown'
 
@@ -452,17 +666,111 @@ def _detect_default_branch(path):
     return 'master'
 
 
-def _release_tags(path):
-    """Return release tags newest-first, using the repo's version-sort order."""
-    out, ok = _run_git(['tag', '--list', 'v*', '--sort=-v:refname'], path)
+# ── Release channels ─────────────────────────────────────────────────────────
+# The self-updater tracks ONE of several release channels, selected in Settings
+# (``update_channel``). A channel is nothing more than *which glob of tags the
+# updater reads* on the single linear master line — no branches, no divergence,
+# so every hard-won ff-only guarantee (#2653/#2846/#3140) is preserved.
+#
+#   stable       -> 'v*'        promoted, soaked releases (the default). Same glob
+#                                the updater has always used — every existing
+#                                v0.51.N tag matches, so legacy installs and the
+#                                full existing test suite keep working unchanged.
+#   experimental -> 'exp-v*'    every release batch, tagged for testers who opt in.
+#
+# ``exp-v*`` deliberately does NOT match ``v*`` (exp tags start with 'e', not
+# 'v'): the two channels never leak into each other's tag list, and a legacy
+# install running the historical 'v*' glob never matches an exp tag, so it
+# auto-lands on the stable stream with zero action.
+DEFAULT_UPDATE_CHANNEL = 'stable'
+_CHANNEL_TAG_GLOBS = {
+    'stable': 'v*',
+    'experimental': 'exp-v*',
+}
+
+
+def _normalize_channel(channel) -> str:
+    """Return a known channel name, defaulting to stable for anything unknown."""
+    if isinstance(channel, str) and channel in _CHANNEL_TAG_GLOBS:
+        return channel
+    return DEFAULT_UPDATE_CHANNEL
+
+
+def _channel_tag_glob(channel) -> str:
+    """Return the ``git tag --list`` glob for the given channel."""
+    return _CHANNEL_TAG_GLOBS[_normalize_channel(channel)]
+
+
+def _read_update_channel() -> str:
+    """Read the configured update channel from settings (stable fallback).
+
+    Read lazily at request time — never baked at import — so a channel switch in
+    Settings takes effect on the next update check without a process restart.
+    """
+    try:
+        from api.config import load_settings
+        return _normalize_channel(load_settings().get('update_channel'))
+    except Exception:
+        return DEFAULT_UPDATE_CHANNEL
+
+
+def channel_version_badge(channel=None) -> str:
+    """Return a channel-scoped version string for the Settings display badge ONLY.
+
+    This is DELIBERATELY separate from ``WEBUI_VERSION``. ``WEBUI_VERSION`` is
+    load-bearing in exact-string-equality systems — asset cache-busting URLs, the
+    service-worker CACHE_NAME, the models-cache stamp, and the stale-client skew
+    banner — so it must stay channel-neutral and stable for the process lifetime.
+    Making it channel-dependent would falsely trip "hard refresh" banners and
+    spurious cache rebuilds on every channel flip. This helper is read at request
+    time purely to render ``WebUI: v0.52.47 · Experimental`` in Settings.
+
+    Returns the channel-matched ``git describe`` (e.g. ``v0.52.47`` on stable,
+    ``exp-v0.52.51`` on experimental), or falls back to ``WEBUI_VERSION`` when no
+    channel tag is reachable (fresh clone, Docker image without channel tags).
+    """
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
+    # NOTE: no ``--always`` here (deliberately different from _detect_webui_version).
+    # The current version is channel-INDEPENDENT — it's just what's installed. The
+    # channel only picks which tag family we compare AGAINST for updates. On a
+    # stable-tagged install (e.g. HEAD == v0.52.0) that opts into Experimental, no
+    # ``exp-v*`` tag is reachable BEHIND HEAD (the exp tags sit ahead on master), so
+    # ``--always`` would fall through to a bare SHA and render "WebUI: d4e80b45 ·
+    # Experimental" instead of the real installed version. Falling back to the
+    # channel-neutral WEBUI_VERSION keeps the badge showing "v0.52.0 · Experimental".
+    # (#5862)
+    out, ok = _run_git(
+        ['describe', '--tags', '--match', _channel_tag_glob(channel)],
+        REPO_ROOT,
+    )
+    if ok and out:
+        return out + _dirty_suffix(REPO_ROOT)
+    return WEBUI_VERSION
+
+
+def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return the channel's release tags newest-first, in version-sort order."""
+    glob = _channel_tag_glob(channel)
+    out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
     if not (ok and out):
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def _current_release_tag(path):
-    """Return the latest release tag reachable from HEAD, if one exists."""
-    out, ok = _run_git(['describe', '--tags', '--abbrev=0'], path)
+def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return the latest channel release tag reachable from HEAD, if one exists.
+
+    MUST filter by the channel glob (``--match``): a commit tagged BOTH
+    ``v0.52.0`` and ``exp-v0.52.0`` describes as ``exp-v0.52.0`` (git prefers the
+    lexically-later tag), so an unfiltered ``describe`` would make stable-channel
+    math resolve to the experimental tag and fall through to the branch firehose.
+    """
+    out, ok = _run_git(
+        ['describe', '--tags', '--abbrev=0', '--match', _channel_tag_glob(channel)],
+        path,
+    )
     return out if ok and out else None
 
 
@@ -475,18 +783,140 @@ def _release_gap(tags, current, latest):
     return 1
 
 
-def _head_is_past_latest_tag(path, current_tag):
-    """Return True when HEAD has moved past the latest reachable release tag.
+def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
+    """Count channel release tags strictly ahead of HEAD (fast-forwardable).
 
-    `git describe --tags --always` returns the bare tag name (e.g. ``v2026.5.16``)
-    when HEAD is exactly on the tag, and a ``v2026.5.16-608-g1d22b9c2`` suffix
-    when HEAD has moved 608 commits past it. Used by both the update check and
-    the update apply path so they agree on which ref to advance to — see #2653
-    (check side) and #2846 (apply side).
+    Used only when NO channel tag is reachable behind HEAD — the channel-scoped
+    ``describe`` returned None — e.g. a stable ``v0.52.0`` install opting into
+    Experimental (all ``exp-v*`` tags sit ahead on master). ``_release_gap`` can't
+    position HEAD in the tag list then and returns a bogus 1. ``git tag --contains
+    HEAD`` lists tags whose history includes HEAD, i.e. tags that are ahead of (or
+    on) HEAD; since HEAD carries no channel tag in this path, that count is exactly
+    the number of channel releases the install can fast-forward to. (#5862)
+    """
+    out, ok = _run_git(
+        ['tag', '--list', _channel_tag_glob(channel), '--contains', 'HEAD'],
+        path,
+    )
+    if not (ok and out):
+        return 0
+    return sum(1 for line in out.splitlines() if line.strip())
+
+
+def _release_tag_sort_key(tag):
+    """Return a version-sort key that keeps release tags newest-first."""
+    raw = str(tag or '').strip()
+    if raw.startswith('v'):
+        raw = raw[1:]
+    parts = []
+    for chunk in re.split(r'(\d+)', raw):
+        if not chunk:
+            continue
+        parts.append((0, int(chunk)) if chunk.isdigit() else (1, chunk.lower()))
+    return tuple(parts)
+
+
+def _is_stable_release_tag(tag):
+    """Return True for stable release tags and False for prerelease tags."""
+    raw = str(tag or '').strip()
+    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
+
+
+def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
+    """Return GitHub release tags newest-first, including commit SHAs when available."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'hermes-webui',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+    if not isinstance(payload, list):
+        return []
+    tags = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get('name')
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if not _is_stable_release_tag(name):
+            continue
+        commit = item.get('commit')
+        sha = None
+        if isinstance(commit, dict):
+            commit_sha = commit.get('sha')
+            if isinstance(commit_sha, str):
+                commit_sha = commit_sha.strip()
+                if commit_sha:
+                    sha = commit_sha
+        tags.append({'name': name, 'sha': sha})
+    return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
+
+
+def _check_webui_published_release_update():
+    """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
+    current_version = str(WEBUI_VERSION or '').strip()
+    if not _RELEASE_TAG_RE.fullmatch(current_version):
+        return None
+    try:
+        tags = _github_release_tags()
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    if not tags:
+        return None
+
+    tag_names = [item['name'] for item in tags]
+    if current_version not in tag_names:
+        return None
+
+    latest = tags[0]
+    latest_version = latest['name']
+    behind = _release_gap(tag_names, current_version, latest_version)
+    if behind <= 0:
+        return None
+
+    current = next((item for item in tags if item['name'] == current_version), None) or {}
+    current_ref = current.get('sha') or current_version
+    latest_ref = latest.get('sha') or latest_version
+    repo_url = 'https://github.com/nesquena/hermes-webui'
+    return {
+        'name': 'webui',
+        'behind': behind,
+        'current_sha': current_ref,
+        'latest_sha': latest_ref,
+        'branch': latest_version,
+        'repo_url': repo_url,
+        'release_based': True,
+        'current_version': current_version,
+        'latest_version': latest_version,
+        'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
+        'manual_update': True,
+    }
+
+
+def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return True when HEAD has moved past the latest reachable channel tag.
+
+    `git describe --tags --always --match <glob>` returns the bare tag name
+    (e.g. ``v2026.5.16``) when HEAD is exactly on the tag, and a
+    ``v2026.5.16-608-g1d22b9c2`` suffix when HEAD has moved 608 commits past it.
+    Used by both the update check and the update apply path so they agree on
+    which ref to advance to — see #2653 (check side) and #2846 (apply side).
+
+    The ``--match`` filter is mandatory: without it, a HEAD sitting on a commit
+    that carries the other channel's tag would describe against that tag and
+    give a wrong past/at answer for THIS channel.
     """
     if not current_tag:
         return False
-    full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
+    full_desc, ok = _run_git(
+        ['describe', '--tags', '--always', '--match', _channel_tag_glob(channel)],
+        path,
+    )
     return bool(ok and full_desc and full_desc != current_tag)
 
 
@@ -512,7 +942,7 @@ def _can_fast_forward_to(path, ref):
     return bool(ok)
 
 
-def _select_apply_compare_ref(path):
+def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None):
     """Return the same remote ref family that the update check reports.
 
     The update banner prefers published release tags when they exist. Applying
@@ -526,11 +956,24 @@ def _select_apply_compare_ref(path):
     decision — otherwise we run `git pull --ff-only <latest-tag>` against a
     checkout that's already past the tag, no-op, restart, and the banner
     re-appears with the same N commits available. See #2846.
+
+    CHANNEL SEMANTICS (webui only): the stable/experimental channels govern the
+    WebUI repo. For ``target == 'webui'`` on the ``stable`` channel, stable tags
+    are a *promoted subset* of master, so a stable install whose HEAD already
+    contains the latest stable tag but sits behind master's tip must NOT fall
+    through to the branch comparison (that would advance it to ``origin/master``
+    — the full experimental firehose, defeating the channel). We return ``None``
+    so the caller reports "no update". Every other case — the experimental
+    channel, and the AGENT repo (which is a separate project that legitimately
+    tracks master past its tags) — keeps the historical branch fallthrough
+    unchanged. This mirrors ``_check_repo_release``.
     """
-    tags = _release_tags(path)
+    channel = _normalize_channel(channel)
+    suppress_stable_fallthrough = (channel == 'stable' and target == 'webui')
+    tags = _release_tags(path, channel)
     if tags:
         latest_tag = tags[0]
-        current_tag = _current_release_tag(path)
+        current_tag = _current_release_tag(path, channel)
         behind = _release_gap(tags, current_tag, latest_tag)
         # Mirror the check side exactly: fall through to the branch comparison
         # whenever the checkout has already moved past the release tag that the
@@ -539,13 +982,18 @@ def _select_apply_compare_ref(path):
         # have behind > 0 after fetching a newer tag that HEAD already contains
         # (#3140). In both cases applying the tag would no-op, move backwards,
         # or fail fast-forward; branch comparison is the truthful update path.
+        # Short-circuit `or` preserves the original minimal git-call pattern.
         if (
-            behind == 0 and _head_is_past_latest_tag(path, current_tag)
-        ) or (
-            behind > 0 and _head_contains_ref(path, latest_tag)
-        ) or (
-            behind > 0 and not _can_fast_forward_to(path, latest_tag)
+            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel))
+            or (behind > 0 and _head_contains_ref(path, latest_tag))
+            or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
         ):
+            # WebUI stable: "HEAD past/contains the latest stable tag" means
+            # up-to-date on the promoted subset — NOT a signal to advance to
+            # master. Return None so the caller reports no update.
+            if suppress_stable_fallthrough:
+                return None
+            # Experimental / agent: preserve the historical branch fallthrough.
             pass
         else:
             return latest_tag
@@ -558,15 +1006,76 @@ def _select_apply_compare_ref(path):
     return f'origin/{branch}'
 
 
-def _check_repo_release(path, name):
-    """Check if a git repo is behind its latest published release tag."""
-    tags = _release_tags(path)
+def _channel_up_to_date_info(path, name, channel, current_tag):
+    """Return an 'up to date' payload for a channel that must NOT branch-compare.
+
+    Used by the stable channel: stable tags are a promoted subset of master, so
+    when HEAD already contains the latest stable tag we report up-to-date
+    (behind == 0) rather than falling through to the branch comparison, which
+    would advance the user onto the experimental firehose.
+    """
+    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    remote_url = _normalize_remote_url(remote_url)
+    return {
+        'name': name,
+        'behind': 0,
+        'current_sha': current_tag,
+        'latest_sha': current_tag,
+        'branch': current_tag,
+        'repo_url': remote_url,
+        'release_based': True,
+        'current_version': current_tag,
+        'latest_version': current_tag,
+        'channel': channel,
+    }
+
+
+def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
+    """Check if a git repo is behind its latest published channel release tag."""
+    channel = _normalize_channel(channel)
+    tags = _release_tags(path, channel)
     if not tags:
         return None
 
     latest_tag = tags[0]
-    current_tag = _current_release_tag(path)
+    current_tag = _current_release_tag(path, channel)
     behind = _release_gap(tags, current_tag, latest_tag)
+
+    # When NO channel tag is reachable behind HEAD, _current_release_tag returns
+    # None (channel-scoped `describe --abbrev=0` fatals with "No tags can describe").
+    # This is the normal state of a stable-tagged install (HEAD == v0.52.0) opting
+    # into Experimental: every exp-v* tag sits AHEAD on master. _release_gap can't
+    # position None in the tag list and returns a bogus 1, and the display fields
+    # would carry current_version=None (rendered as "unknown"). Recover the real
+    # ahead-count and show the channel-neutral installed version as the current
+    # version — the channel only chooses the comparison tag family, not what's
+    # installed. (#5862)
+    current_version_display = current_tag
+    # A git-verified ref for the compare link (defaults to the resolved channel
+    # tag; may be refined below in the no-channel-tag-behind-HEAD fallback).
+    current_sha_ref = current_tag
+    if current_tag is None:
+        ahead = _count_channel_tags_ahead(path, channel)
+        if ahead > 0:
+            behind = ahead
+        # Scope the installed-version fallback to the WebUI repo only.
+        # _check_repo_release() is shared with the Agent repo, and WEBUI_VERSION
+        # (e.g. v0.52.0) is not a valid ref/tag in the Agent repository — injecting
+        # it there would display the WebUI version as the Agent's installed version
+        # and produce a broken Agent compare link. (#5864)
+        if name == "webui":
+            current_version_display = WEBUI_VERSION
+            # For the compare link, derive a git-VERIFIED installed tag rather than
+            # reusing WEBUI_VERSION (which can be `vX.Y.Z-dirty-<hash>`, `-N-g<sha>`,
+            # a bare SHA, or `unknown` — none guaranteed refs). Prefer the exact tag
+            # on HEAD across ALL release families (channel-neutral), so a stable-
+            # pinned Experimental install still gets a resolvable /compare/<tag>...
+            # link; fall back to None (no link) when HEAD is not exactly on a tag. (#5864)
+            exact_tag, ok = _run_git(
+                ['describe', '--tags', '--exact-match', 'HEAD'], path
+            )
+            exact_tag = (exact_tag or '').strip()
+            current_sha_ref = exact_tag if ok and exact_tag else None
 
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
@@ -574,7 +1083,16 @@ def _check_repo_release(path, name):
     # Fall through to _check_repo_branch so the real commit count is reported
     # instead. The same predicate is used by _select_apply_compare_ref so the
     # check and apply sides cannot drift again. See #2653 (check), #2846 (apply).
-    if behind == 0 and _head_is_past_latest_tag(path, current_tag):
+    #
+    # CHANNEL (webui only): for the WebUI repo on stable, stable tags are a
+    # promoted SUBSET of master, so "HEAD past the latest stable tag" means
+    # up-to-date on the promoted subset, NOT a signal to branch-compare against
+    # origin/master (the firehose). Report up-to-date. The AGENT repo and the
+    # experimental channel keep the historical fall-through.
+    suppress_stable_fallthrough = (channel == 'stable' and name == 'webui')
+    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel):
+        if suppress_stable_fallthrough:
+            return _channel_up_to_date_info(path, name, channel, current_tag)
         return None
 
     # Users tracking main can already contain the newest fetched release tag
@@ -583,12 +1101,16 @@ def _check_repo_release(path, name):
     # Fall through to the branch check so the banner compares against the
     # configured upstream instead of advertising a tag that cannot fast-forward.
     if behind > 0 and _head_contains_ref(path, latest_tag):
+        if suppress_stable_fallthrough:
+            return _channel_up_to_date_info(path, name, channel, current_tag)
         return None
 
     # Patch releases can land on a side branch while day-to-day installs track
     # main past an older tag. A positive tag-name gap then advertises an update
     # that `git pull --ff-only <latest-tag>` cannot reach.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
+        if suppress_stable_fallthrough:
+            return _channel_up_to_date_info(path, name, channel, current_tag)
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
@@ -598,14 +1120,20 @@ def _check_repo_release(path, name):
         'name': name,
         'behind': behind,
         # GitHub compare URLs accept tag names, and tag-to-tag links are the
-        # clearest "what changed in this release?" view for operators.
-        'current_sha': current_tag,
+        # clearest "what changed in this release?" view for operators. Use a
+        # git-VERIFIED ref for the compare link: the resolved channel tag when
+        # one is reachable behind HEAD, else None. WEBUI_VERSION is NOT safe here
+        # — it can be `v0.52.0-dirty-<hash>`, `v0.52.0-N-g<sha>`, a bare SHA, or
+        # `unknown`, none of which are guaranteed refs, so reusing it would emit
+        # a broken /compare link (ui.js) and lose update-summary commit subjects. (#5864)
+        'current_sha': current_sha_ref,
         'latest_sha': latest_tag,
         'branch': latest_tag,
         'repo_url': remote_url,
         'release_based': True,
-        'current_version': current_tag,
+        'current_version': current_version_display,
         'latest_version': latest_tag,
+        'channel': channel,
     }
 
 
@@ -680,7 +1208,7 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
-def _check_repo(path, name):
+def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
     The returned dict (when not None) always carries a ``dirty: bool`` reflecting
@@ -693,7 +1221,14 @@ def _check_repo(path, name):
     with ``no_git: True`` and ``behind: None`` so the frontend can distinguish
     "can't check" from "up to date" (issue #4356).
     """
+    channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
+        if name == 'webui':
+            release_info = _check_webui_published_release_update()
+            if release_info is not None:
+                release_info = dict(release_info)
+                release_info['no_git'] = True
+                return release_info
         return {
             'name': name,
             'behind': None,
@@ -711,7 +1246,7 @@ def _check_repo(path, name):
     # See #2756.
     fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
-        release_info = _check_repo_release(path, name)
+        release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
         if fetch_out:
             message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
@@ -729,7 +1264,7 @@ def _check_repo(path, name):
             'dirty': _is_dirty(path),
         }
 
-    release_info = _check_repo_release(path, name)
+    release_info = _check_repo_release(path, name, channel)
     if release_info is not None:
         release_info = dict(release_info)
         release_info['dirty'] = _is_dirty(path)
@@ -739,6 +1274,7 @@ def _check_repo(path, name):
     if branch_info is not None:
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
+        branch_info['channel'] = channel
         return branch_info
     return None
 
@@ -763,11 +1299,20 @@ def _ignored_agent_update_info() -> dict:
     return {'name': 'agent', 'behind': 0, 'ignored': True}
 
 
-def cached_update_status(*, include_agent=True):
+def cached_update_status(*, include_agent=True, channel=None):
     """Return cached update status without performing network or git mutations."""
     include_agent = bool(include_agent)
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
     with _cache_lock:
         cached = dict(_update_cache)
+    # If the cache was populated for a different channel, it is not a valid
+    # answer for this channel — signal that so callers don't render stale
+    # cross-channel data as authoritative.
+    if cached.get('channel') != channel:
+        cached['channel'] = channel
+        cached['stale_channel'] = True
     if cached.get('include_agent') != include_agent:
         cached['include_agent'] = include_agent
         if not include_agent:
@@ -776,31 +1321,48 @@ def cached_update_status(*, include_agent=True):
     return cached
 
 
-def check_for_updates(force=False, *, include_agent=True):
+def check_for_updates(force=False, *, include_agent=True, channel=None):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
     include_agent = bool(include_agent)
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
     with _cache_lock:
+        # Cache is only valid when BOTH the channel AND include_agent match —
+        # a channel switch must not serve the previous channel's answer, and an
+        # in-progress check for the other channel must not short-circuit this one
+        # with a stale cross-channel payload (Codex SILENT #5).
+        cache_matches = (
+            _update_cache.get('include_agent') == include_agent
+            and _update_cache.get('channel') == channel
+        )
         if (
             not force
-            and _update_cache.get('include_agent') == include_agent
+            and cache_matches
             and time.time() - _update_cache['checked_at'] < CACHE_TTL
         ):
             return dict(_update_cache)
-        if _check_in_progress:
-            return dict(_update_cache)  # another thread is already checking
+        if _check_in_progress and cache_matches:
+            return dict(_update_cache)  # another thread is already checking this channel
         _check_in_progress = True
 
     try:
         # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui')
-        agent_info = _check_repo(_AGENT_DIR, 'agent') if include_agent else _ignored_agent_update_info()
+        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
+        # The update channel is a WebUI-only concept. The Agent is a separate
+        # project that tags plain v* and legitimately tracks master past its
+        # tags; it must ALWAYS use the default channel regardless of the user's
+        # WebUI channel selection. (Codex gate: passing 'experimental' here made
+        # the Agent ignore its v* tags and fall back to origin/master.)
+        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
 
         with _cache_lock:
             _update_cache['webui'] = webui_info
             _update_cache['agent'] = agent_info
             _update_cache['checked_at'] = time.time()
             _update_cache['include_agent'] = include_agent
+            _update_cache['channel'] = channel
             return dict(_update_cache)
     finally:
         _check_in_progress = False
@@ -1267,11 +1829,62 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
         - ok is False when restart did not complete and callers must abort success.
         - restart_payload contains helper status fields for response shaping.
     """
-    restart_result = restart_active_profile_gateway()
+    target_profile = str(get_active_profile_name() or "default").strip() or "default"
+    gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
+    restart_result = restart_active_profile_gateway(profile=target_profile)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
         return True, restart_result
-    return False, restart_result
+    if status != "failed":
+        return False, restart_result
+
+    # launchd can briefly fail to spawn the replacement gateway while it is
+    # rotating the supervised process (#6045). Retry exactly once after a
+    # bounded delay so an already-applied Agent update is not reported as a
+    # complete failure because of that transient process handoff.
+    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
+    retry_result = restart_active_profile_gateway(profile=target_profile)
+    retry_status = str(retry_result.get("status") or "")
+    if retry_status in {"completed", "in_progress"}:
+        return True, {
+            **retry_result,
+            "retry_attempted": True,
+            "initial_failure": restart_result.get("message"),
+        }
+    if retry_status != "failed":
+        return False, {
+            **retry_result,
+            "retry_attempted": True,
+            "initial_failure": restart_result.get("message"),
+        }
+
+    # A restart command can still exit non-zero after launchd has recovered the
+    # service. Only accept that recovery when the confirmed local PID changed;
+    # a merely-alive old gateway has not loaded the updated Agent checkout.
+    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
+    gateway_pid_after_retry = get_active_profile_gateway_running_pid(profile=target_profile)
+    if (
+        gateway_pid_before_restart is not None
+        and gateway_pid_after_retry is not None
+        and gateway_pid_after_retry != gateway_pid_before_restart
+    ):
+        return True, {
+            "status": "completed",
+            "message": "Gateway service recovered after a transient restart failure",
+            "retry_attempted": True,
+            "process_replaced": True,
+            "initial_failure": restart_result.get("message"),
+            "retry_failure": retry_result.get("message"),
+        }
+
+    initial_message = str(restart_result.get("message") or "Restart failed")
+    retry_message = str(retry_result.get("message") or "retry did not complete")
+    return False, {
+        **retry_result,
+        "message": f"{initial_message}; recovery retry did not complete: {retry_message}",
+        "retry_attempted": True,
+        "initial_failure": restart_result.get("message"),
+    }
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
@@ -1286,7 +1899,7 @@ def _agent_gateway_restart_failure_message(target: str, restart_result: dict) ->
     )
 
 
-def apply_force_update(target: str) -> dict:
+def apply_force_update(target: str, channel=None) -> dict:
     """Force-reset the target repo to the latest remote HEAD.
 
     Unlike apply_update() which requires a clean working tree and refuses
@@ -1297,7 +1910,17 @@ def apply_force_update(target: str) -> dict:
     Should only be called when apply_update() has already returned a
     response with ``conflict: True`` or ``diverged: True`` and the user
     has confirmed they want to discard local changes.
+
+    CHANNEL SAFETY (rewind guard): ``reset --hard`` is destructive. When the
+    selected channel resolves to a ref that is an ANCESTOR of HEAD (i.e. the
+    checkout is already ahead of the channel — e.g. an ex-experimental install
+    switching back to stable), resetting to it would REWIND code and on-disk
+    state. We refuse and return a clear message instead of silently downgrading.
+    A deliberate rollback would be a separate, explicit feature.
     """
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
     blocker_snapshot = _restart_blocker_snapshot()
     if blocker_snapshot.get('restart_blocked'):
         return _restart_blocked_response(target, blocker_snapshot)
@@ -1309,11 +1932,22 @@ def apply_force_update(target: str) -> dict:
             path = REPO_ROOT
         elif target == 'agent':
             path = _AGENT_DIR
+            # Channel is WebUI-only — the Agent always uses the default channel.
+            channel = DEFAULT_UPDATE_CHANNEL
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
+
+        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+        # this entry point. The mtime-based heuristic was empirically proven
+        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+        # for force-update retries that had nothing to do with a lock error.
+        # Lock cleanup is now ONLY performed by the explicit
+        # /api/updates/clear_lock endpoint, where the user has opted in to
+        # a non-destructive retry.
 
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
@@ -1328,8 +1962,39 @@ def apply_force_update(target: str) -> dict:
                 ),
             }
 
-        compare_ref = _select_apply_compare_ref(path)
+        compare_ref = _select_apply_compare_ref(path, channel, target)
+        # Stable channel, already up to date on the promoted subset: nothing to
+        # force to. Do NOT fall back to origin/master (firehose). See
+        # _select_apply_compare_ref channel semantics.
+        if compare_ref is None:
+            return {
+                'ok': True,
+                'message': f'{target} is already up to date on the {channel} channel.',
+                'target': target,
+                'up_to_date': True,
+                'channel': channel,
+            }
 
+        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
+        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+        # switch-back-to-stable-while-ahead case. A ref that is a descendant of
+        # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
+        # allowed. Refs on a divergent line (neither ancestor nor descendant) are
+        # the legitimate force-update case (conflict/diverged recovery) and are
+        # also allowed — the guard fires ONLY on a pure-ancestor rewind.
+        if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+            return {
+                'ok': False,
+                'message': (
+                    f'{target} is already ahead of the {channel} channel '
+                    f'({compare_ref}); refusing to rewind the checkout. '
+                    'Switching to a slower channel keeps your current version '
+                    'until that channel catches up.'
+                ),
+                'target': target,
+                'channel': channel,
+                'refused_rewind': True,
+            }
         # Discard local modifications and untracked colliders before resetting.
         # Do not use -x: ignored build/cache artifacts should survive force update.
         _run_git(['checkout', '.'], path)
@@ -1382,8 +2047,11 @@ def apply_force_update(target: str) -> dict:
         _apply_lock.release()
 
 
-def apply_update(target):
+def apply_update(target, channel=None):
     """Stash, pull --ff-only, pop for the given target repo."""
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
     blocker_snapshot = _restart_blocker_snapshot()
     if blocker_snapshot.get('restart_blocked'):
         return _restart_blocked_response(target, blocker_snapshot)
@@ -1391,17 +2059,56 @@ def apply_update(target):
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
-        return _apply_update_inner(target)
+        return _apply_update_inner(target, channel)
     finally:
         _apply_lock.release()
 
 
-def _apply_update_inner(target):
+def _restore_stash_after_pull_failure(
+    target: str,
+    path: Path,
+    pull_out: str,
+) -> str:
+    """Best-effort re-apply of a stash pushed earlier in `_apply_update_inner`.
+
+    Called when `git pull` failed with a lock error and we had already pushed
+    a stash for the user's local modifications. Without this, the user's
+    modifications remain in git stash with the working tree clean -- the
+    wrong user experience because the failure was a lock conflict, not a
+    stash-apply conflict, and the stash should re-apply cleanly.
+
+    Returns a human-readable note for inclusion in the response message.
+    """
+    _, pop_ok = _run_git(['stash', 'pop'], path)
+    if pop_ok:
+        return ('Local modifications were restored from the temporary stash.')
+
+    # `git stash pop` failed -- could be that the working tree changed under
+    # us. Try apply + drop to keep the change separation explicit.
+    _, apply_ok = _run_git(['stash', 'apply'], path)
+    if apply_ok:
+        _, _ = _run_git(['stash', 'drop'], path)
+        return ('Local modifications were restored from the temporary stash.')
+
+    detail = (pull_out or '').strip()[:200]
+    return (
+        'Your local modifications could not be restored automatically '
+        f'(stash pop failed after pull error: {detail or "no detail"}). '
+        'They remain safely in `git stash list`; run `git -C '
+        + str(path) + ' stash pop` once the lock is cleared.'
+    )
+
+
+def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     """Inner implementation of apply_update, called under _apply_lock."""
+    channel = _normalize_channel(channel)
     if target == 'webui':
         path = REPO_ROOT
     elif target == 'agent':
         path = _AGENT_DIR
+        # Channel is WebUI-only — the Agent always uses the default channel
+        # regardless of the user's WebUI selection (see check_for_updates).
+        channel = DEFAULT_UPDATE_CHANNEL
     else:
         return {'ok': False, 'message': f'Unknown target: {target}'}
 
@@ -1412,6 +2119,12 @@ def _apply_update_inner(target):
     # --force so a remote re-tag doesn't block the update path (see #2756).
     fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
+        if _is_git_lock_error(fetch_out):
+            return {
+                'ok': False,
+                'message': f'Fetch failed due to a repository lock: {fetch_out.strip()}',
+                'lock_conflict': True,
+            }
         return {
             'ok': False,
             'message': _apply_fetch_failure_message(
@@ -1420,7 +2133,19 @@ def _apply_update_inner(target):
             ),
         }
 
-    compare_ref = _select_apply_compare_ref(path)
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    # On the stable channel a None ref means HEAD already contains the latest
+    # promoted stable tag (up-to-date on the promoted subset). Do NOT fall back
+    # to origin/master — that would advance the user onto the experimental
+    # firehose. Report success/no-op instead. See _select_apply_compare_ref.
+    if compare_ref is None:
+        return {
+            'ok': True,
+            'message': f'{target} is already up to date on the {channel} channel.',
+            'target': target,
+            'up_to_date': True,
+            'channel': channel,
+        }
 
     # Check for dirty working tree (ignore untracked files — git stash
     # doesn't include them, so stashing on '??' alone leaves nothing to pop)
@@ -1428,6 +2153,12 @@ def _apply_update_inner(target):
         ['status', '--porcelain', '--untracked-files=no'], path
     )
     if not status_ok:
+        if _is_git_lock_error(status_out):
+            return {
+                'ok': False,
+                'message': f'Failed to inspect repo status due to a repository lock: {status_out.strip()}',
+                'lock_conflict': True,
+            }
         return {'ok': False, 'message': f'Failed to inspect repo status: {status_out[:200]}'}
     # Fail early on unresolved merge conflicts
     if any(line[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
@@ -1460,6 +2191,24 @@ def _apply_update_inner(target):
         pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
+        if _is_git_lock_error(pull_out):
+            # Lock conflict during pull. If a stash was pushed for the local
+            # modifications, attempt to restore it before returning so the
+            # user's working tree is not silently left empty with changes
+            # stranded in the stash (Greptile P1 on PR #5688).
+            stash_recovery_note = ''
+            if stashed:
+                stash_recovery_note = _restore_stash_after_pull_failure(
+                    target, path, pull_out
+                )
+            message = f'Pull failed due to a repository lock: {pull_out.strip()}'
+            if stash_recovery_note:
+                message = f'{message} {stash_recovery_note}'
+            return {
+                'ok': False,
+                'message': message,
+                'lock_conflict': True,
+            }
         pull_lower = pull_out.lower()
         detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
         untracked_collision = (

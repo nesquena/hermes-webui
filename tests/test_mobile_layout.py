@@ -1048,7 +1048,7 @@ def test_safe_area_variables_available_for_pwa_shell():
     assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
         "CSS must expose env(safe-area-inset-top) through --app-titlebar-safe-top"
     )
-    assert "padding:8px 10px 12px!important" in CSS, (
+    assert "padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important" in CSS, (
         "Phone composer should keep the proven pre-cover-mode padding contract"
     )
 
@@ -1443,7 +1443,7 @@ def test_reasoning_chip_updates_desktop_and_mobile_controls():
     """Reasoning chip sync should keep both footer and mobile overflow labels current."""
     ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
     chip_start = ui_js.index("function _applyReasoningChip(eff)")
-    chip_end = ui_js.index("function fetchReasoningChip()", chip_start)
+    chip_end = ui_js.index("function fetchReasoningChip(", chip_start)
     chip_body = ui_js[chip_start:chip_end]
     for expected in (
         "composerReasoningWrap",
@@ -1570,6 +1570,71 @@ def test_touch_device_inputs_meet_zoom_threshold():
         "query that bumps input/textarea/select to font-size:max(16px,…) "
         "so iOS Safari does not auto-zoom on focus (#1167)"
     )
+
+
+def test_touch_keyboard_inset_uses_touch_primary_media_query():
+    """The keyboard inset path must key off touch-primary media queries."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function _isTouchKeyboardViewport()" in boot_js, \
+        "boot.js must define a touch-keyboard viewport predicate"
+    assert "matchMedia('(hover:none) and (pointer:coarse)')" in boot_js or \
+        'matchMedia("(hover:none) and (pointer:coarse)")' in boot_js, \
+        "touch keyboard inset eligibility must use the hover:none + pointer:coarse media query"
+    assert "any-pointer:fine" in boot_js, \
+        "touch keyboard inset eligibility must exclude co-existing fine-pointer setups"
+    assert "!_hasFinePointerCoexisting()" in boot_js, \
+        "touch keyboard inset eligibility must skip hardware-keyboard/trackpad devices"
+
+
+def test_touch_keyboard_inset_writes_and_clears_css_variable():
+    """visualViewport geometry must write and clear the keyboard inset variable."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "setProperty('--keyboard-bottom-inset'" in boot_js, \
+        "boot.js must write --keyboard-bottom-inset on touch keyboard viewport changes"
+    assert "removeProperty('--keyboard-bottom-inset')" in boot_js, \
+        "boot.js must clear --keyboard-bottom-inset when the inset is zero or ineligible"
+    assert "Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)))" in boot_js, \
+        "boot.js must compute the bottom inset from innerHeight and visualViewport geometry"
+
+
+def test_touch_keyboard_inset_ignores_pinch_zoom_scale():
+    """A pinch-zoomed viewport (vv.scale != 1) must not be read as keyboard
+    occlusion — otherwise Chromium 'force enable zoom' produces a large spurious
+    inset that jitters on pan (#5738 UX-gate hardening)."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "vv.scale" in boot_js, \
+        "boot.js must consult visualViewport.scale before treating shrinkage as keyboard occlusion"
+    assert "Math.abs((vv.scale||1)-1)>0.05" in boot_js, \
+        "boot.js must bail out of the inset when the viewport is pinch-zoomed"
+
+
+def test_touch_keyboard_inset_primes_during_visual_viewport_setup():
+    """The existing visualViewport setup path must prime the inset immediately."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    setup_start = boot_js.index("if(window.visualViewport){")
+    setup_end = boot_js.index("window.visualViewport.addEventListener('resize'", setup_start)
+    setup_block = boot_js[setup_start:setup_end]
+    assert "_syncKeyboardBottomInset();" in setup_block, \
+        "boot.js must sync the keyboard inset once during visualViewport setup"
+
+
+def test_touch_keyboard_inset_primes_on_pageshow_restore():
+    """BFCache restore must resync the inset before restore work continues."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    pageshow_start = boot_js.index("window.addEventListener('pageshow'")
+    pageshow_end = boot_js.index("const _srch = document.getElementById('sessionSearch');", pageshow_start)
+    pageshow_block = boot_js[pageshow_start:pageshow_end]
+    assert "_syncKeyboardBottomInset();" in pageshow_block, \
+        "boot.js must sync the keyboard inset during pageshow restore"
+
+
+def test_touch_keyboard_inset_applies_to_composer_padding():
+    """Touch/coarse composer padding must consume the keyboard inset variable."""
+    css_ns = re.sub(r'\s+', '', CSS)
+    assert "@media(hover:none)and(pointer:coarse)" in css_ns, \
+        "style.css must scope the keyboard inset padding to touch-primary viewports"
+    assert ".composer-wrap{padding-bottom:calc(14px+var(--keyboard-bottom-inset,0px));}" in css_ns, \
+        "style.css must add the keyboard inset to composer bottom padding"
 
 
 

@@ -162,10 +162,12 @@ def test_was_webui_gate_excludes_subagent_children():
     m = re.search(r"\n(?:def |class )", src[start + 1:])
     block = src[start:(start + 1 + m.start()) if m else len(src)]
     assert "_session_index_marks_was_webui(sid)" in block
-    assert re.search(
-        r"_session_index_marks_was_webui\(sid\)\s+and\s+not\s+_is_subagent_child_session_id\(sid\)",
-        block,
-    ), "was_webui and not subagent-child must gate the same 404 return (#5307)"
+    assert "_session_deleted_tombstone_marks_was_webui(sid)" in block
+    guard_start = block.index("if (")
+    guard = block[guard_start:block.index("return None, \"was_webui\"", guard_start)]
+    assert "_is_subagent_child_session_id(sid)" in guard, (
+        "all was_webui predicates must share the subagent-child exclusion (#5307)"
+    )
 
 
 def test_sessions_js_open_handlers_keep_isexternalsession_contract():

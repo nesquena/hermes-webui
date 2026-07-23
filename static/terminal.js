@@ -431,6 +431,34 @@ function _connectTerminalOutput(){
     try{if(source&&source.readyState!==2)source.close();}catch(_){}
     TERMINAL_UI.source=null;
   });
+  // A successful (re)connect clears the notify latch so the NEXT outage notifies
+  // again — "once per outage", not "once per source lifetime". Without this, a
+  // source that errors, auto-reconnects, then drops a second time would stay
+  // silent (guard already true, not CLOSED) — the exact freeze this handler
+  // prevents.
+  source.addEventListener('open',()=>{
+    if(TERMINAL_UI.source!==source)return;
+    source._terminalErrNotified=false;
+  });
+  // Transport-level failures (session expired, gateway killed, network drop)
+  // fire 'error' rather than a terminal_* event; without this the terminal froze
+  // with no feedback and no telemetry. Let the browser auto-reconnect a merely
+  // CONNECTING source (no manual loop/backoff), but surface a permanently CLOSED
+  // one and tear it down so a restart can reconnect. Notify once per outage so a
+  // flapping connection can't flood the pane or telemetry.
+  source.addEventListener('error',()=>{
+    if(TERMINAL_UI.source!==source)return;
+    const closed=source.readyState===EventSource.CLOSED;
+    if(closed||!source._terminalErrNotified){
+      source._terminalErrNotified=true;
+      if(typeof recordClientSSEError==='function')recordClientSSEError('terminal',{ready_state:source?source.readyState:null,reason:'terminal EventSource.onerror'});
+      if(TERMINAL_UI.term)TERMINAL_UI.term.writeln('\r\n[terminal '+(closed?'disconnected':'connection lost, reconnecting…')+']\r\n');
+    }
+    if(closed){
+      try{if(source&&source.readyState!==2)source.close();}catch(_){}
+      TERMINAL_UI.source=null;
+    }
+  });
 }
 
 async function _startComposerTerminal(restart=false){

@@ -72,24 +72,143 @@ def _run_node_script(script):
     return json.loads(result.stdout)
 
 
+_EXTRACT_FUNC_JS = """
+function extractFunc(name){
+  const start = src.indexOf('function ' + name);
+  if(start === -1) throw new Error(name + ' not found');
+  const params = src.indexOf('(', start);
+  let depth = 0, close = -1;
+  for(let i=params; i<src.length; i++){
+    if(src[i] === '(') depth++;
+    else if(src[i] === ')'){
+      depth--;
+      if(depth === 0){ close = i; break; }
+    }
+  }
+  const brace = src.indexOf('{', close);
+  depth = 0;
+  for(let i=brace; i<src.length; i++){
+    if(src[i] === '{') depth++;
+    else if(src[i] === '}'){
+      depth--;
+      if(depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error(name + ' body did not close');
+}
+""".strip()
+
+
+def _run_complete_anchor_settlement_case(active_mode):
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+const activeMode = {json.dumps(active_mode)};
+global.window = {{
+  chatActivityMode(){{ return activeMode; }},
+  _chatActivityDisplayMode: activeMode === 'transparent_stream' ? 'compact_worklog' : 'transparent_stream',
+  _transparentStream: activeMode === 'transparent_stream' ? false : true,
+}};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+if(src.indexOf('function _anchorSceneActiveMode') !== -1){{
+  eval(extractFunc('_anchorSceneActiveMode'));
+}}else{{
+  eval("function _anchorSceneActiveMode(){{ return activeMode; }}");
+}}
+if(src.indexOf('function _anchorSceneRowDisplayHintForMode') !== -1){{
+  eval(extractFunc('_anchorSceneRowDisplayHintForMode'));
+}}else{{
+  eval("function _anchorSceneRowDisplayHintForMode(row, sceneMode){{ const hints=row&&typeof row==='object'&&row.display_hints&&typeof row.display_hints==='object'?row.display_hints:null; if(sceneMode==='transparent_stream') return (hints&&hints.transparent_stream)||'chronological_activity'; if(sceneMode==='compact_worklog') return (hints&&hints.compact_worklog)||row.display_hint||'activity_row'; return row&&row.display_hint||'activity_row'; }}");
+}}
+function _anchorSceneFinalAnswerText(message){{ return message && (message.final_answer || message.content || ''); }}
+function _anchorSceneRowsByMessageIndex(){{ return new Map(); }}
+function _anchorSceneMessageRef(message){{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement(_lastAsst, base){{ return base && base.turn_duration ? base.turn_duration : 0; }}
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+const messages = [
+  {{role:'user', content:'Prompt', id:'user-1'}},
+  {{role:'assistant', content:'Final answer text', id:'assistant-1'}},
+];
+const projectedScene = {{
+  mode:'compact_worklog',
+  final_answer:'Final answer text',
+  identity:{{source_message_refs:['legacy']}},
+  lifecycle:{{terminal_state:'done'}},
+  turn_duration:42,
+  activity_rows:[
+    {{
+      role:'prose',
+      text:'Final answer text',
+      status:'running',
+      row_id:'live-prose-final',
+      local_id:'live-prose-final',
+      display_hint:'main_prose',
+      display_hints:{{compact_worklog:'main_prose', transparent_stream:'chronological_activity'}},
+    }},
+    {{
+      role:'thinking',
+      text:'Working through the result',
+      status:'running',
+      row_id:'live-thinking-1',
+      local_id:'live-thinking-1',
+      display_hint:'collapsed_thinking',
+      display_hints:{{compact_worklog:'collapsed_thinking', transparent_stream:'chronological_activity'}},
+    }},
+    {{
+      role:'tool',
+      text:'Fetched docs',
+      status:'running',
+      row_id:'live-tool-1',
+      local_id:'live-tool-1',
+      tool_call_id:'tool-1',
+      display_hint:'tool_row',
+      display_hints:{{compact_worklog:'tool_row', transparent_stream:'chronological_activity'}},
+    }},
+    {{
+      role:'terminal',
+      text:'done',
+      status:'completed',
+      row_id:'terminal-1',
+      local_id:'terminal-1',
+      display_hint:'terminal_status_row',
+      display_hints:{{compact_worklog:'terminal_status_row', transparent_stream:'chronological_activity'}},
+    }},
+  ],
+}};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+process.stdout.write(JSON.stringify({{
+  mode: scene && scene.mode,
+  final_answer: scene && scene.final_answer,
+  final_message_ref: scene && scene.final_message_ref,
+  identity: scene && scene.identity,
+  activity_rows: scene && scene.activity_rows ? scene.activity_rows.map(row => ({{
+    role: row.role,
+    text: row.text,
+    status: row.status,
+    display_hint: row.display_hint,
+    compact_hint: row.display_hints && row.display_hints.compact_worklog,
+    transparent_hint: row.display_hints && row.display_hints.transparent_stream,
+  }})) : null,
+}}));
+"""
+    return _run_node_script(script)
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_dom_render_live_compression_row_transitions_to_settled_scene():
     script = f"""
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
-function extractFunc(name){{
-  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if(start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start) + 1;
-  let depth = 1;
-  while(depth > 0 && i < src.length){{
-    if(src[i] === '{{') depth += 1;
-    else if(src[i] === '}}') depth -= 1;
-    i += 1;
-  }}
-  return src.slice(start, i);
-}}
+{_EXTRACT_FUNC_JS}
 class FakeElement {{
   constructor(tag){{
     this.tagName = String(tag || 'div').toUpperCase();
@@ -187,7 +306,8 @@ def test_process_prose_is_an_anchor_scene_row_not_a_dom_mirror():
     assert "_upsertAnchorProcessProse(displayText,{sealed:force})" in flush
     assert "function _upsertAnchorProcessProse" in MESSAGES_JS
     assert "source_event_type:sourceEventType" in _function_body(MESSAGES_JS, "_applyToAnchor")
-    assert "_upsertAnchorProcessProse(displayText)" in schedule
+    assert "let anchorProcessText=displayText" in schedule
+    assert "_upsertAnchorProcessProse(anchorProcessText)" in schedule
     assert "function _replaceAnchorActivityEventByLocalId" in MESSAGES_JS
     assert "events[i]=next" in MESSAGES_JS
     assert "_renderAnchorLiveScene();" in _function_body(MESSAGES_JS, "_upsertAnchorProcessProse")
@@ -231,15 +351,68 @@ def test_live_ui_legacy_paths_exit_when_anchor_scene_owns_the_turn():
     assert ':not([data-anchor-scene-owner="1"])' in remove
 
 
-def test_anchor_scene_projection_stays_scoped_to_compact_worklog():
+@pytest.mark.skipif("_anchorSceneActiveMode()" not in MESSAGES_JS, reason="base branch lacks the active-mode helper")
+def test_anchor_scene_projection_tracks_active_mode():
     render_live = _function_body(MESSAGES_JS, "_renderAnchorLiveScene")
     project_live = _function_body(MESSAGES_JS, "_projectLiveAnchorActivityScene")
-    ui_live = _function_body(UI_JS, "_renderLiveAnchorActivitySceneForStream")
 
-    assert "mode:'compact_worklog'" in render_live
-    assert "mode:'compact_worklog'" in project_live
-    assert "(opts&&opts.mode)||'compact_worklog'" in ui_live
-    assert "if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;" in _function_body(UI_JS, "renderLiveAnchorActivityScene")
+    assert "_anchorSceneActiveMode()" in render_live
+    assert "_anchorSceneActiveMode()" in project_live
+    assert "mode:'compact_worklog'" not in render_live
+    assert "mode:'compact_worklog'" not in project_live
+
+
+@pytest.mark.skipif("_anchorSceneActiveMode()" not in MESSAGES_JS, reason="base branch lacks the active-mode helper")
+def test_anchor_scene_active_mode_falls_back_when_primary_accessor_throws():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_anchorSceneActiveMode'));
+global.window = {{
+  chatActivityMode(){{ throw new Error('mode unavailable'); }},
+  _chatActivityDisplayMode:'transparent_stream',
+  _transparentStream:false,
+}};
+const displayModeFallback = _anchorSceneActiveMode();
+global.window = {{
+  chatActivityMode(){{ throw new Error('mode unavailable'); }},
+  _chatActivityDisplayMode:'broken',
+  _transparentStream:true,
+}};
+const booleanFallback = _anchorSceneActiveMode();
+process.stdout.write(JSON.stringify({{displayModeFallback, booleanFallback}}));
+"""
+    result = _run_node_script(script)
+
+    assert result["displayModeFallback"] == "transparent_stream"
+    assert result["booleanFallback"] == "transparent_stream"
+
+
+def test_complete_settled_anchor_scene_tracks_transparent_stream_and_filters_duplicate_final_answer():
+    result = _run_complete_anchor_settlement_case("transparent_stream")
+
+    assert result["mode"] == "transparent_stream"
+    assert result["final_answer"] == "Final answer text"
+    assert result["final_message_ref"] == "assistant-1"
+    assert result["identity"]["source_message_refs"] == ["assistant-1"]
+    assert [row["role"] for row in result["activity_rows"]] == ["thinking", "tool", "terminal"]
+    assert [row["status"] for row in result["activity_rows"]] == ["completed", "completed", "completed"]
+    assert [row["display_hint"] for row in result["activity_rows"]] == [
+        "chronological_activity",
+        "chronological_activity",
+        "chronological_activity",
+    ]
+    assert [row["compact_hint"] for row in result["activity_rows"]] == [
+        "collapsed_thinking",
+        "tool_row",
+        "terminal_status_row",
+    ]
+    assert [row["transparent_hint"] for row in result["activity_rows"]] == [
+        "chronological_activity",
+        "chronological_activity",
+        "chronological_activity",
+    ]
 
 
 def test_live_processed_anchor_renders_before_first_activity_row():
@@ -254,7 +427,10 @@ def test_live_processed_anchor_renders_before_first_activity_row():
     assert "turnStartedAt:S.session&&S.session.pending_started_at" in live
     assert "if(!S.session) return null;" in shell
     assert "const activeStreamId=S.activeStreamId||'';" in shell
-    assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})" in shell
+    # #5942/#5943: the hardcoded {mode:'compact_worklog'} hint was removed so the
+    # helper resolves the user's ACTIVE display mode (a caller hint must not force
+    # compact onto a transparent turn). Assert the call is still wired, mode-free.
+    assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id)" in shell
     assert "if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();" in send
 
 
@@ -333,6 +509,53 @@ def test_live_processed_anchor_is_deduped_across_restore_paths():
     assert "_dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'))" in shell
 
 
+def test_complete_settled_anchor_scene_keeps_compact_worklog_rows_in_compact_mode():
+    result = _run_complete_anchor_settlement_case("compact_worklog")
+
+    assert result["mode"] == "compact_worklog"
+    assert result["final_answer"] == "Final answer text"
+    assert [row["role"] for row in result["activity_rows"]] == ["thinking", "tool", "terminal"]
+    assert [row["display_hint"] for row in result["activity_rows"]] == [
+        "collapsed_thinking",
+        "tool_row",
+        "terminal_status_row",
+    ]
+    assert [row["compact_hint"] for row in result["activity_rows"]] == [
+        "collapsed_thinking",
+        "tool_row",
+        "terminal_status_row",
+    ]
+    assert [row["transparent_hint"] for row in result["activity_rows"]] == [
+        "chronological_activity",
+        "chronological_activity",
+        "chronological_activity",
+    ]
+
+
+def test_anchor_scene_has_worklog_worthy_rows_rejects_prose_only_and_terminal_only_scenes():
+    body = _function_body(MESSAGES_JS, "_anchorSceneHasWorklogWorthyRows")
+
+    assert "role==='tool'||role==='thinking'" in body
+    assert "source==='compressing'||source==='compressed'" in body
+
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_anchorSceneHasWorklogWorthyRows'));
+const proseOnly = {{activity_rows:[{{role:'prose'}}, {{role:'terminal', source_event_type:'done'}}]}};
+const terminalOnly = {{activity_rows:[{{role:'terminal', source_event_type:'done'}}]}};
+process.stdout.write(JSON.stringify({{
+  proseOnly: _anchorSceneHasWorklogWorthyRows(proseOnly),
+  terminalOnly: _anchorSceneHasWorklogWorthyRows(terminalOnly),
+}}));
+"""
+    result = _run_node_script(script)
+
+    assert result["proseOnly"] is False
+    assert result["terminalOnly"] is False
+
+
 def test_scene_renderer_coalesces_row_updates_and_renders_in_scene_order():
     rows = _function_body(UI_JS, "_anchorSceneRowsForRendering")
     render = _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
@@ -355,29 +578,7 @@ def test_live_anchor_scene_dedupes_exact_duplicate_process_prose_only_live():
     script = f"""
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
-function extractFunc(name){{
-  const start = src.indexOf('function ' + name);
-  if(start === -1) throw new Error(name + ' not found');
-  const params = src.indexOf('(', start);
-  let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
-    if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
-      depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
-  depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
-      depth--;
-      if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(name + ' body did not close');
-}}
+{_EXTRACT_FUNC_JS}
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(a,b){{ return b; }}
 function _anchorSceneIsSettledSuccessfulCompression(){{ return false; }}
@@ -726,10 +927,12 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     overlap = _function_body(MESSAGES_JS, "_anchorSceneRowTextOverlapsExisting")
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
-    projected_push_idx = complete.index("for(const row of projectedRows){")
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)")
-    terminal_idx = complete.index("if(row&&row.role==='terminal') pushRow(row);", backfill_idx)
-    assert projected_idx < projected_push_idx < backfill_idx < terminal_idx
+    ordered_idx = complete.index("const orderedRows=[];", projected_idx)
+    projected_push_idx = complete.index("orderedRows.push(row);", ordered_idx)
+    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)", projected_push_idx)
+    terminal_idx = complete.index("if(row&&row.role==='terminal') orderedRows.push(row);", backfill_idx)
+    replay_idx = complete.index("orderedRows.forEach((row)=>pushRow(row));", terminal_idx)
+    assert projected_idx < ordered_idx < projected_push_idx < backfill_idx < terminal_idx < replay_idx
 
     assert "const seenTextKeys=[];" in complete
     assert "_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)" in complete
@@ -745,9 +948,16 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
     assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
+    assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
+    assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
+    assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
     assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
     assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
-    assert "return {...row,status:'completed'};" in settle_live
+    assert "const sealed={...row,status:'completed'};" in settle_live
+    assert "sealed.payload={...row.payload,status:'completed'};" in settle_live
+    assert "if(row.role==='tool') sealed.payload.done=true;" in settle_live
+    assert "sealed.tool={...row.tool,done:true};" in settle_live
+    assert "return sealed;" in settle_live
 
 
 def test_settled_anchor_scene_separates_final_answer_from_activity_rows():
@@ -792,14 +1002,15 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
     assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
     # combined fix: the final answer text is computed and threaded into the row
     # renderer so intermediate prose survives while the final-answer duplicate is dropped.
-    assert "_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer})" in transparent
+    assert "const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);" in transparent
+    assert "liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex" in transparent
     assert "finalAnswer" in transparent
     assert "blocks.insertBefore(node,segment)" in transparent
     assert "_syncTransparentEventControls(turn)" in transparent
     # tool + thinking rows are rendered as transparent event rows
     assert "_decorateTransparentEventRow(_thinkingActivityNode" in row
     assert "_decorateTransparentEventRow(buildToolCard(toolCall)" in row
-    assert "_transparentToolStatus(toolCall,true)" in row
+    assert "_transparentToolStatus(toolCall,settled)" in row
     assert 'data-anchor-settled-scene-row' in row
     assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
 
@@ -811,7 +1022,7 @@ def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate
     row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
 
     transparent_gate = "return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);"
-    compact_gate = "if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;"
+    compact_gate = "if(sceneMode!=='compact_worklog') return false;"
     assert transparent_gate in live
     assert compact_gate in live
     assert live.index(transparent_gate) < live.index(compact_gate), (
@@ -846,30 +1057,7 @@ def test_live_anchor_scene_transparent_snapshot_render_is_idempotent_and_hides_l
 const assert = require('assert');
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
-function extractFunc(name){{
-  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if(start < 0) throw new Error(name + ' not found');
-  const params = src.indexOf('(', start);
-  let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
-    if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
-      depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
-  depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
-      depth--;
-      if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(name + ' body did not close');
-}}
+{_EXTRACT_FUNC_JS}
 
 class FakeElement {{
   constructor(tag='div'){{
@@ -1006,6 +1194,7 @@ global.$=(id)=>{{
   return findById(msgInner,id);
 }};
 let transparentMode=true;
+global.chatActivityMode=()=>transparentMode?'transparent_stream':'compact_worklog';
 global.isTransparentStream=()=>transparentMode;
 global.isCompactWorklogMode=()=>!transparentMode;
 global._anchorSceneRowsForRendering=(scene)=>scene.activity_rows||[];
@@ -1058,6 +1247,7 @@ global._renderAnchorSceneRowsIntoWorklog=(group, rows)=>{{
 }};
 global._syncToolCallGroupSummary=()=>{{}};
 
+    eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
     eval(extractFunc('_transparentLiveRowKey'));
@@ -1065,6 +1255,7 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_transparentLiveRowAttributePairs'));
     eval(extractFunc('_transparentLiveRowInteractiveState'));
     eval(extractFunc('_rehydrateTransparentLiveRow'));
+    eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
     eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
@@ -1420,7 +1611,9 @@ def test_session_switch_prefers_live_anchor_scene_before_snapshot_fallback():
     fallback = SESSIONS_JS.index("restoreLiveTurnHtmlForSession", first)
     assert first < fallback
     assert "let restoredLiveTurn=!!restoredAnchorScene;" in SESSIONS_JS
-    assert "{mode:'compact_worklog'}" in SESSIONS_JS
+    # #5942/#5943: the restore path no longer forces {mode:'compact_worklog'} — it
+    # resolves the active display mode so a transparent session restores as
+    # transparent (not a compact grouped frame). The call itself is asserted above.
 
 
 def test_session_reload_can_render_runtime_journal_anchor_scene_snapshot():

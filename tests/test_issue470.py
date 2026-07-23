@@ -19,7 +19,7 @@ import re
 import html as _html
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text()
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

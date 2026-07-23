@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -78,6 +79,7 @@ _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
+_PROVIDERS_CACHE_TTL_SECONDS = 30.0
 _ACCOUNT_USAGE_CACHE_MAX_ENTRIES = 64
 _ACCOUNT_USAGE_WORKER_IDLE_SECONDS = 5 * 60
 _ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
@@ -134,6 +136,8 @@ _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 # represented as non-None snapshots and remain cacheable.
 _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
+_providers_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_providers_cache_lock = threading.Lock()
 _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
 
@@ -967,6 +971,74 @@ def _get_hermes_home() -> Path:
         return Path.home() / ".hermes"
 
 
+def _providers_file_mtime_ns(path: Path) -> int:
+    """Best-effort file mtime for providers-cache invalidation."""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _providers_config_fingerprint(cfg: Any) -> str:
+    """Stable fingerprint for config fields that shape the Providers response."""
+    try:
+        return hashlib.sha256(
+            json.dumps(cfg, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return repr(cfg)
+
+
+def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
+    """Return a profile-scoped cache key for ``get_providers()`` (#6010).
+
+    The endpoint reads provider state from the active Hermes home plus the
+    current config.  Include the home path and the two files users commonly
+    mutate from Settings so a short TTL never crosses profile boundaries or
+    masks immediate credential/config changes.
+    """
+    home = _get_hermes_home()
+    try:
+        home_key = str(home.resolve())
+    except OSError:
+        home_key = str(home)
+    return (
+        home_key,
+        _providers_file_mtime_ns(home / ".env"),
+        _providers_file_mtime_ns(home / "config.yaml"),
+        _providers_config_fingerprint(cfg),
+    )
+
+
+def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _providers_cache_lock:
+        cached = _providers_cache.get(cache_key)
+        if cached is None:
+            return None
+        ts, payload = cached
+        if now - ts >= _PROVIDERS_CACHE_TTL_SECONDS:
+            _providers_cache.pop(cache_key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> dict[str, Any]:
+    with _providers_cache_lock:
+        # Single-entry by design: /api/providers is cacheable only for the
+        # active profile/config snapshot, so clear older snapshots to avoid
+        # retaining unbounded provider metadata across profile switches.
+        _providers_cache.clear()
+        _providers_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
+    return payload
+
+
+def invalidate_providers_cache() -> None:
+    """Clear cached ``GET /api/providers`` responses."""
+    with _providers_cache_lock:
+        _providers_cache.clear()
+
+
 def _load_env_file(env_path: Path) -> dict[str, str]:
     """Read key=value pairs from a .env file."""
     values: dict[str, str] = {}
@@ -1303,6 +1375,110 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         if key:
             return key
     return None
+
+
+def provider_has_usable_credential(provider_id: str, *, refresh: bool = False) -> bool:
+    """Return True when a provider has a currently usable configured credential."""
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return False
+    if refresh:
+        try:
+            from api.config import invalidate_credential_pool_cache
+
+            invalidate_credential_pool_cache(provider)
+        except Exception:
+            logger.debug("Failed to refresh credential pool before provider availability check", exc_info=True)
+    return _get_provider_api_key(provider) is not None
+
+
+def provider_has_usable_pool_credential(provider_id: str, *, refresh: bool = False) -> bool:
+    """Return True only when the provider's credential-pool lane has a usable entry."""
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return False
+    if refresh:
+        try:
+            from api.config import invalidate_credential_pool_cache
+
+            invalidate_credential_pool_cache(provider)
+        except Exception:
+            logger.debug("Failed to refresh credential pool before pool availability check", exc_info=True)
+    for entry in _pool_entry_payloads(provider):
+        status = str(entry.get("last_status") or "").strip().lower()
+        if status == "dead":
+            continue
+        if status == "exhausted":
+            ns = SimpleNamespace(**entry)
+            if _entry_is_pool_exhausted(ns):
+                continue
+        key = str(
+            entry.get("runtime_api_key")
+            or entry.get("agent_key")
+            or entry.get("access_token")
+            or ""
+        ).strip()
+        if key:
+            return True
+    return False
+
+
+def _credential_secret_fingerprint(secret: str) -> str:
+    value = str(secret or "").strip()
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _entry_secret_fingerprint(entry: dict) -> str:
+    value = str(entry.get("secret_fingerprint") or "").strip().lower()
+    if value.startswith("sha256:"):
+        value = value[len("sha256:"):]
+    if not value:
+        return ""
+    if all(ch in "0123456789abcdef" for ch in value):
+        return value[:16]
+    return ""
+
+
+def _pool_entry_currently_unusable(entry: dict) -> bool:
+    status = str(entry.get("last_status") or "").strip().lower()
+    if status == "dead":
+        return True
+    if status == "exhausted":
+        ns = SimpleNamespace(**entry)
+        return _entry_is_pool_exhausted(ns)
+    return False
+
+
+def provider_has_process_wakeup_recovery_credential(provider_id: str, *, refresh: bool = False) -> bool:
+    """Return True when a paused credential-pool wakeup lane can safely retry."""
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return False
+    if provider_has_usable_pool_credential(provider, refresh=refresh):
+        return True
+    configured_key = _get_provider_api_key(provider)
+    if not configured_key:
+        return False
+    configured_fingerprint = _credential_secret_fingerprint(configured_key)
+    if not configured_fingerprint:
+        return False
+    has_unusable_pool_entry = False
+    has_unknown_unusable_pool_entry = False
+    for entry in _pool_entry_payloads(provider):
+        entry_fingerprint = _entry_secret_fingerprint(entry)
+        if not _pool_entry_currently_unusable(entry):
+            if entry_fingerprint and entry_fingerprint == configured_fingerprint:
+                return True
+            continue
+        has_unusable_pool_entry = True
+        if not entry_fingerprint:
+            has_unknown_unusable_pool_entry = True
+            continue
+        if entry_fingerprint == configured_fingerprint:
+            return False
+    return has_unusable_pool_entry and not has_unknown_unusable_pool_entry
 
 
 def _active_provider_id() -> str | None:
@@ -2355,14 +2531,18 @@ def get_providers() -> dict[str, Any]:
       ``config_yaml``, ``oauth``, ``none``)
     - ``models``: list of known model IDs for this provider
     """
-    providers = []
-
     # Collect all known provider IDs from multiple sources
     known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
     known_ids.update(plugin_model_provider_ids())
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
+    cache_key = _providers_cache_key(cfg)
+    cached = _get_cached_providers(cache_key)
+    if cached is not None:
+        return cached
+
+    providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         known_ids.update(providers_cfg.keys())
@@ -2679,10 +2859,11 @@ def get_providers() -> dict[str, Any]:
         return (3, pid)
     providers.sort(key=_provider_sort_key)
 
-    return {
+    result = {
         "providers": providers,
         "active_provider": active_provider,
     }
+    return _store_cached_providers(cache_key, result)
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
@@ -2735,6 +2916,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     # disrupting active streaming sessions that may be reading config.cfg.
     invalidate_models_cache()
     invalidate_account_usage_status_cache(provider_id)
+    invalidate_providers_cache()
 
     return {
         "ok": True,
@@ -2837,5 +3019,6 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         # reload_config() also acquires _cfg_lock internally.
         if changed:
             reload_config()
+            invalidate_providers_cache()
     except Exception:
         logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)

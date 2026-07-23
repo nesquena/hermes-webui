@@ -46,7 +46,21 @@ async function api(path,opts={}){
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
           // and for subpath mounts like /hermes/, where /login escapes to the site root.
           if(res.status===401){
-            if(redirect401) window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
+            // #5578: if we're ALREADY on the login page, appending
+            // window.location.pathname+search (which contains ?next=…) into a
+            // fresh next= wraps the login URL into itself and re-encodes it —
+            // exponential URL growth on each expired-auth bounce until the tab
+            // breaks. On the login page, just reload login WITHOUT a next (the
+            // page preserves its own inner next); elsewhere, capture the path.
+            if(redirect401){
+              // Already on the login page? Reload login WITHOUT a next.
+              const _p=(window.location.pathname||'').replace(/\/+$/,'');
+              if(/(?:^|\/)login$/.test(_p)){
+                window.location.href='login';
+              }else{
+                window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
+              }
+            }
             // Callers can opt out of navigation and handle the unauthenticated state themselves.
             return;
           }
@@ -228,6 +242,23 @@ function _workspacePathIsReadOnly(path){
 }
 
 function _workspaceRouteForPath(path, kind, opts={}){
+  // Resolve the app-relative "/api/…" route against document.baseURI so the
+  // URLs that are consumed OUTSIDE api() — previewImg.src, the media/pdf/html
+  // frame src, the download anchor, window.open — keep working under a subpath
+  // mount like /hermes/. A bare "/api/…" string resolves to the server root
+  // there and 404s. (api() strips the leading slash and re-resolves against
+  // baseURI itself, so routes passed through it are unaffected by already
+  // being absolute.)
+  const route=_workspaceRouteForPathRel(path, kind, opts);
+  if(!route) return route;
+  // Non-browser test harnesses have no document/location: keep the app-relative form.
+  const base=(typeof document!=='undefined'&&document.baseURI)||(typeof location!=='undefined'&&location.href)||'';
+  if(!base||!/^https?:\/\//i.test(base)) return route;
+  const rel=route.startsWith('/') ? route.slice(1) : route;
+  return new URL(rel, base).href;
+}
+
+function _workspaceRouteForPathRel(path, kind, opts={}){
   if(!S.session) return '';
   const normalizedPath = _normalizeWorkspaceRelPath(path);
   const grant = _workspaceEscapeGrantForPath(normalizedPath);
@@ -555,7 +586,27 @@ function renderSessionArtifacts(){
     if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
     return p;
   };
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  const splitArtifactDisplayPath = (path) => {
+    const slash = path.lastIndexOf('/');
+    if(slash < 0) return {name: path, head: '', tail: ''};
+    const directory = path.slice(0, slash + 1);
+    const parentSlash = directory.lastIndexOf('/', directory.length - 2);
+    return {
+      name: path.slice(slash + 1),
+      head: directory.slice(0, parentSlash + 1),
+      tail: directory.slice(parentSlash + 1),
+    };
+  };
+  root.innerHTML = items.map(item => {
+    const path = displayPath(item.path);
+    const parts = splitArtifactDisplayPath(path);
+    const directory = (parts.head || parts.tail)
+      ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
+      : '';
+    const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
+    const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
+    return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
+  }).join('');
 }
 
 async function _workspacePathExists(path){
@@ -1215,6 +1266,39 @@ function openInBrowser(){
   window.open(url,'_blank','noopener');
 }
 // openInBrowser keeps the helper-based raw path, which expands to an explicit &inline=1 URL.
+
+async function copyPreviewRelativePath(){
+  if(!_previewCurrentPath) return;
+  const btn=$('btnCopyPreviewRelPath');
+  if(btn&&btn.disabled) return;
+  if(btn) btn.disabled=true;
+  try{
+    const rel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath;
+    if(typeof _copyTextWithFallback==='function'){
+      await _copyTextWithFallback(rel,t('path_copied'),t('path_copy_failed'));
+      return;
+    }
+    try{
+      await navigator.clipboard.writeText(rel);
+      showToast(t('path_copied'));
+    }catch(clipErr){
+      const ta=document.createElement('textarea');
+      ta.value=rel;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) showToast(t('path_copied'));
+      else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+    }
+  }catch(err){
+    showToast(t('path_copy_failed')+(err.message||err));
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
 
 // ── Workspace upload ──────────────────────────────────────────────────
 function triggerWorkspaceUpload() {

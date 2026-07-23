@@ -464,15 +464,29 @@ function _syncCronScheduleWarning() {
   const warning = $('cronFormScheduleOnceWarning');
   if (!input || !warning) return;
   warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
+  _syncCronSchedulePreview();
+}
+
+// Live preview of the generated cron expression in the preset hint line (the
+// cron-job.org / GitHub-schedule-editor convention) so a cron-literate user sees
+// exactly what the friendly controls produce. Empty on Custom (the raw field is shown).
+function _syncCronSchedulePreview() {
+  const preview = $('cronFormSchedulePreview');
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!preview) return;
+  const presetId = presetEl ? presetEl.value : 'custom';
+  const expr = String((scheduleEl && scheduleEl.value) || '').trim();
+  preview.textContent = (presetId !== 'custom' && expr) ? `${expr} · ` : '';
 }
 
 const CRON_SCHEDULE_PRESETS = [
-  { id: 'custom', value: '', label: 'cron_schedule_preset_custom', fallback: 'Custom' },
-  { id: 'hourly', value: 'every 1h', label: 'cron_schedule_preset_hourly', fallback: 'Hourly' },
-  { id: 'daily', value: '0 9 * * *', label: 'cron_schedule_preset_daily', fallback: 'Daily' },
-  { id: 'weekdays', value: '0 9 * * 1-5', label: 'cron_schedule_preset_weekdays', fallback: 'Weekdays' },
-  { id: 'weekly', value: '0 9 * * 1', label: 'cron_schedule_preset_weekly', fallback: 'Weekly' },
-  { id: 'monthly', value: '0 9 1 * *', label: 'cron_schedule_preset_monthly', fallback: 'Monthly' },
+  { id: 'hourly', label: 'cron_schedule_preset_hourly', fallback: 'Hourly', fields: ['minute'], defaults: { minute: 0 } },
+  { id: 'daily', label: 'cron_schedule_preset_daily', fallback: 'Daily', fields: ['time'], defaults: { hour: 9, minute: 0 } },
+  { id: 'weekdays', label: 'cron_schedule_preset_weekdays', fallback: 'Weekdays (Mon–Fri)', fields: ['time'], defaults: { hour: 9, minute: 0 } },
+  { id: 'weekly', label: 'cron_schedule_preset_weekly', fallback: 'Weekly', fields: ['weekday', 'time'], defaults: { hour: 9, minute: 0, weekday: 1 } },
+  { id: 'monthly', label: 'cron_schedule_preset_monthly', fallback: 'Monthly', fields: ['monthDay', 'time'], defaults: { hour: 9, minute: 0, monthDay: 1 } },
+  { id: 'custom', label: 'cron_schedule_preset_custom', fallback: 'Custom', fields: [] },
 ];
 
 function _cronSchedulePresetOptionHtml() {
@@ -481,18 +495,211 @@ function _cronSchedulePresetOptionHtml() {
     .join('');
 }
 
-function _cronSchedulePresetIdForValue(value) {
+function _cronSchedulePresetForId(presetId) {
+  return CRON_SCHEDULE_PRESETS.find((entry) => entry.id === presetId) || null;
+}
+
+function _cronSchedulePresetControlIds() {
+  return {
+    time: 'cronFormScheduleTime',
+    minute: 'cronFormScheduleMinute',
+    weekday: 'cronFormScheduleWeekday',
+    monthDay: 'cronFormScheduleMonthDay',
+  };
+}
+
+// Which visible control wrapper each logical field lives in. `hour`+`minute` for
+// time-based presets share the single #cronFormScheduleTime picker (in the Time
+// field); `minute` alone (Hourly) uses the standalone Minute field.
+function _cronSchedulePresetFieldWrapId(field) {
+  if (field === 'time' || field === 'hour') return 'cronFormScheduleTimeField';
+  if (field === 'minute') return 'cronFormScheduleMinuteField';
+  if (field === 'weekday') return 'cronFormScheduleWeekdayField';
+  if (field === 'monthDay') return 'cronFormScheduleMonthDayField';
+  return '';
+}
+
+function _cronSchedulePresetFieldId(field) {
+  const ids = _cronSchedulePresetControlIds();
+  return ids[field] || '';
+}
+
+function _cronSchedulePresetFieldEl(field) {
+  const id = _cronSchedulePresetFieldId(field);
+  return id ? $(id) : null;
+}
+
+function _cronSchedulePresetBounds(field) {
+  if (field === 'hour') return { min: 0, max: 23 };
+  if (field === 'minute') return { min: 0, max: 59 };
+  if (field === 'weekday') return { min: 0, max: 6 };
+  if (field === 'monthDay') return { min: 1, max: 31 };
+  return { min: 0, max: 999 };
+}
+
+function _cronSchedulePresetNormalizeValue(field, value, fallback) {
+  const bounds = _cronSchedulePresetBounds(field);
+  const parsed = parseInt(String(value ?? '').trim(), 10);
+  const fallbackParsed = parseInt(String(fallback ?? bounds.min).trim(), 10);
+  const safeFallback = Number.isFinite(fallbackParsed) ? fallbackParsed : bounds.min;
+  const n = Number.isFinite(parsed) ? parsed : safeFallback;
+  return String(Math.min(bounds.max, Math.max(bounds.min, n)));
+}
+
+function _cronSchedulePresetValueForField(field, fallback) {
+  // hour/minute for time-based presets come from the single #cronFormScheduleTime
+  // picker ("HH:MM"); the standalone Minute box (Hourly) still reads directly.
+  if (field === 'hour' || field === 'minute') {
+    const timeEl = $('cronFormScheduleTime');
+    const minuteBox = $('cronFormScheduleMinute');
+    // Hourly uses the standalone minute box; if the Time picker isn't the visible
+    // source for minute, prefer the minute box when it's the shown control.
+    if (field === 'minute' && minuteBox && (!timeEl || _cronScheduleMinuteBoxIsActive())) {
+      return _cronSchedulePresetNormalizeValue('minute', minuteBox.value, fallback);
+    }
+    if (timeEl && /^\d{1,2}:\d{2}$/.test(String(timeEl.value || '').trim())) {
+      const [h, m] = String(timeEl.value).trim().split(':');
+      return _cronSchedulePresetNormalizeValue(field, field === 'hour' ? h : m, fallback);
+    }
+    return _cronSchedulePresetNormalizeValue(field, fallback, fallback);
+  }
+  const el = _cronSchedulePresetFieldEl(field);
+  const raw = el ? String(el.value || '').trim() : '';
+  return _cronSchedulePresetNormalizeValue(field, raw, fallback);
+}
+
+// The standalone Minute box is the active minute source only for the Hourly preset
+// (the only preset whose visible fields include a bare 'minute').
+function _cronScheduleMinuteBoxIsActive() {
+  const presetEl = $('cronFormSchedulePreset');
+  return !!(presetEl && presetEl.value === 'hourly');
+}
+
+function _cronSchedulePresetRawFieldInBounds(field, value) {
+  const raw = String(value || '').trim();
+  if (!/^\d+$/.test(raw)) return false;
+  const bounds = _cronSchedulePresetBounds(field);
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= bounds.min && parsed <= bounds.max;
+}
+
+function _cronSchedulePresetApplyValues(values) {
+  // Write hour/minute into the single time picker as zero-padded HH:MM.
+  if (values.hour != null || values.minute != null) {
+    const timeEl = $('cronFormScheduleTime');
+    if (timeEl) {
+      const h = _cronSchedulePresetNormalizeValue('hour', values.hour, values.hour ?? 9);
+      const m = _cronSchedulePresetNormalizeValue('minute', values.minute, values.minute ?? 0);
+      timeEl.value = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+  }
+  if (values.minute != null) {
+    const minuteBox = $('cronFormScheduleMinute');
+    if (minuteBox) minuteBox.value = _cronSchedulePresetNormalizeValue('minute', values.minute, values.minute);
+  }
+  ['weekday', 'monthDay'].forEach((field) => {
+    const el = _cronSchedulePresetFieldEl(field);
+    if (!el || values[field] == null) return;
+    el.value = _cronSchedulePresetNormalizeValue(field, values[field], values[field]);
+  });
+}
+
+function _cronSchedulePresetSyncVisibility(presetId) {
+  const wrapper = $('cronFormSchedulePresetParams');
+  const customRow = $('cronFormScheduleCustomRow');
+  const preset = _cronSchedulePresetForId(presetId);
+  const showFields = preset && Array.isArray(preset.fields) ? preset.fields : [];
+  const isCustom = presetId === 'custom';
+  // Preset param controls hide entirely on Custom; the raw cron expression row
+  // shows ONLY on Custom (kept in the DOM as a hidden field otherwise).
+  if (wrapper) wrapper.style.display = isCustom ? 'none' : '';
+  if (customRow) customRow.style.display = isCustom ? '' : 'none';
+  ['time', 'minute', 'weekday', 'monthDay'].forEach((field) => {
+    const fieldWrap = $(_cronSchedulePresetFieldWrapId(field));
+    if (fieldWrap) fieldWrap.style.display = showFields.includes(field) ? '' : 'none';
+  });
+}
+
+function _cronSchedulePresetValuesForSelection(presetId) {
+  const preset = _cronSchedulePresetForId(presetId);
+  const defaults = (preset && preset.defaults) || {};
+  if (presetId === 'hourly') {
+    return { minute: _cronSchedulePresetValueForField('minute', defaults.minute) };
+  }
+  if (presetId === 'daily' || presetId === 'weekdays') {
+    return {
+      hour: _cronSchedulePresetValueForField('hour', defaults.hour),
+      minute: _cronSchedulePresetValueForField('minute', defaults.minute),
+    };
+  }
+  if (presetId === 'weekly') {
+    return {
+      hour: _cronSchedulePresetValueForField('hour', defaults.hour),
+      minute: _cronSchedulePresetValueForField('minute', defaults.minute),
+      weekday: _cronSchedulePresetValueForField('weekday', defaults.weekday),
+    };
+  }
+  if (presetId === 'monthly') {
+    return {
+      hour: _cronSchedulePresetValueForField('hour', defaults.hour),
+      minute: _cronSchedulePresetValueForField('minute', defaults.minute),
+      monthDay: _cronSchedulePresetValueForField('monthDay', defaults.monthDay),
+    };
+  }
+  return {};
+}
+
+function _cronSchedulePresetValueForSelection(presetId, selectedValues) {
+  const values = selectedValues || _cronSchedulePresetValuesForSelection(presetId);
+  if (presetId === 'hourly') return `${values.minute} * * * *`;
+  if (presetId === 'daily') return `${values.minute} ${values.hour} * * *`;
+  if (presetId === 'weekdays') return `${values.minute} ${values.hour} * * 1-5`;
+  if (presetId === 'weekly') return `${values.minute} ${values.hour} * * ${values.weekday}`;
+  if (presetId === 'monthly') return `${values.minute} ${values.hour} ${values.monthDay} * *`;
+  return '';
+}
+
+function _cronSchedulePresetStateForInput(value) {
   const schedule = String(value || '').trim();
-  const preset = CRON_SCHEDULE_PRESETS.find((entry) => entry.value && entry.value === schedule);
-  return preset ? preset.id : 'custom';
+  if (!schedule) return { presetId: 'custom' };
+  if (/^every\s+1h$/i.test(schedule)) {
+    return { presetId: 'hourly', minute: '0' };
+  }
+  if (schedule.startsWith('@')) return { presetId: 'custom' };
+  const parts = schedule.split(/\s+/);
+  if (parts.length !== 5) return { presetId: 'custom' };
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  if (!_cronSchedulePresetRawFieldInBounds('minute', minute)) return { presetId: 'custom' };
+  if (_cronSchedulePresetRawFieldInBounds('hour', hour) && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+    return { presetId: 'daily', minute, hour };
+  }
+  if (_cronSchedulePresetRawFieldInBounds('hour', hour) && dayOfMonth === '*' && month === '*' && dayOfWeek === '1-5') {
+    return { presetId: 'weekdays', minute, hour };
+  }
+  if (hour === '*' && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+    return { presetId: 'hourly', minute };
+  }
+  if (_cronSchedulePresetRawFieldInBounds('hour', hour) && dayOfMonth === '*' && month === '*' && (_cronSchedulePresetRawFieldInBounds('weekday', dayOfWeek) || dayOfWeek === '7')) {
+    return { presetId: 'weekly', minute, hour, weekday: dayOfWeek === '7' ? '0' : dayOfWeek };
+  }
+  if (_cronSchedulePresetRawFieldInBounds('hour', hour) && _cronSchedulePresetRawFieldInBounds('monthDay', dayOfMonth) && month === '*' && dayOfWeek === '*') {
+    return { presetId: 'monthly', minute, hour, monthDay: dayOfMonth };
+  }
+  return { presetId: 'custom' };
+}
+
+function _cronSchedulePresetIdForValue(value) {
+  return _cronSchedulePresetStateForInput(value).presetId;
 }
 
 function _syncCronSchedulePresetFromInput() {
   const presetEl = $('cronFormSchedulePreset');
   const scheduleEl = $('cronFormSchedule');
   if (!presetEl || !scheduleEl) return;
-  const presetId = _cronSchedulePresetIdForValue(scheduleEl.value);
-  presetEl.value = presetId;
+  const state = _cronSchedulePresetStateForInput(scheduleEl.value);
+  presetEl.value = state.presetId;
+  _cronSchedulePresetSyncVisibility(state.presetId);
+  if (state.presetId !== 'custom') _cronSchedulePresetApplyValues(state);
 }
 
 function _syncCronSchedulePresetAndWarning() {
@@ -505,12 +712,29 @@ function _applyCronSchedulePresetSelection() {
   const scheduleEl = $('cronFormSchedule');
   if (!presetEl || !scheduleEl) return;
   const presetId = presetEl.value;
-  const preset = CRON_SCHEDULE_PRESETS.find((entry) => entry.id === presetId);
-  if (preset && preset.value) {
-    scheduleEl.value = preset.value;
-    _syncCronSchedulePresetAndWarning();
+  if (presetId !== 'custom') {
+    const values = _cronSchedulePresetValuesForSelection(presetId);
+    _cronSchedulePresetApplyValues(values);
+    scheduleEl.value = _cronSchedulePresetValueForSelection(presetId, values);
+    _cronSchedulePresetSyncVisibility(presetId);
+    _syncCronScheduleWarning();
     return;
   }
+  _cronSchedulePresetSyncVisibility(presetId);
+  _syncCronScheduleWarning();
+}
+
+// Regenerate the cron expression from the current field values WITHOUT writing the
+// clamped values back into the field the user is editing — so typing into the Minute
+// box (or the time picker) doesn't snap a half-entered value to the default/clamp
+// mid-keystroke. Value clamping still happens on `change`/blur via the full apply.
+function _regenCronScheduleFromFields() {
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!presetEl || !scheduleEl) return;
+  const presetId = presetEl.value;
+  if (presetId === 'custom') return;
+  scheduleEl.value = _cronSchedulePresetValueForSelection(presetId);
   _syncCronScheduleWarning();
 }
 
@@ -519,7 +743,25 @@ function _initCronSchedulePresetControls() {
   const scheduleEl = $('cronFormSchedule');
   if (!presetEl || !scheduleEl) return;
   presetEl.addEventListener('change', _applyCronSchedulePresetSelection);
-  scheduleEl.addEventListener('input', _syncCronSchedulePresetAndWarning);
+  if ($('cronFormSchedulePresetParams')) {
+    ['cronFormScheduleTime', 'cronFormScheduleMinute', 'cronFormScheduleWeekday', 'cronFormScheduleMonthDay'].forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      // On `change`/blur, clamp + normalize (writes values back). On `input`
+      // (per-keystroke), only regenerate the expression — never rewrite the field
+      // being typed into, so partial input like clearing Hour to type "14" isn't
+      // snapped to the default (#5554 UX fix).
+      el.addEventListener('change', _applyCronSchedulePresetSelection);
+      el.addEventListener('input', _regenCronScheduleFromFields);
+    });
+  }
+  // On raw-cron `input` (only reachable on Custom, where the raw row is shown),
+  // update ONLY the warning + preview — do NOT re-detect the preset or sync
+  // visibility, or a partial value momentarily matching a preset (e.g. typing
+  // "0 9 * * 1,3" transiently equals Weekly's "0 9 * * 1") would switch the preset
+  // and hide the focused raw field mid-keystroke (#5554). Preset re-detection runs
+  // on initial render and on `change`/blur.
+  scheduleEl.addEventListener('input', _syncCronScheduleWarning);
   scheduleEl.addEventListener('change', _syncCronSchedulePresetAndWarning);
   _syncCronSchedulePresetAndWarning();
 }
@@ -1299,7 +1541,7 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
+  _renderCronForm({ name:'', schedule:'0 9 * * *', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
@@ -1370,13 +1612,44 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <input type="text" id="cronFormName" value="${esc(name || '')}" placeholder="${esc(t('cron_name_placeholder') || 'Optional')}" autocomplete="off">
         </div>
         <div class="detail-form-row">
-          <label for="cronFormSchedulePreset">${esc(t('cron_schedule_preset_label') || 'Preset')}</label>
-          <select id="cronFormSchedulePreset">
-            ${_cronSchedulePresetOptionHtml()}
-          </select>
+          <label for="cronFormSchedulePreset">${esc(t('cron_schedule_preset_label') || 'Schedule')}</label>
+          <div class="cron-schedule-preset-shell">
+            <select id="cronFormSchedulePreset" class="cron-schedule-preset-select">
+              ${_cronSchedulePresetOptionHtml()}
+            </select>
+            <div id="cronFormSchedulePresetParams" class="cron-schedule-preset-params" style="display:none">
+              <div class="cron-schedule-preset-field" id="cronFormScheduleWeekdayField">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_on') || 'on')}</span>
+                <select id="cronFormScheduleWeekday" aria-label="${esc(t('cron_schedule_weekday_label') || 'Day of week')}">
+                  <option value="0">${esc(t('cron_weekday_sun') || 'Sunday')}</option>
+                  <option value="1" selected>${esc(t('cron_weekday_mon') || 'Monday')}</option>
+                  <option value="2">${esc(t('cron_weekday_tue') || 'Tuesday')}</option>
+                  <option value="3">${esc(t('cron_weekday_wed') || 'Wednesday')}</option>
+                  <option value="4">${esc(t('cron_weekday_thu') || 'Thursday')}</option>
+                  <option value="5">${esc(t('cron_weekday_fri') || 'Friday')}</option>
+                  <option value="6">${esc(t('cron_weekday_sat') || 'Saturday')}</option>
+                </select>
+              </div>
+              <div class="cron-schedule-preset-field" id="cronFormScheduleMonthDayField">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_on_day') || 'on day')}</span>
+                <select id="cronFormScheduleMonthDay" aria-label="${esc(t('cron_schedule_month_day_label') || 'Day of month')}">
+                  ${Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('')}
+                </select>
+              </div>
+              <div class="cron-schedule-preset-field" id="cronFormScheduleTimeField">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_at') || 'at')}</span>
+                <input type="time" id="cronFormScheduleTime" value="09:00" step="60" autocomplete="off" aria-label="${esc(t('cron_schedule_time_label') || 'Time')}">
+              </div>
+              <div class="cron-schedule-preset-field" id="cronFormScheduleMinuteField">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_at_minute') || 'at minute')}</span>
+                <input type="number" id="cronFormScheduleMinute" min="0" max="59" step="1" value="0" autocomplete="off" aria-label="${esc(t('cron_schedule_minute_label') || 'Minute')}">
+              </div>
+              <div class="detail-form-hint cron-schedule-preset-time-hint"><span id="cronFormSchedulePreview" class="cron-schedule-preview"></span>${esc(t('cron_schedule_time_hint') || 'Time is server time; cron runs server-side.')}</div>
+            </div>
+          </div>
         </div>
-        <div class="detail-form-row">
-          <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
+        <div class="detail-form-row" id="cronFormScheduleCustomRow" style="display:none">
+          <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Cron expression')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
           <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
@@ -2253,6 +2526,7 @@ function _kanbanRenderBoard(){
     board.innerHTML = _kanbanEmptyBoardHtml();
     return;
   }
+  board.classList.toggle('kanban-board-consolidated', !_kanbanLanesByProfile);
   const columns = _kanbanVisibleTasks();
   const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
@@ -2385,7 +2659,7 @@ function _kanbanLooksLikeStaleClientError(err){
 function _kanbanUnavailableHtml(err){
   const raw = String((err && err.message) || err || '');
   if (_kanbanLooksLikeStaleClientError(err)) {
-    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
+    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">${esc(t('update_hard_refresh_now')||'Hard refresh now')}</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
   }
   const msg = `${esc(t('kanban_unavailable'))}: ${esc(raw)}`;
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
@@ -5375,19 +5649,24 @@ function syncWorkspaceDisplays(){
   const mobileAction=$('composerMobileWorkspaceAction');
   const mobileLabel=$('composerMobileWorkspaceLabel');
   const composerDropdown=$('composerWsDropdown');
-  if(!hasWorkspace && composerDropdown) composerDropdown.classList.remove('open');
+  if(!hasWorkspace && composerDropdown) _setWorkspaceDropdownOpenState(composerDropdown,false);
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
+  const composerExpanded=!!(composerDropdown&&composerDropdown.classList.contains('open'));
   if(composerChip){
     composerChip.disabled=!hasWorkspace;
     composerChip.title=hasWorkspace?ws:t('no_workspace');
-    composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    composerChip.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
+    composerChip.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    composerChip.classList.toggle('active',composerExpanded);
   }
   if(mobileAction){
     mobileAction.title=hasWorkspace?ws:t('no_workspace');
-    mobileAction.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    mobileAction.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
+    mobileAction.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    mobileAction.classList.toggle('active',composerExpanded);
   }
 }
 
@@ -5400,6 +5679,41 @@ async function loadWorkspaceList(){
     if(typeof syncTerminalButton==='function') syncTerminalButton();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
+}
+
+function _setWorkspaceDropdownOpenState(dd,open){
+  if(!dd)return;
+  dd.classList.toggle('open',!!open);
+  dd.hidden=!open;
+  dd.setAttribute('aria-hidden',open?'false':'true');
+  if(open){
+    try{dd.inert=false;}catch(_){}
+    dd.removeAttribute('inert');
+  }else{
+    try{dd.inert=true;}catch(_){}
+    dd.setAttribute('inert','');
+  }
+}
+
+function _getComposerWorkspaceFocusTarget(){
+  const panel=(typeof $==='function')?$('composerMobileConfigPanel'):null;
+  const mobileAction=(typeof $==='function')?$('composerMobileWorkspaceAction'):null;
+  if(panel&&panel.classList.contains('open')&&mobileAction&&!mobileAction.disabled) return mobileAction;
+  return (typeof $==='function')?$('composerWorkspaceChip'):null;
+}
+
+function _focusComposerWorkspaceTarget(target){
+  if(target&&!target.disabled&&typeof target.focus==='function'){
+    try{target.focus({preventScroll:true});}
+    catch(_){target.focus();}
+  }
+}
+
+function _shouldRestoreComposerWorkspaceFocus(dd){
+  if(typeof document==='undefined') return true;
+  const active=document.activeElement;
+  if(!active||active===document.body) return true;
+  return !!(dd&&dd.contains(active));
 }
 
 function _renderWorkspaceAction(label, meta, iconSvg, onClick){
@@ -5555,7 +5869,7 @@ function toggleWsDropdown(){
     closeProfileDropdown(); // close profile dropdown if open
     loadWorkspaceList().then(data=>{
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
-      dd.classList.add('open');
+      _setWorkspaceDropdownOpenState(dd,true);
     });
   }
 }
@@ -5575,10 +5889,16 @@ function toggleComposerWsDropdown(){
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
-      dd.classList.add('open');
+      _setWorkspaceDropdownOpenState(dd,true);
       _positionComposerWsDropdown();
-      if(chip) chip.classList.add('active');
-      if(mobileAction) mobileAction.classList.add('active');
+      if(chip){
+        chip.classList.add('active');
+        chip.setAttribute('aria-expanded','true');
+      }
+      if(mobileAction){
+        mobileAction.classList.add('active');
+        mobileAction.setAttribute('aria-expanded','true');
+      }
     });
   }
 }
@@ -5588,10 +5908,16 @@ function closeWsDropdown(){
   const composerDd=$('composerWsDropdown');
   const composerChip=$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');
-  if(dd)dd.classList.remove('open');
-  if(composerDd)composerDd.classList.remove('open');
-  if(composerChip)composerChip.classList.remove('active');
-  if(mobileAction)mobileAction.classList.remove('active');
+  if(dd)_setWorkspaceDropdownOpenState(dd,false);
+  if(composerDd)_setWorkspaceDropdownOpenState(composerDd,false);
+  if(composerChip){
+    composerChip.classList.remove('active');
+    composerChip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
 }
 document.addEventListener('click',e=>{
   if(
@@ -5978,7 +6304,9 @@ async function promptWorkspacePath(){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws)return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): worktree:false is explicit so a config
+      // worktree default can't leak a worktree from a workspace prompt.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6014,7 +6342,9 @@ async function switchToWorkspace(path,name){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — a workspace
+      // switch from a blank page is not deliberate New Chat intent.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6022,6 +6352,36 @@ async function switchToWorkspace(path,name){
   // Workspace mutation during a live turn would desync the active stream context.
   if(S.busy){
     showToast(t('workspace_busy_switch'));
+    return;
+  }
+  // #5473 (opt-in, default off): treat switching to a DIFFERENT workspace as a
+  // new-chat boundary instead of mutating the current session in place. A
+  // workspace switch changes the project-context files the agent loaded, so
+  // reusing the session would carry stale cross-workspace context. Only fires
+  // when: the setting is on, the target workspace actually differs from the
+  // current one, and the current conversation has real messages worth keeping on
+  // its original workspace. Same-workspace selection stays an in-place refresh.
+  if(
+    window._newChatOnWorkspaceSwitch===true &&
+    S.session && S.session.workspace && path && path!==S.session.workspace &&
+    Array.isArray(S.messages) && S.messages.length>0
+  ){
+    if(typeof _previewDirty!=='undefined'&&_previewDirty){
+      const discard=await showConfirmDialog({
+        title:t('discard_file_edits_title'),
+        message:t('discard_file_edits_message'),
+        confirmLabel:t('discard'),
+        danger:true
+      });
+      if(!discard)return;
+      if(typeof cancelEditMode==='function')cancelEditMode();
+      if(typeof clearPreview==='function')clearPreview();
+    }
+    closeWsDropdown();
+    // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
+    S._profileSwitchWorkspace=path;
+    if(typeof newSession==='function') await newSession(false);
+    showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
   if(typeof _previewDirty!=='undefined'&&_previewDirty){
@@ -6035,6 +6395,10 @@ async function switchToWorkspace(path,name){
     if(typeof cancelEditMode==='function')cancelEditMode();
     if(typeof clearPreview==='function')clearPreview();
   }
+  const composerDd=(typeof $==='function')?$('composerWsDropdown'):null;
+  const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
+    ? _getComposerWorkspaceFocusTarget()
+    : null;
   try{
     closeWsDropdown();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
@@ -6046,6 +6410,12 @@ async function switchToWorkspace(path,name){
     S._profileSwitchWorkspace=null;
     S._pendingSessionToolsets=null;
     syncTopbar();
+    if(
+      restoreComposerFocusTarget&&
+      typeof _shouldRestoreComposerWorkspaceFocus==='function'&&
+      _shouldRestoreComposerWorkspaceFocus(composerDd)&&
+      typeof _focusComposerWorkspaceTarget==='function'
+    ) _focusComposerWorkspaceTarget(restoreComposerFocusTarget);
     await loadDir('.');
     if (_currentPanel === 'memory') await loadMemory(true);
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
@@ -6230,8 +6600,8 @@ async function loadProfilesPanel() {
       explainer.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name">Profiles vs workspaces</div>
-            <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+            <div class="profile-card-name">${esc(t('profile_concept_title'))}</div>
+            <div class="profile-card-meta">${esc(t('profile_concept_subtitle'))}</div>
           </div>
         </div>`;
       explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
@@ -6291,14 +6661,15 @@ function _renderProfileConceptHelp(activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = 'Profiles vs workspaces';
+  title.textContent = t('profile_concept_title');
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
-        <div class="detail-card-title">Use profiles for how; workspaces for what</div>
-        <div class="detail-row"><div class="detail-row-label">Profiles</div><div class="detail-row-value">Agent identity, memory, skills, model/provider config, and connected tools. Create profiles for roles like researcher, writer, marketer, or developer when those roles should carry different context or capabilities.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Workspaces</div><div class="detail-row-value">Project or product folders on disk. Use one workspace per repo/product so chat, terminal, and file browsing point at the right files.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Together</div><div class="detail-row-value">A profile can have a default workspace, but you can still switch workspaces for a session. Profiles answer “who is working?”; workspaces answer “where are they working?”</div></div>
+        <div class="detail-card-title">${esc(t('profile_concept_title'))}</div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('tab_profiles'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_profiles'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('tab_workspaces'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_workspaces'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_concept_label_together'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_together'))}</div></div>
+        <div class="detail-row" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px"><div class="detail-row-label">${esc(t('profile_concept_label_example'))}</div><div class="detail-row-value">${esc(t('profile_concept_example'))}</div></div>
       </div>
     </div>`;
   body.style.display = '';
@@ -6555,7 +6926,7 @@ async function switchToProfile(name) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
-  if (name && name === S.activeProfile) return;
+  if (name && name === S.activeProfile) return true;
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -6637,9 +7008,12 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
-    if (_switchGen !== _profileSwitchGeneration) return;
+    if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof _resetCronUnreadForProfileSwitch === 'function') {
+      _resetCronUnreadForProfileSwitch();
+    }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
@@ -6653,13 +7027,6 @@ async function switchToProfile(name) {
         sessionInProgress = true;
       }
     }
-    // #4650 review: a profile switch can change agent.reasoning_effort (and other
-    // reasoning inputs like base_url) WITHOUT changing the default model/provider,
-    // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
-    // refetch for the new profile so the chip reflects the new profile's effort
-    // (the syncTopbar() calls below route through syncReasoningChip()).
-    if (typeof _lastReasoningFetchKey !== 'undefined') _lastReasoningFetchKey = null;
-
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
     // still subscribed to the PREVIOUS profile's watcher — and the probe-based
@@ -6723,6 +7090,9 @@ async function switchToProfile(name) {
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
     }
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
+    }
 
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
@@ -6760,7 +7130,7 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress && _callerOwnsNewSession) {
@@ -6774,8 +7144,8 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
-      if (_switchGen !== _profileSwitchGeneration) return;
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -6789,7 +7159,7 @@ async function switchToProfile(name) {
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -6830,6 +7200,7 @@ async function switchToProfile(name) {
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
+    return true;
 
   } catch (e) {
     // Revert the optimistic name update on error
@@ -6856,6 +7227,7 @@ async function switchToProfile(name) {
         clearWorkspaceTreeSkeleton();
       }
     }
+    return false;
   } finally {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
@@ -7905,10 +8277,16 @@ function _syncHermesPanelSessionActions(){
   const visibleMessages=hasSession?(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length:0;
   const title=hasSession?(S.session.title||t('untitled')):t('active_conversation_none');
   const meta=$('hermesSessionMeta');
+  const hasShare=!!(hasSession&&S.session&&S.session.share_token);
   if(meta){
-    meta.textContent=hasSession
-      ? t('active_conversation_meta', title, visibleMessages)
-      : t('active_conversation_none');
+    if(!hasSession){
+      meta.textContent=t('active_conversation_none');
+    }else{
+      const base=t('active_conversation_meta', title, visibleMessages);
+      meta.textContent=hasShare
+        ? `${base} · ${t('share_session_status_active')}`
+        : base;
+    }
   }
   const setDisabled=(id,disabled)=>{
     const el=$(id);
@@ -7918,6 +8296,8 @@ function _syncHermesPanelSessionActions(){
   };
   setDisabled('btnDownload',!hasSession||visibleMessages===0);
   setDisabled('btnExportJSON',!hasSession);
+  setDisabled('btnShareSession',!hasSession||visibleMessages===0);
+  setDisabled('btnStopSharingSession',!hasShare);
   setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
 }
 
@@ -8039,11 +8419,15 @@ function _syncStructuredCodeLinesEnabled(){
 function _appearancePayloadFromUi(){
   const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
   const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+  const transparentEventTimestamps=$('settingsTransparentEventTimestamps');
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
-    chat_activity_display_mode: chatActivityModeSel&&chatActivityModeSel.value==='transparent_stream'?'transparent_stream':'compact_worklog',
+    chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
+      ? chatActivityModeSel.value
+      : 'compact_worklog',
+    transparent_stream_event_timestamps: transparentEventTimestamps ? transparentEventTimestamps.checked : true,
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
@@ -8062,7 +8446,7 @@ function _appearancePayloadFromUi(){
 }
 
 function _syncChatActivityDisplayModeControl(mode){
-  const next=mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+  const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';
   const select=$('settingsChatActivityDisplayMode');
   if(select) select.value=next;
   document.querySelectorAll('[data-chat-activity-mode]').forEach(btn=>{
@@ -8072,6 +8456,20 @@ function _syncChatActivityDisplayModeControl(mode){
   });
   window._chatActivityDisplayMode=next;
   window._transparentStream=next==='transparent_stream';
+  if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);
+  if(next==='hide_all_activity'&&typeof window._hideLiveActivityForFinalAnswerOnly==='function') window._hideLiveActivityForFinalAnswerOnly();
+}
+
+function _syncTransparentEventTimestampsControl(enabled, mode){
+  const next=enabled!==false;
+  const activeMode=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : (window._chatActivityDisplayMode||'compact_worklog');
+  const checkbox=$('settingsTransparentEventTimestamps');
+  if(checkbox){
+    checkbox.checked=next;
+    checkbox.disabled=activeMode!=='transparent_stream';
+    checkbox.style.opacity=activeMode==='transparent_stream'?'':'0.5';
+  }
+  window._transparentEventTimestamps=next;
 }
 
 function _pickChatActivityDisplayMode(mode){
@@ -8081,6 +8479,14 @@ function _pickChatActivityDisplayMode(mode){
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatActivityDisplayMode;
+
+function _pickTransparentEventTimestamps(enabled){
+  _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  _scheduleAppearanceAutosave();
+}
+if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
 
 function _setAppearanceAutosaveStatus(state){
   const el=$('settingsAppearanceAutosaveStatus');
@@ -8130,8 +8536,10 @@ async function _autosaveAppearanceSettings(payload){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
       if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
         const beforeMode=window._chatActivityDisplayMode;
+        const beforeTimestamps=window._transparentEventTimestamps!==false;
         _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
-        if(window._chatActivityDisplayMode!==beforeMode){
+        _syncTransparentEventTimestampsControl(saved.transparent_stream_event_timestamps, saved.chat_activity_display_mode);
+        if(window._chatActivityDisplayMode!==beforeMode||((window._transparentEventTimestamps!==false)!==beforeTimestamps)){
           if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
           if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
         }
@@ -8244,6 +8652,8 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
+  if(hideEmptyStatePanelCb) payload.hide_empty_state_panel=hideEmptyStatePanelCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -8280,6 +8690,8 @@ function _preferencesPayloadFromUi(){
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
+  const updateChannelSel=$('settingsUpdateChannel');
+  if(updateChannelSel) payload.update_channel=updateChannelSel.value;
   const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
   if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8300,6 +8712,8 @@ function _preferencesPayloadFromUi(){
   if(defaultMessageModeSel) payload.default_message_mode=defaultMessageModeSel.value;
   const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
+  const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
+  if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   Object.assign(payload,_speechPreferencesPayloadFromUi());
@@ -8393,6 +8807,10 @@ async function _autosavePreferencesSettings(payload){
       window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
       if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
     }
+    if(payload&&payload.hide_empty_state_panel!==undefined){
+      window._hideEmptyStatePanel=!!(saved&&saved.hide_empty_state_panel);
+      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
+    }
     if(payload&&payload.show_conversation_outline!==undefined){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
       document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
@@ -8408,6 +8826,9 @@ async function _autosavePreferencesSettings(payload){
     if(payload&&payload.show_busy_placeholder_hint!==undefined){
       window._showBusyPlaceholderHint=!!(saved&&saved.show_busy_placeholder_hint);
       if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    }
+    if(payload&&payload.new_chat_on_workspace_switch!==undefined){
+      window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -8472,9 +8893,21 @@ async function loadSettingsPanel(){
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
+    //
+    // The DISPLAY badge uses update_channel_version (a channel-scoped
+    // `git describe --match`), which is SEPARATE from settings.webui_version.
+    // webui_version is load-bearing for asset cache-busting / SW cache / stale-
+    // client skew detection and must stay channel-neutral — never render it as
+    // the channel badge. See api/updates.channel_version_badge().
     const webuiBadge = $('settings-webui-version-badge');
     if(webuiBadge){
-      webuiBadge.textContent = `WebUI: ${settings.webui_version || 'not detected'}`;
+      const chanVer = settings.update_channel_version || settings.webui_version || 'not detected';
+      const chan = settings.update_channel==='experimental' ? 'experimental' : 'stable';
+      // Only annotate the channel when on experimental — stable is the implicit
+      // default and needs no extra chrome.
+      webuiBadge.textContent = chan==='experimental'
+        ? `WebUI: ${chanVer} · Experimental`
+        : `WebUI: ${chanVer}`;
     }
     const agentBadge = $('settings-agent-version-badge');
     if(agentBadge){
@@ -8544,10 +8977,17 @@ async function loadSettingsPanel(){
     }
     const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
     const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+    const transparentEventTimestampsCb=$('settingsTransparentEventTimestamps');
     if(chatActivityModeSel){
       _syncChatActivityDisplayModeControl(settings.chat_activity_display_mode);
+      _syncTransparentEventTimestampsControl(settings.transparent_stream_event_timestamps, settings.chat_activity_display_mode);
       chatActivityModeSel.addEventListener('change',()=>{
         _pickChatActivityDisplayMode(chatActivityModeSel.value);
+      },{once:false});
+    }
+    if(transparentEventTimestampsCb){
+      transparentEventTimestampsCb.addEventListener('change',()=>{
+        _pickTransparentEventTimestamps(transparentEventTimestampsCb.checked);
       },{once:false});
     }
     if(worklogDetailsExpandedCb){
@@ -8681,6 +9121,11 @@ async function loadSettingsPanel(){
           for(const m of [...(g.models||[]),...(g.extra_models||[])]){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
+            if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+              opt.dataset.fast='1';
+            }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+              opt.dataset.fast='0';
+            }
             og.appendChild(opt);
           }
           modelSel.appendChild(og);
@@ -8703,7 +9148,13 @@ async function loadSettingsPanel(){
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }
+      if(typeof closeSettingsModelDropdown==='function') closeSettingsModelDropdown();
+      if(typeof mountSettingsModelPicker==='function') mountSettingsModelPicker();
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
+      if(!modelSel._settingsChipSyncBound){
+        modelSel._settingsChipSyncBound=true;
+        modelSel.addEventListener('change',()=>{if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();},{once:false});
+      }
     }
     // Auxiliary models — load task assignments and provider/model options
     _bindMainAdvancedOptionsButton();
@@ -8762,6 +9213,17 @@ async function loadSettingsPanel(){
       hideSuggestionsCb.addEventListener('change',()=>{
         window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
         if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
+    if(hideEmptyStatePanelCb){
+      hideEmptyStatePanelCb.checked=settings.hide_empty_state_panel===true;
+      window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
+      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
+      hideEmptyStatePanelCb.addEventListener('change',()=>{
+        window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
+        if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -8859,6 +9321,24 @@ async function loadSettingsPanel(){
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const updateChannelSel=$('settingsUpdateChannel');
+    if(updateChannelSel){
+      updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
+      updateChannelSel.addEventListener('change',function(){
+        // Persist the channel, then invalidate the cached update check and
+        // re-check so the banner reflects the newly-selected channel. Changing
+        // the channel changes WHAT is offered, never WHAT is installed — the
+        // update banner still gates the actual apply behind "Update Now".
+        _schedulePreferencesAutosave();
+        if(typeof checkUpdatesNow==='function'){
+          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
+          // the debounced autosave PUT and answer for the previous channel.
+          const _picked=updateChannelSel.value;
+          setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
+        }
+        if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(updateChannelSel.value);
+      },{once:false});
+    }
     const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
     if(ignoreAgentUpdatesCb){ignoreAgentUpdatesCb.checked=!!settings.ignore_agent_updates;ignoreAgentUpdatesCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8917,6 +9397,9 @@ async function loadSettingsPanel(){
     // Voice-mode button visibility (#1488).
     // Toggling re-applies immediately via the boot.js helper so the user sees
     // the audio-waveform button appear/disappear without a reload.
+    // Also recomputes composer footer visibility so the .composer-divider
+    // (which tracks whether all left-group buttons are hidden, see #5451)
+    // stays in sync when #btnVoiceMode appears or disappears here.
     const voiceModeCb=$('settingsVoiceModeEnabled');
     if(voiceModeCb){
       voiceModeCb.checked=_speechBool('voice_mode_button','hermes-voice-mode-button',false);
@@ -8924,6 +9407,7 @@ async function loadSettingsPanel(){
         _markSpeechPreferenceChanged('voice_mode_button');
         localStorage.setItem('hermes-voice-mode-button',this.checked?'true':'false');
         if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
+        if(typeof window._applyComposerFooterVisibilitySettings==='function') window._applyComposerFooterVisibilitySettings();
         _schedulePreferencesAutosave();
       };
     }
@@ -9058,6 +9542,12 @@ async function loadSettingsPanel(){
       showBusyPlaceholderHintCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
+    if(newChatOnWorkspaceSwitchCb){
+      newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
+      window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
+      newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
     if(botNameField){
@@ -9351,6 +9841,13 @@ function _extensionSidecarCard(sidecars){
     const proxyConsentRequired=proxy.consent_required===true;
     const proxyOriginChanged=proxy.origin_changed===true;
     const proxyPath=(proxy&&proxy.path)||'';
+    // token-v1 posture: 'local_unprotected' = WebUI auth is off, so proxy consent
+    // is grantable by any unauthenticated local caller. Warn the operator to
+    // enable authentication before wiring up a sidecar (design §9.1).
+    const proxyUnprotected=proxy.posture==='local_unprotected';
+    const proxyWarning=proxyUnprotected
+      ?`<div class="extension-sidecar-warning">⚠ WebUI authentication is off. This sidecar's proxy consent can be granted by any local process. Set a password in Settings → Password before using sidecar extensions.</div>`
+      :'';
     const proxyStatus=proxyConsented
       ?'consented'
       :(proxyOriginChanged
@@ -9375,6 +9872,7 @@ function _extensionSidecarCard(sidecars){
         <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
       </div>
       <div class="extension-sidecar-actions">${proxyButton}</div>
+      ${proxyWarning}
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
   }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
@@ -11364,6 +11862,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
+  _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -11430,7 +11929,21 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
-async function checkUpdatesNow(){
+// Instant client-side badge feedback when the update channel is toggled, before
+// the server round-trip that authoritatively re-renders the badge from
+// update_channel_version. Keeps the "· Experimental" suffix in sync immediately.
+function _syncUpdateChannelBadge(channel){
+  try{
+    const badge=$('settings-webui-version-badge');
+    if(!badge) return;
+    let base=badge.textContent||'';
+    // Strip any existing " · Experimental" suffix, then re-append if needed.
+    base=base.replace(/\s·\sExperimental\s*$/,'');
+    badge.textContent = channel==='experimental' ? (base+' · Experimental') : base;
+  }catch(e){}
+}
+
+async function checkUpdatesNow(channelOverride){
   const btn=$('btnCheckUpdatesNow');
   const label=$('checkUpdatesLabel');
   const spinner=$('checkUpdatesSpinner');
@@ -11441,8 +11954,15 @@ async function checkUpdatesNow(){
   if(spinner) spinner.style.display='';
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
+
   try {
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000});
+    // Pass the channel explicitly when the caller has one (e.g. the dropdown
+    // just switched) so the check cannot race the debounced settings autosave
+    // and answer for the previous channel. Omit otherwise → server uses the
+    // saved setting. (Fable UX gate.)
+    const _checkBody={force:true};
+    if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -11462,14 +11982,18 @@ async function checkUpdatesNow(){
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
       if(agentPart) parts.push(agentPart);
+      const manualInstruction=(typeof _formatManualUpdateInstruction==='function')
+        ? _formatManualUpdateInstruction(data.webui)
+        : null;
       // Track non-git targets separately so a mixed deployment (one git
       // checkout + one no-git install) never hides the "can't check" state
       // behind an up-to-date summary (#4356).
       const noGitParts=[];
-      if(data.webui&&data.webui.no_git) noGitParts.push('WebUI');
+      if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
@@ -11504,29 +12028,57 @@ async function checkUpdatesNow(){
 
 // ── Auxiliary Models ──────────────────────────────────────────────────────────
 
-// Canonical auxiliary task slots with display names.
-// Keep in sync with hermes_cli/main.py _AUX_TASKS and hermes_cli/web_server.py _AUX_TASK_SLOTS.
-const _AUX_TASK_SLOTS=[
- {key:'vision',nameKey:'settings_aux_task_vision',descKey:'settings_aux_task_vision_desc'},
- {key:'compression',nameKey:'settings_aux_task_compression',descKey:'settings_aux_task_compression_desc'},
- {key:'web_extract',nameKey:'settings_aux_task_web_extract',descKey:'settings_aux_task_web_extract_desc'},
- {key:'session_search',nameKey:'settings_aux_task_session_search',descKey:'settings_aux_task_session_search_desc'},
- {key:'approval',nameKey:'settings_aux_task_approval',descKey:'settings_aux_task_approval_desc'},
- {key:'mcp',nameKey:'settings_aux_task_mcp',descKey:'settings_aux_task_mcp_desc'},
- {key:'title_generation',nameKey:'settings_aux_task_title_generation',descKey:'settings_aux_task_title_generation_desc'},
- {key:'skills_hub',nameKey:'settings_aux_task_skills_hub',descKey:'settings_aux_task_skills_hub_desc'},
- {key:'curator',nameKey:'settings_aux_task_curator',descKey:'settings_aux_task_curator_desc'},
- {key:'kanban_decomposer',nameKey:'settings_aux_task_kanban_decomposer',descKey:'settings_aux_task_kanban_decomposer_desc'},
- {key:'profile_describer',nameKey:'settings_aux_task_profile_describer',descKey:'settings_aux_task_profile_describer_desc'},
- {key:'triage_specifier',nameKey:'settings_aux_task_triage_specifier',descKey:'settings_aux_task_triage_specifier_desc'},
-];
-
 let _auxProviders=[];       // cached provider list from /api/models
+let _auxTasks=[];           // sanitized auxiliary task configs from /api/model/auxiliary
 let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
 let _mainAdvancedConfig=null; // current advanced config for the default chat model
 
 function _auxSelectStyle(){
  return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
+}
+
+function _auxTaskLabelFromMeta(taskKey, taskCfg){
+  const nameKey='settings_aux_task_'+taskKey;
+  const descKey=nameKey+'_desc';
+  const tName=t(nameKey);
+  const tDesc=t(descKey);
+  const name=(tName&&tName!==nameKey)?String(tName).trim():'';
+  const description=(tDesc&&tDesc!==descKey)?String(tDesc).trim():'';
+  const fallbackName=(taskCfg&&typeof taskCfg.label==='string'&&taskCfg.label.trim())?String(taskCfg.label).trim():taskKey;
+  const fallbackDesc=(taskCfg&&typeof taskCfg.description==='string'&&taskCfg.description.trim())?String(taskCfg.description).trim():'';
+  return {
+    task: taskKey,
+    label: name||fallbackName,
+    description: description||fallbackDesc,
+  };
+}
+
+function _normalizeAuxiliaryTasks(rawTasks){
+  const tasks=Array.isArray(rawTasks)?rawTasks:[];
+  const out=[];
+  const seen=new Set();
+  for(const rawTask of tasks){
+    if(!rawTask||typeof rawTask!=='object') continue;
+    const task=(typeof rawTask.task==='string'?String(rawTask.task).trim():'');
+    if(!task||seen.has(task)) continue;
+    seen.add(task);
+    const meta=_auxTaskLabelFromMeta(task,rawTask);
+    const entry={
+      task,
+      provider:String(rawTask.provider||'auto').trim()||'auto',
+      model:String(rawTask.model||'').trim(),
+      base_url:String(rawTask.base_url||'').trim(),
+      timeout:rawTask.timeout,
+      download_timeout:rawTask.download_timeout,
+      max_concurrency:rawTask.max_concurrency,
+      extra_body:rawTask.extra_body&&typeof rawTask.extra_body==='object'?rawTask.extra_body:{},
+      api_key_set:!!rawTask.api_key_set,
+      label:meta.label,
+      description:meta.description,
+    };
+    out.push(entry);
+  }
+  return out;
 }
 
 function _buildAuxProviderOptions(sel,providers,currentProvider){
@@ -11657,26 +12209,19 @@ function _mainModelSupportsServiceTier(cfg){
  const optgroup=selectedOpt&&selectedOpt.parentElement&&selectedOpt.parentElement.tagName==='OPTGROUP'?selectedOpt.parentElement:null;
  const provider=((selectedOpt&&selectedOpt.dataset&&selectedOpt.dataset.provider)||(optgroup&&optgroup.dataset&&optgroup.dataset.provider)||(cfg&&cfg.provider)||'').trim().toLowerCase();
  if(provider!=='openai'&&provider!=='openai-api'&&provider!=='openai-codex') return false;
- if(provider==='openai-codex') return false;
- const rawModel=String((selectedOpt&&selectedOpt.value)||(selected&&selected.value)||(cfg&&cfg.model)||'').trim().toLowerCase();
- if(!rawModel) return true;
- let bareModel=rawModel;
- if(rawModel.includes('/')){
-  const slash=rawModel.indexOf('/');
-  if(rawModel.slice(0,slash)!=='openai') return false;
-  bareModel=rawModel.slice(slash+1);
- }
- if(bareModel.includes('codex')) return false;
- return bareModel.startsWith('gpt-')||bareModel.startsWith('o1')||bareModel.startsWith('o3')||bareModel.startsWith('o4');
+ const fastSupport = selectedOpt&&selectedOpt.dataset?selectedOpt.dataset.fast:'';
+ if(fastSupport) return fastSupport==='1'||fastSupport==='true';
+ return cfg&&cfg.supports_fast_tier===true;
 }
 
-function _openAuxAdvancedOptions(taskKey,cfg){
- const isMain=taskKey==='__main__';
- const slot=isMain?{key:taskKey,nameKey:'settings_label_model',descKey:'settings_desc_model'}:(_AUX_TASK_SLOTS.find(s=>s.key===taskKey)||{key:taskKey,nameKey:'',descKey:''});
+function _openAuxAdvancedOptions(taskCfg,cfg){
+ const isMain=taskCfg==='__main__';
+ const taskKey=isMain?'__main__':(taskCfg&&typeof taskCfg==='object'&&typeof taskCfg.task==='string'?taskCfg.task:typeof taskCfg==='string'?taskCfg:'');
+ const slot=isMain?{task:taskKey,label:(t('settings_label_model')||'Default model')}:_auxTaskLabelFromMeta(taskKey,taskCfg);
  const overlay=_ensureAuxAdvancedModal();
  overlay.dataset.task=taskKey;
  const title=$('auxAdvancedTitle'),sub=$('auxAdvancedSubtitle'),body=$('auxAdvancedBody');
- const slotName=t(slot.nameKey)||slot.key;
+ const slotName=isMain?(t('settings_label_model')||'Default model'):(slot&&slot.label)||taskKey;
  if(title) title.textContent=isMain?(t('settings_main_advanced_title')||'Main model options'):((t('settings_aux_advanced_title')||'{task} options').replace('{task}',slotName));
  if(sub) sub.textContent=isMain?(t('settings_main_advanced_subtitle')||'Advanced config for the default chat model.'):(t('settings_aux_advanced_subtitle')||'Advanced config for auxiliary.');
  const extraBody=cfg&&cfg.extra_body&&typeof cfg.extra_body==='object'&&Object.keys(cfg.extra_body).length?JSON.stringify(cfg.extra_body,null,2):'';
@@ -11800,68 +12345,68 @@ async function _loadAuxiliaryModels(){
  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
 
  try{
- // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
- const [auxData,modelsData]=await Promise.all([
- api('/api/model/auxiliary').catch(()=>null),
- api('/api/models').catch(()=>null),
- ]);
- // Build provider list from /api/models groups
- // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
- const groups=(modelsData&&modelsData.groups)||[];
- _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
- slug:g.provider_id||g.provider,
- name:g.provider,
- models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
- }));
- if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
- _mainAdvancedConfig=auxData.main||{};
- }else{
- _mainAdvancedConfig=null;
- }
- _bindMainAdvancedOptionsButton();
- const tasks=(auxData&&auxData.tasks)||[];
-  // Build a quick lookup: taskKey → {provider, model}
+  // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
+  const [auxData,modelsData]=await Promise.all([
+   api('/api/model/auxiliary').catch(()=>null),
+   api('/api/models').catch(()=>null),
+  ]);
+  // Build provider list from /api/models groups
+  // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
+  const groups=(modelsData&&modelsData.groups)||[];
+  _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
+   slug:g.provider_id||g.provider,
+   name:g.provider,
+   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
+  }));
+  if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
+   _mainAdvancedConfig=auxData.main||{};
+  }else{
+   _mainAdvancedConfig=null;
+  }
+  _bindMainAdvancedOptionsButton();
+  _auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[]);
+  // Build a quick lookup: taskKey → config
   const taskMap={};
-  for(const t of tasks) taskMap[t.task]=t;
+  for(const task of _auxTasks) taskMap[task.task]=task;
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
-  for(const slot of _AUX_TASK_SLOTS){
-   const cfg=taskMap[slot.key]||{provider:'auto',model:''};
+  for(const task of _auxTasks){
+   const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
    row.style.cssText='display:grid;grid-template-columns:120px 1fr 1fr 34px;gap:8px;align-items:center;margin-bottom:8px';
 
    // Task name + description
    const label=document.createElement('div');
    label.style.cssText='font-size:12px;font-weight:500;color:var(--text);line-height:1.3';
-   label.innerHTML=esc(t(slot.nameKey)||slot.key)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(t(slot.descKey)||'')+'</div>';
+   label.innerHTML=esc(task.label||task.task)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(task.description||'')+'</div>';
    row.appendChild(label);
 
    // Provider select
    const provSel=document.createElement('select');
-   provSel.id='aux-prov-'+slot.key;
+   provSel.id='aux-prov-'+task.task;
    provSel.style.cssText=_auxSelectStyle();
    _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
-   provSel.addEventListener('change',()=>_onAuxProviderChange(slot.key,_auxProviders));
+   provSel.addEventListener('change',()=>_onAuxProviderChange(task.task,_auxProviders));
    row.appendChild(provSel);
 
    // Model select
    const modelSel=document.createElement('select');
-   modelSel.id='aux-model-'+slot.key;
+   modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
    _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
-   modelSel.addEventListener('change',()=>_onAuxModelChange(slot.key));
+   modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
    const advancedBtn=document.createElement('button');
    advancedBtn.type='button';
    advancedBtn.className='aux-advanced-btn model-advanced-btn';
    const advTitle=t('settings_aux_advanced_button_title')||'Advanced options';
-   const slotName=t(slot.nameKey)||slot.key;
+   const taskName=task.label||task.task;
    advancedBtn.title=advTitle;
-   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',slotName));
+   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',taskName));
    advancedBtn.innerHTML=typeof li==='function'?li('settings',15):'⚙';
-   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(slot.key,cfg));
+   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(task,cfg));
    row.appendChild(advancedBtn);
 
    container.appendChild(row);
@@ -11899,20 +12444,20 @@ async function _loadAuxiliaryModels(){
 
 async function _applyAuxModels(){
  let saved=0;
- for(const slot of _AUX_TASK_SLOTS){
-  const provSel=$('aux-prov-'+slot.key);
-  const modelSel=$('aux-model-'+slot.key);
+ for(const task of _auxTasks){
+  const provSel=$('aux-prov-'+task.task);
+  const modelSel=$('aux-model-'+task.task);
   if(!provSel) continue;
   const provider=provSel.value;
   const model=(modelSel&&modelSel.value!=='__custom__')?(modelSel.value||''):'';
-  const orig=_auxOriginalConfig?.[slot.key]||{provider:'auto',model:''};
+  const orig=_auxOriginalConfig?.[task.task]||{provider:'auto',model:''};
   // Only save if changed
   if(provider!==orig.provider||model!==orig.model){
    try{
-    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:slot.key,provider,model})});
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:task.task,provider,model})});
     saved++;
    }catch(e){
-    console.warn('[settings] failed to save aux task',slot.key,e);
+    console.warn('[settings] failed to save aux task',task.task,e);
     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
     return;
    }
@@ -11958,7 +12503,11 @@ async function saveSettings(andClose){
   body.font_size=fontSize;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
-  body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
+  body.chat_activity_display_mode=((($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')
+    ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity'))
+    ? ($('settingsChatActivityDisplayMode')||{}).value
+    : 'compact_worklog';
+  body.transparent_stream_event_timestamps=(($('settingsTransparentEventTimestamps')||{}).checked)!==false;
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
@@ -11995,6 +12544,7 @@ async function saveSettings(andClose){
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
+  body.update_channel=($('settingsUpdateChannel')||{}).value==='experimental'?'experimental':'stable';
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
@@ -12071,8 +12621,8 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
-    await api('/api/auth/logout',{method:'POST',body:'{}'});
-    window.location.href='login';
+    const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
+    window.location.href=response.trusted_logout_url||'login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);
   }
@@ -12143,7 +12693,21 @@ async function disableAuth(){
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
+let _cronPollGeneration=0;
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
+
+function _resetCronUnreadForProfileSwitch(){
+  _cronPollGeneration++;
+  _cronNewJobIds.clear();
+  _cronPollSince=Date.now()/1000;
+  // Clear persisted cron sidebar markers from the profile we left. Non-cron
+  // completion unread stays intact (#5960 gate: sticky all-profile leak).
+  if(typeof _clearCronSessionCompletionUnreadForInactiveProfiles==='function'){
+    const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+    _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile);
+  }
+  updateCronBadge();
+}
 
 // Auto-refresh the cron list when a job is created from chat or any external source.
 // The chat path dispatches this event when the agent response mentions cron creation.
@@ -12156,7 +12720,9 @@ function startCronPolling(){
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
+      const pollGeneration=_cronPollGeneration;
       const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      if(pollGeneration!==_cronPollGeneration) return;
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){
@@ -12165,7 +12731,11 @@ function startCronPolling(){
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
           if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count);
+            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+              source:'cron',
+              profile:activeProfile,
+            });
           }
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.

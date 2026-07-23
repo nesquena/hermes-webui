@@ -92,6 +92,8 @@ def clean_env(monkeypatch):
         "HERMES_WEBUI_HOST",
         "HERMES_WEBUI_PORT",
         "HERMES_WEBUI_AGENT_DIR",
+        "HERMES_WEBUI_PYTHON",
+        "HERMES_WEBUI_DISABLE_LOCAL_VENV",
         "HERMES_WEBUI_STATE_DIR",
         "HERMES_WEBUI_SERVER_CWD",
         "HERMES_HOME",
@@ -531,3 +533,63 @@ class TestForegroundExecutabilityGuard:
             bs.main()
         # execv must NOT have been called when the guard fires
         assert len(execv_calls) == 0
+
+
+def test_package_python_discovers_agent_before_skip_install_gate(import_bootstrap, clean_env, monkeypatch, tmp_path):
+    bs = import_bootstrap
+    agent_dir = tmp_path / "site-packages"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text("class AIAgent:\n    pass\n", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    python_exe = sys.executable
+    execv_calls = []
+
+    monkeypatch.setenv("HERMES_WEBUI_PYTHON", python_exe)
+    monkeypatch.setenv("HERMES_WEBUI_DISABLE_LOCAL_VENV", "1")
+    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("PYTHONPATH", str(agent_dir))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "webui")
+    monkeypatch.setattr(bs.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground", "--skip-agent-install"])
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "access", lambda path, mode: True)
+    monkeypatch.setattr(os, "chdir", lambda path: None)
+
+    def fake_execv(path, argv):
+        execv_calls.append((path, argv))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", fake_execv)
+
+    with patch.object(bs, "install_hermes_agent") as mock_install, patch.object(bs.venv, "EnvBuilder") as mock_builder, pytest.raises(SystemExit):
+        bs.main()
+
+    assert execv_calls == [(python_exe, [python_exe, str(bs.REPO_ROOT / "server.py")])]
+    assert os.environ["HERMES_WEBUI_AGENT_DIR"] == str(agent_dir.resolve())
+    mock_install.assert_not_called()
+    mock_builder.assert_not_called()
+
+
+def test_package_python_without_agent_stays_fail_closed(import_bootstrap, clean_env, monkeypatch, tmp_path):
+    bs = import_bootstrap
+    python_exe = sys.executable
+
+    monkeypatch.setenv("HERMES_WEBUI_PYTHON", python_exe)
+    monkeypatch.setenv("HERMES_WEBUI_DISABLE_LOCAL_VENV", "1")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "webui")
+    monkeypatch.setattr(bs.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground", "--skip-agent-install"])
+
+    with patch.object(bs, "_agent_dir_from_python", return_value=None) as mock_probe, patch.object(bs, "install_hermes_agent") as mock_install, patch.object(bs.venv, "EnvBuilder") as mock_builder, patch.object(os, "execv") as mock_execv, pytest.raises(RuntimeError, match="Hermes Agent was not found"):
+        bs.main()
+
+    mock_probe.assert_called_once_with(python_exe)
+    mock_install.assert_not_called()
+    mock_builder.assert_not_called()
+    mock_execv.assert_not_called()
