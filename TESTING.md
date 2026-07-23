@@ -1219,6 +1219,20 @@ EXPECT:
   - Paste (Cmd+V) elsewhere shows the full text of that message
 FAIL: No visual feedback, clipboard empty or wrong content.
 
+### T23.3: Copy Mixed Rendered Content with Tables
+SETUP: Use the dark theme and render an assistant response with a heading, prose,
+two Markdown tables, and a bold subtotal cell.
+STEPS:
+  1. Select the complete rendered response, including both tables
+  2. Copy it and paste into a rich-text editor
+  3. Paste it again as plain text
+EXPECT:
+  - Rich text keeps headings, table headers, values, and bold subtotal text
+  - Rich text does not carry Hermes theme colors, spacing, or table controls
+  - Plain text keeps surrounding prose and tab-delimited table rows readable
+FAIL: Theme styling leaks, header cells are blank, formatting disappears, or
+partial table content is missing.
+
 ---
 
 ## Section 24: Inline File Editor (Sprint 5)
