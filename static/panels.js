@@ -9442,6 +9442,56 @@ async function loadSettingsPanel(){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
       } else if(engine==='openai'){
         ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
+      } else if(engine==='minimax'){
+        // MiniMax TTS voices — VERIFIED to exist on the platform as of
+        // 2026-07-07. Many voice IDs that appear in MiniMax's marketing
+        // docs (e.g. English_Exciting_Actor) return "voice id not exist"
+        // from the API. The four below all returned 200 with real audio.
+        // See the full MiniMax voice catalog:
+        // https://platform.minimax.io/faq/system-voice-id
+        const mmVoices=[
+          {value:'English_expressive_narrator',label:'Expressive Narrator (English, Male, storytelling) — DEFAULT'},
+          {value:'English_Graceful_Lady',label:'Graceful Lady (English, Female, warm)'},
+          {value:'English_Trustworth_Man',label:'Trustworthy Man (English, Male, calm)'},
+          {value:'English_Diligent_Man',label:'Diligent Man (English, Male, steady)'},
+          {value:'English_Comedian',label:'Comedian (English, Male, playful)'},
+          {value:'English_Cute_Girl',label:'Cute Girl (English, Female, bright)'},
+        ];
+        ttsVoiceSel.innerHTML='<option value="">Server default (English_expressive_narrator)</option>';
+        mmVoices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.value;opt.textContent=v.label;
+          if(v.value===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
+      } else if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)
+                &&typeof window._hermesTtsEngineVoices==='function'){
+        // Any other extension-registered engine can supply its own voice list
+        // via window._hermesTtsEngineVoices(engine) -> [{value,label}, ...].
+        // Falls through to the Browser list below if the engine didn't implement it.
+        const extVoices=window._hermesTtsEngineVoices(engine);
+        if(Array.isArray(extVoices)&&extVoices.length){
+          ttsVoiceSel.innerHTML='<option value="">Server default</option>';
+          extVoices.forEach(v=>{
+            const opt=document.createElement('option');
+            opt.value=v.value;opt.textContent=v.label;
+            if(v.value===current) opt.selected=true;
+            ttsVoiceSel.appendChild(opt);
+          });
+          return;
+        }
+        if(!('speechSynthesis' in window)){
+          ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
+          return;
+        }
+        const voices=speechSynthesis.getVoices();
+        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        voices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
+          if(v.name===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
       } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},

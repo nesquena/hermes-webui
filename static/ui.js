@@ -8880,8 +8880,13 @@ function autoReadLastAssistant(){
   // registered-engine branch in speakMessage() so auto-read honors the selection.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
     _ttsSpeaking=true;
+    // The voice dropdown stores its value in localStorage 'hermes-tts-voice'.
+    // We pass it to the extension as BOTH 'voice' (legacy/speaking-friendly) and
+    // 'voice_id' (our MiniMax engine's preferred key), so any registered engine
+    // can pick whichever it expects. Empty string means "use server default".
     const _opts={
       voice: localStorage.getItem('hermes-tts-voice')||'',
+      voice_id: localStorage.getItem('hermes-tts-voice')||'',
       rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
       pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
     };

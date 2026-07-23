@@ -18647,6 +18647,164 @@ def _handle_tts(handler, parsed):
             pass
         return True
 
+    # ── MiniMax TTS ────────────────────────────────────────────────────
+    if engine == "minimax":
+        api_key = os.getenv("MINIMAX_API_KEY", "").strip()
+        if not api_key:
+            try:
+                from api.onboarding import _load_env_file
+                from api.profiles import get_active_hermes_home
+                api_key = _load_env_file(get_active_hermes_home() / ".env").get("MINIMAX_API_KEY", "")
+            except Exception:
+                pass
+        if not api_key:
+            from api.helpers import bad as _bad
+            return _bad(handler, "MINIMAX_API_KEY not configured", 503)
+
+        # Resolve config: tts.minimax.{model, voice_id, speed, vol, pitch}
+        # Default voice: English_expressive_narrator — verified to exist on
+        # MiniMax's platform as of 2026-07-07. (English_Exciting_Actor appears
+        # in MiniMax's docs as a sample but returns "voice id not exist".)
+        mm_model = "speech-2.8-hd"
+        mm_voice = "English_expressive_narrator"
+        mm_speed = 1
+        mm_vol = 1
+        mm_pitch = 0
+        try:
+            from api.config import get_config
+            tts_cfg = (get_config() or {}).get("tts", {})
+            if isinstance(tts_cfg, dict):
+                mm_cfg = tts_cfg.get("minimax", {})
+                if isinstance(mm_cfg, dict):
+                    mm_model = mm_cfg.get("model") or mm_model
+                    cfg_voice = mm_cfg.get("voice_id")
+                    if isinstance(cfg_voice, str) and cfg_voice.strip():
+                        mm_voice = cfg_voice.strip()
+                    try:
+                        mm_speed = float(mm_cfg.get("speed", mm_speed))
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        mm_vol = float(mm_cfg.get("vol", mm_vol))
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        mm_pitch = float(mm_cfg.get("pitch", mm_pitch))
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            pass  # fall through to defaults
+
+        # Per-utterance voice override from the request body (set by the
+        # extension's synthesize() when opts.voice_id is supplied).
+        req_voice = (data.get("voice_id") or "").strip()
+        if req_voice:
+            # Defense-in-depth: only allow safe identifier characters so a
+            # tampered voice_id can't smuggle JSON into the upstream payload.
+            if not re.fullmatch(r'[A-Za-z0-9_\-]{1,64}', req_voice):
+                from api.helpers import bad as _bad
+                return _bad(handler, "invalid voice_id", 400)
+            mm_voice = req_voice
+
+        # Clamp voice settings to MiniMax's documented ranges.
+        try:
+            mm_speed = max(0.5, min(2.0, float(mm_speed)))
+        except (TypeError, ValueError):
+            mm_speed = 1
+        try:
+            mm_vol = max(0.0, min(10.0, float(mm_vol)))
+        except (TypeError, ValueError):
+            mm_vol = 1
+        try:
+            mm_pitch = max(-12.0, min(12.0, float(mm_pitch)))
+        except (TypeError, ValueError):
+            mm_pitch = 0
+
+        url = "https://api.minimax.io/v1/t2a_v2"
+        req_body = json.dumps({
+            "model": mm_model,
+            "text": text,
+            "stream": False,
+            "language_boost": "auto",
+            "output_format": "hex",
+            "voice_setting": {
+                "voice_id": mm_voice,
+                "speed": mm_speed,
+                "vol": mm_vol,
+                "pitch": int(mm_pitch),
+            },
+            "audio_setting": {
+                "sample_rate": 32000,
+                "bitrate": 128000,
+                "format": "mp3",
+                "channel": 1,
+            },
+        }).encode("utf-8")
+
+        req = Request(url, data=req_body, headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        })
+
+        try:
+            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
+                raw = resp.read()
+        except ValueError:
+            logger.warning("MiniMax TTS rejected an invalid upstream response", exc_info=True)
+            from api.helpers import bad as _bad
+            return _bad(handler, "MiniMax TTS generation failed", 502)
+        except Exception:
+            logger.exception("MiniMax TTS generation failed")
+            from api.helpers import bad as _bad
+            return _bad(handler, "MiniMax TTS generation failed", 500)
+
+        # MiniMax returns JSON with hex-encoded audio in data.audio. Parse it,
+        # then validate the upstream actually succeeded (base_resp.status_code).
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            logger.exception("MiniMax TTS returned non-JSON body")
+            from api.helpers import bad as _bad
+            return _bad(handler, "MiniMax TTS generation failed", 502)
+
+        base_resp = payload.get("base_resp") or {}
+        if base_resp.get("status_code") not in (0, None):
+            logger.warning(
+                "MiniMax TTS upstream returned error: %s",
+                base_resp.get("status_msg") or base_resp,
+            )
+            from api.helpers import bad as _bad
+            return _bad(
+                handler,
+                "MiniMax TTS rejected the request: " + str(base_resp.get("status_msg") or "unknown"),
+                502,
+            )
+
+        data_obj = payload.get("data") or {}
+        audio_hex = data_obj.get("audio")
+        if not isinstance(audio_hex, str) or not audio_hex:
+            from api.helpers import bad as _bad
+            return _bad(handler, "MiniMax TTS returned empty audio", 502)
+
+        try:
+            audio_data = bytes.fromhex(audio_hex)
+        except ValueError:
+            logger.exception("MiniMax TTS returned non-hex audio payload")
+            from api.helpers import bad as _bad
+            return _bad(handler, "MiniMax TTS returned invalid audio", 502)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(audio_data)))
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
+
     # ── Edge TTS ────────────────────────────────────────────────────────
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
