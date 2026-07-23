@@ -15696,6 +15696,17 @@ def handle_post(handler, parsed) -> bool:
             body["_clear_password"] = True
 
         current_password = body.pop("_current_password", None)
+        profile_for_auth_state_cookie = None
+        if requested_password or requested_clear_password:
+            try:
+                # Preserve an explicit selected UI profile when this request
+                # changes the cookie auth format. Requests without
+                # hermes_profile can keep using the default fallback.
+                from api.helpers import get_profile_cookie
+
+                profile_for_auth_state_cookie = get_profile_cookie(handler)
+            except Exception:
+                profile_for_auth_state_cookie = None
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -15813,6 +15824,17 @@ def handle_post(handler, parsed) -> bool:
         if auth_just_enabled and not logged_in_before:
             new_cookie = create_session()
             logged_in_after = True
+        profile_cookie_header = None
+        if profile_for_auth_state_cookie and auth_enabled_before != auth_enabled_after:
+            from api.helpers import build_profile_cookie
+
+            if auth_enabled_after:
+                profile_cookie_header = build_profile_cookie(
+                    profile_for_auth_state_cookie,
+                    session_cookie_value=new_cookie or current_cookie,
+                )
+            else:
+                profile_cookie_header = build_profile_cookie(profile_for_auth_state_cookie)
 
         saved["auth_enabled"] = auth_enabled_after
         saved["password_auth_enabled"] = get_password_hash() is not None
@@ -15831,7 +15853,8 @@ def handle_post(handler, parsed) -> bool:
             pass
 
         if not new_cookie:
-            return j(handler, saved)
+            extra_headers = {"Set-Cookie": profile_cookie_header} if profile_cookie_header else None
+            return j(handler, saved, extra_headers=extra_headers)
 
         response_body = json.dumps(saved, ensure_ascii=False, indent=2).encode("utf-8")
         handler.send_response(200)
@@ -15839,6 +15862,8 @@ def handle_post(handler, parsed) -> bool:
         handler.send_header("Content-Length", str(len(response_body)))
         handler.send_header("Cache-Control", "no-store")
         set_auth_cookie(handler, new_cookie)
+        if profile_cookie_header:
+            handler.send_header("Set-Cookie", profile_cookie_header)
         _security_headers(handler)
         handler.end_headers()
         handler.wfile.write(response_body)

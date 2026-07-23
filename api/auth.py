@@ -846,11 +846,21 @@ def reset_trusted_auth_request_state(handler) -> None:
             pass
 
 
-def _apply_trusted_session_profile(handler, bound_profile: str | None, cookie_value: str) -> None:
-    if bound_profile is None:
-        return
+def _apply_trusted_session_profile(
+    handler,
+    bound_profile: str | None,
+    cookie_value: str,
+    *,
+    selected_profile: str | None = None,
+) -> None:
     from api.helpers import get_profile_cookie
     from api.profiles import set_request_profile
+
+    if bound_profile is None:
+        selected = str(selected_profile or '').strip()
+        if selected:
+            _queue_pending_cookie(handler, _build_profile_cookie_header(selected, cookie_value))
+        return
 
     set_request_profile(bound_profile)
     if get_profile_cookie(handler) != bound_profile:
@@ -886,6 +896,14 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
         _apply_trusted_session_profile(handler, bound_profile, cookie_value)
         return _remember_trusted_auth_session(handler, info, cookie_value)
+    selected_profile_for_rotation = None
+    if info and info.get('bound_profile') is None:
+        try:
+            from api.profiles import get_active_profile_name
+
+            selected_profile_for_rotation = str(get_active_profile_name() or '').strip() or None
+        except Exception:
+            selected_profile_for_rotation = None
     if info:
         invalidate_session(cookie_value)
     cookie_value = create_session(
@@ -894,7 +912,12 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         bound_profile=bound_profile,
     )
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
-    _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+    _apply_trusted_session_profile(
+        handler,
+        bound_profile,
+        cookie_value,
+        selected_profile=selected_profile_for_rotation,
+    )
     info = get_session_info(cookie_value)
     return _remember_trusted_auth_session(handler, info, cookie_value)
 

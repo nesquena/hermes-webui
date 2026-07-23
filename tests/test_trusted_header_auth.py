@@ -21,13 +21,15 @@ NODE = shutil.which("node")
 
 
 class _Handler:
-    def __init__(self, *, headers=None, client_address=("127.0.0.1", 12345)):
+    def __init__(self, *, headers=None, client_address=("127.0.0.1", 12345), body=b""):
         self.headers = dict(headers or {})
+        if body and "Content-Length" not in self.headers:
+            self.headers["Content-Length"] = str(len(body))
         self.client_address = client_address
         self.command = "GET"
         self.path = "/"
         self.request = SimpleNamespace()
-        self.rfile = io.BytesIO(b"")
+        self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
         self.status = None
         self.sent_headers = []
@@ -52,6 +54,27 @@ class _Handler:
 
     def header_values(self, name):
         return [value for key, value in self.sent_headers if key == name]
+
+
+def _cookie_value(set_cookie_headers, cookie_name):
+    prefix = f"{cookie_name}="
+    for header in set_cookie_headers:
+        if header.startswith(prefix):
+            return header.split("=", 1)[1].split(";", 1)[0]
+    raise AssertionError(f"{cookie_name} Set-Cookie header missing: {set_cookie_headers!r}")
+
+
+def _install_known_work_profile(monkeypatch, tmp_path):
+    work_home = tmp_path / "profiles" / "work"
+    work_home.mkdir(parents=True)
+
+    def _home_for_profile(name):
+        if name == "work":
+            return work_home
+        return tmp_path
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", _home_for_profile)
+    return work_home
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +120,77 @@ def _trusted_env(
         monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", proxy_cidrs)
     if logout_url is not None:
         monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL", logout_url)
+
+
+def test_password_auth_enable_resigns_selected_profile_cookie(monkeypatch, tmp_path):
+    _install_known_work_profile(monkeypatch, tmp_path)
+    auth_state = {"enabled": False}
+    monkeypatch.setattr(auth, "is_password_auth_enabled", lambda: auth_state["enabled"])
+    monkeypatch.setattr(auth, "get_password_hash", lambda: "hash" if auth_state["enabled"] else None)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+
+    def _save_settings(_body):
+        auth_state["enabled"] = True
+        return {"theme": "dark", "password_hash": "redacted"}
+
+    monkeypatch.setattr(routes, "save_settings", _save_settings)
+    profiles.set_request_profile("work")
+    handler = _Handler(
+        headers={"Cookie": "hermes_profile=work"},
+        body=b'{"_set_password":"owner-password"}',
+    )
+    handler.command = "POST"
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/settings", query=""))
+
+    assert handler.status == 200
+    set_cookies = handler.header_values("Set-Cookie")
+    session_cookie = _cookie_value(set_cookies, "hermes_session")
+    profile_cookie = _cookie_value(set_cookies, "hermes_profile")
+    assert auth.verify_profile_cookie_value(profile_cookie, session_cookie) == "work"
+
+    next_handler = _Handler(headers={"Cookie": f"hermes_session={session_cookie}; hermes_profile={profile_cookie}"})
+    from api.helpers import get_profile_cookie
+
+    assert get_profile_cookie(next_handler, reject_invalid=True) == "work"
+
+
+def test_password_auth_disable_rewrites_selected_profile_plain_cookie(monkeypatch, tmp_path):
+    _install_known_work_profile(monkeypatch, tmp_path)
+    auth_state = {"enabled": True}
+    monkeypatch.setattr(auth, "is_password_auth_enabled", lambda: auth_state["enabled"])
+    monkeypatch.setattr(auth, "get_password_hash", lambda: "hash" if auth_state["enabled"] else None)
+    monkeypatch.setattr(auth, "verify_password", lambda password: password == "old-password")
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr("api.passkeys.clear_credentials", lambda: None)
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+
+    def _save_settings(_body):
+        auth_state["enabled"] = False
+        return {"theme": "dark"}
+
+    monkeypatch.setattr(routes, "save_settings", _save_settings)
+    session_cookie = auth.create_session()
+    signed_profile = auth.sign_profile_cookie_value("work", session_cookie)
+    profiles.set_request_profile("work")
+    handler = _Handler(
+        headers={"Cookie": f"hermes_session={session_cookie}; hermes_profile={signed_profile}"},
+        body=b'{"_clear_password":true,"_current_password":"old-password"}',
+    )
+    handler.command = "POST"
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/settings", query=""))
+
+    assert handler.status == 200
+    profile_cookie = _cookie_value(handler.header_values("Set-Cookie"), "hermes_profile")
+    assert profile_cookie == "work"
+
+    next_handler = _Handler(headers={"Cookie": f"hermes_profile={profile_cookie}"})
+    from api.helpers import get_profile_cookie
+
+    assert get_profile_cookie(next_handler, reject_invalid=True) == "work"
 
 
 def test_trusted_header_only_enables_auth_gate(monkeypatch):
@@ -509,6 +603,45 @@ def test_existing_trusted_session_rotates_for_current_identity(monkeypatch):
     assert handler._trusted_auth_session_info["bound_profile"] == "bob"
     assert handler._trusted_auth_session_cookie_value != cookie
     assert profiles.get_active_profile_name() == "bob"
+
+
+def test_unbound_trusted_identity_rotation_resigns_selected_profile_cookie(monkeypatch, tmp_path):
+    _install_known_work_profile(monkeypatch, tmp_path)
+    _trusted_env(monkeypatch)
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile=None,
+    )
+    profile_cookie = auth.sign_profile_cookie_value("work", cookie)
+    profiles.set_request_profile("work")
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={cookie}; hermes_profile={profile_cookie}",
+            "Remote-User": "bob",
+        }
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.verify_session(cookie) is False
+    pending = getattr(handler, "_pending_set_cookies", [])
+    replacement_session = _cookie_value(pending, "hermes_session")
+    replacement_profile = _cookie_value(pending, "hermes_profile")
+    assert replacement_session != cookie
+    assert auth.verify_profile_cookie_value(replacement_profile, replacement_session) == "work"
+
+    profiles.clear_request_profile()
+    next_handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={replacement_session}; hermes_profile={replacement_profile}",
+            "Remote-User": "bob",
+        }
+    )
+    from api.helpers import get_profile_cookie
+
+    profiles.set_request_profile(get_profile_cookie(next_handler, reject_invalid=True))
+    assert auth.check_auth(next_handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert profiles.get_active_profile_name() == "work"
 
 
 def test_trusted_reconciliation_cache_resets_between_requests(monkeypatch):
