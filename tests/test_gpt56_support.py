@@ -188,13 +188,13 @@ def test_gpt56_minimal_degrades_to_none(monkeypatch, provider_id):
     ) == "none"
 
 
-def test_max_and_ultra_are_not_advertised_for_older_reasoning_models():
+def test_openrouter_older_reasoning_models_preserve_max_but_not_ultra():
     efforts = config._heuristic_reasoning_efforts(
         "openai/gpt-5.5", "openrouter"
     )
 
-    assert efforts == ["minimal", "low", "medium", "high", "xhigh"]
-    assert "max" not in efforts
+    assert efforts == ["minimal", "low", "medium", "high", "xhigh", "max"]
+    assert "max" in efforts
     assert "ultra" not in efforts
 
 
@@ -224,3 +224,30 @@ def test_reasoning_dropdown_includes_max_and_ultra():
 
     assert 'data-effort="max"' in html
     assert 'data-effort="ultra"' in html
+
+
+def test_openrouter_preserves_max_when_metadata_advertises_it(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "_models_dev_reasoning_efforts",
+        lambda *_args: ["minimal", "low", "medium", "high", "xhigh", "max"],
+    )
+
+    assert config.resolve_model_reasoning_efforts(
+        "openai/gpt-5.4", provider_id="openrouter"
+    )[-1] == "max"
+    assert config.coerce_reasoning_effort_for_model(
+        "max", "openai/gpt-5.4", provider_id="openrouter"
+    ) == "max"
+
+
+def test_generic_partial_capabilities_do_not_disable_reasoning(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "_models_dev_reasoning_efforts",
+        lambda *_args: ["none", "high"],
+    )
+
+    assert config.coerce_reasoning_effort_for_model(
+        "low", "custom-model", provider_id="custom"
+    ) == "low"

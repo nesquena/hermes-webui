@@ -217,8 +217,8 @@ class TestBuildNousFeaturedSet:
 
     def test_curated_static_flagships_are_preserved(self):
         from api.config import _build_nous_featured_set, _PROVIDER_MODELS
-        # Build a catalog that contains all the curated static IDs so the
-        # rule-2 path fires.
+        # The full static catalog still contains every GPT-5.6 fallback entry,
+        # but only a small GPT-5.6 subset belongs to the featured budget.
         static_ids = []
         for entry in _PROVIDER_MODELS.get("nous", []):
             sid = entry["id"]
@@ -226,8 +226,16 @@ class TestBuildNousFeaturedSet:
                 sid = sid[len("@nous:"):]
             static_ids.append(sid)
         catalog = static_ids + [f"filler-vendor/filler-{i:03d}" for i in range(100)]
-        featured, _ = _build_nous_featured_set(catalog)
-        for sid in static_ids:
+        featured, extras = _build_nous_featured_set(catalog)
+        gpt56_ids = {
+            f"openai/gpt-5.6-{variant}"
+            for variant in ("sol", "sol-pro", "terra", "terra-pro", "luna", "luna-pro")
+        }
+        featured_gpt56 = gpt56_ids & set(featured)
+        assert {"openai/gpt-5.6-sol", "openai/gpt-5.6-terra"} <= featured_gpt56
+        assert len(featured_gpt56) < len(gpt56_ids)
+        assert gpt56_ids - set(featured) <= set(extras)
+        for sid in set(static_ids) - gpt56_ids:
             assert sid in featured, (
                 f"Curated static flagship {sid!r} dropped from featured set."
             )

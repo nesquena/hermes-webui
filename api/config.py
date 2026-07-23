@@ -1112,6 +1112,12 @@ _GPT56_ULTRA_MODEL_IDS = frozenset(
 _OPENROUTER_GPT56_MODEL_IDS = frozenset(
     f"openai/{model_id}" for model_id in _GPT56_MODEL_IDS
 )
+# Keep only two GPT-5.6 variants in the mixed-vendor Nous featured budget. The
+# complete GPT-5.6 set remains in the full catalog and is returned via extras.
+_NOUS_FEATURED_GPT56_MODEL_IDS = frozenset({
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-terra",
+})
 
 # Hardcoded fallback models (used when no config.yaml or agent is available)
 # Also used as the OpenRouter model list — keep this curated to current, widely-used models.
@@ -2154,8 +2160,9 @@ def _build_nous_featured_set(
        catalog (preserves selection stickiness — no orphan IDs in the
        dropdown after a refresh).
     2. Always include every entry from the curated static
-       ``_PROVIDER_MODELS["nous"]`` list whose id maps onto a live id —
-       those four are explicitly maintained as flagship picks.
+       ``_PROVIDER_MODELS["nous"]`` list whose id maps onto a live id, except
+       GPT-5.6 variants outside the small featured subset; those stay in
+       ``extras`` so one family cannot consume the mixed-vendor budget.
     3. Top up to ``target`` by walking ``_NOUS_VENDOR_PRIORITY`` round-robin
        (one model per vendor each pass) so no vendor monopolises the slot
        budget. Within a vendor, the original ``live_ids`` order is preserved
@@ -2195,6 +2202,8 @@ def _build_nous_featured_set(
         sid = static.get("id", "")
         if sid.startswith("@nous:"):
             sid = sid[len("@nous:"):]
+        if sid in _OPENROUTER_GPT56_MODEL_IDS and sid not in _NOUS_FEATURED_GPT56_MODEL_IDS:
+            continue
         if sid in live_ids:
             _add(sid)
 
@@ -2202,6 +2211,8 @@ def _build_nous_featured_set(
     by_vendor: dict[str, list[str]] = {}
     for mid in live_ids:
         if mid in chosen_set:
+            continue
+        if mid in _OPENROUTER_GPT56_MODEL_IDS and mid not in _NOUS_FEATURED_GPT56_MODEL_IDS:
             continue
         vendor = mid.split("/", 1)[0] if "/" in mid else ""
         by_vendor.setdefault(vendor, []).append(mid)
@@ -3569,16 +3580,6 @@ def _filter_reasoning_efforts_for_provider(
 
     # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap pre-5.6 GPT-5
     # at xhigh and o-series at high. Exact GPT-5.6 IDs are handled above.
-    if (
-        provider == "openrouter"
-        and model_lower.startswith("openai/")
-        and bare.startswith(("gpt-5", "o1", "o3", "o4"))
-    ):
-        if bare.startswith(("o1", "o3", "o4")):
-            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare not in _GPT56_MODEL_IDS:
-            return [eff for eff in normalized if eff not in {"max", "ultra"}]
-
     if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
@@ -4180,12 +4181,12 @@ def coerce_reasoning_effort_for_model(
     for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
         if level in supported:
             return level
-    # No lower enabled effort exists. Prefer the model's explicit disabled
-    # state over escalating to a higher effort (for example GPT-5.6 minimal -> none).
-    if "none" in supported:
+    # Only GPT-5.6 has the explicit minimal → none contract. For other
+    # partially-known capability sets, keep the requested effort rather than
+    # disabling reasoning merely because `none` is present.
+    bare_model = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if raw == "minimal" and bare_model in _GPT56_MODEL_IDS and "none" in supported:
         return "none"
-    # Partially-known provider metadata may omit lower values and `none`; keep
-    # the valid configured value rather than silently disabling reasoning.
     return raw
 
 
