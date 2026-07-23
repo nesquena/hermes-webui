@@ -131,14 +131,20 @@ _RAW_PRE_REGION_RE = re.compile(r"<pre\b[^>]*>[\s\S]*?</pre>", re.IGNORECASE)
 _ENTITY_PRE_REGION_RE = re.compile(
     r"&lt;(?i:pre)\b(?:[^&]|&(?!gt;))*&gt;[\s\S]*?&lt;/(?i:pre)&gt;"
 )
+_RENDERER_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n|$)")
 _BLOCKQUOTE_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,})([^\r\n`]*)$")
 _BLOCKQUOTE_FENCE_CLOSE_RE = re.compile(r"^[ ]{0,3}(`{3,})[ \t]*$")
+_NESTED_HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"\)\]]+", re.IGNORECASE)
+_RELATIVE_API_MEDIA_PAYLOAD_RE = re.compile(
+    r"(?:^|[=&?#])(?:\.{0,2}/)*/?api/media(?:[/?#=&]|$)",
+    re.IGNORECASE,
+)
 _FENCED_CODE_REGION_RE = re.compile(
     r"(^|\r\n|\r|\n)[ ]{0,3}(?P<fence>`{3,})([^\r\n`]*)"
     r"(?:\r\n|\r|\n)"
     r"(?:[\s\S]*?(?:\r\n|\r|\n))?[ ]{0,3}(?P=fence)`*[ \t]*(?=\r\n|\r|\n|$)"
 )
-_INLINE_CODE_REGION_RE = re.compile(r"`[^`\r\n]+`")
+_INLINE_CODE_REGION_RE = re.compile(r"`[^`\r\n\v\f\x85\u2028\u2029]+`")
 _DATA_IMAGE_RE = re.compile(
     r"^data:image/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$",
     re.IGNORECASE,
@@ -347,7 +353,42 @@ def _has_invalid_bracketed_authority(parsed) -> bool:
     return False
 
 
-def _is_public_media_url(raw_ref: str) -> bool:
+def _bounded_unquote_variants(value: str) -> list[str]:
+    variants: list[str] = []
+    decoded = str(value or "")
+    for _ in range(5):
+        normalized = decoded.replace("\\", "/")
+        if normalized not in variants:
+            variants.append(normalized)
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    return variants
+
+
+def _payload_has_local_media_reference(value: str, *, relative_api_media: bool) -> bool:
+    for variant in _bounded_unquote_variants(value):
+        lowered = variant.lower()
+        if "file://" in lowered or "file:/" in lowered:
+            return True
+        if relative_api_media and _RELATIVE_API_MEDIA_PAYLOAD_RE.search(variant):
+            return True
+        for match in _NESTED_HTTP_URL_RE.finditer(variant):
+            if not _is_public_media_url(match.group(0), validate_payload=False):
+                return True
+    return False
+
+
+def _media_url_has_local_payload(parsed) -> bool:
+    return (
+        _payload_has_local_media_reference(parsed.path, relative_api_media=False)
+        or _payload_has_local_media_reference(parsed.query, relative_api_media=True)
+        or _payload_has_local_media_reference(parsed.fragment, relative_api_media=True)
+    )
+
+
+def _is_public_media_url(raw_ref: str, *, validate_payload: bool = True) -> bool:
     ref = str(raw_ref or "")
     if "[" in ref or "]" in ref:
         return False
@@ -382,6 +423,8 @@ def _is_public_media_url(raw_ref: str) -> bool:
             or _hostname_has_non_global_embedded_ip(hostname)
         ):
             return False
+    if validate_payload and _media_url_has_local_payload(parsed):
+        return False
     if _API_MEDIA_PATH_RE.search(_media_url_path_for_boundary_check(parsed.path)):
         return not _is_trusted_webui_origin(parsed, hostname)
     return True
@@ -477,10 +520,10 @@ def _line_content(line: str) -> str:
 
 def _share_lines_with_offsets(text: str) -> list[tuple[int, str]]:
     lines: list[tuple[int, str]] = []
-    offset = 0
-    for line in str(text or "").splitlines(keepends=True):
-        lines.append((offset, _line_content(line)))
-        offset += len(line)
+    for match in _RENDERER_LINE_RE.finditer(str(text or "")):
+        line = match.group(0)
+        if line:
+            lines.append((match.start(), _line_content(line)))
     return lines
 
 
@@ -554,11 +597,11 @@ def _stash_share_code_regions(text: str):
         stashed.append(match.group(0) if hasattr(match, "group") else str(match))
         return f"{stash_prefix}{len(stashed) - 1}\x00"
 
-    protected = _RAW_PRE_REGION_RE.sub(stash, text)
-    protected = _ENTITY_PRE_REGION_RE.sub(stash, protected)
-    protected = _stash_blockquote_fenced_code_regions(protected, stash)
+    protected = _stash_blockquote_fenced_code_regions(text, stash)
     protected = _FENCED_CODE_REGION_RE.sub(stash, protected)
     protected = _INLINE_CODE_REGION_RE.sub(stash, protected)
+    protected = _RAW_PRE_REGION_RE.sub(stash, protected)
+    protected = _ENTITY_PRE_REGION_RE.sub(stash, protected)
 
     def restore(value: str) -> str:
         for index, original in enumerate(stashed):

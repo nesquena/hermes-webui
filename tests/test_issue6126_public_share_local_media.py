@@ -118,10 +118,7 @@ window.window = window;
 window.globalThis = context;
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(uiPath, 'utf8'), context, {filename: uiPath});
-vm.runInContext(
-  "_inlineMediaHtmlForRef = ref => `__MEDIA_REF__${ref}__`; __rendered = renderMd(__raw);",
-  context
-);
+vm.runInContext("__rendered = renderMd(__raw);", context);
 process.stdout.write(String(context.__rendered));
 """
     result = subprocess.run(
@@ -393,6 +390,28 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
         "> file:///private-not-known/lone-cr.png\r"
         ">> ```"
     )
+    inline_pre_crossing = "`<pre>` file:///private-not-known/cross-inline.png </pre>"
+    entity_inline_pre_crossing = (
+        "`&lt;pre&gt;` file:///private-not-known/cross-entity-inline.png &lt;/pre&gt;"
+    )
+    hidden_pre_ancestor = (
+        "<pre>x\n"
+        "```text\n"
+        "</pre>\n"
+        "> ```text\n"
+        "> file:///private-not-known/pre-shadow.png\n"
+        "> ```"
+    )
+    unicode_separator = (
+        "> ```text\u2028"
+        "> file:///private-not-known/u2028-separator.png\u2028"
+        "> ```"
+    )
+    vertical_tab_separator = (
+        "> ```text\v"
+        "> file:///private-not-known/vtab-separator.png\v"
+        "> ```"
+    )
     session = SimpleNamespace(
         title="Title >> ```text\n> file:///private-not-known/title-depth.png\n>> ```",
         messages=[
@@ -404,7 +423,12 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
                     f"{deeper_closer}\n"
                     f"{unmatched_outer}\n"
                     f"{mixed_crlf_deeper_closer}\n"
-                    f"{lone_cr_deeper_closer}"
+                    f"{lone_cr_deeper_closer}\n"
+                    f"{inline_pre_crossing}\n"
+                    f"{entity_inline_pre_crossing}\n"
+                    f"{hidden_pre_ancestor}\n"
+                    f"{unicode_separator}\n"
+                    f"{vertical_tab_separator}"
                 ),
             }
         ],
@@ -422,9 +446,14 @@ def test_public_share_snapshot_omits_mixed_depth_blockquote_fence_file_uris():
     assert "shadowed-by-outer" not in content
     assert "mixed-crlf" not in content
     assert "lone-cr" not in content
+    assert "cross-inline" not in content
+    assert "cross-entity-inline" not in content
+    assert "pre-shadow" not in content
+    assert "u2028-separator" not in content
+    assert "vtab-separator" not in content
     assert f"> {OMITTED_ATTACHMENT}" in content
     assert f">> {OMITTED_ATTACHMENT}" in content
-    assert content.count(OMITTED_ATTACHMENT) == 6
+    assert content.count(OMITTED_ATTACHMENT) == 11
     assert "file://" not in title
     assert "private-not-known" not in title
     assert "title-depth" not in title
@@ -463,11 +492,54 @@ def test_public_share_blockquote_stashing_matches_render_md_file_activation():
 
     for raw in active_shapes:
         rendered = _render_md_with_node(raw)
-        assert "__MEDIA_REF__file:///private-not-known/" in rendered
+        assert "api/media?path=" in rendered
+        assert "private-not-known" in rendered
 
     rendered = _render_md_with_node(inert_shape)
-    assert "__MEDIA_REF__" not in rendered
+    assert "api/media?path=" not in rendered
     assert "file:///fixture-not-redacted/mixed-inert-oracle.txt" in rendered
+
+
+def test_public_share_snapshot_render_md_oracle_keeps_local_refs_closed():
+    import api.shares as shares
+
+    session = SimpleNamespace(
+        title=(
+            "Title MEDIA:https://cdn.example.test/image.png"
+            "?source=file:///private-not-known/title-query.png"
+        ),
+        messages=[
+            {
+                "role": "assistant",
+                "content": (
+                    "`<pre>` file:///private-not-known/cross-inline-render.png </pre>\n"
+                    "<pre>x\n"
+                    "```text\n"
+                    "</pre>\n"
+                    "> ```text\n"
+                    "> file:///private-not-known/pre-shadow-render.png\n"
+                    "> ```\n"
+                    "> ```text\u2028"
+                    "> file:///private-not-known/u2028-render.png\u2028"
+                    "> ```\n"
+                    "MEDIA:https://cdn.example.test/image.png"
+                    "?source=file:///private-not-known/query-render.png"
+                ),
+            }
+        ],
+    )
+
+    snapshot = shares.build_share_snapshot(session)
+    content = snapshot["messages"][0]["content"]
+    rendered = _render_md_with_node(content)
+    rendered_title = _render_md_with_node(snapshot["title"])
+
+    assert "private-not-known" not in content
+    assert "private-not-known" not in snapshot["title"]
+    assert "api/media?path=" not in rendered
+    assert "private-not-known" not in rendered
+    assert "api/media?path=" not in rendered_title
+    assert "private-not-known" not in rendered_title
 
 
 def test_public_share_snapshot_omits_parser_divergent_active_file_uri_shapes():
@@ -636,25 +708,53 @@ def test_public_share_snapshot_scopes_api_media_path_to_trusted_same_origin(monk
     assert content.count(OMITTED_ATTACHMENT) == 2
 
 
-def test_public_share_snapshot_preserves_unrelated_scheme_and_public_media_file_query():
+def test_public_share_snapshot_omits_local_payloads_inside_public_media_urls(monkeypatch):
     import api.shares as shares
 
-    public_media = "MEDIA:https://cdn.example.test/image.png?source=file:///label"
+    monkeypatch.setenv("HERMES_WEBUI_ALLOWED_ORIGINS", "https://hermes.example.test")
+
+    public_media = "MEDIA:https://cdn.example.test/image.png?source=label#caption=public"
     session = SimpleNamespace(
-        title="Approved public media share",
+        title=(
+            "Title MEDIA:https://cdn.example.test/image.png"
+            "?source=file:///private-not-known/title-query.png"
+        ),
         messages=[
             {
                 "role": "assistant",
-                "content": f"profile://alice/settings\n{public_media}",
+                "content": (
+                    f"profile://alice/settings\n{public_media}\n"
+                    "Literal MEDIA:https://cdn.example.test/image.png"
+                    "?source=file:///private-not-known/query.png\n"
+                    "Encoded MEDIA:https://cdn.example.test/image.png"
+                    "#source=file%3A%2F%2F%2Fprivate-not-known%2Ffragment.png\n"
+                    "Path MEDIA:https://cdn.example.test/assets/"
+                    "file%3A%2F%2F%2Fprivate-not-known%2Fpath.png\n"
+                    "Relative auth MEDIA:https://cdn.example.test/image.png"
+                    "?next=%2Fapi%2Fmedia%3Fpath%3D%2Fprivate-not-known%2Fauth.png\n"
+                    "Same-origin auth MEDIA:https://cdn.example.test/image.png"
+                    "?next=https%3A%2F%2Fhermes.example.test%2Fapi%2Fmedia"
+                    "%3Fpath%3D%2Fprivate-not-known%2Fsame-origin.png"
+                ),
             }
         ],
     )
 
-    content = shares.build_share_snapshot(session)["messages"][0]["content"]
+    snapshot = shares.build_share_snapshot(session)
+    content = snapshot["messages"][0]["content"]
 
     assert "profile://alice/settings" in content
     assert public_media in content
-    assert content.count(OMITTED_ATTACHMENT) == 0
+    assert "source=file://" not in content
+    assert "file%3A" not in content
+    assert "/api/media" not in content
+    assert "%2Fapi%2Fmedia" not in content
+    assert "hermes.example.test" not in content
+    assert "private-not-known" not in content
+    assert content.count(OMITTED_ATTACHMENT) == 5
+    assert "file://" not in snapshot["title"]
+    assert "private-not-known" not in snapshot["title"]
+    assert snapshot["title"].count(OMITTED_ATTACHMENT) == 1
 
 
 def test_public_share_snapshot_bracketed_local_media_has_clean_placeholder():
