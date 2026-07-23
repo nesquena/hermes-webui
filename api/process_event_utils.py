@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import logging
+import re
 import threading
 import time
 from typing import Any
@@ -51,6 +52,105 @@ def completion_delivery_id(evt: Any) -> str:
             or ""
         ).strip()
     return str(evt.get("session_id") or "").strip()
+
+
+# ── process-wakeup display metadata (#6345) ────────────────────────────────
+# Inverse of the two structured ``format_wakeup_prompt`` shapes (completion,
+# watch_match). Those shapes are pinned by
+# tests/test_background_process_wakeup_format.py; the other event kinds
+# (watch_overflow/watch_disabled free-text, async_delegation agent-side
+# formatter) intentionally return None so the UI keeps its raw fallback.
+_WAKEUP_COMPLETION_RE = re.compile(
+    r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) completed "
+    r"\(exit_code=(?P<exit_code>[^)\n]*)\)\.\n"
+    r"Command: (?P<cmd>[^\n]*)\n"
+    r"Output:\n"
+)
+_WAKEUP_WATCH_MATCH_RE = re.compile(
+    r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) matched watch pattern "
+    r"\"(?P<pattern>.*)\"\.\n"
+    r"Command: (?P<cmd>[^\n]*)\n"
+    r"Matched output:\n"
+)
+
+
+def wakeup_display_meta(text: Any) -> dict | None:
+    """Parse a ``format_wakeup_prompt`` body into display-only metadata.
+
+    Returns ``{type, task_id, command, exit_code}`` for completion events and
+    ``{type, task_id, command, pattern}`` for watch matches, or None when the
+    text is not one of those pinned shapes. Header fields only — the output
+    section stays in the message body (the UI extracts it there), so the
+    metadata never duplicates multi-KB process output in the store.
+
+    Header fields are anchored to the pinned single-line grammar (``sid``,
+    ``exit_code``, ``command``, ``pattern`` never contain newlines). The
+    optional watch suppression note is deliberately NOT parsed out: it lives in
+    the free-form output tail, where process output can contain the exact same
+    "(N earlier matches were suppressed…)" text, so inferring it from the body
+    would misclassify legitimate output and drop it. The note stays part of the
+    rendered output verbatim (#6350 review finding 2).
+    """
+    body = str(text or "")
+    m = _WAKEUP_COMPLETION_RE.match(body)
+    if m:
+        exit_code: Any = m.group("exit_code")
+        try:
+            exit_code = int(exit_code)
+        except ValueError:
+            pass
+        return {
+            "type": "completion",
+            "task_id": m.group("sid"),
+            "command": m.group("cmd"),
+            "exit_code": exit_code,
+        }
+    m = _WAKEUP_WATCH_MATCH_RE.match(body)
+    if m:
+        return {
+            "type": "watch_match",
+            "task_id": m.group("sid"),
+            "command": m.group("cmd"),
+            "pattern": m.group("pattern"),
+        }
+    return None
+
+
+def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
+    """Stamp ``_wakeup_meta`` on a process-wakeup user message, best-effort.
+
+    Companion to the ``_source`` stamp: display-only (``_wakeup_meta`` is not
+    in ``_API_SAFE_MSG_KEYS``, so it never reaches a provider) and never
+    raises — an unparseable body simply leaves the message unstamped and the
+    UI falls back to parsing/raw rendering.
+    """
+    if source != "process_wakeup" or not isinstance(msg, dict):
+        return
+    if msg.get("_wakeup_meta"):
+        return
+    try:
+        meta = wakeup_display_meta(msg.get("content"))
+    except Exception:
+        logger.debug("wakeup display-meta derivation failed", exc_info=True)
+        return
+    if meta:
+        msg["_wakeup_meta"] = meta
+
+
+def stamp_message_source(msg: Any, source: Any) -> None:
+    """Stamp ``_source`` and any display metadata on a materialized user turn.
+
+    Single choke point for every path that persists a non-``webui`` user turn
+    (result merges, eager checkpoint, and the pending-turn recovery paths) so a
+    future source-bearing recovery site cannot silently skip the ``_wakeup_meta``
+    stamp — the gap #6350 review flagged in ``_append_recovered_pending_turn``
+    and the cancel outer-finally recovery. ``webui`` turns are left untouched to
+    preserve the existing "``_source`` omitted for the default source" contract.
+    """
+    if not isinstance(msg, dict) or not source or source == "webui":
+        return
+    msg["_source"] = source
+    attach_wakeup_display_meta(msg, source)
 
 
 def _claim_bounded_local(delegation_id: str) -> bool:
