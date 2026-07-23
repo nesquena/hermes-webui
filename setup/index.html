@@ -355,14 +355,14 @@
     <div class="section-head reveal">
       <div class="step-eyebrow"><span class="step-dot">1</span> Run the server</div>
       <h2>Stand up Hermes WebUI</h2>
-      <p class="lead">On any machine you control — macOS, Linux, or Windows via WSL2 — with <code>Python 3.11+</code> and <code>git</code>. The bootstrap finds or installs Hermes Agent, sets up the environment, and walks you through first-run onboarding.</p>
+      <p class="lead">On any machine you control — macOS, Linux, or Windows via WSL2 — with <code>Python 3.11+</code> and <code>git</code>. The bootstrap checks for Hermes Agent (and shows you how to install it if it's missing), sets up the environment, and walks you through first-run onboarding.</p>
     </div>
 
     <div class="code reveal">
       <div class="code-head"><span class="code-label">bash — one-liner</span><button class="code-copy">Copy</button></div>
       <pre><code>curl -fsSL https://get-hermes.ai/install.sh | bash</code></pre>
     </div>
-    <p class="reveal">Clones the Web UI to <code>~/hermes-webui</code>, installs Hermes Agent if it's missing, and starts the server on <code>127.0.0.1:8787</code>. Safe to re-run to update. Open that URL in any browser and the full Web UI is there. To relaunch later, run <code>./start.sh</code>.</p>
+    <p class="reveal">Clones the Web UI to <code>~/hermes-webui</code>, checks that Hermes Agent is installed (printing the one-line agent installer if it's missing), and starts the server on <code>127.0.0.1:8787</code>. Safe to re-run to update. Open that URL in any browser and the full Web UI is there. To relaunch later, run <code>./start.sh</code>.</p>
 
     <details class="adv-reveal reveal">
       <summary>Install manually, or set up Hermes Agent yourself</summary>
@@ -376,7 +376,7 @@ python3 bootstrap.py</code></pre>
         </div>
 
         <h3 class="sub">Need Hermes Agent first?</h3>
-        <p>Hermes WebUI runs on the <a href="https://hermes-agent.nousresearch.com/" target="_blank">Hermes Agent</a>. The one-liner installs it automatically if it's missing — or set it up directly:</p>
+        <p>Hermes WebUI runs on the <a href="https://hermes-agent.nousresearch.com/" target="_blank">Hermes Agent</a>. If the <code>hermes</code> CLI is missing, the one-liner points you here to install it first — set it up directly:</p>
         <div class="code">
           <div class="code-head"><span class="code-label">bash — install Hermes Agent</span><button class="code-copy">Copy</button></div>
           <pre><code>curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
