@@ -359,6 +359,7 @@ def _run_dashboard_link_driver(
             pass
 
 
+@requires_node
 def test_issue6459_remote_public_dashboard_url_uses_normal_label_from_fixture():
     fixture = (FIXTURES / "webui-PR-TARGET-6459-REPRO.md").read_text(encoding="utf-8")
     dashboard_url = "https://dashboard.example.com"
@@ -374,6 +375,7 @@ def test_issue6459_remote_public_dashboard_url_uses_normal_label_from_fixture():
     assert all(state["tooltip"] == "Dashboard" and state["ariaLabel"] == "Dashboard" for state in out["buttonStates"])
 
 
+@requires_node
 def test_issue6459_remote_loopback_targets_keep_warning():
     for target in ("http://127.0.0.1:9119", "http://localhost:9119", "http://[::1]:9119"):
         out = _run_dashboard_link_driver(
@@ -386,6 +388,7 @@ def test_issue6459_remote_loopback_targets_keep_warning():
         assert all(state["tooltip"] == "Loopback" for state in out["buttonStates"])
 
 
+@requires_node
 def test_issue6459_public_hosts_that_resemble_loopback_do_not_warn():
     for target in ("https://localhost.example.test", "https://127.0.0.1.example.test"):
         out = _run_dashboard_link_driver(
@@ -398,6 +401,7 @@ def test_issue6459_public_hosts_that_resemble_loopback_do_not_warn():
         assert all(state["tooltip"] == "Dashboard" for state in out["buttonStates"])
 
 
+@requires_node
 def test_issue6459_loopback_webui_origin_never_gets_remote_warning():
     out = _run_dashboard_link_driver(
         "save",
@@ -409,6 +413,7 @@ def test_issue6459_loopback_webui_origin_never_gets_remote_warning():
     assert all(state["tooltip"] == "Dashboard" for state in out["buttonStates"])
 
 
+@requires_node
 def test_issue6459_loopback_target_warning_survives_locale_resync():
     out = _run_dashboard_link_driver(
         "save-and-apply-locale",
