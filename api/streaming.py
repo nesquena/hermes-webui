@@ -160,6 +160,26 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
 
+# ── Pre-provider TTFT-reduction caches (#6006) ──────────────────────────────
+# MCP discovery is idempotent but does import + config read. Run it at most
+# once per process so it never blocks the send→first-token path on later turns.
+_MCP_DISCOVERY_RAN: bool = False
+_MCP_DISCOVERY_LOCK = threading.Lock()
+
+# Per-profile fingerprint cache: once we've resolved config-derived values
+# (_cfg, _prefill_messages, _toolsets, _main_request_overrides) for a given
+# config fingerprint, skip re-derivation on subsequent turns for the same
+# profile. The fingerprint is (config_path, st_mtime_ns, st_size) so any
+# on-disk config edit is picked up on the next turn.
+_CONFIG_DERIVATIONS_CACHE: dict[str, dict] = {}
+_CONFIG_DERIVATIONS_CACHE_LOCK = threading.Lock()
+# Per-session enabled_toolsets cache (#6006): Session.load_metadata_only()
+# reads the session JSON file from disk every turn. Cache the result per
+# session_id so the disk read only happens once per run.
+_SESSION_TOOLSETS_CACHE: dict[str, tuple[list[str] | None, float]] = {}  # session_id -> (enabled_toolsets or None, wall_clock_freshness)
+_SESSION_TOOLSETS_CACHE_LOCK = threading.Lock()
+_SESSION_TOOLSETS_CACHE_TTL = 5.0  # seconds; a session JSON change is reflected within 5s
+
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
     if environ is None:
@@ -7787,11 +7807,23 @@ def _run_agent_streaming(
         # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
         # lives outside this WebUI repo.  This change fixes the headline bug
         # for users who run a single non-default profile per WebUI process.
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
-        except Exception:
-            pass  # MCP not available or not configured — non-fatal
+        #
+        # #6006 TTFT: MCP discovery is idempotent (process-global _servers
+        # registry) and only needs to run once per process — on every
+        # subsequent turn it just re-imports and finds nothing new.  Gate it
+        # behind a process-level flag so the import + config-read overhead
+        # never hits the send→first-token path on later turns.  Re-enters when
+        # _ENV_LOCK mutation above changes HERMES_HOME to ensure the first
+        # discovery after a profile switch is fresh.
+        global _MCP_DISCOVERY_RAN
+        with _MCP_DISCOVERY_LOCK:
+            if not _MCP_DISCOVERY_RAN:
+                try:
+                    from tools.mcp_tool import discover_mcp_tools
+                    discover_mcp_tools()
+                except Exception:
+                    pass  # MCP not available or not configured — non-fatal
+                _MCP_DISCOVERY_RAN = True
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
@@ -8481,36 +8513,108 @@ def _run_agent_streaming(
             # this run (issue #3294). Read the SESSION's own profile home
             # explicitly so toolsets and context match the profile the session
             # actually runs under.
+            #
+            # #6006 TTFT: cache config derivations (prefill, toolsets) keyed
+            # on (profile_home, config_file_stat) so unchanged config does not
+            # re-derive prefill context (file read or script launch) or
+            # toolset resolution on every turn. The config parse itself is
+            # already memoized in config._yaml_file_cache; this layer saves
+            # the downstream work that isn't cached downstream.
             from api.config import get_config_for_profile_home as _get_config_for_home
             try:
                 _cfg = _get_config_for_home(_profile_home)
             except Exception:
                 from api.config import get_config as _get_config
                 _cfg = _get_config()
-            _prefill_context = _load_webui_prefill_context(_cfg)
-            _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
-            _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
-            _main_request_overrides = _main_model_request_overrides(
-                _cfg,
-                effective_model=resolved_model,
-                effective_provider=resolved_provider,
-            )
-            put('context_status', {
-                'session_id': session_id,
-                'prefill': _public_prefill_context_status(_prefill_context),
-            })
 
-            # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
-            # server toolsets are included, matching native CLI behaviour.
-            from api.config import _resolve_cli_toolsets
-            _toolsets = _resolve_cli_toolsets(_cfg)
+            # Compute a fingerprint from the resolved config file so we can
+            # skip re-derivation when the on-disk config hasn't changed.
+            from api.config import _get_config_path as _gcfg_path
+            _cfg_fingerprint = None
+            try:
+                _cfg_path = _gcfg_path()
+                if _cfg_path and _cfg_path.exists():
+                    _cfg_st = _cfg_path.stat()
+                    _cfg_fingerprint = f"{_cfg_path}:{_cfg_st.st_mtime_ns}:{_cfg_st.st_size}"
+            except Exception:
+                pass
+
+            _cached_derivations = None
+            if _cfg_fingerprint and _profile_home:
+                _cache_key = str(_profile_home)
+                with _CONFIG_DERIVATIONS_CACHE_LOCK:
+                    _cached = _CONFIG_DERIVATIONS_CACHE.get(_cache_key)
+                    if _cached is not None and _cached.get('_fingerprint') == _cfg_fingerprint:
+                        _cached_derivations = _cached
+
+            if _cached_derivations is not None:
+                # Use cached derivations — config hasn't changed since last turn
+                _prefill_context = _cached_derivations['_prefill_context']
+                _prefill_messages = _cached_derivations['_prefill_messages']
+                _toolsets = list(_cached_derivations['_toolsets'])
+            else:
+                # Fresh derivation — compute prefill and toolsets from config
+                _prefill_context = _load_webui_prefill_context(_cfg)
+                _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
+                _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
+                _main_request_overrides = _main_model_request_overrides(
+                    _cfg,
+                    effective_model=resolved_model,
+                    effective_provider=resolved_provider,
+                )
+                put('context_status', {
+                    'session_id': session_id,
+                    'prefill': _public_prefill_context_status(_prefill_context),
+                })
+
+                # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
+                # server toolsets are included, matching native CLI behaviour.
+                from api.config import _resolve_cli_toolsets
+                _toolsets = _resolve_cli_toolsets(_cfg)
+
+                # Cache derivations for the next turn on the same profile.
+                # _main_request_overrides is NOT cached because it depends on
+                # the per-turn resolved_model + resolved_provider.
+                if _cfg_fingerprint and _profile_home:
+                    with _CONFIG_DERIVATIONS_CACHE_LOCK:
+                        _CONFIG_DERIVATIONS_CACHE[_cache_key] = {
+                            '_fingerprint': _cfg_fingerprint,
+                            '_prefill_context': _prefill_context,
+                            '_prefill_messages': _prefill_messages,
+                            '_toolsets': list(_toolsets),
+                        }
+
+            # _main_request_overrides is per-turn (depends on resolved model+provider)
+            # and was already computed in the fresh branch above. For the cached
+            # branch, compute it now.
+            if _cached_derivations is not None:
+                _main_request_overrides = _main_model_request_overrides(
+                    _cfg,
+                    effective_model=resolved_model,
+                    effective_provider=resolved_provider,
+                )
+                put('context_status', {
+                    'session_id': session_id,
+                    'prefill': _public_prefill_context_status(_prefill_context),
+                })
 
             # Per-session toolset override (#493): if the session has
             # enabled_toolsets set, use that instead of the global config.
+            # #6006 TTFT: Session.load_metadata_only() reads the session JSON
+            # file from disk on every turn. Cache the result per session_id
+            # with a short TTL so the disk read only happens once per run.
             try:
                 from api.models import Session, SESSION_DIR
                 _session_path = SESSION_DIR / f"{session_id}.json"
-                if _session_path.exists():
+                _cached_override = None
+                with _SESSION_TOOLSETS_CACHE_LOCK:
+                    _cached_ts_data = _SESSION_TOOLSETS_CACHE.get(session_id)
+                    if _cached_ts_data is not None and (time.time() - _cached_ts_data[1]) < _SESSION_TOOLSETS_CACHE_TTL:
+                        _cached_override = _cached_ts_data[0]
+                if _cached_override is not None:
+                    if _cached_override:
+                        _toolsets = _cached_override
+                elif _session_path.exists():
                     _session_meta = Session.load_metadata_only(session_id)
                     # load_metadata_only returns a Session INSTANCE, not a dict.
                     # The previous .get('enabled_toolsets') raised AttributeError
@@ -8521,6 +8625,10 @@ def _run_agent_streaming(
                     _override = getattr(_session_meta, 'enabled_toolsets', None) if _session_meta else None
                     if _override:
                         _toolsets = _override
+                    # Cache the result (None or the list) so TTL guards the
+                    # next read instead of hitting disk again.
+                    with _SESSION_TOOLSETS_CACHE_LOCK:
+                        _SESSION_TOOLSETS_CACHE[session_id] = (_override, time.time())
             except Exception as _ts_err:
                 print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
 
@@ -10543,6 +10651,14 @@ def _run_agent_streaming(
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
                 raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                # #6006: expose ttft_ms as a top-level field in the done event
+                # payload so the run journal records it directly (it was already
+                # embedded in usage.ttft_ms for the browser SSE consumer, but the
+                # top-level field makes the journal queryable without digging into
+                # the usage sub-object).
+                _done_ttft = usage.get('ttft_ms')
+                if _done_ttft is not None:
+                    _done_payload['ttft_ms'] = _done_ttft
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
