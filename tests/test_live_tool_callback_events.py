@@ -56,8 +56,22 @@ def test_legacy_progress_events_are_suppressed_when_structured_callbacks_are_wir
     src = _read("api/streaming.py")
     block = _function_block(src, "on_tool")
 
+    # Verify the targeted-suppression contract.
+    # Legacy tool.started and tool.completed events are only suppressed
+    # when (a) the structured callback is wired AND (b) this specific tool
+    # name was already handled by the structured path (tracked via the
+    # _live_tool_event_start_names / _live_tool_event_complete_names sets).
+    # Internal/framework-only tool calls not touched by the structured
+    # callbacks still flow through the legacy path.
     assert "event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params" in block
+    assert "name in _live_tool_event_start_names" in block
     assert "event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params" in block
+    assert "name in _live_tool_event_complete_names" in block
+    assert "name and name in" in block, (
+        "The name check must guard against None/empty names so "
+        "unnamed tool-progress events still reach the legacy path."
+    )
+    # Suppression guard must come before the corresponding legacy emit
     assert block.index("'tool_start_callback' in _agent_params") < block.index("put('tool'")
     assert block.index("'tool_complete_callback' in _agent_params") < block.index("put('tool_complete'")
 

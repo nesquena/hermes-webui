@@ -8097,6 +8097,8 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
+            _live_tool_event_start_names = set()
+            _live_tool_event_complete_names = set()
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -8197,9 +8199,14 @@ def _run_agent_streaming(
                 # and the structured tool_start/tool_complete callbacks for the
                 # same tool. Prefer the structured path when it is supported so
                 # the browser receives one tid-tagged tool card per real call.
+                # Only suppress the legacy emit for calls the structured path
+                # actually handles. Since the legacy callback fires BEFORE the
+                # structured one, use tid-correlation instead of name look-
+                # behind: extract tool_call_id from positional args.
+                tid = cb_args[4] if len(cb_args) >= 5 else None
                 if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
-                    return
-
+                    if tid:
+                        return
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
@@ -8246,8 +8253,8 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
-                    return
-
+                    if tid:
+                        return
                 if event_type == 'tool.completed':
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
@@ -8318,6 +8325,7 @@ def _run_agent_streaming(
                     _record_live_tool_start(tool_call_id, name, args)
                     if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
                         _live_tool_event_start_ids.add(tool_call_id)
+                        _live_tool_event_start_names.add(name)
                         _live_tool_calls.append({
                             'name': name,
                             'args': args if isinstance(args, dict) else {},
@@ -8351,6 +8359,7 @@ def _run_agent_streaming(
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
+                        _live_tool_event_complete_names.add(name)
                         result_snippet = _tool_result_snippet(function_result)
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
