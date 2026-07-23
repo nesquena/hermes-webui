@@ -2969,6 +2969,8 @@ def _clear_stale_stream_state(session) -> bool:
                     original_stub.pending_started_at = None
                 if hasattr(original_stub, "pending_user_source"):
                     original_stub.pending_user_source = None
+                if hasattr(original_stub, "pending_turn_id"):
+                    original_stub.pending_turn_id = None
             except Exception:
                 pass
             return False
@@ -3025,6 +3027,8 @@ def _clear_stale_stream_state(session) -> bool:
             session.pending_started_at = None
         if hasattr(session, "pending_user_source"):
             session.pending_user_source = None
+        if hasattr(session, "pending_turn_id"):
+            session.pending_turn_id = None
         try:
             # Runtime cleanup is not user activity; do not bubble old sessions
             # to the top of the sidebar just because a stale stream flag was
@@ -15044,6 +15048,7 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_turn_id = None
             s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
@@ -20869,7 +20874,7 @@ def _handle_background(handler, body):
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
-def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:
+def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui", *, stream_id: str | None = None) -> None:
     """Materialize the current user turn for eager first-turn persistence.
 
     The streaming thread still receives ``pending_user_message`` so existing
@@ -20894,6 +20899,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         user_msg["timestamp"] = int(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
+    if stream_id:
+        user_msg["_turn_id"] = stream_id
     s.messages.append(user_msg)
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
@@ -20942,6 +20949,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    s.pending_turn_id = stream_id
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -20959,6 +20967,7 @@ def _prepare_chat_start_session_for_stream(
             attachments,
             s.pending_started_at,
             source=source,
+            stream_id=stream_id,
         )
     s.save()
 
@@ -24780,6 +24789,7 @@ def _handle_session_compress(handler, body):
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_turn_id = None
             visible_after = visible_messages_for_anchor(s.messages, auto_compression=False)
             s.compression_anchor_visible_idx = max(0, len(visible_after) - 1) if visible_after else None
             s.compression_anchor_message_key = _anchor_message_key(visible_after[-1]) if visible_after else None
