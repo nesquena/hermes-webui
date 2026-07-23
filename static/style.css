@@ -2144,6 +2144,7 @@
   .panel-view{display:none;flex:1;overflow:hidden;flex-direction:column;}
   .panel-view.active{display:flex;}
   /* Cron panel */
+  #tasksJobsPane,#tasksScriptsPane{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden;}
   .cron-list{flex:1;overflow-y:auto;padding:8px;}
   .cron-gateway-notice{margin:8px 8px 0;}
   .cron-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;overflow:hidden;transition:border-color .15s,background .15s;background:rgba(255,255,255,.02);cursor:pointer;}
@@ -7219,9 +7220,11 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 .tasks-subtab:hover{background:var(--hover-bg);color:var(--text);}
 .tasks-subtab.active{background:var(--accent-bg);color:var(--accent-text);}
 /* Scripts list */
-.scripts-list{flex:1;overflow-y:auto;padding:8px;}
+.scripts-list{flex:1;min-height:0;overflow-y:auto;padding:8px;}
+.tasks-subtab[aria-selected="true"]{background:var(--accent-bg);color:var(--accent-text);}
+.script-expand{margin-left:auto;color:var(--muted);font-size:14px;line-height:1;}
 .script-item{border:1px solid var(--border);border-radius:8px;margin-bottom:6px;overflow:hidden;}
-.script-header{display:flex;align-items:center;gap:6px;padding:8px 10px;cursor:pointer;user-select:none;}
+.script-header{display:flex;align-items:center;gap:6px;width:100%;border:0;background:none;color:inherit;text-align:left;padding:8px 10px;cursor:pointer;user-select:none;}
 .script-header:hover{background:var(--hover-bg);}
 .script-name{font-size:13px;font-weight:500;color:var(--text);}
 .script-ext{font-size:11px;color:var(--muted);}

@@ -18954,15 +18954,23 @@ def _handle_file_read(handler, parsed):
         return bad(handler, _sanitize_error(e), 404)
 
 
-def _read_anchored_file_bytes(ws_root: Path, target: Path) -> bytes:
+def _read_anchored_file_bytes(
+    ws_root: Path,
+    target: Path,
+    max_bytes: int = MAX_FILE_BYTES,
+    allow_prefix: bool = False,
+) -> bytes:
     fd = open_anchored_fd(ws_root, target, want_dir=False)
     with os.fdopen(fd, "rb", closefd=True) as fh:
         st = os.fstat(fh.fileno())
         if not _stat.S_ISREG(st.st_mode):
             raise FileNotFoundError(f"Not a file: {target}")
-        if st.st_size > MAX_FILE_BYTES:
-            raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
-        return fh.read(MAX_FILE_BYTES + 1)
+        if not allow_prefix and st.st_size > max_bytes:
+            raise ValueError(f"File too large ({st.st_size} bytes, max {max_bytes})")
+        data = fh.read(max_bytes if allow_prefix else max_bytes + 1)
+        if not allow_prefix and len(data) > max_bytes:
+            raise ValueError(f"File too large (max {max_bytes} bytes)")
+        return data
 
 
 def _handle_approval_pending(handler, parsed):
@@ -20136,27 +20144,20 @@ def _read_active_project_context(workspace: Path | None) -> dict:
     )
     return payload
 def _hermes_scripts_dir() -> Path:
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser().resolve()
-    return hermes_home / "scripts"
+    from api.profiles import get_active_hermes_home
+
+    return Path(get_active_hermes_home()).expanduser().resolve() / "scripts"
 
 
-def _parse_script_docstring(path: Path) -> str:
+def _parse_script_docstring(data: bytes, ext: str) -> str:
     """Extract leading docstring or comment block from a script file."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    ext = path.suffix.lower()
+    text = data.decode("utf-8", errors="replace")
     if ext == ".py":
         import ast
         try:
             tree = ast.parse(text)
             doc = ast.get_docstring(tree)
-            return (doc or "").split("\n")[0].strip()
+            return (doc or "").split("\n")[0].strip()[:512]
         except (SyntaxError, ValueError):
             pass
     # .sh and fallback: collect leading # comment lines
@@ -20169,11 +20170,14 @@ def _parse_script_docstring(path: Path) -> str:
             continue
         else:
             break
-    return " ".join(lines[:3]).strip()
+    return " ".join(lines[:3]).strip()[:512]
 
 
 def _handle_scripts_list(handler) -> None:
-    scripts_dir = _hermes_scripts_dir()
+    try:
+        scripts_dir = _hermes_scripts_dir()
+    except Exception:
+        return bad(handler, "scripts unavailable", 503)
     if not scripts_dir.exists():
         return j(handler, {"scripts": []})
     scripts = []
@@ -20182,17 +20186,18 @@ def _handle_scripts_list(handler) -> None:
     except OSError:
         return j(handler, {"scripts": []})
     for p in entries:
+        if p.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
+            continue
         try:
             target = safe_resolve(scripts_dir, p.name)
-        except ValueError:
-            continue
-        if not target.exists() or not target.is_file():
-            continue
-        if target.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
+            data = _read_anchored_file_bytes(
+                scripts_dir, target, 64 * 1024, allow_prefix=True
+            )
+        except (OSError, ValueError):
             continue
         scripts.append({
             "name": p.name,
-            "description": _parse_script_docstring(target),
+            "description": _parse_script_docstring(data, p.suffix.lower()),
         })
     return j(handler, {"scripts": scripts})
 
@@ -20202,21 +20207,30 @@ def _handle_scripts_raw(handler, parsed) -> None:
     name = qs.get("path", [""])[0]
     if not name:
         return bad(handler, "path required", 400)
-    scripts_dir = _hermes_scripts_dir()
+    try:
+        scripts_dir = _hermes_scripts_dir()
+    except Exception:
+        return bad(handler, "scripts unavailable", 503)
     if not scripts_dir.exists():
         return bad(handler, "scripts directory not found", 404)
     try:
         target = safe_resolve(scripts_dir, name)
     except ValueError:
-        return bad(handler, "invalid path", 400)
-    if not target.exists() or not target.is_file():
+        if any(part == ".." for part in Path(name).parts):
+            return bad(handler, "invalid path", 400)
         return bad(handler, "script not found", 404)
     if target.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
         return bad(handler, "unsupported file type", 400)
     try:
-        source = target.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        return bad(handler, _sanitize_error(e), 500)
+        source = _read_anchored_file_bytes(scripts_dir, target).decode(
+            "utf-8", errors="replace"
+        ).replace("\r\n", "\n")
+    except FileNotFoundError:
+        return bad(handler, "script not found", 404)
+    except ValueError:
+        return bad(handler, "script too large", 413)
+    except OSError:
+        return bad(handler, "script not found", 404)
     return j(handler, {"name": target.name, "source": source})
 
 
