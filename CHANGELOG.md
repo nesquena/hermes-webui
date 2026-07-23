@@ -5,6 +5,8 @@
 
 ### Changed
 
+- **Background-process completions and watch matches now render as compact, collapsible summary cards.** Routine wakeups no longer fill the transcript with an always-expanded agent-facing prompt: the collapsed row shows the command, exit status or matched watch pattern, and timestamp, while one click reveals the complete command and verbatim output. Failed processes keep a red accent, long watch patterns remain reachable on touch and keyboard when expanded, and unfamiliar future event shapes safely retain the existing raw-notice fallback. Thanks @b3nw. (#6350, #6345)
+
 - **The repository is now pip-installable with standard packaging metadata.** `pyproject.toml` gains a `[build-system]` + `[project]` section (setuptools + setuptools-scm) so packagers and distros can `pip install .` and get a proper wheel (`api` + `static` bundled). The normal `bootstrap.py` / `start.sh` / `ctl.sh` source-checkout launch path is unchanged. setuptools-scm writes its version to a separate `api/_scm_version.py` (not the Docker-owned `api/_version.py`), and the runtime version detector reads it as an explicit fallback (normalizing the PEP 440 value to a `v…` form) so an installed wheel reports a real version instead of `unknown` — Docker and git-checkout version resolution are byte-identical to before. Thanks @rodboev. (#6337, #2695)
 
 - **Transparent Stream can now hide its per-event timestamp chips.** A new opt-in setting (Settings → the Transparent Stream activity area) lets you suppress the small per-event timestamp chips inside Transparent Stream while keeping the assistant response footer time visible — narrowing the visual noise without removing timing information entirely. Default is unchanged (chips shown). Thanks @rodboev. (#6130, #6099)
