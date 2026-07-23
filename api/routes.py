@@ -3641,14 +3641,20 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             event_run_ids.add(event_run_id)
         if event_run_id_malformed:
             malformed_envelope_run_id = True
-    # The event envelope is the durable identity authority. Older summaries
-    # are keyed by the transport id, so only use that fallback when the journal
-    # does not provide one unambiguous run id.
-    run_id = (
-        next(iter(event_run_ids))
-        if not malformed_envelope_run_id and len(event_run_ids) == 1
-        else fallback_run_id
-    )
+    # The event envelope is the durable identity authority when it carries a
+    # real run identity. Mixed-era journals can still have token/tool envelopes
+    # keyed by the transport stream while the summary and outcome envelopes use
+    # the stable run id, so treat that exact stream-id-only case as fallback
+    # authority without letting outcomes choose the scene owner.
+    if not malformed_envelope_run_id and len(event_run_ids) == 1:
+        event_run_id = next(iter(event_run_ids))
+        run_id = (
+            fallback_run_id
+            if fallback_run_id != stream_id and event_run_id == stream_id
+            else event_run_id
+        )
+    else:
+        run_id = fallback_run_id
 
     assistant_text = ""
     reasoning_text = ""

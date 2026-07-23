@@ -377,6 +377,66 @@ def test_snapshot_preserves_stable_run_identity_for_outcomes(monkeypatch):
     assert scene["side_effects"] == []
 
 
+def test_snapshot_accepts_mixed_stream_envelopes_with_stable_outcomes(monkeypatch):
+    from api import routes
+
+    stream_id = "stream_transport_mixed"
+    run_id = "run_stable_mixed"
+    session_id = "session_mixed"
+    events = [
+        {
+            "seq": 1,
+            "event": "token",
+            "event_id": f"{stream_id}:1",
+            "run_id": stream_id,
+            "payload": {"text": "visible progress"},
+        },
+        {
+            "seq": 2,
+            "event": "artifact_reference",
+            "event_id": f"{run_id}:2",
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "payload": {"kind": "workspace_file", "path": "reports/final.md"},
+        },
+        {
+            "seq": 3,
+            "event": "state_saved",
+            "event_id": "foreign-run:3",
+            "run_id": "foreign-run",
+            "stream_id": stream_id,
+            "payload": {
+                "session_id": session_id,
+                "kind": "memory",
+                "action": "saved",
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: {
+            "session_id": session_id,
+            "run_id": run_id,
+            "last_seq": 3,
+            "last_event_id": f"{run_id}:3",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _session_id, _run_id: {"events": events},
+    )
+
+    scene = routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]
+
+    assert scene["identity"]["run_id"] == run_id
+    assert scene["identity"]["stream_id"] == stream_id
+    assert [event["event_id"] for event in scene["artifacts"]] == [f"{run_id}:2"]
+    assert scene["artifacts"][0]["run_id"] == run_id
+    assert scene["side_effects"] == []
+
+
 def test_snapshot_rejects_outcomes_that_would_steer_scene_owner(monkeypatch):
     from api import routes
 
