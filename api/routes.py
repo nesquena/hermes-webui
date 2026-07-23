@@ -9399,6 +9399,7 @@ from api.models import (
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
+    project_identity_matches,
     save_projects,
     import_cli_session,
     get_cli_sessions,
@@ -13186,14 +13187,36 @@ def handle_get(handler, parsed) -> bool:
         # aggregate list so settings/admin UIs can still see everything.
         from api import profiles as profiles_api
 
-        active_profile = profiles_api.get_active_profile_name()
-        all_projects = load_projects()
         isolated_profile_mode = _is_isolated_profile_mode()
         all_profiles = _all_profiles_enabled(parsed)
+        active_profile = profiles_api.get_active_profile_name()
+        root_profile_names = ['default']
         if all_profiles:
+            from api.models import load_projects_for_profiles
+
+            profile_rows = [
+                row
+                for row in profiles_api.list_profiles_api()
+                if isinstance(row, dict) and row.get("name")
+            ]
+            profile_names = [
+                row.get("name")
+                for row in profile_rows
+            ]
+            root_profile_names = ['default'] + [
+                row.get("name")
+                for row in profile_rows
+                if row.get("is_default") and row.get("name") != 'default'
+            ]
+            if active_profile not in profile_names:
+                profile_names.insert(0, active_profile)
+            all_projects = load_projects_for_profiles(profile_names)
             scoped = all_projects
             other_profile_count = 0
         else:
+            if profiles_api._is_root_profile(active_profile) and active_profile != 'default':
+                root_profile_names.append(active_profile)
+            all_projects = load_projects(include_db=True, profile_name=active_profile)
             scoped = [p for p in all_projects
                       if _profiles_match(p.get("profile"), active_profile)]
             other_profile_count = 0 if isolated_profile_mode else len(all_projects) - len(scoped)
@@ -13201,6 +13224,7 @@ def handle_get(handler, parsed) -> bool:
             "projects": scoped,
             "all_profiles": all_profiles,
             "active_profile": active_profile,
+            "root_profile_names": root_profile_names,
             "other_profile_count": other_profile_count,
         })
 
@@ -14228,6 +14252,17 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        requested_profile = str(body.get("profile") or "").strip()
+        if requested_profile:
+            from api.profiles import _PROFILE_ID_RE
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile", status=400)
+        session_profile = requested_profile or get_active_profile_name() or "default"
+        project_id = body.get("project_id") or None
+        if project_id:
+            projects = load_projects(include_db=True, profile_name=session_profile)
+            if not any(project_identity_matches(p, project_id, session_profile) for p in projects):
+                return bad(handler, "Project not found", status=404)
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
@@ -14342,8 +14377,8 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
-            project_id=body.get("project_id") or None,
+            profile=session_profile,
+            project_id=project_id,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
@@ -16063,7 +16098,13 @@ def handle_post(handler, parsed) -> bool:
             # session-scoped state over global active profile. (#3325 follow-up)
             _session_profile = getattr(s, 'profile', None) or get_active_profile_name()
             target = next(
-                (p for p in load_projects() if p["project_id"] == target_pid),
+                (
+                    p for p in load_projects(
+                        include_db=True,
+                        profile_name=_session_profile,
+                    )
+                    if project_identity_matches(p, target_pid, _session_profile)
+                ),
                 None,
             )
             if not target:
@@ -16139,14 +16180,21 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         import re as _re
 
+        requested_profile = str(body.get("profile") or "").strip()
+        active_profile = get_active_profile_name() or "default"
+        if requested_profile:
+            from api.profiles import _PROFILE_ID_RE
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile")
+            if not _profiles_match(requested_profile, active_profile):
+                return bad(handler, "Project not found", 404)
+        requested_profile = requested_profile or active_profile
         projects = load_projects()
         proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
+            (p for p in projects if project_identity_matches(p, body["project_id"], requested_profile)), None
         )
         if not proj:
             return bad(handler, "Project not found", 404)
-        # #1614: a project can only be renamed by the profile that owns it.
-        active_profile = get_active_profile_name()
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
         proj["name"] = body["name"].strip()[:128]
@@ -16163,17 +16211,27 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id")
         except ValueError as e:
             return bad(handler, str(e))
+        requested_profile = str(body.get("profile") or "").strip()
+        active_profile = get_active_profile_name() or "default"
+        if requested_profile:
+            from api.profiles import _PROFILE_ID_RE
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile")
+            if not _profiles_match(requested_profile, active_profile):
+                return bad(handler, "Project not found", 404)
+        requested_profile = requested_profile or active_profile
         projects = load_projects()
         proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
+            (p for p in projects if project_identity_matches(p, body["project_id"], requested_profile)), None
         )
         if not proj:
             return bad(handler, "Project not found", 404)
-        # #1614: a project can only be deleted by the profile that owns it.
-        active_profile = get_active_profile_name()
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
-        projects = [p for p in projects if p["project_id"] != body["project_id"]]
+        projects = [
+            p for p in projects
+            if not project_identity_matches(p, body["project_id"], requested_profile)
+        ]
         save_projects(projects)
         # Unassign all sessions that belonged to this project.
         # #3746: this loop is O(N) full-JSON read+save per session, and each
@@ -16195,6 +16253,8 @@ def handle_post(handler, parsed) -> bool:
                 deferred_to_stream = []
                 for entry in index:
                     if entry.get("project_id") != body["project_id"]:
+                        continue
+                    if not _profiles_match(entry.get("profile"), requested_profile):
                         continue
                     sid = entry.get("session_id")
                     try:

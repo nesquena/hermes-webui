@@ -502,6 +502,15 @@ def test_send_uses_session_model_as_authoritative_source(cleanup_test_sessions):
         "send() must use S.session.model in the chat/start payload"
 
 
+def test_send_prefers_session_profile_over_active_profile():
+    src = (REPO_ROOT / "static/messages.js").read_text(encoding="utf-8")
+    chat_start_idx = src.find("api('/api/chat/start'")
+    assert chat_start_idx >= 0, "could not find /api/chat/start POST in messages.js"
+    payload_block = src[chat_start_idx:chat_start_idx+700]
+    assert "profile:S.session.profile||S.activeProfile||'default'" in payload_block, \
+        "send() must bind chat/start to the session profile before falling back to the active profile"
+
+
 # ── R15: newSession does not clear live tool cards ────────────────────────────
 
 def test_newSession_clears_live_tool_cards(cleanup_test_sessions):
