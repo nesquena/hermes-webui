@@ -865,7 +865,21 @@ def main() -> int:
             page.evaluate(
                 """() => {
                   const samples = [];
+                  const settledWorklogRemovals = [];
                   let active = true;
+                  const transcript = document.querySelector('#msgInner');
+                  const observer = new MutationObserver(records => {
+                    for (const record of records) {
+                      if (record.target !== transcript) continue;
+                      for (const node of record.removedNodes) {
+                        if (!(node instanceof Element)) continue;
+                        if (node.querySelector('[data-anchor-settled-scene-owner="1"]')) {
+                          settledWorklogRemovals.push(node.outerHTML.slice(0, 500));
+                        }
+                      }
+                    }
+                  });
+                  observer.observe(transcript, {childList: true});
                   const sample = () => {
                     const liveTurn = document.querySelector('#liveAssistantTurn');
                     const groups = Array.from(document.querySelectorAll(
@@ -887,7 +901,11 @@ def main() -> int:
                     if (active) requestAnimationFrame(sample);
                   };
                   window.__lifecycleSettleFrameProof = {
-                    stop: () => { active = false; return samples.slice(); },
+                    stop: () => {
+                      active = false;
+                      observer.disconnect();
+                      return {samples: samples.slice(), settledWorklogRemovals};
+                    },
                   };
                   requestAnimationFrame(sample);
                 }"""
@@ -925,10 +943,16 @@ def main() -> int:
         assert session_id, "active session id missing after settlement"
         if TEST_BITE == "settle-worklog-frame-proof":
             page.wait_for_timeout(100)
-            settle_frames = page.evaluate(
+            settle_proof = page.evaluate(
                 "window.__lifecycleSettleFrameProof && window.__lifecycleSettleFrameProof.stop()"
             )
+            assert isinstance(settle_proof, dict), settle_proof
+            settle_frames = settle_proof.get("samples")
             assert isinstance(settle_frames, list) and settle_frames, settle_frames
+            assert not settle_proof.get("settledWorklogRemovals"), {
+                "message": "#6414: settlement rebuilt and removed the just-settled Worklog",
+                "settled_worklog_removals": settle_proof.get("settledWorklogRemovals"),
+            }
             for frame in settle_frames:
                 groups = frame["groups"]
                 valid_settled_surface = any(
@@ -948,7 +972,7 @@ def main() -> int:
                 full_page=True,
             )
             (artifact_dir / "settle-worklog-frame-proof.json").write_text(
-                json.dumps(settle_frames, indent=2),
+                json.dumps(settle_proof, indent=2),
                 encoding="utf-8",
             )
             print(

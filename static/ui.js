@@ -13521,6 +13521,44 @@ function _armKeepSettledWorklogOpen(streamId){
 function _disarmKeepSettledWorklogOpen(){
   _keepSettledWorklogOpenForStreamId=null;
 }
+function _collapseJustSettledWorklogInPlace(streamId){
+  // #6414: STREAM_DONE used to render the settled turn once with its Worklog
+  // forced open, then immediately run a second full render only to collapse it.
+  // That second `innerHTML=''` rebuild removes the Worklog the user just saw and
+  // can expose a reset frame. Keep the canonical first render, then collapse its
+  // one settled group in place. The rows are released after the group is hidden;
+  // an expand still rebuilds them from the settled transcript via the normal
+  // #5839 deferred-row path.
+  const inner=$('msgInner');
+  if(!inner||!streamId) return false;
+  const group=Array.from(inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]'))
+    .filter(candidate=>candidate.getAttribute('data-anchor-stream-id')===String(streamId))
+    .pop();
+  if(!group) return false;
+  const disclosureKey=group.getAttribute('data-activity-disclosure-key')||'';
+  const savedDisclosure=_readActivityDisclosureState(disclosureKey);
+  const rows=_deferredWorklogRowsFromGroup(group);
+  if(!rows||!rows.length) return false;
+  const match=/^anchor-scene:(\d+)$/.exec(disclosureKey);
+  const message=match&&S.messages&&S.messages[Number(match[1])];
+  const errored=!!(message&&message._anchor_activity_scene&&
+    _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
+  if(savedDisclosure==='open'||(errored&&savedDisclosure!=='closed')) return true;
+  group._deferredWorklogRows=rows;
+  group.setAttribute('data-worklog-rows-deferred','1');
+  group.classList.add('tool-call-group-collapsed');
+  group.classList.remove('open');
+  const summary=group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+  if(summary) summary.setAttribute('aria-expanded','false');
+  _syncToolCallGroupSummary(group);
+  requestAnimationFrame(()=>{
+    if(!group.isConnected||!group.classList.contains('tool-call-group-collapsed')) return;
+    if(group.getAttribute('data-worklog-rows-deferred')!=='1') return;
+    const list=_toolWorklogListEl(group);
+    if(list) list.replaceChildren();
+  });
+  return true;
+}
 // True while a just-settled worklog is being force-rendered open (between
 // _armKeepSettledWorklogOpen and _disarmKeepSettledWorklogOpen). renderMessages()
 // consults this so it does NOT write the forced-open DOM into _sessionHtmlCache:
