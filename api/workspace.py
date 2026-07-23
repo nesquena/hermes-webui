@@ -27,6 +27,7 @@ _ESCAPE_AUTH_TTL_SECONDS = 300
 _ESCAPE_AUTH_LOCK = threading.Lock()
 _ESCAPE_AUTH_TOKENS: dict[str, dict[str, str | int | float]] = {}
 
+from api._subprocess_compat import windows_hide_flags
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
@@ -1683,6 +1684,7 @@ def _run_git(args, cwd, timeout=3):
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
+            creationflags=windows_hide_flags(),
         )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

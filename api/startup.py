@@ -3,6 +3,8 @@ from __future__ import annotations
 import os, stat, subprocess, sys
 from pathlib import Path
 
+from api._subprocess_compat import windows_hide_flags
+
 # Credential files that should never be world-readable
 _SENSITIVE_FILES = (
     '.env',
@@ -112,7 +114,10 @@ def auto_install_agent_deps() -> bool:
         print('[!!] Auto-install skipped: no requirements.txt or pyproject.toml in agent dir.', flush=True)
         return False
     try:
-        result = subprocess.run(install_args, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            install_args, capture_output=True, text=True, timeout=120,
+            creationflags=windows_hide_flags(),
+        )
         if result.returncode != 0:
             print(f'[!!] pip install failed (exit {result.returncode}):', flush=True)
             for line in (result.stderr or '').splitlines()[-10:]:

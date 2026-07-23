@@ -1011,7 +1011,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                     return 202
                 return None
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 
@@ -1065,7 +1065,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 calls["implicit_pid"] += 1
                 return next(self._pids)
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 
@@ -1119,7 +1119,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 calls["ambient_pid"] += 1
                 return next(self._pids)
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 
@@ -1177,7 +1177,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 calls["ambient_pid"] += 1
                 return next(self._pids)
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 
@@ -1235,7 +1235,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 calls["ambient_pid"] += 1
                 return next(self._pids)
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 
@@ -1292,7 +1292,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                     return 101
                 return None
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 
@@ -1347,7 +1347,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                     return 101
                 return None
 
-        def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        def fake_popen(args, stdout=None, stderr=None, text=True, env=None, **kwargs):
             calls["popen"].append((args, dict(env or {})))
             return FailedRestartProcess()
 

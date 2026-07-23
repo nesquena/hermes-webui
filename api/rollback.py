@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from api._subprocess_compat import windows_hide_flags
+
 logger = logging.getLogger(__name__)
 
 # Checkpoint identifiers are SHA-style hex hashes from the agent's
@@ -102,6 +104,7 @@ def _checkpoint_entry_modes(git: str, ckpt_dir: Path) -> dict[str, int]:
     result = subprocess.run(
         [git, "-C", str(ckpt_dir), "ls-files", "-s"],
         capture_output=True, text=True, timeout=10,
+        creationflags=windows_hide_flags(),
     )
     if result.returncode != 0:
         raise ValueError("Failed to list checkpoint files")
@@ -136,6 +139,7 @@ def _read_checkpoint_blob(git: str, ckpt_dir: Path, rel_path: str) -> bytes | No
     result = subprocess.run(
         [git, "-C", str(ckpt_dir), "show", f"HEAD:{rel_path}"],
         capture_output=True, timeout=10,
+        creationflags=windows_hide_flags(),
     )
     if result.returncode != 0:
         return None
@@ -250,6 +254,7 @@ def _inspect_checkpoint(ckpt_path: Path, git: str) -> dict[str, Any] | None:
         result = subprocess.run(
             [git, "-C", str(ckpt_path), "log", "--format=%H%n%s%n%aI", "-1"],
             capture_output=True, text=True, timeout=5,
+            creationflags=windows_hide_flags(),
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
@@ -272,6 +277,7 @@ def _inspect_checkpoint(ckpt_path: Path, git: str) -> dict[str, Any] | None:
         files_result = subprocess.run(
             [git, "-C", str(ckpt_path), "ls-files"],
             capture_output=True, text=True, timeout=5,
+            creationflags=windows_hide_flags(),
         )
         file_count = len(files_result.stdout.strip().split("\n")) if files_result.stdout.strip() else 0
 

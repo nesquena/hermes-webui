@@ -21,20 +21,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from api._subprocess_compat import windows_hide_flags
+
 logger = logging.getLogger(__name__)
 
 
-def _windows_hide_flags() -> int:
-    """Win32 ``creationflags`` that hide a short-lived console child's window
-    (``CREATE_NO_WINDOW``) without detaching it, so ``capture_output`` still
-    works. Returns ``0`` on non-Windows — the ``subprocess`` default, a genuine
-    no-op. Mirrors the ``api/updates.py`` pattern; kept local so workspace-git
-    never takes a hard dependency on the optional ``hermes_cli`` package (a
-    standalone/agent-less WebUI must keep full git functionality). See #5692.
-    """
-    if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return 0
+# Kept as a module-level alias rather than switching every call site to the
+# shared name: #5692's regression tests import `_windows_hide_flags` from this
+# module by name, and the alias costs nothing. New code should import
+# `windows_hide_flags` from api._subprocess_compat directly.
+_windows_hide_flags = windows_hide_flags
 
 
 from api.workspace import rmtree_anchored, safe_resolve_ws, unlink_anchored
