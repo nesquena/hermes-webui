@@ -205,8 +205,12 @@ class FakeElement {
     this._listeners.get(eventType).push(listener);
   }
 
-  focus() {
-    if (globalThis.document) globalThis.document.activeElement = this;
+  focus(options = {}) {
+    if (globalThis.document) {
+      globalThis.document.activeElement = this;
+      this.lastFocusOptions = options;
+      if (!options.preventScroll) globalThis.document.scrollTop = 0;
+    }
   }
 
   click() {
@@ -401,7 +405,7 @@ function setupDom(mode) {
   const providers = makePane('settingsPaneProviders');
   const plugins = makePane('settingsPanePlugins');
   register(createElement('div')).id = 'settingsPaneAppearance';
-  register(createElement('div')).id = 'settingsPanePreferences';
+  const preferences = makePane('settingsPanePreferences');
   register(createElement('div')).id = 'settingsPaneExtensions';
   register(createElement('div')).id = 'settingsPaneSystem';
   register(createElement('div')).id = 'settingsPaneHelp';
@@ -489,6 +493,11 @@ function setupDom(mode) {
       labelText: 'Theme',
       descriptionText: 'Choose the interface color theme',
     }));
+  } else if (mode === 'focus-displaced-by-dynamic') {
+    preferences.appendChild(makeSettingsField({
+      labelText: 'Default Model',
+      descriptionText: 'Choose the default model',
+    }));
   }
 
   return {
@@ -543,13 +552,16 @@ function runScenario(command) {
         command === 'live-before-dynamic' ||
         command === 'click-before-dynamic' ||
         command === 'focus-before-dynamic' ||
-        command === 'focus-with-dynamic-change'
+        command === 'focus-with-dynamic-change' ||
+        command === 'focus-displaced-by-dynamic'
       ) {
         let releaseProviderLoad;
         globalThis.loadProvidersPanel = () => new Promise((resolveLoad) => {
           releaseProviderLoad = resolveLoad;
         });
-        const searchPromise = filterSettings('theme');
+        const searchPromise = filterSettings(
+          command === 'focus-displaced-by-dynamic' ? 'model' : 'theme',
+        );
         await Promise.resolve();
         await Promise.resolve();
         const results = $('settingsSearchResults');
@@ -571,16 +583,37 @@ function runScenario(command) {
           });
           return;
         }
-        if (command === 'focus-before-dynamic' || command === 'focus-with-dynamic-change') {
+        if (
+          command === 'focus-before-dynamic' ||
+          command === 'focus-with-dynamic-change' ||
+          command === 'focus-displaced-by-dynamic'
+        ) {
           const provisionalResult = results.children[0];
           provisionalResult.focus();
           const focusedBefore = document.activeElement === provisionalResult;
           if (command === 'focus-with-dynamic-change') {
             $('settingsPaneProviders').appendChild(makeProviderCard('Theme Provider'));
           }
+          if (command === 'focus-displaced-by-dynamic') {
+            for (let i = 0; i < 12; i++) {
+              $('settingsPaneProviders').appendChild(makeProviderCard(`Model Provider ${i}`));
+            }
+            document.scrollTop = 321;
+          }
           releaseProviderLoad();
           await searchPromise;
           const finalResult = results.children[0];
+          if (command === 'focus-displaced-by-dynamic') {
+            resolve({
+              focusedBefore,
+              resultCount: results.children.length,
+              oldResultDetached: provisionalResult.parentElement === null,
+              inputActive: document.activeElement === $('settingsSearch'),
+              scrollTop: document.scrollTop,
+              focusPreventScroll: $('settingsSearch').lastFocusOptions?.preventScroll === true,
+            });
+            return;
+          }
           resolve({
             focusedBefore,
             focusedAfter: document.activeElement === finalResult,
@@ -744,3 +777,15 @@ def test_changed_dynamic_results_restore_focus_by_identity(driver_file):
     assert payload["focusedBefore"] is True
     assert payload["focusedAfter"] is True
     assert payload["replacementSameNode"] is False
+
+
+def test_displaced_dynamic_result_returns_focus_to_search_without_scrolling(
+    driver_file,
+):
+    payload = _run_driver(driver_file, "focus-displaced-by-dynamic")
+    assert payload["focusedBefore"] is True
+    assert payload["resultCount"] == 12
+    assert payload["oldResultDetached"] is True
+    assert payload["inputActive"] is True
+    assert payload["scrollTop"] == 321
+    assert payload["focusPreventScroll"] is True

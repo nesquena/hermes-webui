@@ -8217,8 +8217,9 @@ async function filterSettings(query) {
       if (focusedIdentity === identity) focusTarget = item;
     }
     resultsEl.style.display = '';
-    if (focusTarget && typeof focusTarget.focus === 'function') {
-      focusTarget.focus({ preventScroll: true });
+    const focusDestination = focusTarget || (focusedIdentity ? $('settingsSearch') : null);
+    if (focusDestination && typeof focusDestination.focus === 'function') {
+      focusDestination.focus({ preventScroll: true });
     }
   };
   renderResults(!!buildPromise);
