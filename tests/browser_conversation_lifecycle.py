@@ -859,8 +859,8 @@ def main() -> int:
 
         # #6414 proof: the terminal handoff may rebuild DOM, but a browser paint
         # must never expose an expanded empty Worklog shell or an activity-less
-        # gap.  Sample on rAF boundaries because DOM mutations within one task are
-        # not a user-visible frame.
+        # gap.  Sample after rAF callbacks for a frame have drained; DOM mutations
+        # within one task or earlier rAF callbacks are not user-visible frames.
         if TEST_BITE == "settle-worklog-frame-proof":
             page.evaluate(
                 """() => {
@@ -880,6 +880,11 @@ def main() -> int:
                     }
                   });
                   observer.observe(transcript, {childList: true});
+                  const scheduleSample = () => {
+                    requestAnimationFrame(() => {
+                      setTimeout(sample, 0);
+                    });
+                  };
                   const sample = () => {
                     const liveTurn = document.querySelector('#liveAssistantTurn');
                     const groups = Array.from(document.querySelectorAll(
@@ -898,7 +903,7 @@ def main() -> int:
                       '[data-anchor-scene-row="1"],.tool-card-row,.wl-reason'
                     ).length : 0;
                     samples.push({live: Boolean(liveTurn), liveRows, groups});
-                    if (active) requestAnimationFrame(sample);
+                    if (active) scheduleSample();
                   };
                   window.__lifecycleSettleFrameProof = {
                     stop: () => {
@@ -907,7 +912,7 @@ def main() -> int:
                       return {samples: samples.slice(), settledWorklogRemovals};
                     },
                   };
-                  requestAnimationFrame(sample);
+                  scheduleSample();
                 }"""
             )
 
