@@ -513,6 +513,99 @@ def test_fetch_json_rejects_dns_resolved_private_hosts(monkeypatch):
         auth_oidc._fetch_json("https://issuer.example/.well-known/openid-configuration")
 
 
+@pytest.mark.parametrize(
+    ("url", "private_ip"),
+    [
+        ("https://10.5.5.7/.well-known/openid-configuration", "10.5.5.7"),
+        ("https://192.168.1.50/.well-known/openid-configuration", "192.168.1.50"),
+        ("https://172.16.0.10/.well-known/openid-configuration", "172.16.0.10"),
+    ],
+)
+def test_validates_private_ip_literal_when_allow_private_endpoints_is_true(
+    monkeypatch, url, private_ip
+):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": f"https://{private_ip}",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+
+    # Should NOT raise — private endpoints are allowed
+    auth_oidc._validate_outbound_oidc_url(url)
+
+
+def test_validates_private_dns_host_when_allow_private_endpoints_is_true(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "https://auth.internal.example",
+            "client_id": "webui-client",
+            "client_secret": "",
+            "redirect_uri": "",
+            "scopes": ["openid"],
+            "allow_claim": "email",
+            "allow_values": ["user@example.com"],
+            "allow_private_endpoints": True,
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.5.5.7", 443))
+        ],
+    )
+
+    # Should NOT raise — private endpoints are allowed
+    auth_oidc._validate_outbound_oidc_url(
+        "https://auth.internal.example/.well-known/openid-configuration"
+    )
+
+
+def test_still_rejects_loopback_when_allow_private_endpoints_is_true():
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url(
+            "https://127.0.0.1/.well-known/openid-configuration"
+        )
+
+
+def test_allow_private_endpoints_defaults_to_false_in_config(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "get_config",
+        lambda: {
+            "webui_oidc": {
+                "issuer": "https://auth.example",
+                "client_id": "webui-client",
+                "allow_claim": "email",
+                "allow_values": ["user@example.com"],
+            }
+        },
+    )
+
+    cfg = auth_oidc._resolve_oidc_config()
+    assert cfg["allow_private_endpoints"] is False
+
+
 def test_select_public_key_rejects_wrong_ec_curve_for_alg():
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
