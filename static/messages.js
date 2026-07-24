@@ -6073,6 +6073,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
       if(eventMatchesCurrent){
+        const completionSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||eventSid||currentSid;
+        if (typeof _migrateSessionCompletionUnreadToFinalSession === 'function') {
+          _migrateSessionCompletionUnreadToFinalSession(currentSid, completionSid);
+        }
         _flushReasoningToAnchor();
         _applyToAnchor('apperror',{
           type:d.type||'error',
@@ -6458,6 +6462,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
+      if (typeof _migrateSessionCompletionUnreadToFinalSession === 'function') {
+        _migrateSessionCompletionUnreadToFinalSession(activeSid, completedSid);
+      }
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, session.message_count);
       }

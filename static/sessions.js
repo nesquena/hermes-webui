@@ -536,6 +536,32 @@ function _saveSessionCompletionUnread() {
   }
 }
 
+function _migrateSessionCompletionUnreadToFinalSession(previousSid, finalSid) {
+  if (!previousSid || !finalSid || previousSid === finalSid) return;
+  const unread = _getSessionCompletionUnread();
+  const previousMarker = unread[previousSid];
+  if (!previousMarker || typeof previousMarker !== 'object' || Array.isArray(previousMarker)) return;
+  const finalMarker = unread[finalSid];
+  if (finalMarker && typeof finalMarker === 'object' && !Array.isArray(finalMarker)) {
+    const mergedMarker = {...previousMarker, ...finalMarker};
+    if (previousMarker.manual === true || finalMarker.manual === true) {
+      mergedMarker.manual = true;
+      if (
+        !Object.prototype.hasOwnProperty.call(finalMarker, 'manual_pending')
+        && Object.prototype.hasOwnProperty.call(previousMarker, 'manual_pending')
+      ) {
+        mergedMarker.manual_pending = previousMarker.manual_pending;
+      }
+    }
+    unread[finalSid] = mergedMarker;
+  } else {
+    unread[finalSid] = previousMarker;
+  }
+  delete unread[previousSid];
+  _saveSessionCompletionUnread();
+}
+
+
 function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
@@ -1170,28 +1196,7 @@ function _markSessionCompletedInList(session, previousSid = null) {
   const finalSid = session.session_id || previousSid;
   if (!finalSid) return;
   if (previousSid && previousSid !== finalSid) {
-    const unread = _getSessionCompletionUnread();
-    const previousMarker = unread[previousSid];
-    if (previousMarker && typeof previousMarker === 'object' && !Array.isArray(previousMarker)) {
-      const finalMarker = unread[finalSid];
-      if (finalMarker && typeof finalMarker === 'object' && !Array.isArray(finalMarker)) {
-        const mergedMarker = {...previousMarker, ...finalMarker};
-        if (previousMarker.manual === true || finalMarker.manual === true) {
-          mergedMarker.manual = true;
-          if (
-            !Object.prototype.hasOwnProperty.call(finalMarker, 'manual_pending')
-            && Object.prototype.hasOwnProperty.call(previousMarker, 'manual_pending')
-          ) {
-            mergedMarker.manual_pending = previousMarker.manual_pending;
-          }
-        }
-        unread[finalSid] = mergedMarker;
-      } else {
-        unread[finalSid] = previousMarker;
-      }
-      delete unread[previousSid];
-      _saveSessionCompletionUnread();
-    }
+    _migrateSessionCompletionUnreadToFinalSession(previousSid, finalSid);
   }
   const finalIdx = _allSessions.findIndex(s => s && s.session_id === finalSid);
   const previousIdx = previousSid ? _allSessions.findIndex(s => s && s.session_id === previousSid) : -1;
