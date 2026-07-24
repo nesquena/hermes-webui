@@ -27,7 +27,7 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
-_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
+_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple[object, ...], dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
@@ -98,13 +98,14 @@ def _session_list_cache_active_stream_ids():
     return _active_stream_ids()
 
 
-def _session_list_cache_resolved_source_stamp(key: tuple):
+def _session_list_cache_resolved_source_stamp(key: tuple) -> tuple[object, ...]:
     try:
         import api.routes as _routes
 
         override = getattr(_routes, "_session_list_cache_source_stamp", None)
         if callable(override) and override is not _session_list_cache_source_stamp:
-            return override(key)
+            value = override(key)
+            return value if isinstance(value, tuple) else (value,)
     except Exception:
         pass
     return _session_list_cache_source_stamp(key)
@@ -338,15 +339,71 @@ def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
         return None
 
 
-def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
-    _cache_profile, _cache_all_profiles, _cache_show_cli_sessions, *_rest = key
+def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
+    (
+        _cache_profile,
+        _cache_all_profiles,
+        _cache_show_cli_sessions,
+        _cache_show_previous_messaging_sessions,
+        _cache_show_cron_sessions,
+        *_rest,
+    ) = key
+    try:
+        sidebar_source = key[10]
+    except Exception:
+        sidebar_source = None
     try:
         swv = _session_list_cache_settings_write_version()
     except Exception:
         swv = 0
+    # WebUI-only sidebar requests skip the expensive CLI/gateway projection, but
+    # ``all_sessions()`` still applies the authoritative state.db summary overlay
+    # for WebUI-owned rows. Track settled state.db changes so a Desktop append
+    # cannot leave the sidebar's count/title stale until the cache TTL expires.
+    # While a turn streams, collapse that volatile state to the stream-set marker
+    # just as the mixed buckets do: the hold-down remains bounded by the streaming
+    # TTL, and start/stop transitions invalidate immediately because the marker is
+    # part of the stamp.
+    if sidebar_source == "webui":
+        streaming_marker = _session_list_cache_streaming_freeze_marker()
+        try:
+            session_index_path = _session_list_cache_session_dir() / "_index.json"
+        except Exception:
+            session_index_path = None
+        if streaming_marker is not None:
+            return (
+                streaming_marker,
+                streaming_marker,
+                streaming_marker,
+                _session_list_cache_path_stamp(session_index_path),
+                _session_list_cache_path_stamp(_session_list_cache_settings_file()),
+                streaming_marker,
+                swv,
+                _cli_badge_cache_generation(),
+            )
+        try:
+            state_db_path = Path(str(_session_list_cache_state_db_path()))
+        except Exception:
+            state_db_path = None
+        try:
+            state_db_wal_path = state_db_path.with_name(f"{state_db_path.name}-wal") if state_db_path is not None else None
+        except Exception:
+            state_db_wal_path = None
+        return (
+            _session_list_cache_path_stamp(state_db_path),
+            _session_list_cache_path_stamp(state_db_wal_path),
+            ("webui-sidebar",),
+            _session_list_cache_path_stamp(session_index_path),
+            _session_list_cache_path_stamp(_session_list_cache_settings_file()),
+            _session_list_cache_state_db_fingerprint(state_db_path),
+            swv,
+            # Badge refresh with changed counts must invalidate this bucket
+            # exactly once (#6192 gate: authoritative sidebar-tab badges).
+            _cli_badge_cache_generation(),
+        )
     # WebUI-origin sessions can also receive settled rows in state.db when the
-    # official Hermes Desktop App continues the same agent session.  The sidebar
-    # therefore watches state.db even when the CLI/external-session tab is hidden.
+    # official Hermes Desktop App continues the same agent session.  The non-
+    # webui sidebar buckets therefore still watch state.db.
     #
     # Streaming hold-down (#4672): while a turn is in flight, collapse the
     # volatile state.db-derived components (db/WAL stat, gateway metadata, index
@@ -518,3 +575,140 @@ def _session_list_cache_done(key: tuple, event: threading.Event | None) -> None:
             _SESSIONS_CACHE_INFLIGHT.pop(key, None)
     if event is not None:
         event.set()
+
+
+# ── CLI badge counts for sidebar_source=webui (#6192 gate follow-up) ─────────
+# The webui-tab shortcut skips the expensive get_cli_sessions() projection, but
+# the sidebar-tab badges (cli_session_count / archived_cli_count) must stay
+# authoritative — external state.db / Claude-Code rows exist ONLY in that
+# projection.  This cache hands the routes layer CLI rows for *counting only*
+# on a slow, churn-tolerant TTL: state.db writes never bust it directly (that
+# was exactly the rebuild storm the shortcut removed), it refreshes at most
+# once per TTL during a response-cache rebuild, and when a refresh actually
+# changes the badge-relevant signature its generation bumps so the response
+# stamp invalidates exactly once and converges on the fresh counts.
+_CLI_BADGE_CACHE_LOCK = threading.Lock()
+_CLI_BADGE_CACHE: dict = {
+    "key": None,
+    "expires": 0.0,
+    "rows": [],
+    "sig": None,
+    "gen": 0,
+    "loading": False,
+    "has_good": False,  # rows came from a SUCCESSFUL load (last-known-good)
+}
+
+
+def _cli_badge_ttl_seconds() -> float:
+    try:
+        return max(
+            0.0, float(os.environ.get("HERMES_WEBUI_CLI_BADGE_TTL_SECONDS", "30"))
+        )
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _cli_badge_cache_generation() -> int:
+    with _CLI_BADGE_CACHE_LOCK:
+        return int(_CLI_BADGE_CACHE["gen"])
+
+
+def _reset_cli_badge_cache_for_tests() -> None:
+    with _CLI_BADGE_CACHE_LOCK:
+        _CLI_BADGE_CACHE.update(
+            {
+                "key": None,
+                "expires": 0.0,
+                "rows": [],
+                "sig": None,
+                "gen": 0,
+                "loading": False,
+                "has_good": False,
+            }
+        )
+
+
+def get_cli_sessions_for_badges(
+    *,
+    source_filter=None,
+    all_profiles: bool = False,
+    include_claude_code: bool = True,
+    profile_key=None,
+) -> list:
+    """CLI rows for badge counting on webui-tab requests.
+
+    Explicit BOUNDED-PROJECTION contract (review round 2): the sidebar-tab
+    badges need rows that exist only in the CLI projection, so the webui
+    path pays that projection -- but bounded, single-flight, and
+    stale-tolerant rather than per-poll:
+
+    * TTL-bounded: state.db churn never busts this cache directly; a
+      refresh happens at most once per HERMES_WEBUI_CLI_BADGE_TTL_SECONDS.
+    * SINGLE-FLIGHT: exactly one thread performs a cold/expired load;
+      concurrent misses return the last-known rows immediately instead of
+      duplicating the projection.
+    * LAST-KNOWN-GOOD: a loader failure returns (and keeps) the previous
+      successful rows -- an error can never overwrite a good badge state
+      with zeros for a whole TTL window.
+
+    Late-binds ``routes.get_cli_sessions`` so focused tests that monkeypatch
+    the routes-level symbol keep steering this path too.
+    """
+    key = (source_filter, bool(all_profiles), bool(include_claude_code), profile_key)
+    now = time.monotonic()
+    with _CLI_BADGE_CACHE_LOCK:
+        same_key = _CLI_BADGE_CACHE["key"] == key
+        if same_key and now < _CLI_BADGE_CACHE["expires"]:
+            return list(_CLI_BADGE_CACHE["rows"])
+        if _CLI_BADGE_CACHE["loading"]:
+            # A leader is already projecting: serve stale-known state (same
+            # key) or empty (key change) WITHOUT caching -- never a second
+            # concurrent projection.
+            return list(_CLI_BADGE_CACHE["rows"]) if same_key else []
+        _CLI_BADGE_CACHE["loading"] = True
+    from api import routes as _routes
+
+    loader = _routes.get_cli_sessions
+    try:
+        if _routes._callable_accepts_kwarg(loader, "include_claude_code"):
+            rows = loader(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=include_claude_code,
+            )
+        else:
+            rows = loader(source_filter=source_filter, all_profiles=all_profiles)
+        rows = list(rows or [])
+        failed = False
+    except Exception:
+        rows = []
+        failed = True
+    if failed:
+        with _CLI_BADGE_CACHE_LOCK:
+            _CLI_BADGE_CACHE["loading"] = False
+            if same_key and _CLI_BADGE_CACHE["has_good"]:
+                # Keep last-known-good; retry no earlier than next TTL tick.
+                _CLI_BADGE_CACHE["expires"] = now + _cli_badge_ttl_seconds()
+                return list(_CLI_BADGE_CACHE["rows"])
+            return []
+    sig = tuple(
+        sorted(
+            (str(r.get("session_id") or ""), bool(r.get("archived")))
+            for r in rows
+            if isinstance(r, dict)
+        )
+    )
+    with _CLI_BADGE_CACHE_LOCK:
+        if sig != _CLI_BADGE_CACHE["sig"]:
+            _CLI_BADGE_CACHE["gen"] += 1
+        _CLI_BADGE_CACHE.update(
+            {
+                "key": key,
+                "expires": now + _cli_badge_ttl_seconds(),
+                "rows": rows,
+                "sig": sig,
+                "loading": False,
+                "has_good": True,
+            }
+        )
+        return list(rows)

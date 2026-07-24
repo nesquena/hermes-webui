@@ -1878,6 +1878,8 @@ _session_list_row_timestamp = _route_session_list_cache._session_list_row_timest
 _session_list_runtime_sort_key = _route_session_list_cache._session_list_runtime_sort_key
 _session_list_cache_set = _route_session_list_cache._session_list_cache_set
 _session_list_cache_source_stamp = _route_session_list_cache._session_list_cache_source_stamp
+_get_cli_sessions_for_badges = _route_session_list_cache.get_cli_sessions_for_badges
+_reset_cli_badge_cache_for_tests = _route_session_list_cache._reset_cli_badge_cache_for_tests
 _session_list_cache_state_db_fingerprint = _route_session_list_cache._session_list_cache_state_db_fingerprint
 _session_list_cache_stale_reason = _route_session_list_cache._session_list_cache_stale_reason
 _session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
@@ -2156,6 +2158,63 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
     ]
 
 
+def _prune_orphaned_imported_agent_sidecars(rows, *, cli_by_id, diag_stage=None):
+    """Prune imported CLI/API sidecars whose backing state.db row is gone.
+
+    This direct, uncapped state.db probe is deliberately independent of the
+    optional CLI/gateway projection: the WebUI sidebar skips that expensive
+    projection, but must retain the same orphan-recovery safety contract.
+    """
+    if not rows:
+        return list(rows) if rows is not None else []
+    _diag = diag_stage if callable(diag_stage) else (lambda *_a, **_k: None)
+    cli_by_id = cli_by_id if isinstance(cli_by_id, dict) else {}
+    orphan_probe_rows = []
+    kept_rows = []
+    for row in rows:
+        sid = row.get("session_id")
+        if (
+            sid
+            and (is_cli_session_row(row) or _is_api_server_sidecar_row(row))
+            and not _session_source_is_webui(row)
+            and sid not in cli_by_id
+        ):
+            orphan_probe_rows.append(row)
+        else:
+            kept_rows.append(row)
+    if not orphan_probe_rows:
+        return kept_rows
+    rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+    for row in orphan_probe_rows:
+        rows_by_profile[row.get("profile")].append(row)
+    missing_orphan_ids: set[str] = set()
+    for profile_key, profile_rows in rows_by_profile.items():
+        probe_ids = [
+            str(row.get("session_id")).strip()
+            for row in profile_rows
+            if str(row.get("session_id") or "").strip()
+        ]
+        existing = agent_session_rows_existing(
+            probe_ids,
+            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+        )
+        for row in profile_rows:
+            sid = str(row.get("session_id") or "").strip()
+            if sid and sid not in existing:
+                missing_orphan_ids.add(sid)
+    for row in orphan_probe_rows:
+        sid = str(row.get("session_id") or "").strip()
+        if sid in missing_orphan_ids:
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune orphaned agent sidecar %s", sid, exc_info=True)
+            _diag("prune_orphaned_agent_sidecar")
+            continue
+        kept_rows.append(row)
+    return kept_rows
+
+
 def _build_session_list_cache_payload(
     active_profile: str | None,
     all_profiles: bool,
@@ -2219,7 +2278,12 @@ def _build_session_list_cache_payload(
     show_cron_sessions = bool(show_cron_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-    if show_cli_sessions:
+    # A WebUI-only sidebar request must not pay the CLI/agent projection cost and
+    # then filter it away. On large state.db / Claude-Code stores that projection
+    # can exceed the browser timeout and block later lightweight WebUI refreshes
+    # behind the same cache rebuild path.
+    load_cli_sessions = show_cli_sessions and sidebar_source != "webui"
+    if load_cli_sessions:
         diag_stage("get_cli_sessions")
         if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
             cli = get_cli_sessions(
@@ -2361,6 +2425,56 @@ def _build_session_list_cache_payload(
             represented_webui_ids.update(_session_lineage_ids(s))
         deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
             cli,
+            represented_webui_ids,
+            show_cron_sessions=show_cron_sessions,
+            show_webhook_sessions=show_webhook_sessions,
+        )
+    elif show_cli_sessions:
+        # sidebar_source == "webui": skip the external get_cli_sessions()
+        # bridge (22c4352e's perf win — that projection is the expensive
+        # part on large state.db / Claude-Code stores), but do NOT strip
+        # locally-sourced CLI-tagged rows out of webui_sessions. Those rows
+        # already came from all_sessions() above at zero extra cost, and
+        # _filter_sidebar_source() below still excludes them from the
+        # returned "sessions" list — dropping them here only zeroed out
+        # cli_session_count/archived_cli_count for the sidebar tab badges
+        # while sidebar_source=webui (#4766 regression: this branch used to
+        # run only for show_cli_sessions=False, where zero CLI counts are
+        # correct; the sidebar_source=="webui" shortcut hijacked the same
+        # branch and zeroed counts for the wrong reason).
+        diag_stage("filter_webui_sessions")
+        webui_sessions = _prune_orphaned_imported_agent_sidecars(
+            webui_sessions,
+            cli_by_id={},
+            diag_stage=diag_stage,
+        )
+        webui_sessions = _prune_orphaned_webui_zero_message_sessions(
+            webui_sessions,
+            diag_stage=diag_stage,
+        )
+        # #6192 gate follow-up: the returned "sessions" list stays webui-only
+        # (_filter_sidebar_source strips CLI rows below), but the sidebar-tab
+        # badges must count the external state.db / Claude-Code rows too — they
+        # exist ONLY in the CLI projection.  Pull that projection through the
+        # slow, churn-tolerant badge cache (state.db writes never bust it; it
+        # refreshes at most once per TTL) and run it through the SAME dedupe as
+        # the cli-tab branch so both request forms count identical rows.
+        diag_stage("cli_badge_counts")
+        try:
+            _badge_cli = _get_cli_sessions_for_badges(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=show_claude_code_sessions,
+                profile_key=None if all_profiles else _get_active_profile_name(),
+            )
+        except Exception:
+            logger.debug("cli badge count projection failed", exc_info=True)
+            _badge_cli = []
+        represented_webui_ids = set()
+        for s in webui_sessions:
+            represented_webui_ids.update(_session_lineage_ids(s))
+        deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
+            _badge_cli,
             represented_webui_ids,
             show_cron_sessions=show_cron_sessions,
             show_webhook_sessions=show_webhook_sessions,
