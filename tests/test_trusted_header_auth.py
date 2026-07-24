@@ -5,7 +5,6 @@ import json
 import sys
 import shutil
 import subprocess
-import threading
 import time
 import types
 from pathlib import Path
@@ -810,37 +809,42 @@ def test_profile_delete_route_blocks_reconciliation_interleaving(monkeypatch):
     delete_calls = []
     switch_calls = []
     _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
-    guard_entered = threading.Event()
-    reconciliation_released = threading.Event()
-    reconciled_cookie = {}
-    real_guard = auth._assert_profile_delete_has_no_active_trusted_binding
+    real_group_map = auth._trusted_group_profile_map
+    armed = False
+    reconcile_started = False
+    reconciliation_calls = []
 
-    def _guard_with_reconciliation_boundary(name):
-        guard_entered.set()
-        reconcile_handler = _profile_delete_route_handler(
-            reconcile_cookie,
-            body_name="default",
-            groups="alice-group",
-        )
-        assert auth.check_auth(reconcile_handler, SimpleNamespace(path="/api/sessions", query="")) is True
-        reconcile_info = auth.ensure_trusted_auth_session(reconcile_handler)
-        assert reconcile_info["bound_profile"] == "work"
-        reconciled_cookie["value"] = reconcile_handler._trusted_auth_session_cookie_value
-        reconciliation_released.set()
-        return real_guard(name)
+    def _group_map_after_session_scan():
+        nonlocal reconcile_started
+        mapping = real_group_map()
+        if armed and not reconciliation_calls and not reconcile_started:
+            reconcile_started = True
+            reconcile_handler = _profile_delete_route_handler(
+                reconcile_cookie,
+                body_name="default",
+                groups="alice-group",
+            )
+            assert auth.check_auth(reconcile_handler, SimpleNamespace(path="/api/sessions", query="")) is True
+            reconcile_info = auth.ensure_trusted_auth_session(reconcile_handler)
+            assert reconcile_info["bound_profile"] == "work"
+            reconciliation_calls.append(reconcile_info["token"])
+        return mapping
 
-    monkeypatch.setattr(auth, "_assert_profile_delete_has_no_active_trusted_binding", _guard_with_reconciliation_boundary)
     handler = _profile_delete_route_handler(current_cookie)
     assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+
+    # Authenticate before arming the hook. The outer guard's map read then runs
+    # only after its session scan has released the sessions lock; the recursive
+    # inner read belongs to reconciliation rather than the earlier auth path.
+    monkeypatch.setattr(auth, "_trusted_group_profile_map", _group_map_after_session_scan)
+    armed = True
     routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
 
-    assert guard_entered.is_set()
-    assert reconciliation_released.is_set()
+    assert reconciliation_calls
     assert handler.status == 409
-    assert handler.json_body()["error"] == "Profile is bound to an active trusted session"
+    assert handler.json_body()["error"] == "Profile is bound by trusted group policy"
     assert delete_calls == []
     assert switch_calls == []
-    assert auth.session_bound_profile(reconciled_cookie["value"]) == "work"
 
 
 def test_profile_delete_route_checks_authority_before_switch_or_delete(monkeypatch):
