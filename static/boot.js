@@ -2323,35 +2323,12 @@ window._isImeEnter=_isImeEnter;
 // detachable Surface in tablet mode, iPad + Magic Keyboard). When that
 // happens we should NOT force the mobile newline-on-Enter override
 // because Shift+Enter / Ctrl+Enter come from real keys and the user
-// expects desktop semantics.
-//
-// Detection strategy (layered):
-// 1. Runtime keyboard detection: physical keyboards emit KeyboardEvent.code
-//    values (e.g. 'KeyA', 'Space'); virtual/software keyboards emit code===''.
-//    Once a physical keypress is observed, we treat the session as having a
-//    hardware keyboard until the page is reloaded. This handles keyboard-only
-//    BT accessories that lack a trackpad (no hover, no fine pointer from the
-//    keyboard itself).
-// 2. Media query fallback: `(any-pointer:fine) and (any-hover:hover)` detects
-//    a trackpad/mouse co-existing with touch. This catches the case before any
-//    key is pressed (e.g. user taps send button with trackpad).
-//
-// Together these cover: passive-stylus phones (no false positive from
-// digitizer), active-stylus tablets, keyboard-only BT accessories, and
-// traditional keyboard+trackpad setups.
-let _physicalKeyboardDetected=false;
-(()=>{const _c=$('msg');if(!_c)return;
-  _c.addEventListener('keydown',function(e){
-    if(!_physicalKeyboardDetected&&e.code&&e.code!==''&&!e.isComposing&&e.key!=='Process'){
-      _physicalKeyboardDetected=true;
-    }
-  },true);
-})();
+// expects desktop semantics. `matchMedia('(any-pointer:fine)')` is true
+// whenever ANY available pointing device is fine-grained — which is the
+// strongest signal browsers expose for "there is a real keyboard /
+// trackpad in the picture too". Skip the mobile default in that case.
 function _hasFinePointerCoexisting(){
-  try{
-    if(_physicalKeyboardDetected) return true;
-    return matchMedia('(any-pointer:fine) and (any-hover:hover)').matches;
-  }catch(_){ return false; }
+  try{ return matchMedia('(any-pointer:fine) and (any-hover:hover)').matches; }catch(_){ return false; }
 }
 function _isNumpadEnter(e){
   return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
