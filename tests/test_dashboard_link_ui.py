@@ -8,10 +8,12 @@ import re
 import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
+FIXTURES = pathlib.Path(__file__).with_name("fixtures")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 UI_PATH = REPO / "static" / "ui.js"
+I18N_PATH = REPO / "static" / "i18n.js"
 PANELS_PATH = REPO / "static" / "panels.js"
 NODE = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -98,6 +100,8 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       btn._classes = btn.classList._set;
       if (id === 'dashboardRailBtn' || id === 'dashboardMobileBtn') {
         btn.setAttribute('data-dashboard-link', '');
+        btn.setAttribute('data-tooltip', 'Dashboard');
+        btn.setAttribute('data-i18n-title', 'tab_dashboard');
         btn.setAttribute('aria-label', 'Dashboard');
       }
       return btn;
@@ -106,8 +110,12 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     const action = process.argv[2] || 'load';
     const mode = process.argv[3] || 'auto';
     const url = process.argv[4] || '';
-    const uiSrc = fs.readFileSync(process.argv[5], 'utf8');
-    const panelsSrc = fs.readFileSync(process.argv[6], 'utf8');
+    const originHostname = process.argv[5] || '127.0.0.1';
+    const dashboardTarget = process.argv[6] || 'http://127.0.0.1:1234';
+    const uiSrc = fs.readFileSync(process.argv[7], 'utf8');
+    const i18nSrc = fs.readFileSync(process.argv[8], 'utf8');
+    const panelsSrc = fs.readFileSync(process.argv[9], 'utf8');
+    const helperCases = JSON.parse(process.argv[10] || '[]');
 
     const modeEl = makeButton('settingsDashboardMode');
     const urlEl = makeButton('settingsDashboardUrl');
@@ -127,11 +135,13 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     global._dashboardStatusFetchedAt = 0;
     global._dashboardSettingsLoadSeq = 0;
     global._dashboardSettingsWriteSeq = 0;
-    global.window = { location: { hostname: '127.0.0.1' } };
+    global.window = { location: { hostname: originHostname } };
     global.document = {
       createElement: () => makeEl(),
       querySelectorAll: (sel) => {
         if (sel === '[data-dashboard-link]') return buttons;
+        if (sel === '[data-i18n-title]') return buttons.filter((btn) => btn.hasAttribute('data-i18n-title'));
+        if (sel === '[data-i18n-aria-label]') return buttons.filter((btn) => btn.hasAttribute('data-i18n-aria-label'));
         return [];
       },
       querySelector: () => null,
@@ -149,8 +159,6 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       if (key === 'dashboard_loopback_warning') return 'Loopback';
       return key;
     };
-    global._dashboardIsBrowserLoopback = () => false;
-
     global.api = (url, opts = {}) => {
       result.calls.push({ url: String(url), method: (opts.method || 'GET').toUpperCase(), body: opts.body || '', timeoutToast: !!(opts.timeoutToast) });
       if (String(url) === '/api/dashboard/config') {
@@ -179,7 +187,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
         result.statusCalls += 1;
         return Promise.resolve({
           running: modeEl.value !== 'never',
-          browser_url: modeEl.value === 'never' ? '' : 'http://127.0.0.1:1234',
+          browser_url: modeEl.value === 'never' ? '' : dashboardTarget,
         });
       }
       return Promise.resolve({ running: false });
@@ -189,10 +197,18 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       result.lastRenderMode = modeEl.value;
     };
 
+    const dashboardLoopbackHostFallback = "function _dashboardIsLoopbackHost(host){host=(host||'').replace(/^\\\\[|\\\\]$/g,'').toLowerCase();if(host.endsWith('.'))host=host.slice(0,-1);if(host==='localhost'||host==='::1')return true;const parts=host.split('.');return parts.length===4&&parts[0]==='127'&&parts.every(part=>/^\\\\d+$/.test(part)&&Number(part)>=0&&Number(part)<=255);}";
+
     for (const name of ['_normalizeDashboardEnabledMode','_setDashboardModeForChip','_getDashboardChipRestoreMode']) {
       eval(extractFn(uiSrc, name));
     }
-    for (const name of ['_dashboardBrowserUrl', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
+    try {
+      eval(extractFn(uiSrc, '_dashboardIsLoopbackHost'));
+    } catch (err) {
+      if (!String(err && err.message || err).includes('_dashboardIsLoopbackHost() not found')) throw err;
+      eval(dashboardLoopbackHostFallback);
+    }
+    for (const name of ['_dashboardIsBrowserLoopback', '_dashboardBrowserUrl', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
       let src = extractFn(uiSrc, name);
       if(name === 'saveDashboardSettings'){
         src = src.replace(
@@ -205,18 +221,27 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     for (const name of ['_dashboardPanelMode', '_toggleDashboardVisibilityChip']) {
       eval(extractFn(panelsSrc, name));
     }
+    eval(extractFn(i18nSrc, 'applyLocaleToDOM'));
 
     function recordButtons() {
       result.buttonStates = buttons.map((btn) => ({
         id: btn.id,
         classes: Array.from(btn.classList._set || []),
         display: btn.style.display || '',
-        dashboardUrl: btn._attrs['data-dashboard-url'] || '',
-        tooltip: btn._attrs['data-tooltip'] || '',
+        dashboardUrl: btn.dataset.dashboardUrl || btn._attrs['data-dashboard-url'] || '',
+        tooltip: btn._attrs['data-tooltip'] || btn.title || '',
+        ariaLabel: btn._attrs['aria-label'] || '',
       }));
     }
 
     (async () => {
+      if (action === 'helper-matrix') {
+        console.log(JSON.stringify({
+          helperCases: helperCases.map((host) => ({ host, loopback: _dashboardIsLoopbackHost(host) })),
+        }));
+        return;
+      }
+
       if (action === 'load') {
         await loadDashboardSettings();
         recordButtons();
@@ -279,6 +304,9 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
 
       if (action === 'chip-toggle') {
         _toggleDashboardVisibilityChip();
+      } else if (action === 'save-and-apply-locale') {
+        await saveDashboardSettings();
+        applyLocaleToDOM();
       } else {
         await saveDashboardSettings();
       }
@@ -299,7 +327,14 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
 )
 
 
-def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -> dict:
+def _run_dashboard_link_driver(
+    action: str,
+    mode: str = 'auto',
+    url: str = '',
+    origin_hostname: str = '127.0.0.1',
+    dashboard_target: str = 'http://127.0.0.1:1234',
+    helper_cases: list[str] | None = None,
+) -> dict:
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
         f.write(_DASHBOARD_LINK_DRIVER)
         driver = f.name
@@ -311,8 +346,12 @@ def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -
                 action,
                 mode,
                 url,
+                origin_hostname,
+                dashboard_target,
                 str(UI_PATH),
+                str(I18N_PATH),
                 str(PANELS_PATH),
+                json.dumps(helper_cases or []),
             ],
             cwd=REPO,
             text=True,
@@ -328,6 +367,102 @@ def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -
             pathlib.Path(driver).unlink()
         except OSError:
             pass
+
+
+@requires_node
+def test_issue6459_remote_public_dashboard_url_uses_normal_label_from_fixture():
+    fixture = (FIXTURES / "webui-PR-TARGET-6459-REPRO.md").read_text(encoding="utf-8")
+    dashboard_url = "https://dashboard.example.com"
+    assert dashboard_url in fixture
+    out = _run_dashboard_link_driver(
+        "save",
+        mode="always",
+        url=dashboard_url,
+        origin_hostname="webui.example.test",
+        dashboard_target=dashboard_url,
+    )
+    assert all(state["dashboardUrl"] == dashboard_url for state in out["buttonStates"])
+    assert all(state["tooltip"] == "Dashboard" and state["ariaLabel"] == "Dashboard" for state in out["buttonStates"])
+
+
+@requires_node
+def test_issue6459_remote_loopback_targets_keep_warning():
+    for target in (
+        "http://127.0.0.1:9119",
+        "http://127.0.0.2:9119",
+        "http://127.5.5.5:9119",
+        "http://localhost:9119",
+        "http://localhost.:9119",
+        "http://[::1]:9119",
+    ):
+        out = _run_dashboard_link_driver(
+            "save",
+            mode="always",
+            url=target,
+            origin_hostname="webui.example.test",
+            dashboard_target=target,
+        )
+        assert all(state["tooltip"] == "Loopback" for state in out["buttonStates"])
+
+
+@requires_node
+def test_issue6459_loopback_helper_classifies_terminal_dot_and_bounds():
+    out = _run_dashboard_link_driver(
+        "helper-matrix",
+        helper_cases=[
+            "127.0.0.2",
+            "127.255.255.255",
+            "localhost.",
+            "126.255.255.255",
+            "127.256.0.1",
+            "localhost.example.test",
+        ],
+    )
+    assert {row["host"]: row["loopback"] for row in out["helperCases"]} == {
+        "127.0.0.2": True,
+        "127.255.255.255": True,
+        "localhost.": True,
+        "126.255.255.255": False,
+        "127.256.0.1": False,
+        "localhost.example.test": False,
+    }
+
+
+@requires_node
+def test_issue6459_public_hosts_that_resemble_loopback_do_not_warn():
+    for target in ("https://localhost.example.test", "https://127.0.0.1.example.test"):
+        out = _run_dashboard_link_driver(
+            "save",
+            mode="always",
+            url=target,
+            origin_hostname="webui.example.test",
+            dashboard_target=target,
+        )
+        assert all(state["tooltip"] == "Dashboard" for state in out["buttonStates"])
+
+
+@requires_node
+def test_issue6459_loopback_webui_origin_never_gets_remote_warning():
+    out = _run_dashboard_link_driver(
+        "save",
+        mode="always",
+        url="https://dashboard.example.test",
+        origin_hostname="[::1]",
+        dashboard_target="https://dashboard.example.test",
+    )
+    assert all(state["tooltip"] == "Dashboard" for state in out["buttonStates"])
+
+
+@requires_node
+def test_issue6459_loopback_target_warning_survives_locale_resync():
+    out = _run_dashboard_link_driver(
+        "save-and-apply-locale",
+        mode="always",
+        url="http://127.0.0.1:9119",
+        origin_hostname="webui.example.test",
+        dashboard_target="http://127.0.0.1:9119",
+    )
+    assert all(state["tooltip"] == "Loopback" and state["ariaLabel"] == "Loopback" for state in out["buttonStates"])
 
 
 def test_dashboard_nav_buttons_are_hidden_by_default_and_subpath_safe():

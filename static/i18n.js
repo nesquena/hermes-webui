@@ -26158,6 +26158,11 @@ function applyLocaleToDOM() {
     const val = t(key);
     if (val && val !== key) el.setAttribute('aria-label', val);
   });
+  // Dashboard labels are stateful, so locale sync restores the translated base
+  // strings first, then reapplies the cached status label when one is active.
+  if (typeof _applyDashboardStatus === 'function' && typeof _dashboardStatusCache !== 'undefined') {
+    _applyDashboardStatus(_dashboardStatusCache);
+  }
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
 }
