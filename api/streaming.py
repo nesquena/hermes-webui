@@ -7628,14 +7628,17 @@ def _run_agent_streaming(
                 restore_skill_home_modules,
                 snapshot_skill_home_modules,
                 get_hermes_home_for_profile,
-                get_profile_runtime_env,
+                _get_profile_runtime_env_for_caller,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
             )
-            _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
+            _streaming_profile_name = str(getattr(s, 'profile', '') or '').strip() or None
+            _profile_home_path = get_hermes_home_for_profile(_streaming_profile_name)
             _profile_home = str(_profile_home_path)
             _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
-            _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
+            _profile_runtime_env = _get_profile_runtime_env_for_caller(
+                _profile_home_path, _streaming_profile_name
+            )
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
@@ -7646,6 +7649,7 @@ def _run_agent_streaming(
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
             _SKILL_HOME_MODULE_PATCH_LOCK = None
+            _streaming_profile_name = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -7654,7 +7658,7 @@ def _run_agent_streaming(
             model=model,
             provider_context=provider_context,
             profile_home=_profile_home,
-            has_profile=bool(getattr(s, "profile", None)),
+            has_profile=bool(_streaming_profile_name),
         )
         # #4251: only apply the profile-repair persistence if this turn still
         # owns the session model/provider pair it last wrote.
@@ -7681,7 +7685,7 @@ def _run_agent_streaming(
         # threading.Thread and does not inherit TLS. At compression time,
         # get_active_profile_name() would fall back to the process-global
         # _active_profile, which may belong to a different concurrent tab.
-        _resolved_profile_name = getattr(s, 'profile', None)
+        _resolved_profile_name = _streaming_profile_name
         if not _resolved_profile_name:
             try:
                 from api.profiles import get_active_profile_name

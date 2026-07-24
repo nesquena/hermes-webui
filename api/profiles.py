@@ -2838,7 +2838,19 @@ def delete_profile_api(name: str) -> dict:
     if _is_root_profile(name):
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
-    profile_home = _resolve_named_profile_home(name)
+    conventional_profile_home = _canonical_profile_home(_resolve_named_profile_home(name))
+    profile_home = get_cached_profile_home_for_diagnostics(name)
+    if profile_home is None:
+        for profile in list_profiles_api():
+            if profile.get('name') != name:
+                continue
+            metadata_home = profile.get('path')
+            if metadata_home:
+                profile_home = _canonical_profile_home(metadata_home)
+            break
+    if profile_home is None:
+        profile_home = conventional_profile_home
+    profile_home = _canonical_profile_home(profile_home)
     # If deleting the active profile, switch to default first
     if _active_profile == name:
         try:
@@ -2868,7 +2880,8 @@ def delete_profile_api(name: str) -> dict:
     _forget_profile_home(name, profile_home)
     try:
         from api import config as _config
-        _config.invalidate_sessions_cap_snapshot(profile_home)
+        for home in {profile_home, conventional_profile_home}:
+            _config.invalidate_sessions_cap_snapshot(home)
     except Exception:
         logger.debug("Failed to invalidate session cap snapshot", exc_info=True)
     return {'ok': True, 'name': name}

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import pathlib
+import queue
 import shutil
 import sys
 import threading
@@ -1205,6 +1207,9 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     root.mkdir()
     profiles_root = root / "profiles"
     profiles_root.mkdir()
+    custom_root = root / "custom"
+    custom_root.mkdir()
+    conventional_home = profiles_root / "work"
     catalog = {}
     caps = {"work": 731}
 
@@ -1232,12 +1237,12 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
         }
 
     def fake_create_profile(name, **_kwargs):
-        home = profiles_root / name
+        home = custom_root / name
         home.mkdir(parents=True, exist_ok=True)
         catalog[name] = _row(name, home)
 
     def fake_delete_profile(name, **_kwargs):
-        home = profiles_root / name
+        home = pathlib.Path(catalog[name]["path"])
         shutil.rmtree(home)
         catalog.pop(name, None)
 
@@ -1266,9 +1271,17 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     monkeypatch.setattr(profiles, "get_profile_runtime_env", fake_get_profile_runtime_env)
 
     created = profiles.create_profile_api("work")
-    home = profiles_root / "work"
+    home = custom_root / "work"
     key = config._sessions_cap_home_key(home)
     first_generation = config._sessions_cap_generations[key][2]
+    conventional_key = config._sessions_cap_home_key(conventional_home)
+    conventional_generation = config.observe_sessions_cap_sources(conventional_home, (1, 1), None)
+    config.publish_sessions_cap_snapshot(
+        conventional_home,
+        {"webui": {"sessions_cache_max": 909}},
+        generation=conventional_generation,
+        owner="profile",
+    )
 
     assert created["name"] == "work"
     assert profiles.get_cached_profile_home_for_diagnostics("work") == home.resolve()
@@ -1280,6 +1293,8 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     assert deleted_generation > first_generation
     assert profiles.get_cached_profile_home_for_diagnostics("work") is None
     assert config.try_get_sessions_cap_snapshot(home)[1] is False
+    assert config._sessions_cap_generations[conventional_key][2] > conventional_generation
+    assert config.try_get_sessions_cap_snapshot(conventional_home)[1] is False
 
     caps["work"] = 202
     profiles.create_profile_api("work")
@@ -1411,6 +1426,92 @@ def test_runtime_env_requires_explicit_logical_identity(monkeypatch, tmp_path):
     assert config.try_get_sessions_cap_snapshot(home) == (731, True)
 
 
+def test_named_session_streaming_setup_publishes_profile_cap(monkeypatch, tmp_path):
+    from api import config
+    from api import profiles
+    from api import streaming
+
+    home = tmp_path / "physical-work"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "webui:\n  sessions_cache_max: 731\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "_sessions_cap_snapshots", __import__("collections").OrderedDict())
+    monkeypatch.setattr(config, "_sessions_cap_generations", {})
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: home)
+
+    class _Meter:
+        def begin_session(self, _stream_id):
+            pass
+
+        def end_session(self, _stream_id, _final_output_tokens=0):
+            pass
+
+        def get_interval(self):
+            return 11.0
+
+    session = SimpleNamespace(
+        profile=" work ",
+        workspace=str(tmp_path),
+        pending_user_source=None,
+        model=None,
+        model_provider=None,
+        messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        session_id="session-1",
+    )
+    stream_id = "named-profile-stream"
+    streaming.STREAMS[stream_id] = queue.Queue()
+
+    monkeypatch.setattr(streaming, "register_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "update_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "get_session", lambda _session_id: session)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _session_id: contextlib.nullcontext())
+    monkeypatch.setattr(streaming, "_set_turn_session_identity", lambda _session_id: None)
+    monkeypatch.setattr(streaming, "_reset_turn_session_identity", lambda _token: None)
+    monkeypatch.setattr(streaming, "_set_thread_env", lambda **kwargs: None)
+    monkeypatch.setattr(streaming, "_clear_thread_env", lambda: None)
+    monkeypatch.setattr(streaming, "_build_agent_thread_env", lambda *args, **kwargs: {})
+    monkeypatch.setattr(streaming, "_set_streaming_hermes_home_override", lambda home: (None, None, False))
+    monkeypatch.setattr(streaming, "_reset_streaming_hermes_home_override", lambda *args: None)
+    monkeypatch.setattr(streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr(streaming, "_install_streaming_cronjob_profile_wrapper", lambda: None)
+    monkeypatch.setattr(streaming, "meter", lambda: _Meter())
+    setup = {}
+
+    def _record_profile_setup(model, provider_context, profile_home, has_profile):
+        setup.update(
+            home=profile_home,
+            has_profile=has_profile,
+            name=profiles.get_cached_profile_home_for_diagnostics("work"),
+        )
+        return model, provider_context, False
+
+    monkeypatch.setattr(streaming, "_apply_profile_home_context_to_streaming_model", _record_profile_setup)
+    monkeypatch.setattr(streaming, "ensure_agent_runtime_current", lambda: (_ for _ in ()).throw(RuntimeError("stop")))
+    monkeypatch.setattr(streaming, "_materialize_pending_user_turn_before_error", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *args, **kwargs: None)
+    streaming._run_agent_streaming(
+        "session-1", "hello", "model", str(tmp_path), stream_id, ephemeral=True,
+    )
+
+    assert setup == {"home": str(home), "has_profile": True, "name": home.resolve()}
+    assert config.try_get_sessions_cap_snapshot(home) == (731, True)
+
+    monkeypatch.setattr(profiles, "_profile_home_snapshot", {})
+    monkeypatch.setattr(config, "_sessions_cap_snapshots", __import__("collections").OrderedDict())
+    monkeypatch.setattr(config, "_sessions_cap_generations", {})
+    session.profile = "   "
+    streaming.STREAMS[stream_id] = queue.Queue()
+    streaming._run_agent_streaming(
+        "session-1", "hello", "model", str(tmp_path), stream_id, ephemeral=True,
+    )
+    assert config.try_get_sessions_cap_snapshot(home)[1] is False
+    assert profiles.get_cached_profile_home_for_diagnostics("work") is None
+
+
 def test_list_profiles_api_rejects_stale_epoch_and_preserves_custom_root_path(monkeypatch, tmp_path):
     from api import profiles
 
@@ -1496,14 +1597,21 @@ def test_failed_delete_keeps_existing_diagnostics_observation(monkeypatch, tmp_p
     from api import config
     from api import profiles
 
-    home = tmp_path / "existing"
+    home = tmp_path / "custom-existing"
+    conventional_home = tmp_path / "profiles" / "existing"
     home.mkdir()
     monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
     monkeypatch.setattr(profiles, "_is_root_profile", lambda name: False)
-    monkeypatch.setattr(profiles, "_resolve_named_profile_home", lambda name: home)
+    monkeypatch.setattr(profiles, "_resolve_named_profile_home", lambda name: conventional_home)
+    monkeypatch.setattr(profiles, "_profile_home_snapshot", {})
     _install_fake_hermes_cli_profiles(
         monkeypatch,
         delete_profile=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("delete failed")),
+    )
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": "existing", "path": str(home), "is_default": False}],
     )
     profiles._remember_profile_home("existing", home)
     generation = config.observe_sessions_cap_sources(home, (1, 1), None)
@@ -1511,8 +1619,16 @@ def test_failed_delete_keeps_existing_diagnostics_observation(monkeypatch, tmp_p
         home, {"webui": {"sessions_cache_max": 731}}, generation=generation,
         owner="profile"
     )
+    conventional_generation = config.observe_sessions_cap_sources(conventional_home, (1, 1), None)
+    config.publish_sessions_cap_snapshot(
+        conventional_home,
+        {"webui": {"sessions_cache_max": 909}},
+        generation=conventional_generation,
+        owner="profile",
+    )
 
     with pytest.raises(RuntimeError, match="delete failed"):
         profiles.delete_profile_api("existing")
     assert profiles.get_cached_profile_home_for_diagnostics("existing") == home.resolve()
     assert config.try_get_sessions_cap_snapshot(home) == (731, True)
+    assert config.try_get_sessions_cap_snapshot(conventional_home) == (909, True)
