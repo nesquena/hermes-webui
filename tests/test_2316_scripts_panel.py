@@ -66,6 +66,29 @@ function extractFunc(name) {{
 """
 
 
+def _run_playwright_probe(script: str, *, width: int = 1280, height: int = 720):
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip("playwright not installed")
+
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+        except Exception as exc:
+            pytest.skip(f"Chromium unavailable: {exc}")
+        page = browser.new_page(viewport={"width": width, "height": height})
+        try:
+            page.goto(TEST_BASE, wait_until="domcontentloaded")
+            page.wait_for_selector("#scriptsList", state="attached", timeout=10000)
+            return page.evaluate(script)
+        finally:
+            browser.close()
+
+
 def test_scripts_list_empty():
     """GET /api/scripts/list should return empty array if directory doesn't exist."""
     _clear_scripts_dir()
@@ -880,7 +903,7 @@ eval(extractFunc('switchToProfile'));
 })().catch(err => { console.error(err); process.exit(1); });
 """
     assert json.loads(_run_node(source)) == {
-        "profile": "old", "invalidations": 1, "reloads": [True]
+        "profile": "old", "invalidations": 1, "reloads": [None]
     }
 
 
@@ -933,7 +956,7 @@ def test_tasks_panes_scroll_in_chromium(width, height):
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_switch_to_profile_clears_scripts_cache_before_panel_reload():
-    """Profile switch must null `_scriptsData` before the panel reload hook runs."""
+    """Profile switch must retire Scripts state before the panel reload hook runs."""
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
@@ -941,11 +964,16 @@ let _scriptsData = ['stale'];
 let _skillsData = ['old'];
 let _workspaceList = ['old'];
 let _showAllProfiles = true;
+let _scriptsGeneration = 0;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
 const localStorage = { removed: [], removeItem(key){ this.removed.push(key); } };
 const window = {};
 const S = { activeProfile: 'default', session: null, messages: [] };
 const panelLoads = [];
-function $(id){ return null; }
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){ return id === 'scriptsList' ? scriptsList : id === 'scriptsRefreshBtn' ? scriptsRefreshBtn : null; }
 async function api(url, opts){
   if (url !== '/api/profile/switch') throw new Error('unexpected api: ' + url);
   return { active: 'work', is_default: false };
@@ -958,12 +986,18 @@ function t(key){ return key; }
 async function _profileSwitchPanelLoad(){ panelLoads.push(_scriptsData); }
 function _refreshProfileSwitchBackground(){}
 function animateNextSessionListRefresh(){}
+eval(extractFunc('_invalidateScriptsRequests'));
+eval(extractFunc('_resetScriptsForProfileTransition'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   await switchToProfile('work');
   console.log(JSON.stringify({
     activeProfile: S.activeProfile,
     scriptsData: _scriptsData,
+    generation: _scriptsGeneration,
+    cards: scriptsList.children.length,
+    refreshDisabled: scriptsRefreshBtn.disabled,
+    refreshOpacity: scriptsRefreshBtn.style.opacity,
     panelLoads,
     removed: localStorage.removed,
   }));
@@ -972,8 +1006,361 @@ eval(extractFunc('switchToProfile'));
     result = json.loads(_run_node(source))
     assert result["activeProfile"] == "work"
     assert result["scriptsData"] is None
+    assert result["generation"] == 1
+    assert result["cards"] == 0
+    assert result["refreshDisabled"] is False
+    assert result["refreshOpacity"] == ""
     assert result["panelLoads"] == [None]
     assert result["removed"] == ["hermes-webui-model"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_load_profile_switch_delegates_to_canonical_transaction():
+    """Session-load profile changes must use the canonical switch transaction."""
+    js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let _profileSwitchOpeningExistingSession = false;
+const S = { activeProfile: 'a' };
+const calls = [];
+async function switchToProfile(name){
+  calls.push({ name, opening: _profileSwitchOpeningExistingSession });
+  S.activeProfile = name;
+  return true;
+}
+eval(extractFunc('_switchProfileForSessionLoad'));
+(async () => {
+  await _switchProfileForSessionLoad('b');
+  console.log(JSON.stringify({ calls, guard: _profileSwitchOpeningExistingSession, profile: S.activeProfile }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    assert json.loads(_run_node(source)) == {
+        "calls": [{"name": "b", "opening": True}],
+        "guard": False,
+        "profile": "b",
+    }
+
+
+def test_session_load_profile_switch_clears_scripts_dom_before_destination_render():
+    """The real session-load ingress must retire prior-profile Scripts DOM before B renders."""
+    result = _run_playwright_probe(
+        """
+        async () => {
+          const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+          const settle = async (cycles = 4) => {
+            for (let i = 0; i < cycles; i += 1) await tick();
+          };
+          const deferred = () => {
+            let resolve;
+            let reject;
+            const promise = new Promise((res, rej) => {
+              resolve = res;
+              reject = rej;
+            });
+            return { promise, resolve, reject };
+          };
+
+          const rawA = deferred();
+          const listB = deferred();
+          const calls = [];
+          const scriptsList = document.querySelector('#scriptsList');
+          const refreshBtn = document.querySelector('#scriptsRefreshBtn');
+
+          window.api = async (url, opts) => {
+            calls.push({ url, profile: S.activeProfile });
+            if (url === '/api/profile/switch') {
+              const body = JSON.parse(opts.body);
+              return { active: body.name, is_default: false };
+            }
+            if (url === '/api/scripts/list') {
+              if (S.activeProfile === 'b') return listB.promise;
+              throw new Error('unexpected list profile ' + S.activeProfile);
+            }
+            if (url === '/api/scripts/raw?path=a.py') return rawA.promise;
+            throw new Error('unexpected api ' + url);
+          };
+          window.renderSessionList = async () => {};
+          window.loadDir = async () => {};
+          window.showToast = () => {};
+          window.t = key => key;
+          window.syncTopbar = () => {};
+          window._refreshProfileSwitchBackground = () => {};
+          window.animateNextSessionListRefresh = () => {};
+          window.startGatewaySSE = () => {};
+          window._resetCronUnreadForProfileSwitch = () => {};
+          window._clearPersistedModelState = () => {};
+          window.refreshProfileTransitionReasoningChip = () => {};
+          window._setProfileSwitchListEmbargo = () => {};
+          window.showSessionListSkeleton = () => {};
+          window.bumpWorkspaceTreeGen = () => {};
+          window.showWorkspaceTreeSkeleton = () => {};
+          window.clearWorkspaceTreeSkeleton = () => {};
+          window.renderSessionListFromCache = () => {};
+          window._openProfileSwitchSessionBrowser = () => {};
+          window.applyBotName = () => {};
+          window.Prism = null;
+
+          S.activeProfile = 'a';
+          S.activeProfileIsDefault = false;
+          S.session = null;
+          S.messages = [];
+          _workspacePanelMode = 'closed';
+          _currentPanel = 'tasks';
+          _tasksSubtab = 'scripts';
+          _profileSwitchGeneration = 0;
+          _showAllProfiles = true;
+          _scriptsGeneration = 0;
+          _scriptsRequestId = 0;
+          _scriptsRawRequestId = 0;
+          _scriptsData = [{ name: 'a.py', description: 'Alpha script' }];
+
+          scriptsList.replaceChildren();
+          refreshBtn.style.opacity = '0.5';
+          refreshBtn.disabled = true;
+          _renderScriptsList(_scriptsData, _scriptsOwner());
+
+          const firstHeader = scriptsList.querySelector('.script-header');
+          firstHeader.click();
+          await settle();
+          rawA.resolve({ source: 'alpha source' });
+          await settle();
+
+          const beforeSwitch = {
+            cards: scriptsList.children.length,
+            expanded: firstHeader.getAttribute('aria-expanded'),
+            source: scriptsList.querySelector('.script-source code').textContent,
+          };
+
+          const switchPromise = _switchProfileForSessionLoad('b');
+          await settle();
+
+          const mid = {
+            profile: S.activeProfile,
+            generation: _scriptsGeneration,
+            scriptsDataCleared: _scriptsData === null,
+            cards: scriptsList.children.length,
+            hasAlphaSource: scriptsList.textContent.includes('alpha source'),
+            expanded: scriptsList.querySelector('.script-header')?.getAttribute('aria-expanded') || null,
+            refreshDisabled: refreshBtn.disabled,
+            refreshOpacity: refreshBtn.style.opacity,
+          };
+
+          listB.resolve({ scripts: [{ name: 'b.py', description: 'Beta script' }] });
+          await switchPromise;
+          await settle();
+
+          return {
+            beforeSwitch,
+            mid,
+            final: {
+              profile: S.activeProfile,
+              generation: _scriptsGeneration,
+              cards: scriptsList.children.length,
+              name: scriptsList.querySelector('.script-name')?.textContent || null,
+              text: scriptsList.textContent,
+              refreshDisabled: refreshBtn.disabled,
+              refreshOpacity: refreshBtn.style.opacity,
+            },
+            calls,
+          };
+        }
+        """
+    )
+
+    assert result["beforeSwitch"] == {
+        "cards": 1,
+        "expanded": "true",
+        "source": "alpha source",
+    }
+    assert result["mid"] == {
+        "profile": "b",
+        "generation": 1,
+        "scriptsDataCleared": True,
+        "cards": 0,
+        "hasAlphaSource": False,
+        "expanded": None,
+        "refreshDisabled": False,
+        "refreshOpacity": "",
+    }
+    assert result["final"]["profile"] == "b"
+    assert result["final"]["generation"] == 1
+    assert result["final"]["cards"] == 1
+    assert result["final"]["name"] == "b"
+    assert "Beta script" in result["final"]["text"]
+    assert "alpha source" not in result["final"]["text"]
+    assert result["final"]["refreshDisabled"] is False
+    assert result["final"]["refreshOpacity"] == ""
+    assert [call["url"] for call in result["calls"]] == [
+        "/api/scripts/raw?path=a.py",
+        "/api/profile/switch",
+        "/api/scripts/list",
+    ]
+
+
+def test_session_load_profile_switch_retires_first_profile_owner_after_return():
+    """A deferred first-A response cannot replace the later A ownership period."""
+    result = _run_playwright_probe(
+        """
+        async () => {
+          const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+          const settle = async (cycles = 4) => {
+            for (let i = 0; i < cycles; i += 1) await tick();
+          };
+          const deferred = () => {
+            let resolve;
+            let reject;
+            const promise = new Promise((res, rej) => {
+              resolve = res;
+              reject = rej;
+            });
+            return { promise, resolve, reject };
+          };
+
+          const rawFirstA = deferred();
+          const rawSecondA = deferred();
+          const listB = deferred();
+          const listSecondA = deferred();
+          let aRawCalls = 0;
+          const scriptsList = document.querySelector('#scriptsList');
+          const refreshBtn = document.querySelector('#scriptsRefreshBtn');
+
+          window.api = async (url, opts) => {
+            if (url === '/api/profile/switch') {
+              const body = JSON.parse(opts.body);
+              return { active: body.name, is_default: false };
+            }
+            if (url === '/api/scripts/list') {
+              if (S.activeProfile === 'b') return listB.promise;
+              if (S.activeProfile === 'a') return listSecondA.promise;
+              throw new Error('unexpected list profile ' + S.activeProfile);
+            }
+            if (url === '/api/scripts/raw?path=a.py') {
+              aRawCalls += 1;
+              return aRawCalls === 1 ? rawFirstA.promise : rawSecondA.promise;
+            }
+            throw new Error('unexpected api ' + url);
+          };
+          window.renderSessionList = async () => {};
+          window.loadDir = async () => {};
+          window.showToast = () => {};
+          window.t = key => key;
+          window.syncTopbar = () => {};
+          window._refreshProfileSwitchBackground = () => {};
+          window.animateNextSessionListRefresh = () => {};
+          window.startGatewaySSE = () => {};
+          window._resetCronUnreadForProfileSwitch = () => {};
+          window._clearPersistedModelState = () => {};
+          window.refreshProfileTransitionReasoningChip = () => {};
+          window._setProfileSwitchListEmbargo = () => {};
+          window.showSessionListSkeleton = () => {};
+          window.bumpWorkspaceTreeGen = () => {};
+          window.showWorkspaceTreeSkeleton = () => {};
+          window.clearWorkspaceTreeSkeleton = () => {};
+          window.renderSessionListFromCache = () => {};
+          window._openProfileSwitchSessionBrowser = () => {};
+          window.applyBotName = () => {};
+          window.Prism = null;
+
+          S.activeProfile = 'a';
+          S.activeProfileIsDefault = false;
+          S.session = null;
+          S.messages = [];
+          _workspacePanelMode = 'closed';
+          _currentPanel = 'tasks';
+          _tasksSubtab = 'scripts';
+          _profileSwitchGeneration = 0;
+          _showAllProfiles = true;
+          _scriptsGeneration = 0;
+          _scriptsRequestId = 0;
+          _scriptsRawRequestId = 0;
+          _scriptsData = [{ name: 'a.py', description: 'Alpha script' }];
+
+          scriptsList.replaceChildren();
+          refreshBtn.style.opacity = '';
+          refreshBtn.disabled = false;
+          _renderScriptsList(_scriptsData, _scriptsOwner());
+
+          scriptsList.querySelector('.script-header').click();
+          await settle();
+
+          const switchToB = _switchProfileForSessionLoad('b');
+          await settle();
+          listB.resolve({ scripts: [{ name: 'b.py', description: 'Beta script' }] });
+          await switchToB;
+          await settle();
+
+          const afterB = {
+            profile: S.activeProfile,
+            generation: _scriptsGeneration,
+            text: scriptsList.textContent,
+          };
+
+          const switchBackToA = _switchProfileForSessionLoad('a');
+          await settle();
+          listSecondA.resolve({ scripts: [{ name: 'a.py', description: 'Alpha current' }] });
+          await switchBackToA;
+          await settle();
+
+          const currentHeader = scriptsList.querySelector('.script-header');
+          currentHeader.click();
+          await settle();
+          rawSecondA.resolve({ source: 'new A source' });
+          await settle();
+
+          const beforeStale = {
+            profile: S.activeProfile,
+            generation: _scriptsGeneration,
+            cards: scriptsList.children.length,
+            expanded: currentHeader.getAttribute('aria-expanded'),
+            source: scriptsList.querySelector('.script-source code').textContent,
+            cachedSource: _scriptsData[0].source,
+          };
+
+          rawFirstA.resolve({ source: 'stale first A source' });
+          await settle();
+
+          return {
+            afterB,
+            beforeStale,
+            afterStale: {
+              profile: S.activeProfile,
+              generation: _scriptsGeneration,
+              cards: scriptsList.children.length,
+              expanded: scriptsList.querySelector('.script-header').getAttribute('aria-expanded'),
+              source: scriptsList.querySelector('.script-source code').textContent,
+              cachedSource: _scriptsData[0].source,
+              name: scriptsList.querySelector('.script-name').textContent,
+              hasNewSource: scriptsList.textContent.includes('new A source'),
+              hasStaleSource: scriptsList.textContent.includes('stale first A source'),
+            },
+            aRawCalls,
+          };
+        }
+        """
+    )
+
+    assert result["afterB"]["profile"] == "b"
+    assert result["afterB"]["generation"] == 1
+    assert "Beta script" in result["afterB"]["text"]
+    assert result["beforeStale"] == {
+        "profile": "a",
+        "generation": 2,
+        "cards": 1,
+        "expanded": "true",
+        "source": "new A source",
+        "cachedSource": "new A source",
+    }
+    assert result["afterStale"] == {
+        "profile": "a",
+        "generation": 2,
+        "cards": 1,
+        "expanded": "true",
+        "source": "new A source",
+        "cachedSource": "new A source",
+        "name": "a",
+        "hasNewSource": True,
+        "hasStaleSource": False,
+    }
+    assert result["aRawCalls"] == 2
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

@@ -1516,6 +1516,16 @@ function _invalidateScriptsRequests(clearCache = true) {
   else _scriptsRawRequestId++;
   if (clearCache) _scriptsData = null;
 }
+function _resetScriptsForProfileTransition() {
+  _invalidateScriptsRequests();
+  const box = $('scriptsList');
+  const refreshBtn = $('scriptsRefreshBtn');
+  if (box) box.replaceChildren();
+  if (refreshBtn) {
+    refreshBtn.style.opacity = '';
+    refreshBtn.disabled = false;
+  }
+}
 function _scriptsOwner() {
   return { profile: (S && S.activeProfile) || 'default', generation: _scriptsGeneration };
 }
@@ -7156,7 +7166,8 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
-    if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
+    if (typeof _resetScriptsForProfileTransition === 'function') _resetScriptsForProfileTransition();
+    else if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
     else _scriptsData = null;
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
@@ -7350,7 +7361,8 @@ async function switchToProfile(name) {
     // are intact — restore the real list/tree so the loading skeletons we showed
     // up front don't strand. (#4662)
     if (_switchGen === _profileSwitchGeneration) {
-      if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
+      if (typeof _resetScriptsForProfileTransition === 'function') _resetScriptsForProfileTransition();
+      else if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
       else _scriptsData = null;
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
@@ -7367,7 +7379,7 @@ async function switchToProfile(name) {
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
       }
-      if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts(true);
+      if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();
     }
     return false;
   } finally {
