@@ -15058,7 +15058,6 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     logger.exception("Failed to restore session after final directory fsync failure: %s", sid)
                 return bad(handler, "Failed to finalize session deletion; session was retained", 500)
-            sidecar_deleted = True
             if not is_messaging_session and not _record_webui_deleted_session_tombstone(sid):
                 logger.error("Failed to record delete tombstone for %s", sid)
                 try:
