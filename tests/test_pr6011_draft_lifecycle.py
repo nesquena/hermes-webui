@@ -382,3 +382,277 @@ def test_cleanup_preserves_nonempty_draft_owner_and_removes_empty_owner_and_ghos
     assert models.read_composer_draft_sidecar(remove_sid) is None
     assert models.read_composer_draft_sidecar(ghost_sid) is None
     assert captured["ok"] is True
+
+
+# ── Gate follow-ups: tri-state reads, honored deletions, ordering, routing ──
+
+
+def _break_sidecar_read(monkeypatch, models, *, sid, exc=None):
+    """Make exactly *sid*'s sidecar unreadable, leaving every other path alone."""
+    exc = exc if exc is not None else OSError("EIO")
+    target = models.composer_draft_sidecar_path(sid)
+    real_read_text = type(target).read_text
+
+    def read_text(self, *args, **kwargs):
+        if self == target:
+            raise exc
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(target), "read_text", read_text)
+    models._DRAFT_SIDECAR_CACHE.clear()
+
+
+def test_unreadable_sidecar_is_not_reported_as_absent(session_env, monkeypatch):
+    """`None` used to mean both "no draft" and "I could not read it"."""
+    from api import models
+
+    sid = "tri-state-read"
+    models.write_composer_draft_sidecar(sid, {"text": "precious", "files": []})
+    _break_sidecar_read(monkeypatch, models, sid=sid)
+
+    draft, status, _redirect = models.read_composer_draft_sidecar_status(sid)
+    assert draft is None
+    assert status == models.DRAFT_UNREADABLE
+
+    _resolved, readable = models.resolve_composer_draft_status(sid, {"text": "legacy"})
+    assert readable is False, "an unreadable sidecar must not read as a known-empty draft"
+
+
+def test_corrupt_sidecar_is_unreadable_not_absent(session_env, monkeypatch):
+    from api import models
+
+    sid = "tri-state-corrupt"
+    path = models.composer_draft_sidecar_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"draft": {"text": "half', encoding="utf-8")
+    models._DRAFT_SIDECAR_CACHE.clear()
+
+    _draft, status, _redirect = models.read_composer_draft_sidecar_status(sid)
+    assert status == models.DRAFT_UNREADABLE
+
+
+def test_absent_sidecar_stays_absent(session_env):
+    from api import models
+
+    draft, status, _redirect = models.read_composer_draft_sidecar_status("never-written")
+    assert draft is None
+    assert status == models.DRAFT_ABSENT
+
+
+def test_zero_message_cleanup_keeps_owner_when_sidecar_is_unreadable(
+    session_env, monkeypatch
+):
+    """A transient read error must not delete a valid owner and its draft."""
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "cleanup-unreadable"
+    session = models.Session(session_id=sid, title="Untitled")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "recoverable", "files": []})
+    _break_sidecar_read(monkeypatch, models, sid=sid)
+
+    kept = routes._prune_orphaned_webui_zero_message_sessions([
+        {"session_id": sid, "message_count": 0, "source": "webui"},
+    ])
+
+    assert [row["session_id"] for row in kept] == [sid], (
+        "an unreadable sidecar was treated as no draft and the row was pruned"
+    )
+    assert models.composer_draft_sidecar_path(sid).exists()
+    assert (session_dir / f"{sid}.json").exists()
+
+
+def test_zero_message_cleanup_keeps_owner_when_sidecar_unlink_fails(
+    session_env, monkeypatch
+):
+    """Reporting a clean prune while the sidecar survives leaves an orphan."""
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "cleanup-unlink-fails"
+    session = models.Session(session_id=sid, title="Untitled")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "", "files": []})
+
+    monkeypatch.setattr(models, "delete_composer_draft_sidecar", lambda _sid: False)
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+
+    kept = routes._prune_orphaned_webui_zero_message_sessions([
+        {"session_id": sid, "message_count": 0, "source": "webui"},
+    ])
+
+    assert [row["session_id"] for row in kept] == [sid]
+    assert (session_dir / f"{sid}.json").exists()
+
+
+def test_session_delete_reports_failure_when_sidecar_survives(session_env, monkeypatch):
+    """`/api/session/delete` must not answer ok while an orphan sidecar remains."""
+    from api import models, routes
+
+    _session_dir, _sessions = session_env
+    sid = "delete-orphan-sidecar"
+    session = models.Session(session_id=sid, title="Doomed")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(sid, {"text": "leftover", "files": []})
+
+    monkeypatch.setattr(routes, "delete_composer_draft_sidecar", lambda _sid: False)
+
+    captured = {}
+
+    def fake_j(_handler, body, status=200, extra_headers=None):
+        captured.update(payload=body, status=status)
+        return True
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(
+        routes, "bad",
+        lambda handler, message, status=400: fake_j(handler, {"error": message}, status=status),
+    )
+    raw = json.dumps({"session_id": sid}).encode("utf-8")
+    handler = SimpleNamespace(
+        command="POST",
+        headers={"Content-Length": str(len(raw))},
+        rfile=BytesIO(raw),
+        _safe_webui_print=lambda *_a, **_k: None,
+    )
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    assert captured["status"] == 500, captured
+    assert captured["payload"].get("ok") is False
+
+
+def test_stale_pre_clear_write_is_rejected_not_applied(session_env, monkeypatch):
+    """A write queued before the clear must not resurrect the sent text."""
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "reorder-clear"
+    models.Session(session_id=sid, title="Reorder").save(skip_index=True)
+
+    first = _post_draft(monkeypatch, {"session_id": sid, "text": "queued text", "files": []})
+    assert first["status"] == 200
+    stale_rev = first["payload"]["rev"]
+
+    cleared = _post_draft(monkeypatch, {"session_id": sid, "clear": True})
+    assert cleared["status"] == 200
+    assert cleared["payload"]["draft"] == {"text": "", "files": []}
+    assert cleared["payload"]["rev"] > stale_rev
+
+    # The autosave that was already in flight when the user hit send.
+    late = _post_draft(
+        monkeypatch,
+        {"session_id": sid, "text": "queued text", "files": [], "rev": stale_rev},
+    )
+
+    assert late["status"] == 409, late
+    assert late["payload"].get("stale") is True
+    # The clear removed the sidecar and canonicalized the owner's legacy field;
+    # neither may carry the resurrected text.
+    assert models.read_composer_draft_sidecar(sid) is None, (
+        "a pre-clear write resurrected the draft sidecar"
+    )
+    owner = models.Session.load(sid)
+    assert models.resolve_composer_draft(sid, owner.composer_draft) == {
+        "text": "", "files": [],
+    }
+
+
+def test_a_write_quoting_the_current_revision_still_applies(session_env, monkeypatch):
+    """The fence must not block ordinary typing."""
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "reorder-current"
+    models.Session(session_id=sid, title="Reorder").save(skip_index=True)
+
+    first = _post_draft(monkeypatch, {"session_id": sid, "text": "one", "files": []})
+    second = _post_draft(
+        monkeypatch,
+        {"session_id": sid, "text": "two", "files": [], "rev": first["payload"]["rev"]},
+    )
+
+    assert second["status"] == 200
+    assert models.resolve_composer_draft(sid)["text"] == "two"
+
+
+def test_a_write_without_a_revision_still_applies(session_env, monkeypatch):
+    """Old clients (and the first write of a session) send no revision."""
+    from api import models
+
+    _session_dir, _sessions = session_env
+    sid = "reorder-norev"
+    models.Session(session_id=sid, title="Reorder").save(skip_index=True)
+
+    _post_draft(monkeypatch, {"session_id": sid, "text": "one", "files": []})
+    _post_draft(monkeypatch, {"session_id": sid, "clear": True})
+    late = _post_draft(monkeypatch, {"session_id": sid, "text": "two", "files": []})
+
+    assert late["status"] == 200
+    assert models.resolve_composer_draft(sid)["text"] == "two"
+
+
+def test_rotation_installs_durable_continuation_routing(session_env, monkeypatch):
+    """A late old-sid write must be told which sid is live, not accepted."""
+    from api import models, streaming
+
+    _session_dir, _sessions = session_env
+    old_sid = "routing-old"
+    new_sid = "routing-new"
+    session = models.Session(session_id=old_sid, title="Before compression")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(old_sid, {"text": "carry me", "files": []})
+
+    session.session_id = new_sid
+    session.save(skip_index=True)
+    streaming._preserve_pre_compression_snapshot(session, old_sid)
+
+    assert models.composer_draft_redirect_target(old_sid) == new_sid
+    assert models.resolve_composer_draft(new_sid)["text"] == "carry me"
+
+    late = _post_draft(
+        monkeypatch,
+        {"session_id": old_sid, "text": "newest text typed after rotation", "files": []},
+    )
+
+    assert late["status"] == 409, late
+    assert late["payload"]["session_id"] == new_sid
+    # And nothing was stranded on the archived parent.
+    assert models.read_composer_draft_sidecar(old_sid) is None
+
+
+def test_continuation_routing_survives_a_restart(session_env):
+    """The marker is on disk, not in process memory."""
+    from api import models, streaming
+
+    _session_dir, _sessions = session_env
+    old_sid = "routing-restart-old"
+    new_sid = "routing-restart-new"
+    session = models.Session(session_id=old_sid, title="Before compression")
+    session.save(skip_index=True)
+    models.write_composer_draft_sidecar(old_sid, {"text": "carry me", "files": []})
+    session.session_id = new_sid
+    session.save(skip_index=True)
+    streaming._preserve_pre_compression_snapshot(session, old_sid)
+
+    models._DRAFT_SIDECAR_CACHE.clear()
+    models._COMPOSER_DRAFT_REVISIONS.clear()
+
+    assert models.composer_draft_redirect_target(old_sid) == new_sid
+
+
+def test_migration_refuses_to_overwrite_an_unreadable_old_sidecar(
+    session_env, monkeypatch
+):
+    from api import models
+
+    _session_dir, _sessions = session_env
+    old_sid = "migrate-unreadable-old"
+    new_sid = "migrate-unreadable-new"
+    models.write_composer_draft_sidecar(old_sid, {"text": "precious", "files": []})
+    _break_sidecar_read(monkeypatch, models, sid=old_sid)
+
+    models.migrate_composer_draft_sidecar(old_sid, new_sid)
+
+    assert models.composer_draft_sidecar_path(old_sid).exists()
+    assert not models.composer_draft_sidecar_path(new_sid).exists()
