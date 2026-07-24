@@ -9006,13 +9006,12 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
                 if existing_index is not None and existing_index < len(artifacts):
                     existing = artifacts[existing_index]
                     existing_payload = existing.get("payload") if isinstance(existing, dict) else None
-                    existing_has_tool_identity = (
-                        isinstance(existing_payload, dict)
-                        and isinstance(existing_payload.get("tool_name"), str)
-                        and existing_payload.get("tool_name").strip()
-                        and isinstance(existing_payload.get("tool_call_id"), str)
-                        and existing_payload.get("tool_call_id").strip()
+                    existing_is_renderable = _strict_artifact_reference(
+                        existing_payload if isinstance(existing_payload, dict) else None,
+                        existing.get("type") if isinstance(existing, dict) else None,
                     )
+                    replay_session_id = descriptor.get("session_id")
+                    replay_is_renderable = _strict_artifact_reference(descriptor, "artifact_reference")
                     replay_has_tool_identity = (
                         isinstance(descriptor, dict)
                         and isinstance(descriptor.get("tool_name"), str)
@@ -9020,10 +9019,17 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
                         and isinstance(descriptor.get("tool_call_id"), str)
                         and descriptor.get("tool_call_id").strip()
                     )
+                    existing_session_id = (
+                        existing_payload.get("session_id")
+                        if isinstance(existing_payload, dict)
+                        else None
+                    )
                     if (
-                        not existing_has_tool_identity
+                        not existing_is_renderable
+                        or not isinstance(replay_session_id, str)
+                        or existing_session_id != replay_session_id
                     ):
-                        if replay_has_tool_identity:
+                        if replay_has_tool_identity and replay_is_renderable:
                             artifacts[existing_index] = {
                                 "type": "artifact_reference",
                                 "payload": {**descriptor, "source": "transcript_replay"},

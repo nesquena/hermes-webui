@@ -101,6 +101,29 @@ def test_turn_artifact_references_require_strict_identity_fields():
     ]
 
 
+def test_artifact_owner_match_requires_root_when_captured():
+    workspace = (ROOT / "static/workspace.js").read_text(encoding="utf-8")
+    start = workspace.index("function _artifactScalarString(value){")
+    end = workspace.index("function _artifactCandidatesFromText", start)
+    output = _run_node(
+        workspace[start:end]
+        + "\nconst scenario = ["
+        + "{ name: 'empty-active-root', activeRoot:'', captured:'/old' },"
+        + "{ name: 'matching-root', activeRoot:'/old', captured:'/old' },"
+        + "{ name: 'captured-empty', activeRoot:'/old', captured:'' },"
+        + "{ name: 'missing-active-root-with-captured', activeRoot:'', captured:'/old' },"
+        + "];\n"
+        + "console.log(JSON.stringify(scenario.map((entry) => {\n"
+        + "  global.S = { session: { session_id:'sid-1', workspace: entry.activeRoot } };\n"
+        + "  return _artifactOwnerMatchesSession({\n"
+        + "    session_id:'sid-1',\n"
+        + "    workspace_root: entry.captured,\n"
+        + "  });\n"
+        + "})));"
+    )
+    assert output == [False, True, True, False]
+
+
 def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
     messages = (ROOT / "static/messages.js").read_text(encoding="utf-8")
@@ -304,8 +327,20 @@ def test_replay_replaces_under_typed_existing_anchor_artifacts_with_transcript_d
         messages,
         {
             0: [
-                {"path": "output/report.md", "workspace_root": "/workspace", "tool_call_id": "call-1", "tool_name": "write_file"},
-                {"path": "output/typed.md", "workspace_root": "/workspace", "tool_call_id": "call-2", "tool_name": "patch"},
+                {
+                    "path": "output/report.md",
+                    "workspace_root": "/workspace",
+                    "tool_call_id": "call-1",
+                    "tool_name": "write_file",
+                    "session_id": "sid-replay",
+                },
+                {
+                    "path": "output/typed.md",
+                    "workspace_root": "/workspace",
+                    "tool_call_id": "call-2",
+                    "tool_name": "patch",
+                    "session_id": "sid-replay",
+                },
             ],
         },
     )
@@ -317,6 +352,7 @@ def test_replay_replaces_under_typed_existing_anchor_artifacts_with_transcript_d
             "payload": {
                 "path": "output/report.md",
                 "workspace_root": "/workspace",
+                "session_id": "sid-replay",
                 "tool_call_id": "call-1",
                 "tool_name": "write_file",
                 "source": "transcript_replay",
@@ -327,10 +363,69 @@ def test_replay_replaces_under_typed_existing_anchor_artifacts_with_transcript_d
             "payload": {
                 "path": "output/typed.md",
                 "workspace_root": "/workspace",
+                "session_id": "sid-replay",
                 "tool_name": "patch",
-                "tool_call_id": "call-existing",
+                "tool_call_id": "call-2",
+                "source": "transcript_replay",
             },
         },
+    ]
+
+
+def test_replay_replaces_wrong_session_existing_anchor_artifacts_with_transcript_descriptors():
+    from api import routes
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "final answer",
+            "_anchor_activity_scene": {
+                "version": "activity_scene_v1",
+                "activity_rows": [{"type": "tool"}],
+                "artifacts": [
+                    {
+                        "type": "artifact_reference",
+                        "payload": {
+                            "path": "output/report.md",
+                            "workspace_root": "/workspace",
+                            "tool_name": "patch",
+                            "tool_call_id": "call-existing",
+                            "session_id": "sid-old",
+                        },
+                    },
+                ],
+            },
+        }
+    ]
+
+    hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
+        messages,
+        {
+            0: [
+                {
+                    "path": "output/report.md",
+                    "workspace_root": "/workspace",
+                    "tool_call_id": "call-replay",
+                    "tool_name": "patch",
+                    "session_id": "sid-replay",
+                },
+            ],
+        },
+    )
+
+    scene = hydrated[0]["_anchor_activity_scene"]
+    assert scene["artifacts"] == [
+        {
+            "type": "artifact_reference",
+            "payload": {
+                "path": "output/report.md",
+                "workspace_root": "/workspace",
+                "tool_name": "patch",
+                "tool_call_id": "call-replay",
+                "session_id": "sid-replay",
+                "source": "transcript_replay",
+            },
+        }
     ]
 
 

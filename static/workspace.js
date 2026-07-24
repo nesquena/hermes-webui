@@ -504,7 +504,7 @@ function _artifactOwnerFromOptions(opts){
 function _artifactOwnerMatchesSession(owner){
   const active = _artifactOwnerFromCurrentSession();
   if(!owner || !active || owner.session_id !== active.session_id) return false;
-  if(owner.workspace_root && active.workspace_root) return owner.workspace_root === active.workspace_root;
+  if(owner.workspace_root) return owner.workspace_root === active.workspace_root;
   return true;
 }
 
