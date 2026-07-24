@@ -13630,19 +13630,27 @@ function _turnArtifactEntriesFromScene(scene){
   const entries=[];
   const currentSessionId = S&&S.session&&typeof S.session.session_id==='string' ? S.session.session_id : '';
   for(const artifact of artifacts){
-    const isReference = artifact && (artifact.type === 'artifact_reference' || artifact.source_event_type === 'artifact_reference');
+    const artifactType=artifact && typeof artifact.type === 'string' ? artifact.type : artifact && typeof artifact.source_event_type === 'string' ? artifact.source_event_type : '';
+    const isReference = artifactType === 'artifact_reference';
     const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
+    const payloadSessionId=(
+      typeof payload.session_id==='string'
+        ? payload.session_id
+        : typeof artifact.session_id==='string'
+          ? artifact.session_id
+          : ''
+    ).trim();
     if(
       !isReference
       || typeof payload.path!=='string'
       || typeof payload.workspace_root!=='string'
       || typeof payload.tool_name!=='string'
       || typeof payload.tool_call_id!=='string'
-      || typeof payload.session_id!=='string'
+      || !payloadSessionId
     ) continue;
     const toolName=payload.tool_name.replace(/^functions\./,'');
     const toolCallId=payload.tool_call_id.trim();
-    const sessionId=payload.session_id.trim();
+    const sessionId=payloadSessionId;
     if(sessionId!==currentSessionId) continue;
     if(!['write_file','patch'].includes(toolName)||!toolCallId) continue;
     const path=_turnArtifactWorkspacePath(payload.path,payload.workspace_root);

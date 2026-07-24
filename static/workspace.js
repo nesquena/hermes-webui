@@ -792,6 +792,7 @@ async function openArtifactPath(path){
   // workspace panel must expand before openFile paints the preview, otherwise
   // the file is selected behind an invisible right-hand column.
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  if(!ownerStillActive()) return;
   switchWorkspacePanelTab('files');
   if(!ownerStillActive()) return;
   let rel = pathValue.replace(/^~\//,'').replace(/^\.\/+/,'');
