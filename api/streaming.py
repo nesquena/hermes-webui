@@ -3426,7 +3426,12 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
             or (provider_lower in {'', 'auto'} and not supplied_model)
         ):
             return 'custom', supplied_model, supplied_base_url
-        return supplied_provider, supplied_model, supplied_base_url
+        if supplied_model:
+            return supplied_provider, supplied_model, supplied_base_url
+
+        # An explicit provider with a blank model still belongs to that
+        # provider, even when it uses a custom endpoint. Let the explicit
+        # provider route below obtain the Agent-owned auxiliary default.
 
     if not implicit_route and not picker_route:
         if supplied_model:

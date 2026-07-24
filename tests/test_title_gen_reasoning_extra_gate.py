@@ -145,6 +145,34 @@ class TestAuxReasoningExtraRouteContract:
         assert request['base_url'] is None
         assert request['extra_body'] == {'reasoning': {'enabled': False}}
 
+    def test_explicit_blank_model_with_custom_url_uses_its_own_default(self):
+        """A custom endpoint must not bypass an explicit provider's default."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'deepseek', 'model': '', 'base_url': 'https://deepseek.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='deepseek-chat',
+            create=True,
+        ) as aux_default, patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        aux_default.assert_called_once_with('deepseek')
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'deepseek', 'deepseek-chat', 'https://deepseek.example.test/v1',
+        )
+        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+
     def test_explicit_blank_model_without_a_provider_default_fails_closed(self):
         captured = []
 
