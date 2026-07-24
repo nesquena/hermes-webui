@@ -51,9 +51,6 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
-// Touch-primary devices get batched rendering; these tests verify the desktop
-// virtualization path, so mock the touch guard to always return false.
-const _isTouchPrimary = () => false;
 """
 
 
@@ -106,7 +103,7 @@ console.log(JSON.stringify(metrics));
 def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     """renderSessionListFromCache should window rows without stale cached slices."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    render_start = js.index("function renderSessionListFromCache(opts)")
+    render_start = js.index("function renderSessionListFromCache()")
     render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
     render_body = js[render_start:render_end]
 
@@ -116,7 +113,7 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     assert "list.addEventListener('scroll', _scheduleSessionVirtualizedRender" in js
     assert "requestAnimationFrame(()=>{" in js
     assert "_sessionVirtualScrollRaf=0;" in js
-    assert "renderSessionListFromCache({force:true});" in js
+    assert "renderSessionListFromCache();" in js
     assert "const listScrollTopBeforeRender=list.scrollTop||0" in render_body
     assert "scrollTop:listScrollTopBeforeRender" in render_body
     assert "list.scrollTop=listScrollTopBeforeRender" in render_body
@@ -128,7 +125,7 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
 def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     """Changing filters should not jump the sidebar when active row is already visible."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    render_start = js.index("function renderSessionListFromCache(opts)")
+    render_start = js.index("function renderSessionListFromCache()")
     render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
     render_body = js[render_start:render_end]
 
@@ -146,7 +143,7 @@ def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
 def test_session_list_resyncs_when_browser_clamps_virtual_scroll_restore():
     """If a hidden/reflowed sidebar rejects restored scrollTop, re-render the visible window."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    render_start = js.index("function renderSessionListFromCache(opts)")
+    render_start = js.index("function renderSessionListFromCache()")
     render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
     render_body = js[render_start:render_end]
 
