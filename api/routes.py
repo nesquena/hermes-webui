@@ -8948,10 +8948,8 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             key = (payload_workspace_root, payload_path)
             if not key[0] or not key[1]:
                 continue
-            if key not in seen:
-                seen_to_first_index.setdefault(key, idx)
-            if _strict_artifact_reference(payload, event_type):
-                seen.add(key)
+            seen_to_first_index.setdefault(key, idx)
+            seen.add(key)
         for descriptor in descriptors:
             if not isinstance(descriptor, dict):
                 continue
@@ -8971,16 +8969,36 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
                     existing_payload = existing.get("payload") if isinstance(existing, dict) else None
                     existing_type = existing.get("type") if isinstance(existing, dict) else None
                     existing_source_event_type = existing.get("source_event_type") if isinstance(existing, dict) else None
+                    existing_has_tool_identity = (
+                        isinstance(existing_payload, dict)
+                        and isinstance(existing_payload.get("tool_name"), str)
+                        and existing_payload.get("tool_name").strip()
+                        and isinstance(existing_payload.get("tool_call_id"), str)
+                        and existing_payload.get("tool_call_id").strip()
+                    )
+                    replay_has_tool_identity = (
+                        isinstance(descriptor, dict)
+                        and isinstance(descriptor.get("tool_name"), str)
+                        and descriptor.get("tool_name").strip()
+                        and isinstance(descriptor.get("tool_call_id"), str)
+                        and descriptor.get("tool_call_id").strip()
+                    )
                     if (
-                        not _strict_artifact_reference(
-                            existing_payload if isinstance(existing_payload, dict) else {},
-                            existing_type or existing_source_event_type,
-                        )
+                        not existing_has_tool_identity
                     ):
-                        artifacts[existing_index] = {
-                            "type": "artifact_reference",
-                            "payload": {**descriptor, "source": "transcript_replay"},
-                        }
+                        if replay_has_tool_identity:
+                            artifacts[existing_index] = {
+                                "type": "artifact_reference",
+                                "payload": {**descriptor, "source": "transcript_replay"},
+                            }
+                        else:
+                            artifacts[existing_index] = {
+                                "type": "artifact_reference",
+                                "payload": {
+                                    **(existing_payload if isinstance(existing_payload, dict) else {}),
+                                    "source": "transcript_replay",
+                                },
+                            }
                 seen.add(key)
                 continue
             seen.add(key)
