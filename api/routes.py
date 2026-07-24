@@ -12375,6 +12375,11 @@ def handle_get(handler, parsed) -> bool:
         from api.config import get_auxiliary_models
         return j(handler, get_auxiliary_models())
 
+    # ── Mixture of Agents config (GET/PUT) ──
+    if parsed.path == "/api/model/moa":
+        from api.config import get_moa_config
+        return j(handler, get_moa_config())
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -16639,6 +16644,15 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
+    if parsed.path == "/api/model/moa":
+        from api.config import MoaStaleEditError, set_moa_config
+        try:
+            return j(handler, {"ok": True, **set_moa_config(body)})
+        except MoaStaleEditError as exc:
+            # Optimistic-concurrency conflict: the editor must reload.
+            return bad(handler, str(exc), status=409)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────

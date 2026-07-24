@@ -9149,6 +9149,8 @@ async function loadSettingsPanel(){
     // Auxiliary models — load task assignments and provider/model options
     _bindMainAdvancedOptionsButton();
     _loadAuxiliaryModels();
+    // Mixture of Agents — load current preset (agents + aggregator)
+    _loadMoaConfig();
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -12456,6 +12458,331 @@ async function _applyAuxModels(){
  if(typeof showToast==='function') showToast(saved?(t('settings_aux_saved')||'Auxiliary models updated'):(t('settings_aux_no_changes')||'No changes to apply'));
  // Reload to refresh state
  _loadAuxiliaryModels();
+}
+
+// ── Mixture of Agents (MoA) settings ────────────────────────────────────────
+// Backend: GET/PUT /api/model/moa (api/config.py get_moa_config/set_moa_config).
+// This UI edits a single working preset (the config's default preset, or the
+// flat "moa" key for configs that never adopted named presets). Provider and
+// model lists come from /api/models, same as the auxiliary models UI above.
+let _moaProviders=[];
+let _moaMeta=null;          // full preset object as returned by GET (incl. fields this UI doesn't expose)
+let _moaAgentsState=[];     // [{provider,model}]
+let _moaAggregatorState={provider:'',model:''};
+
+function _moaSelectStyle(){
+ return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
+}
+
+let _moaLoaded=false;   // successful GET completed for the current panel open
+let _moaDirty=false;    // section-owned (gate finding 6): MoA saves via its
+                        // OWN button/transaction; the global Settings save
+                        // path neither saves nor reports MoA state.
+function _updateMoaSaveButtonState(){
+ const saveBtn=$('btnSaveMoa');
+ if(saveBtn) saveBtn.disabled=!(_moaLoaded&&_moaDirty);
+}
+function _markMoaDirty(){
+ _moaDirty=true;
+ _updateMoaSaveButtonState();
+}
+function _moaStatus(text,isError){
+ const note=$('moaStatusNote');
+ if(!note) return;
+ if(!text){note.style.display='none';note.textContent='';return;}
+ note.style.display='';
+ note.style.color=isError?'var(--error,#e05)':'var(--muted)';
+ note.textContent=text;
+}
+
+function _updateMoaFieldsVisibility(){
+ const fields=$('moaFields');
+ const enabledCb=$('moaEnabled');
+ if(fields) fields.style.display=(enabledCb&&enabledCb.checked)?'':'none';
+}
+
+function _buildMoaProviderOptions(sel,providers,currentProvider){
+ sel.innerHTML='';
+ const emptyOpt=document.createElement('option');
+ emptyOpt.value='';emptyOpt.textContent=t('settings_moa_agent_provider_placeholder')||'Provider';
+ sel.appendChild(emptyOpt);
+ for(const p of providers){
+  const opt=document.createElement('option');
+  opt.value=p.slug;opt.textContent=p.name;
+  if(p.slug===currentProvider) opt.selected=true;
+  sel.appendChild(opt);
+ }
+ if(currentProvider&&!providers.some(p=>p.slug===currentProvider)){
+  const existingOpt=document.createElement('option');
+  existingOpt.value=currentProvider;existingOpt.textContent=currentProvider+' (configured)';
+  existingOpt.selected=true;
+  sel.appendChild(existingOpt);
+ }
+}
+
+function _buildMoaModelOptions(sel,provider,providers,currentModel){
+ sel.innerHTML='';
+ const emptyOpt=document.createElement('option');
+ emptyOpt.value='';emptyOpt.textContent=t('settings_moa_agent_model_placeholder')||'Model';
+ sel.appendChild(emptyOpt);
+ const pData=providers.find(p=>p.slug===provider);
+ if(pData&&pData.models){
+  for(const mId of pData.models){
+   const opt=document.createElement('option');
+   opt.value=mId;opt.textContent=mId;
+   if(mId===currentModel) opt.selected=true;
+   sel.appendChild(opt);
+  }
+ }
+ const customOpt=document.createElement('option');
+ customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
+ sel.appendChild(customOpt);
+ if(currentModel&&!(pData&&pData.models&&pData.models.includes(currentModel))){
+  const existingOpt=document.createElement('option');
+  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.selected=true;
+  sel.insertBefore(existingOpt,customOpt);
+ }
+}
+
+async function _onMoaModelSelectChange(modelSel,onPick){
+ if(modelSel.value==='__custom__'){
+  const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
+  onPick((customModel&&customModel.trim())?customModel.trim():'');
+ }else{
+  onPick(modelSel.value);
+ }
+ _markMoaDirty();
+}
+
+function _restoreMoaFocus(container,focusKey){
+ if(!focusKey) return;
+ const el=container.querySelector(`[data-moa-focus="${focusKey}"]`);
+ if(el) el.focus();
+}
+function _renderMoaAgents(){
+ const container=$('moaAgentsContainer');
+ if(!container) return;
+ const focusKey=document.activeElement&&document.activeElement.dataset?document.activeElement.dataset.moaFocus:null;
+ container.innerHTML='';
+ _moaAgentsState.forEach((agent,index)=>{
+  const row=document.createElement('div');
+  row.style.cssText='display:grid;grid-template-columns:1fr 1fr 44px;gap:8px;align-items:center;margin-bottom:8px';
+
+  const provSel=document.createElement('select');
+  provSel.dataset.moaFocus=`agent-${index}-provider`;
+  provSel.setAttribute('aria-label',(t('settings_moa_agent_provider_placeholder')||'Provider')+' '+(index+1));
+  provSel.style.cssText=_moaSelectStyle();
+  _buildMoaProviderOptions(provSel,_moaProviders,agent.provider);
+  provSel.addEventListener('change',()=>{
+   _moaAgentsState[index].provider=provSel.value;
+   _moaAgentsState[index].model='';
+   _markMoaDirty();
+   _renderMoaAgents();
+  });
+  row.appendChild(provSel);
+
+  const modelSel=document.createElement('select');
+  modelSel.dataset.moaFocus=`agent-${index}-model`;
+  modelSel.setAttribute('aria-label',(t('settings_moa_agent_model_placeholder')||'Model')+' '+(index+1));
+  modelSel.style.cssText=_moaSelectStyle();
+  _buildMoaModelOptions(modelSel,agent.provider,_moaProviders,agent.model);
+  modelSel.addEventListener('change',()=>_onMoaModelSelectChange(modelSel,(model)=>{
+   _moaAgentsState[index].model=model;
+   _renderMoaAgents();
+  }));
+  row.appendChild(modelSel);
+
+  const removeBtn=document.createElement('button');
+  removeBtn.type='button';
+  removeBtn.className='model-advanced-btn';
+  removeBtn.style.minWidth='44px';
+  removeBtn.style.minHeight='44px';
+  removeBtn.title=t('settings_moa_btn_remove_agent')||'Remove agent';
+  removeBtn.setAttribute('aria-label',t('settings_moa_btn_remove_agent')||'Remove agent');
+  removeBtn.textContent='×';
+  removeBtn.addEventListener('click',()=>{
+   _moaAgentsState.splice(index,1);
+   _markMoaDirty();
+   _renderMoaAgents();
+  });
+  row.appendChild(removeBtn);
+
+  container.appendChild(row);
+ });
+ _restoreMoaFocus(container,focusKey);
+}
+
+function _renderMoaAggregator(){
+ const container=$('moaAggregatorContainer');
+ if(!container) return;
+ const focusKey=document.activeElement&&document.activeElement.dataset?document.activeElement.dataset.moaFocus:null;
+ container.innerHTML='';
+ const row=document.createElement('div');
+ row.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center';
+
+ const provSel=document.createElement('select');
+ provSel.id='moaAggregatorProvider';
+ provSel.dataset.moaFocus='aggregator-provider';
+ provSel.setAttribute('aria-label',(t('settings_moa_aggregator_label')||'Aggregator')+' '+(t('settings_moa_agent_provider_placeholder')||'Provider'));
+ provSel.style.cssText=_moaSelectStyle();
+ _buildMoaProviderOptions(provSel,_moaProviders,_moaAggregatorState.provider);
+ provSel.addEventListener('change',()=>{
+  _moaAggregatorState.provider=provSel.value;
+  _moaAggregatorState.model='';
+  _markMoaDirty();
+  _renderMoaAggregator();
+ });
+ row.appendChild(provSel);
+
+ const modelSel=document.createElement('select');
+ modelSel.id='moaAggregatorModel';
+ modelSel.dataset.moaFocus='aggregator-model';
+ modelSel.setAttribute('aria-label',(t('settings_moa_aggregator_label')||'Aggregator')+' '+(t('settings_moa_agent_model_placeholder')||'Model'));
+ modelSel.style.cssText=_moaSelectStyle();
+ _buildMoaModelOptions(modelSel,_moaAggregatorState.provider,_moaProviders,_moaAggregatorState.model);
+ modelSel.addEventListener('change',()=>_onMoaModelSelectChange(modelSel,(model)=>{
+  _moaAggregatorState.model=model;
+  _renderMoaAggregator();
+ }));
+ row.appendChild(modelSel);
+
+ container.appendChild(row);
+ _restoreMoaFocus(container,focusKey);
+}
+
+function _bindMoaControls(){
+ const enabledCb=$('moaEnabled');
+ if(enabledCb&&!enabledCb._bound){
+  enabledCb._bound=true;
+  enabledCb.addEventListener('change',()=>{_updateMoaFieldsVisibility();_markMoaDirty();});
+ }
+ const addBtn=$('btnMoaAddAgent');
+ if(addBtn&&!addBtn._bound){
+  addBtn._bound=true;
+  addBtn.addEventListener('click',()=>{
+   _moaAgentsState.push({provider:'',model:''});
+   _renderMoaAgents();
+   _markMoaDirty();
+  });
+ }
+ const saveBtn=$('btnSaveMoa');
+ if(saveBtn&&!saveBtn._bound){
+  saveBtn._bound=true;
+  saveBtn.addEventListener('click',_saveMoaConfig);
+ }
+}
+
+async function _loadMoaConfig(){
+ const enabledCb=$('moaEnabled');
+ if(!enabledCb) return;
+ _bindMoaControls();
+ // Gate finding 3: Save stays unusable until a load actually SUCCEEDED --
+ // a fast click or a transient GET failure must never overwrite a valid
+ // CLI config with a blank disabled default.
+ _moaLoaded=false;
+ _moaDirty=false;
+ _updateMoaSaveButtonState();
+ _moaStatus(t('settings_moa_loading')||'Loading Mixture of Agents settings…');
+ let moaData;
+ let modelsData=null;
+ try{
+  [moaData,modelsData]=await Promise.all([
+   api('/api/model/moa'),
+   api('/api/models').catch(()=>null),
+  ]);
+ }catch(e){
+  console.warn('[settings] moa config load failed',e);
+  _moaStatus(t('settings_moa_load_failed')||'Could not load Mixture of Agents settings.',true);
+  return;
+ }
+ try{
+  const groups=(modelsData&&modelsData.groups)||[];
+  _moaProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
+   slug:g.provider_id||g.provider,
+   name:g.provider,
+   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
+  }));
+  _moaMeta=moaData;
+  enabledCb.checked=!!_moaMeta.enabled;
+  // reasoning_effort has no UI control of its own (yet), but the backend
+  // persists it per slot (see api/config.py _MOA_SLOT_KEYS) -- carry
+  // whatever value was loaded through untouched so a save from this UI
+  // doesn't silently erase it (#audit MEDIUM: this used to be dropped here).
+  _moaAgentsState=(Array.isArray(_moaMeta.reference_models)?_moaMeta.reference_models:[]).map(a=>({provider:(a&&a.provider)||'',model:(a&&a.model)||'',reasoning_effort:(a&&a.reasoning_effort)||''}));
+  _moaAggregatorState={provider:(_moaMeta.aggregator&&_moaMeta.aggregator.provider)||'',model:(_moaMeta.aggregator&&_moaMeta.aggregator.model)||'',reasoning_effort:(_moaMeta.aggregator&&_moaMeta.aggregator.reasoning_effort)||''};
+  _renderMoaAgents();
+  _renderMoaAggregator();
+  _updateMoaFieldsVisibility();
+  const note=$('moaOtherPresetsNote');
+  if(note){
+   const count=(_moaMeta.other_presets||[]).length;
+   if(count>0){
+    note.style.display='';
+    note.textContent=(t('settings_moa_other_presets_note')||'{count} additional preset(s) configured elsewhere are preserved but not shown here.').replace('{count}',String(count));
+   }else{
+    note.style.display='none';
+   }
+  }
+  _moaStatus('');
+  _moaLoaded=true;
+  _moaDirty=false;
+  _updateMoaSaveButtonState();
+ }catch(e){
+  console.warn('[settings] moa config render failed',e);
+  _moaStatus(t('settings_moa_load_failed')||'Could not load Mixture of Agents settings.',true);
+ }
+}
+
+function _moaSlotPayload(slot){
+ // reasoning_effort has no UI control yet, but the backend accepts and
+ // persists it per slot (agents and aggregator alike) -- pass through
+ // whatever value _loadMoaConfig() attached so a save from this UI can
+ // never silently erase it (#audit MEDIUM). Omit the key entirely when
+ // blank, matching the backend's own _moa_clean_slot behavior.
+ const out={provider:slot.provider||'',model:slot.model||''};
+ if(slot.reasoning_effort) out.reasoning_effort=slot.reasoning_effort;
+ return out;
+}
+
+async function _saveMoaConfig(){
+ const enabledCb=$('moaEnabled');
+ const enabled=!!(enabledCb&&enabledCb.checked);
+ const referenceModels=_moaAgentsState
+  .filter(a=>a.provider||a.model)
+  .map(_moaSlotPayload);
+ const aggregator=_moaSlotPayload(_moaAggregatorState);
+ if(!_moaLoaded){
+  // Defense in depth: the button is disabled pre-load, but keyboard/JS
+  // activation must not slip through either (gate finding 3).
+  return;
+ }
+ const body={enabled,reference_models:referenceModels,aggregator};
+ // Round-trip advanced fields this UI doesn't expose (reference_temperature,
+ // max_tokens, fanout, …) so saving here never clobbers values a user set
+ // via the CLI /moa command or the hermes-agent dashboard.
+ if(_moaMeta){
+  for(const key of ['reference_temperature','aggregator_temperature','max_tokens','reference_max_tokens','fanout']){
+   if(Object.prototype.hasOwnProperty.call(_moaMeta,key)) body[key]=_moaMeta[key];
+  }
+  // Optimistic concurrency (gate finding 4): pin WHICH preset this editor
+  // loaded and WHAT content revision it saw; the server 409s stale writes.
+  if(_moaMeta.preset) body.preset=_moaMeta.preset;
+  if(_moaMeta.revision) body.revision=_moaMeta.revision;
+ }
+ try{
+  await api('/api/model/moa',{method:'PUT',body:JSON.stringify(body)});
+  if(typeof showToast==='function') showToast(t('settings_moa_saved')||'Mixture of Agents settings saved');
+  _loadMoaConfig();
+ }catch(e){
+  const msg=e&&e.message?e.message:'';
+  if(typeof showToast==='function') showToast((t('settings_moa_save_failed')||'Failed to save Mixture of Agents settings')+(msg?': '+msg:''));
+  if(e&&(e.status===409||/reload before saving/i.test(msg))){
+   // Stale editor: bring the fresh state in instead of letting the user
+   // hammer Save against a moved target.
+   _loadMoaConfig();
+  }
+ }
 }
 
 async function saveSettings(andClose){

@@ -4836,6 +4836,437 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     return {"ok": True, "task": task, "provider": provider, "model": model}
 
 
+# ── Mixture-of-Agents (MoA) configuration ───────────────────────────────────
+# The "moa" config.yaml key and its {reference_models, aggregator, enabled,
+# reference_temperature, aggregator_temperature, max_tokens,
+# reference_max_tokens, fanout} shape are owned by hermes_cli/moa_config.py
+# (normalize_moa_config / validate_moa_payload) in hermes-agent, which
+# actually executes MoA turns. hermes_cli is an optional runtime dependency
+# here (see api/commands.py resolve_moa_config, which degrades gracefully
+# when it isn't installed), so this reads/writes the SAME config.yaml
+# structure without importing it — every field name below matches
+# hermes_cli/moa_config.py exactly so a config saved by this UI resolves
+# identically whether hermes-agent is present or not.
+#
+# GET/PUT here manage a single working preset (the config's default_preset,
+# or the flat "moa" key itself for configs that never adopted named
+# presets — the common case). Any additional named presets a user built via
+# the CLI/dashboard are left untouched on write.
+
+MOA_DEFAULT_PRESET_NAME = "default"
+
+_MOA_SLOT_KEYS = {"provider", "model", "reasoning_effort"}
+_MOA_PRESET_KEYS = {
+    "enabled",
+    "reference_models",
+    "aggregator",
+    "reference_temperature",
+    "aggregator_temperature",
+    "max_tokens",
+    "reference_max_tokens",
+    "fanout",
+}
+
+
+def _moa_slot_is_blank(slot) -> bool:
+    if not isinstance(slot, dict):
+        return False
+    return not any(str(slot.get(k) or "").strip() for k in _MOA_SLOT_KEYS)
+
+
+def _moa_slot_problem(slot, *, label: str) -> str | None:
+    """Return a validation problem for a non-blank MoA agent/aggregator slot."""
+    if not isinstance(slot, dict):
+        return f"{label} must be an object with 'provider' and 'model'"
+    unknown = sorted(set(slot) - _MOA_SLOT_KEYS)
+    if unknown:
+        return f"{label} has unknown field(s): {', '.join(unknown)}"
+    provider = str(slot.get("provider") or "").strip()
+    model = str(slot.get("model") or "").strip()
+    if not provider:
+        return f"{label} is missing provider"
+    if not model:
+        return f"{label} is missing model"
+    if provider.lower() == "moa":
+        # MoA is a virtual provider; nesting it inside its own preset would
+        # create a recursive MoA tree (see hermes_cli/moa_config.py).
+        return f"{label}: the Mixture of Agents provider cannot be used inside a preset (recursive MoA)"
+    return None
+
+
+def _moa_effort_string(raw) -> str:
+    """Runtime-parity effort read: the agent canonicalizes YAML
+    ``reasoning_effort: false`` to the string ``"none"`` — mirror that
+    instead of blanking it out (gate finding 5)."""
+    if raw is False:
+        return "none"
+    return str(raw or "").strip()
+
+
+def _moa_clean_slot(slot: dict) -> dict:
+    clean = {
+        "provider": str(slot.get("provider") or "").strip(),
+        "model": str(slot.get("model") or "").strip(),
+    }
+    effort = _moa_effort_string(slot.get("reasoning_effort"))
+    if effort:
+        clean["reasoning_effort"] = effort
+    return clean
+
+
+def _moa_slot_identity(slot) -> tuple[str, str] | None:
+    if not isinstance(slot, dict):
+        return None
+    provider = str(slot.get("provider") or "").strip()
+    model = str(slot.get("model") or "").strip()
+    if not provider and not model:
+        return None
+    return (provider, model)
+
+
+def _moa_merge_slot_extras(new_slots: list[dict], old_slots) -> list[dict]:
+    """Merge-don't-replace at slot level -- by IDENTITY, never by position.
+
+    Independent review P1: an index-based merge reassigns another tool's
+    slot metadata to the wrong agent as soon as a reference model is
+    removed or reordered. Unknown fields are carried over only when the
+    old slot is UNAMBIGUOUSLY identified by its (provider, model) pair:
+
+    * exactly one unclaimed old slot with the same identity -> carry its
+      unknown fields;
+    * duplicate identities on either side, or no match -> carry nothing
+      (dropping metadata is recoverable via the other tool; binding it to
+      the wrong agent silently corrupts semantics).
+
+    Known fields always take the UI's value."""
+    old_list = old_slots if isinstance(old_slots, list) else []
+    by_identity: dict[tuple[str, str], list[dict]] = {}
+    for old in old_list:
+        identity = _moa_slot_identity(old)
+        if identity is not None:
+            by_identity.setdefault(identity, []).append(old)
+
+    new_identities = [_moa_slot_identity(slot) for slot in new_slots]
+    merged: list[dict] = []
+    for slot, identity in zip(new_slots, new_identities, strict=True):
+        candidates = by_identity.get(identity, []) if identity is not None else []
+        unambiguous = (
+            len(candidates) == 1
+            and new_identities.count(identity) == 1
+        )
+        if unambiguous:
+            old = candidates[0]
+            extras = {k: v for k, v in old.items() if k not in _MOA_SLOT_KEYS}
+            merged.append({**extras, **slot})
+        else:
+            merged.append(dict(slot))
+    return merged
+
+
+def _moa_read_slot(slot) -> dict:
+    """Lenient read-side slot view — shows exactly what's persisted, even if
+    incomplete, so the editor never substitutes hardcoded example agents for
+    a user's real (possibly blank) saved state."""
+    if not isinstance(slot, dict):
+        slot = {}
+    out = {
+        "provider": str(slot.get("provider") or "").strip(),
+        "model": str(slot.get("model") or "").strip(),
+    }
+    effort = _moa_effort_string(slot.get("reasoning_effort"))
+    if effort:
+        out["reasoning_effort"] = effort
+    return out
+
+
+def _moa_float_or_none(value):
+    """Read-side display helper (lenient by design; write path validates)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _moa_positive_int_or_none(value):
+    """Read-side display helper (lenient by design; write path validates)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        try:
+            n = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    except OverflowError:
+        return None
+    return n if n > 0 else None
+
+
+def _moa_int_or_default(value, default: int) -> int:
+    """Read-side display helper (lenient by design; write path validates)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return default
+    except OverflowError:
+        return default
+
+
+def _moa_fanout_or_default(value) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in ("per_iteration", "user_turn") else "per_iteration"
+
+
+# ── Strict write-side validators (gate finding 2): exact types, finite
+# ranges, loud ValueError — never coerce, never silently repair. ──────────────
+
+def _moa_require_bool(payload: dict, key: str, default: bool) -> bool:
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _moa_require_temperature(payload: dict, key: str):
+    value = payload.get(key)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be a number")
+    f = float(value)
+    if not math.isfinite(f):
+        raise ValueError(f"{key} must be a finite number")
+    if not (0.0 <= f <= 2.0):
+        raise ValueError(f"{key} must be between 0 and 2")
+    return f
+
+
+def _moa_require_positive_int(payload: dict, key: str, *, default=None):
+    value = payload.get(key, None)
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{key} must be a positive integer")
+    if value > 100_000_000:
+        raise ValueError(f"{key} is implausibly large")
+    return value
+
+
+def _moa_require_fanout(payload: dict) -> str:
+    value = payload.get("fanout", None)
+    if value is None or value == "":
+        return "per_iteration"
+    mode = str(value).strip().lower()
+    if mode not in ("per_iteration", "user_turn"):
+        raise ValueError("fanout must be 'per_iteration' or 'user_turn'")
+    return mode
+
+
+def _moa_preset_revision(preset: dict) -> str:
+    """Stable identity of the currently persisted preset content, carried
+    through GET→PUT so a stale editor cannot overwrite concurrent CLI/
+    dashboard edits (gate finding 4)."""
+    try:
+        canonical = json.dumps(preset, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        canonical = repr(sorted(preset.items(), key=lambda kv: str(kv[0])))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+class MoaStaleEditError(ValueError):
+    """The editor's loaded preset/revision no longer matches the config."""
+
+
+def _moa_locate_preset(raw_moa: dict) -> tuple[str, dict, list[str]]:
+    """Return (preset_name, preset_dict, other_preset_names) for the preset
+    this UI edits — the config's default_preset when named presets are in
+    use, else the flat "moa" key itself. Never mutates ``raw_moa``."""
+    presets = raw_moa.get("presets")
+    if isinstance(presets, dict) and presets:
+        preset_name = str(raw_moa.get("default_preset") or "").strip()
+        if preset_name not in presets:
+            preset_name = next(iter(presets))
+        preset = presets.get(preset_name)
+        preset = preset if isinstance(preset, dict) else {}
+        others = [name for name in presets if name != preset_name]
+        return preset_name, preset, others
+    return MOA_DEFAULT_PRESET_NAME, raw_moa, []
+
+
+def _moa_preset_for_read(preset: dict) -> dict:
+    refs = preset.get("reference_models")
+    if not isinstance(refs, list):
+        refs = [refs] if isinstance(refs, dict) else []
+    aggregator = preset.get("aggregator")
+    # Runtime parity (gate finding 5): the agent treats a preset WITHOUT an
+    # ``enabled`` key as enabled. Mirror that for configured presets; a fully
+    # unset/empty preset still reads as disabled (nothing to enable).
+    enabled_default = bool(preset)
+    return {
+        "enabled": bool(preset.get("enabled", enabled_default)),
+        "reference_models": [_moa_read_slot(slot) for slot in refs],
+        "aggregator": _moa_read_slot(aggregator) if isinstance(aggregator, dict) else {"provider": "", "model": ""},
+        "reference_temperature": _moa_float_or_none(preset.get("reference_temperature")),
+        "aggregator_temperature": _moa_float_or_none(preset.get("aggregator_temperature")),
+        "max_tokens": _moa_int_or_default(preset.get("max_tokens"), 4096),
+        "reference_max_tokens": _moa_positive_int_or_none(preset.get("reference_max_tokens")),
+        "fanout": _moa_fanout_or_default(preset.get("fanout")),
+    }
+
+
+def get_moa_config() -> dict:
+    """Return the Mixture-of-Agents preset this settings UI edits.
+
+    Defaults to disabled/empty when config.yaml has no "moa" key yet —
+    unlike hermes_cli.moa_config's runtime normalizer, which substitutes
+    hardcoded example agents so a chat turn never crashes, an editor must
+    reflect the user's actual (possibly unset) saved state.
+    """
+    reload_config()
+    raw_moa = cfg.get("moa") if isinstance(cfg, dict) else None
+    raw_moa = raw_moa if isinstance(raw_moa, dict) else {}
+    preset_name, preset, other_presets = _moa_locate_preset(raw_moa)
+    return {
+        **_moa_preset_for_read(preset),
+        "preset": preset_name,
+        "other_presets": other_presets,
+        # Optimistic-concurrency handle (gate finding 4): PUT must echo both.
+        "revision": _moa_preset_revision(preset),
+    }
+
+
+def set_moa_config(payload: dict) -> dict:
+    """Validate and persist the Mixture-of-Agents preset this UI edits.
+
+    Reject-don't-repair: an incomplete agent/aggregator slot or an unknown
+    field is rejected loudly (ValueError, mapped to 400 by the route) rather
+    than silently dropped or defaulted — a client that saves a half-filled
+    row must not corrupt the user's config (mirrors hermes-agent's
+    validate_moa_payload, PR #64156).
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("MoA config must be an object")
+
+    payload = dict(payload)
+    # Concurrency handles from GET (gate finding 4) — not preset content.
+    target_preset = payload.pop("preset", None)
+    client_revision = payload.pop("revision", None)
+
+    unknown_top = sorted(set(payload) - _MOA_PRESET_KEYS)
+    if unknown_top:
+        raise ValueError(f"Unknown field(s): {', '.join(unknown_top)}")
+
+    enabled = _moa_require_bool(payload, "enabled", False)
+    refs_raw = payload.get("reference_models", [])
+    if not isinstance(refs_raw, list):
+        raise ValueError("reference_models must be a list")
+
+    problems: list[str] = []
+    clean_refs: list[dict] = []
+    for index, slot in enumerate(refs_raw):
+        if _moa_slot_is_blank(slot):
+            continue
+        issue = _moa_slot_problem(slot, label=f"agent {index + 1}")
+        if issue:
+            problems.append(issue)
+        else:
+            clean_refs.append(_moa_clean_slot(slot))
+    if enabled and not clean_refs:
+        problems.append("at least one agent with provider and model is required when enabled")
+
+    aggregator_raw = payload.get("aggregator", {})
+    aggregator_blank = _moa_slot_is_blank(aggregator_raw)
+    if not aggregator_blank:
+        issue = _moa_slot_problem(aggregator_raw, label="aggregator")
+        if issue:
+            problems.append(issue)
+    elif enabled:
+        problems.append("aggregator is missing provider")
+
+    if problems:
+        raise ValueError("; ".join(problems))
+
+    # Strict scalars (gate finding 2): exact types, finite/ranged values,
+    # loud rejection — bool("false"), NaN temperatures, zero/negative or
+    # string token limits and unknown fanout modes are all 400s now.
+    preset_update = {
+        "enabled": enabled,
+        "reference_models": clean_refs,
+        "aggregator": {} if aggregator_blank else _moa_clean_slot(aggregator_raw),
+        "reference_temperature": _moa_require_temperature(payload, "reference_temperature"),
+        "aggregator_temperature": _moa_require_temperature(payload, "aggregator_temperature"),
+        "max_tokens": _moa_require_positive_int(payload, "max_tokens", default=4096),
+        "reference_max_tokens": _moa_require_positive_int(payload, "reference_max_tokens"),
+        "fanout": _moa_require_fanout(payload),
+    }
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        raw_moa = config_data.get("moa")
+        raw_moa = raw_moa if isinstance(raw_moa, dict) else {}
+        preset_name, existing_preset, _others = _moa_locate_preset(raw_moa)
+
+        # Optimistic concurrency (gate finding 4): the editor pins WHICH
+        # preset it loaded and WHAT content it saw. If the default preset
+        # was repointed or the content changed underneath (CLI/dashboard),
+        # reject instead of overwriting the wrong or newer state. Clients
+        # that never sent handles (older UI) keep legacy last-write-wins.
+        if target_preset is not None and str(target_preset) != preset_name:
+            raise MoaStaleEditError(
+                f"The editor loaded preset {str(target_preset)!r}, but the "
+                f"config's edit target is now {preset_name!r}. Reload before saving."
+            )
+        if client_revision is not None and str(client_revision) != _moa_preset_revision(existing_preset):
+            raise MoaStaleEditError(
+                "The MoA configuration changed while this editor was open. "
+                "Reload before saving."
+            )
+
+        # Merge-don't-replace (gate finding 1): unknown root/preset/slot
+        # fields written by other tooling survive a UI save.
+        merged = dict(existing_preset) if isinstance(existing_preset, dict) else {}
+        old_refs = merged.get("reference_models")
+        old_refs = old_refs if isinstance(old_refs, list) else []
+        preset_update["reference_models"] = _moa_merge_slot_extras(
+            preset_update["reference_models"], old_refs
+        )
+        if not aggregator_blank:
+            # The aggregator is a singleton slot: identity-match against the
+            # persisted aggregator only (same rule, list of one).
+            preset_update["aggregator"] = _moa_merge_slot_extras(
+                [preset_update["aggregator"]], [merged.get("aggregator")]
+            )[0]
+        merged.update(preset_update)
+
+        presets = raw_moa.get("presets")
+        if isinstance(presets, dict) and presets:
+            presets[preset_name] = merged
+            raw_moa["presets"] = presets
+            config_data["moa"] = raw_moa
+        else:
+            # Flat layout: the moa dict IS the preset — merge into it, so
+            # unknown root-level keys survive too.
+            flat = dict(raw_moa)
+            flat.update({k: v for k, v in merged.items()})
+            config_data["moa"] = flat
+        _save_yaml_config_file(config_path, config_data)
+
+    reload_config()
+    return get_moa_config()
+
+
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0

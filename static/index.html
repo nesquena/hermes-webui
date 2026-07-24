@@ -1170,6 +1170,26 @@
               </div>
             </div>
             <div class="settings-field">
+              <label data-i18n="settings_label_moa">Mixture of Agents</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px" data-i18n="settings_desc_moa">Route a turn through multiple reference models, then combine their answers with an aggregator model. Increases cost and latency per turn.</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px">
+                <input type="checkbox" id="moaEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_moa_enable">Enable Mixture of Agents</span>
+              </label>
+              <div id="moaFields" style="display:none">
+                <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px" data-i18n="settings_moa_agents_label">Agents</div>
+                <div id="moaAgentsContainer"></div>
+                <button type="button" id="btnMoaAddAgent" class="settings-btn" style="font-size:12px;padding:12px;min-height:44px;border-radius:6px;margin-top:4px" data-i18n="settings_moa_btn_add_agent">Add agent</button>
+                <div style="font-size:12px;font-weight:600;color:var(--text);margin:14px 0 6px" data-i18n="settings_moa_aggregator_label">Aggregator model</div>
+                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_moa_aggregator_desc">Combines the agents’ answers into the final response.</div>
+                <div id="moaAggregatorContainer"></div>
+              </div>
+              <div id="moaStatusNote" role="status" aria-live="polite" style="display:none;font-size:12px;color:var(--muted);margin:6px 0"></div><div id="moaOtherPresetsNote" style="font-size:11px;color:var(--muted);margin-top:8px;display:none"></div>
+              <div style="margin-top:10px">
+                <button type="button" id="btnSaveMoa" class="settings-btn" disabled style="font-size:12px;padding:12px;min-height:44px;border-radius:6px" data-i18n="settings_moa_btn_save">Save Mixture of Agents settings</button>
+              </div>
+            </div>
+            <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsHideSuggestions" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
