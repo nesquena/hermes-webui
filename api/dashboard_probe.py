@@ -239,7 +239,7 @@ def get_dashboard_status(config_data: dict | None = None) -> dict:
         if browser_url and not override:
             return {"running": True, "enabled": enabled, "url": browser_url, "browser_url": browser_url}
         host, port, scheme, base = targets[0]
-        return {"running": True, "enabled": enabled, "host": host, "port": port, "url": browser_url or base, "browser_url": browser_url or base}
+        return {"running": True, "enabled": enabled, "host": host, "port": port, "url": browser_url or base, "browser_url": browser_url}
 
     if not _webui_bind_host_allows_auto_probe():
         return {"running": False, "enabled": enabled}

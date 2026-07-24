@@ -159,6 +159,18 @@ def test_status_honors_never_and_external_browser_link_without_probe(monkeypatch
         "browser_url": "https://dashboard.example.test",
     }
 
+    loopback_result = dashboard_probe.get_dashboard_status(
+        config_data={"webui": {"dashboard": {"enabled": "always"}}}
+    )
+    assert loopback_result == {
+        "running": True,
+        "enabled": "always",
+        "host": "127.0.0.1",
+        "port": 9119,
+        "url": "http://127.0.0.1:9119",
+        "browser_url": "",
+    }
+
 
 
 
