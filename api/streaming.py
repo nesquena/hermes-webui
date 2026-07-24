@@ -3401,7 +3401,8 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
 
     Only implicit, auto/local, and picker routes inherit resolver output.  A
     configured explicit route is itself the request contract: it must never be
-    filled with the main route's model or endpoint.
+    filled with the main route's model or endpoint.  In particular, a base URL
+    is sufficient to make a route explicit even if its model is blank.
     """
     supplied_provider = str(provider or '').strip()
     supplied_model = str(model or '').strip()
@@ -3410,13 +3411,21 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
     implicit_route = provider_lower in {'', 'auto', 'local'}
     picker_route = supplied_model.startswith('@')
 
-    if supplied_base_url and supplied_model and not picker_route:
+    if supplied_base_url and not picker_route:
         # A base URL is an explicit Agent-custom endpoint contract even when
-        # its provider is blank.  Running an unqualified model through the
-        # main-model resolver here would substitute the main provider/model
-        # (for example OpenAI/gpt-main) and silently send title traffic to the
-        # wrong route.  Keep blank provider blank so the Agent treats it as the
-        # supplied custom endpoint.
+        # its provider and model are blank.  Running an unqualified model
+        # through the main-model resolver here would substitute the main
+        # provider/model (for example OpenAI/gpt-main) and silently send title
+        # traffic to the wrong route.  Blank-provider base-URL-only routes and
+        # the legacy ``local`` spelling are both OpenAI-compatible custom
+        # endpoints; make that explicit for the Agent instead of borrowing the
+        # main route.  A configured blank provider with an explicit model keeps
+        # its historical Agent-custom (None) provider contract.
+        if (
+            provider_lower == 'local'
+            or (provider_lower in {'', 'auto'} and not supplied_model)
+        ):
+            return 'custom', supplied_model, supplied_base_url
         return supplied_provider, supplied_model, supplied_base_url
 
     if not implicit_route and not picker_route:

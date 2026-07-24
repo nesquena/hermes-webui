@@ -205,6 +205,56 @@ class TestAuxReasoningExtraRouteContract:
         )
         assert request['extra_body'] is None
 
+    def test_base_url_only_route_is_custom_not_the_anthropic_main_route(self):
+        """A URL alone is an auxiliary custom-route contract."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': '', 'model': '', 'base_url': 'https://relay.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'anthropic',
+                'default': 'claude-main',
+                'base_url': 'https://api.anthropic.com',
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom', None, 'https://relay.example.test/v1',
+        )
+        assert request['extra_body'] is None
+
+    def test_legacy_local_base_url_route_is_custom_not_the_codex_main_route(self):
+        """The legacy local spelling must use the custom auxiliary client path."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'local', 'model': '', 'base_url': 'https://relay.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'openai-codex',
+                'default': 'gpt-main',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom', None, 'https://relay.example.test/v1',
+        )
+        assert request['extra_body'] is None
+
     @pytest.mark.parametrize('model', (
         '@openai:gpt-5.5',
         '@openrouter:anthropic/claude-sonnet-4.6',
