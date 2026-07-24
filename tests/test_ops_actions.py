@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import os
+import signal
+from pathlib import Path
 import json
 import subprocess
 import threading
@@ -90,19 +93,8 @@ def _reset_ops_actions_state():
     from api import ops_actions
 
     def _reset():
-        with ops_actions._STATE_LOCK:
-            ops_actions._STATE.update(
-                {
-                    "action": None,
-                    "status": "idle",
-                    "started_at": None,
-                    "finished_at": None,
-                    "returncode": None,
-                    "log": "",
-                    "backup_path": None,
-                    "error": None,
-                }
-            )
+        with ops_actions._REGISTRY_LOCK:
+            ops_actions._PROFILES.clear()
         # threading.Lock.release() doesn't track ownership, so this is safe to
         # call even if a previous test's background thread left it held.
         if ops_actions._ACTION_LOCK.locked():
@@ -121,7 +113,7 @@ def _wait_until_not_running(timeout=5.0):
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = ops_actions.get_status()
+        status = ops_actions.get_status("default")
         if status["status"] != "running":
             return status
         time.sleep(0.02)
@@ -222,8 +214,10 @@ def test_ops_backup_action_writes_file_and_is_downloadable(monkeypatch, tmp_path
         out_path = cmd[out_idx]
         # Backup file must land under the WebUI state root, never the repo.
         assert str(state_dir) in out_path
-        with open(out_path, "wb") as f:
-            f.write(b"PK\x03\x04fake-zip-bytes")
+        import zipfile as _zf
+
+        with _zf.ZipFile(out_path, "w") as zf:
+            zf.writestr("config.yaml", "fake: backup")
 
     fake_proc = _make_fake_popen(["backing up...\n"], returncode=0, on_spawn=_write_zip)
     monkeypatch.setattr(ops_actions.subprocess, "Popen", fake_proc)
@@ -236,7 +230,7 @@ def test_ops_backup_action_writes_file_and_is_downloadable(monkeypatch, tmp_path
 
     dl_handler = _call_get(monkeypatch, "/api/ops/backup/download")
     assert dl_handler.status == 200
-    assert bytes(dl_handler.body) == b"PK\x03\x04fake-zip-bytes"
+    assert bytes(dl_handler.body)[:2] == b"PK"  # served the real archive
     assert dl_handler.header("Content-Type") == "application/zip"
     disposition = dl_handler.header("Content-Disposition") or ""
     assert "attachment" in disposition
@@ -304,14 +298,14 @@ def test_ops_action_lock_is_released_when_profile_home_resolution_raises(monkeyp
     )
 
     with pytest.raises(RuntimeError):
-        ops_actions.start_action("doctor")
+        ops_actions.start_action("doctor", "default")
 
     assert not ops_actions._ACTION_LOCK.locked(), "lock leaked after get_active_hermes_home() raised"
 
     # Prove the leak doesn't linger: a normal call right after must still work.
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(ops_actions.subprocess, "Popen", _make_fake_popen(["ok\n"], returncode=0))
-    started, _status = ops_actions.start_action("doctor")
+    started, _status = ops_actions.start_action("doctor", "default")
     assert started is True
     _wait_until_not_running()
 
@@ -323,10 +317,10 @@ def test_ops_action_lock_is_released_when_backups_dir_raises(monkeypatch, tmp_pa
     from api import ops_actions, profiles
 
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(ops_actions, "_backups_dir", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(ops_actions, "_backups_dir", lambda profile: (_ for _ in ()).throw(OSError("disk full")))
 
     with pytest.raises(OSError):
-        ops_actions.start_action("backup")
+        ops_actions.start_action("backup", "default")
 
     assert not ops_actions._ACTION_LOCK.locked(), "lock leaked after _backups_dir() raised"
 
@@ -517,3 +511,305 @@ def test_ops_actions_i18n_keys_translated_in_enforced_locales():
         block = _extract_locale_block(i18n, marker)
         missing = [key for key in _OPS_I18N_KEYS if f"{key}:" not in block]
         assert not missing, f"ops_ keys missing from {locale!r} locale: {missing}"
+
+
+# ── Gate follow-ups: profile ownership, run identity, process tree, artifacts ─
+
+
+def test_cross_profile_cannot_see_running_state_or_backup(monkeypatch, tmp_path):
+    """A run started under profile A must be invisible to profile B: status,
+    log, error, backup path — and B's 409 must be a minimal busy envelope."""
+    from api import config, ops_actions, profiles
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui_state")
+
+    release = threading.Event()
+
+    class _HeldProc:
+        def __init__(self, cmd, **kwargs):
+            self.args = cmd
+            self.stdout = io.StringIO("secret-log-line\n")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            release.wait(timeout=5)
+            return 0
+
+        def kill(self):
+            release.set()
+
+    monkeypatch.setattr(ops_actions.subprocess, "Popen", _HeldProc)
+    started, own = ops_actions.start_action("doctor", "profile-a")
+    assert started and own["status"] == "running"
+
+    try:
+        # B's own status: idle, no trace of A's run.
+        b_status = ops_actions.get_status("profile-b")
+        assert b_status["status"] == "idle"
+        assert b_status["log"] == ""
+        assert b_status["backup_path"] is None
+
+        # B's start attempt: refused with a minimal busy envelope.
+        b_started, b_snap = ops_actions.start_action("doctor", "profile-b")
+        assert b_started is False
+        assert b_snap.get("busy") is True
+        for leaky in ("log", "error", "backup_path", "action", "run_id"):
+            assert not b_snap.get(leaky), f"busy envelope leaked {leaky!r}"
+
+        # A's OWN 409 keeps A's full state (same profile retries).
+        a_started, a_snap = ops_actions.start_action("doctor", "profile-a")
+        assert a_started is False
+        assert a_snap["status"] == "running"
+    finally:
+        release.set()
+        deadline = time.time() + 5
+        while ops_actions._ACTION_LOCK.locked() and time.time() < deadline:
+            time.sleep(0.02)
+
+    # B never gains a download path from A's world.
+    assert ops_actions.latest_backup_path("profile-b") is None
+
+
+def test_late_reader_from_previous_run_cannot_write_into_new_run(tmp_path):
+    """Run-identity contract: an append carrying a stale run id is dropped."""
+    from api import ops_actions
+
+    runs = ops_actions._profile_runs("default")
+    with runs.state_lock:
+        runs.run_seq += 1
+        runs.state = dict(ops_actions._IDLE_STATE)
+        runs.state.update({"run_id": "current-run", "status": "running", "log": "new "})
+
+    ops_actions._append_log(runs, "stale-run", "POISON")
+    ops_actions._append_log(runs, "current-run", "ok")
+    with runs.state_lock:
+        assert "POISON" not in runs.state["log"]
+        assert runs.state["log"].endswith("ok")
+
+
+def test_timeout_kills_the_whole_process_group(monkeypatch, tmp_path):
+    """A timed-out action must not leave CLI-spawned children alive: the
+    runner owns the process group and the grandchild dies with it."""
+    from api import config, ops_actions, profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui_state")
+    monkeypatch.setattr(ops_actions, "_ACTION_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(ops_actions, "_TERM_GRACE_SECONDS", 1)
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setattr(
+        ops_actions,
+        "_command_for_action",
+        lambda action, backup_dir: [
+            "bash",
+            "-c",
+            f"sleep 300 & echo $! > {pid_file}; wait",
+        ],
+    )
+
+    started, _ = ops_actions.start_action("doctor", "default")
+    assert started
+    final = _wait_until_not_running(timeout=15)
+    assert final["status"] == "timeout"
+
+    deadline = time.time() + 5
+    grandchild = None
+    while time.time() < deadline:
+        try:
+            grandchild = int(pid_file.read_text().strip())
+            break
+        except (OSError, ValueError):
+            time.sleep(0.05)
+    assert grandchild, "grandchild pid was never written"
+    # ESRCH proves the whole group is gone (kill 0 = existence probe).
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.kill(grandchild, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            break
+    else:
+        os.kill(grandchild, signal.SIGKILL)
+        raise AssertionError("grandchild survived the group kill")
+
+
+def test_slot_stays_closed_until_stuck_process_is_reaped(monkeypatch, tmp_path):
+    """Single-flight invariant: after the SIGKILL escalation, no new action
+    may start while the first process is still unreaped."""
+    from api import ops_actions, profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(ops_actions, "_ACTION_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(ops_actions, "_TERM_GRACE_SECONDS", 0)
+
+    reap_gate = threading.Event()
+    reaped = threading.Event()
+
+    class _StuckUntilReleased:
+        def __init__(self, cmd, **kwargs):
+            self.args = cmd
+            self.stdout = io.StringIO("")
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout)
+            reap_gate.wait(timeout=10)
+            self.returncode = -9
+            reaped.set()
+            return -9
+
+        def send_signal(self, sig):
+            pass
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(ops_actions.subprocess, "Popen", _StuckUntilReleased)
+    started, _ = ops_actions.start_action("doctor", "default")
+    assert started
+
+    time.sleep(0.2)  # the runner is now inside the blocking reap wait
+    second, snap = ops_actions.start_action("doctor", "default")
+    assert second is False, "second action started before the first was reaped"
+
+    reap_gate.set()
+    assert reaped.wait(timeout=5)
+    final = _wait_until_not_running(timeout=5)
+    assert final["status"] == "timeout"
+
+
+def _completed_backup(monkeypatch, tmp_path, profile="default"):
+    """Drive one successful, validated backup run; returns the archive path."""
+    from api import config, ops_actions, profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui_state")
+
+    def _write_zip(cmd, kwargs):
+        out = cmd[cmd.index("--output") + 1]
+        import zipfile as _zf
+
+        with _zf.ZipFile(out, "w") as zf:
+            zf.writestr("config.yaml", "x: 1")
+
+    monkeypatch.setattr(
+        ops_actions.subprocess,
+        "Popen",
+        _make_fake_popen(["ok\n"], returncode=0, on_spawn=_write_zip),
+    )
+    started, _ = ops_actions.start_action("backup", profile)
+    assert started
+    final = _wait_until_not_running() if profile == "default" else None
+    if profile != "default":
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            st = ops_actions.get_status(profile)
+            if st["status"] != "running":
+                final = st
+                break
+            time.sleep(0.02)
+    assert final and final["status"] == "completed", final
+    return Path(final["backup_path"])
+
+
+def test_backup_artifacts_are_permission_hardened(monkeypatch, tmp_path):
+    from api import ops_actions
+
+    archive = _completed_backup(monkeypatch, tmp_path)
+    assert archive.exists()
+    assert (archive.stat().st_mode & 0o777) == 0o600
+    assert (archive.parent.stat().st_mode & 0o777) == 0o700
+    assert (archive.parent.parent.stat().st_mode & 0o777) == 0o700
+    assert ops_actions.latest_backup_path("default") == archive
+
+
+def test_backup_retention_keeps_only_newest(monkeypatch, tmp_path):
+    from api import ops_actions
+
+    archive = _completed_backup(monkeypatch, tmp_path)
+    root = archive.parent
+    import zipfile as _zf
+
+    for i in range(ops_actions._BACKUP_RETENTION_COUNT + 3):
+        p = root / f"hermes-backup-{1000 + i}-deadbeef.zip"
+        with _zf.ZipFile(p, "w") as zf:
+            zf.writestr("x", "y")
+        os.utime(p, (1000 + i, 1000 + i))
+    ops_actions._apply_backup_retention("default")
+    remaining = list(root.glob("hermes-backup-*.zip"))
+    assert len(remaining) == ops_actions._BACKUP_RETENTION_COUNT
+
+
+def test_download_rejects_symlink_and_outside_paths(monkeypatch, tmp_path):
+    from api import config, ops_actions
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui_state")
+    root = ops_actions._backups_dir("default")
+    outside = tmp_path / "outside-secret.zip"
+    import zipfile as _zf
+
+    with _zf.ZipFile(outside, "w") as zf:
+        zf.writestr("secret", "x")
+    link = root / "hermes-backup-999-symlink.zip"
+    link.symlink_to(outside)
+
+    runs = ops_actions._profile_runs("default")
+    with runs.state_lock:
+        runs.last_successful_backup = str(link)
+    # The recorded path is a symlink escaping the root: must not be served,
+    # and the fallback scan must not pick it either.
+    assert ops_actions.latest_backup_path("default") is None
+
+
+def test_failed_backup_deletes_partial_archive(monkeypatch, tmp_path):
+    from api import config, ops_actions, profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui_state")
+    partials = []
+
+    def _write_partial(cmd, kwargs):
+        out = Path(cmd[cmd.index("--output") + 1])
+        out.write_bytes(b"PK\x03\x04truncated")
+        partials.append(out)
+
+    monkeypatch.setattr(
+        ops_actions.subprocess,
+        "Popen",
+        _make_fake_popen(["boom\n"], returncode=1, on_spawn=_write_partial),
+    )
+    started, _ = ops_actions.start_action("backup", "default")
+    assert started
+    final = _wait_until_not_running()
+    assert final["status"] == "failed"
+    assert partials and not partials[0].exists(), "partial archive not cleaned up"
+
+
+def test_last_successful_backup_survives_later_runs_and_restart(monkeypatch, tmp_path):
+    """The Download affordance must not vanish because a doctor run started —
+    and the archive must be rediscovered after a WebUI restart."""
+    from api import ops_actions
+
+    archive = _completed_backup(monkeypatch, tmp_path)
+
+    # A later doctor run resets the RUN state but not the backup record.
+    monkeypatch.setattr(
+        ops_actions.subprocess, "Popen", _make_fake_popen(["ok\n"], returncode=0)
+    )
+    started, _ = ops_actions.start_action("doctor", "default")
+    assert started
+    final = _wait_until_not_running()
+    assert final["status"] == "completed"
+    assert final["backup_path"] is None  # run-scoped field
+    assert final["last_successful_backup"] == str(archive)
+    assert final["backup_available"] is True
+    assert ops_actions.latest_backup_path("default") == archive
+
+    # Simulated restart: in-memory registry gone, artifact rediscovered.
+    with ops_actions._REGISTRY_LOCK:
+        ops_actions._PROFILES.clear()
+    assert ops_actions.latest_backup_path("default") == archive

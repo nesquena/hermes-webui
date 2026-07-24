@@ -213,6 +213,7 @@ const LOCALES = {
     ops_gate_disabled: 'Maintenance actions are disabled. Set {flag}=1 to enable.',
     ops_confirm_security_audit: 'This runs a supply-chain vulnerability scan (OSV.dev) against the Hermes venv, plugins, and MCP servers. Continue?',
     ops_confirm_backup: 'This creates a backup zip of your Hermes configuration and state on the server. Continue?',
+    ops_confirm_backup_contents: 'The archive includes your .env file, auth keys and credentials, state.db, and cron configuration. Anyone with this file can act as you.',
     gateway_auth_label: 'Gateway authentication failed',
     gateway_start: 'Start',
     gateway_stop: 'Stop',
@@ -5291,6 +5292,7 @@ const LOCALES = {
     ops_gate_disabled: 'メンテナンス操作は無効になっています。有効にするには {flag}=1 を設定してください。',
     ops_confirm_security_audit: 'Hermes の venv、プラグイン、MCP サーバーに対してサプライチェーン脆弱性スキャン（OSV.dev）を実行します。続行しますか？',
     ops_confirm_backup: 'サーバー上の Hermes の設定と状態をバックアップ zip として作成します。続行しますか？',
+    ops_confirm_backup_contents: 'このアーカイブには .env ファイル、認証キーと認証情報、state.db、cron 設定が含まれます。このファイルを持つ人は、あなたとして操作できます。',
   },
 
   ru: {
@@ -7031,6 +7033,7 @@ const LOCALES = {
     ops_gate_disabled: 'Действия обслуживания отключены. Установите {flag}=1, чтобы включить их.',
     ops_confirm_security_audit: 'Будет выполнено сканирование уязвимостей цепочки поставок (OSV.dev) для venv, плагинов и MCP-серверов Hermes. Продолжить?',
     ops_confirm_backup: 'Будет создан резервный zip-архив конфигурации и состояния Hermes на сервере. Продолжить?',
+    ops_confirm_backup_contents: 'Архив содержит ваш файл .env, ключи аутентификации и учётные данные, state.db и конфигурацию cron. Любой, у кого есть этот файл, может действовать от вашего имени.',
   },
 
   es: {
@@ -8738,6 +8741,7 @@ const LOCALES = {
     ops_gate_disabled: 'Las acciones de mantenimiento están deshabilitadas. Establece {flag}=1 para habilitarlas.',
     ops_confirm_security_audit: 'Esto ejecuta un escaneo de vulnerabilidades de la cadena de suministro (OSV.dev) sobre el venv, los plugins y los servidores MCP de Hermes. ¿Continuar?',
     ops_confirm_backup: 'Esto crea un zip de copia de seguridad de la configuración y el estado de Hermes en el servidor. ¿Continuar?',
+    ops_confirm_backup_contents: 'El archivo incluye tu fichero .env, claves de autenticación y credenciales, state.db y la configuración de cron. Cualquiera con este archivo puede actuar como tú.',
   },
 
   de: {
@@ -12116,6 +12120,7 @@ const LOCALES = {
     ops_gate_disabled: '维护操作已禁用。设置 {flag}=1 以启用。',
     ops_confirm_security_audit: '这将对 Hermes 的虚拟环境、插件和 MCP 服务器运行供应链漏洞扫描（OSV.dev）。是否继续？',
     ops_confirm_backup: '这将在服务器上创建 Hermes 配置和状态的备份压缩包。是否继续？',
+    ops_confirm_backup_contents: '该存档包含您的 .env 文件、认证密钥和凭据、state.db 以及 cron 配置。持有此文件的任何人都可以以您的身份操作。',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -13880,6 +13885,7 @@ const LOCALES = {
     ops_gate_disabled: '維護操作已停用。請設定 {flag}=1 以啟用。',
     ops_confirm_security_audit: '這將對 Hermes 的虛擬環境、外掛程式與 MCP 伺服器執行供應鏈弱點掃描（OSV.dev）。是否繼續？',
     ops_confirm_backup: '這將在伺服器上建立 Hermes 設定與狀態的備份壓縮檔。是否繼續？',
+    ops_confirm_backup_contents: '該封存檔包含您的 .env 檔案、認證金鑰與憑證、state.db 以及 cron 設定。持有此檔案的任何人都可以以您的身分操作。',
   },
 
   pt: {
@@ -17195,6 +17201,7 @@ const LOCALES = {
     ops_gate_disabled: '유지보수 작업이 비활성화되어 있습니다. 활성화하려면 {flag}=1을 설정하세요.',
     ops_confirm_security_audit: 'Hermes venv, 플러그인, MCP 서버에 대해 공급망 취약점 스캔(OSV.dev)을 실행합니다. 계속하시겠습니까?',
     ops_confirm_backup: '서버에 있는 Hermes의 설정과 상태를 백업 zip으로 생성합니다. 계속하시겠습니까?',
+    ops_confirm_backup_contents: '이 아카이브에는 .env 파일, 인증 키와 자격 증명, state.db, cron 설정이 포함됩니다. 이 파일을 가진 사람은 누구나 사용자 행세를 할 수 있습니다.',
   },
 
   fr: {
@@ -20633,6 +20640,7 @@ const LOCALES = {
     ops_gate_disabled: 'Údržbové akce jsou zakázány. Pro povolení nastavte {flag}=1.',
     ops_confirm_security_audit: 'Tímto se spustí sken zranitelností dodavatelského řetězce (OSV.dev) proti venv, pluginům a MCP serverům Hermes. Pokračovat?',
     ops_confirm_backup: 'Tímto se na serveru vytvoří záložní zip konfigurace a stavu Hermes. Pokračovat?',
+    ops_confirm_backup_contents: 'Archiv obsahuje váš soubor .env, autentizační klíče a přihlašovací údaje, state.db a konfiguraci cron. Kdokoli s tímto souborem může jednat vaším jménem.',
   },
   tr: {
 
@@ -22386,6 +22394,7 @@ const LOCALES = {
     ops_gate_disabled: 'Bakım işlemleri devre dışı. Etkinleştirmek için {flag}=1 ayarlayın.',
     ops_confirm_security_audit: 'Bu işlem, Hermes venv, eklentiler ve MCP sunucularına karşı bir tedarik zinciri güvenlik açığı taraması (OSV.dev) çalıştırır. Devam edilsin mi?',
     ops_confirm_backup: 'Bu işlem, sunucudaki Hermes yapılandırmanızın ve durumunuzun bir yedek zip dosyasını oluşturur. Devam edilsin mi?',
+    ops_confirm_backup_contents: 'Arşiv .env dosyanızı, kimlik doğrulama anahtarlarını ve kimlik bilgilerini, state.db\'yi ve cron yapılandırmasını içerir. Bu dosyaya sahip olan herkes sizin adınıza işlem yapabilir.',
   },
   pl: {
     offline_title: 'Połączenie utracone',
@@ -24142,6 +24151,7 @@ const LOCALES = {
     ops_gate_disabled: 'Działania konserwacyjne są wyłączone. Ustaw {flag}=1, aby je włączyć.',
     ops_confirm_security_audit: 'Spowoduje to uruchomienie skanowania podatności łańcucha dostaw (OSV.dev) dla venv, wtyczek i serwerów MCP Hermes. Kontynuować?',
     ops_confirm_backup: 'Spowoduje to utworzenie kopii zapasowej zip konfiguracji i stanu Hermes na serwerze. Kontynuować?',
+    ops_confirm_backup_contents: 'Archiwum zawiera plik .env, klucze uwierzytelniania i dane logowania, state.db oraz konfigurację cron. Każdy, kto ma ten plik, może działać w Twoim imieniu.',
   },
   vi: {
     offline_title: 'Mất kết nối',
@@ -25899,6 +25909,7 @@ const LOCALES = {
     ops_gate_disabled: 'Các thao tác bảo trì đang bị tắt. Đặt {flag}=1 để bật.',
     ops_confirm_security_audit: 'Thao tác này sẽ chạy quét lỗ hổng chuỗi cung ứng (OSV.dev) đối với venv, plugin và máy chủ MCP của Hermes. Tiếp tục?',
     ops_confirm_backup: 'Thao tác này sẽ tạo một tệp zip sao lưu cấu hình và trạng thái Hermes trên máy chủ. Tiếp tục?',
+    ops_confirm_backup_contents: 'Kho lưu trữ bao gồm tệp .env, khóa xác thực và thông tin đăng nhập, state.db và cấu hình cron của bạn. Bất kỳ ai có tệp này đều có thể hành động thay bạn.',
   },
 
 };

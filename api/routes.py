@@ -13709,8 +13709,12 @@ def handle_get(handler, parsed) -> bool:
     # name instead of silently hiding the card. ──
     if parsed.path == "/api/ops/status":
         from api.ops_actions import get_status
+        from api.profiles import get_active_profile_name as _ops_profile
 
-        status = get_status()
+        # Profile-owned: status/log/backup info is only ever the REQUESTING
+        # profile's own run state (gate follow-up: a run started under
+        # profile A must be invisible to profile B).
+        status = get_status(_ops_profile())
         allowed = _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS")
         status["allowed"] = allowed
         if not allowed:
@@ -13722,15 +13726,22 @@ def handle_get(handler, parsed) -> bool:
             status["log"] = ""
             status["error"] = None
             status["backup_path"] = None
+            status["last_successful_backup"] = None
+            status["backup_available"] = False
         return j(handler, status)
 
     if parsed.path == "/api/ops/backup/download":
         if not _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS"):
             return bad(handler, _OPS_ACTIONS_GATE_MESSAGE, 403)
         from api.ops_actions import latest_backup_path
+        from api.profiles import get_active_profile_name as _ops_profile
 
-        backup_path = latest_backup_path()
-        if not backup_path or not backup_path.exists():
+        # Bound to the requesting profile AND re-validated (regular file,
+        # no symlink, contained in the profile's own backup root, readable
+        # ZIP) inside latest_backup_path -- a stale/spoofed state path can
+        # never serve bytes from outside the owned root.
+        backup_path = latest_backup_path(_ops_profile())
+        if not backup_path:
             return j(handler, {"error": "No backup available for download"}, status=404)
         return _serve_file_bytes(handler, backup_path, "application/zip", "attachment", "no-store")
 
@@ -15586,11 +15597,17 @@ def handle_post(handler, parsed) -> bool:
                 status=403,
             )
         from api.ops_actions import start_action
+        from api.profiles import get_active_profile_name as _ops_profile
 
         try:
-            started, status = start_action(_OPS_ACTION_BY_PATH[parsed.path])
+            started, status = start_action(
+                _OPS_ACTION_BY_PATH[parsed.path], _ops_profile()
+            )
         except ValueError as exc:
             return bad(handler, str(exc), 400)
+        # On 409 the snapshot is the caller's OWN state (when the caller's
+        # profile owns the running action) or a minimal busy envelope with
+        # no log/path/error (when another profile does).
         status["allowed"] = True
         return j(handler, status, status=200 if started else 409)
 
