@@ -8705,25 +8705,70 @@ def _turn_artifact_paths_from_tool_result(message) -> list[str]:
     name = str(message.get("name") or message.get("tool_name") or "").removeprefix("functions.")
     if name not in _TURN_ARTIFACT_MUTATION_TOOLS or message.get("is_error") is True:
         return []
-    result = message.get("content", message.get("result", message.get("output")))
-    if isinstance(result, str):
+
+    args = message.get("arguments") or message.get("args") or message.get("input") or {}
+    if isinstance(args, str):
         try:
-            result = json.loads(result)
+            args = json.loads(args)
         except (TypeError, ValueError):
-            return []
-    if not isinstance(result, dict) or result.get("success") is False:
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+
+    result = None
+    for candidate in (
+        message.get("content"),
+        message.get("result"),
+        message.get("output"),
+        message.get("snippet"),
+        message.get("preview"),
+    ):
+        if not candidate:
+            continue
+        if isinstance(candidate, dict):
+            result = candidate
+            break
+        if isinstance(candidate, str):
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                result = parsed
+                break
+
+    if isinstance(result, dict) and result.get("success") is False:
         return []
-    candidates = [result.get(key) for key in ("resolved_path", "path", "file_path", "destination")]
-    candidates.extend(result.get("files_modified") or [])
-    candidates.extend(result.get("files_created") or [])
+
     paths = []
     seen = set()
-    for candidate in candidates:
+
+    def add(candidate):
         value = candidate.get("path") if isinstance(candidate, dict) else candidate
-        value = str(value or "").strip()
+        if not isinstance(value, str):
+            return
+        value = value.strip()
         if value and value not in seen:
             seen.add(value)
             paths.append(value)
+
+    for key in ("path", "file_path", "source", "destination"):
+        add(args.get(key))
+    arg_paths = args.get("paths")
+    for candidate in arg_paths if isinstance(arg_paths, list) else []:
+        add(candidate)
+    arg_edits = args.get("edits")
+    for edit in arg_edits if isinstance(arg_edits, list) else []:
+        add(edit.get("path") if isinstance(edit, dict) else None)
+    if isinstance(result, dict):
+        for key in ("resolved_path", "path", "file_path", "destination"):
+            add(result.get(key))
+        modified = result.get("files_modified")
+        for candidate in modified if isinstance(modified, list) else []:
+            add(candidate)
+        created = result.get("files_created")
+        for candidate in created if isinstance(created, list) else []:
+            add(candidate)
     return paths
 
 

@@ -122,6 +122,55 @@ def test_replay_merges_missing_artifact_into_existing_anchor_scene():
     ]
 
 
+def test_paginated_replay_keeps_write_arg_artifact_when_result_is_plain_text():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "write the report"},
+        {
+            "role": "tool",
+            "name": "write_file",
+            "arguments": json.dumps({"path": "/workspace/output/plain-text-confirmation.md"}),
+            "content": "Wrote /workspace/output/plain-text-confirmation.md",
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    assert routes._turn_artifact_paths_from_tool_result(messages[1]) == [
+        "/workspace/output/plain-text-confirmation.md"
+    ]
+
+    paths_by_final_index = routes._final_turn_artifact_paths(messages)
+    window, offset = routes._message_window_for_display(messages, msg_limit=1)
+    hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
+        window, paths_by_final_index, message_offset=offset
+    )
+
+    assert offset == 2
+    assert hydrated[0]["_anchor_activity_scene"]["artifacts"] == [
+        {
+            "type": "artifact_reference",
+            "payload": {
+                "path": "/workspace/output/plain-text-confirmation.md",
+                "source": "transcript_replay",
+            },
+        }
+    ]
+
+
+def test_replay_rejects_write_arg_artifact_when_structured_result_failed():
+    from api import routes
+
+    message = {
+        "role": "tool",
+        "name": "write_file",
+        "arguments": {"path": "/workspace/output/rejected.md"},
+        "content": json.dumps({"success": False, "path": "/workspace/output/rejected.md"}),
+    }
+
+    assert routes._turn_artifact_paths_from_tool_result(message) == []
+
+
 def test_paginated_session_response_keeps_turn_artifacts_from_earlier_tool_rows():
     from api import routes
 
