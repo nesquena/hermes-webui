@@ -22,13 +22,11 @@ import socket
 import sys
 import threading
 import time
-import traceback
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
@@ -538,7 +536,7 @@ def is_unified_session_db_enabled(config_data: dict | None = None) -> bool:
     return experimental.get("unified_session_db") is True
 
 
-def _refresh_config_cache(config_path: Path | None = None) -> None:
+def _refresh_config_cache(config_path: Path | None = None, *, invalidate_models_disk: bool = True) -> None:
     """Refresh _cfg_cache for ``config_path``.
 
     Callers must hold _cfg_lock when invoking this helper because it mutates
@@ -603,6 +601,32 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                     _cfg_mtime = 0.0
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
+    target_home = Path(config_path).parent
+    cfg_stat = None
+    env_stat = None
+    try:
+        cfg_stat = config_path.stat()
+        env_path = target_home / ".env"
+        env_stat = env_path.stat() if env_path.exists() else None
+    except OSError:
+        pass
+    generation = observe_sessions_cap_sources(
+        target_home,
+        (cfg_stat.st_mtime_ns, cfg_stat.st_size) if cfg_stat else None,
+        (env_stat.st_mtime_ns, env_stat.st_size) if env_stat else None,
+    )
+    process_authority = _process_interpolation_authority()
+    if (
+        _sessions_cap_home_key(target_home) == process_authority
+        and "get_sessions_cache_max" in globals()
+    ):
+        publish_sessions_cap_snapshot(
+            target_home,
+            _cfg_cache,
+            generation=generation,
+            owner="process",
+            process_authority=process_authority,
+        )
     _apply_config_defaults(_cfg_cache)
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
@@ -610,14 +634,14 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
     # profile switch) -- preserving the disk cache so the next restart
     # still hits the fast path without a cold run.
-    if _old_cfg_mtime != 0.0:
+    if invalidate_models_disk and _old_cfg_mtime != 0.0:
         _delete_models_cache_on_disk()
 
 
-def reload_config() -> None:
+def reload_config(*, invalidate_models_disk: bool = True) -> None:
     """Reload config.yaml from the active profile's directory."""
     with _cfg_lock:
-        _refresh_config_cache(_get_config_path())
+        _refresh_config_cache(_get_config_path(), invalidate_models_disk=invalidate_models_disk)
 
 
 # Memoized parse cache for _load_yaml_config_file, keyed on (resolved path,
@@ -632,6 +656,120 @@ def reload_config() -> None:
 # is picked up on the next read.
 _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
+
+# Diagnostics retain only a bounded scalar observation of the effective session
+# cap.  Raw config and environment values stay in the producer's stack frame.
+_sessions_cap_snapshot_lock = threading.Lock()
+_sessions_cap_snapshots: collections.OrderedDict[str, dict[str, Any]] = collections.OrderedDict()
+_sessions_cap_generations: dict[str, tuple[Any, Any, int]] = {}
+_SESSIONS_CAP_SNAPSHOT_MAX = 64
+
+
+def _sessions_cap_home_key(profile_home: Path | str) -> str:
+    try:
+        # Lexical canonicalization keeps diagnostic reads free of filesystem I/O.
+        return os.path.normcase(os.path.abspath(os.path.expanduser(str(profile_home))))
+    except Exception:
+        return str(Path(profile_home).expanduser())
+
+
+def _process_interpolation_authority() -> str:
+    return _sessions_cap_home_key(os.getenv("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+
+
+def observe_sessions_cap_sources(profile_home: Path | str, config_signature: Any, env_signature: Any) -> int:
+    key = _sessions_cap_home_key(profile_home)
+    signature = (config_signature, env_signature)
+    with _sessions_cap_snapshot_lock:
+        previous = _sessions_cap_generations.get(key)
+        generation = previous[2] if previous else 0
+        if previous is None or previous[:2] != signature:
+            generation += 1
+            _sessions_cap_generations[key] = (config_signature, env_signature, generation)
+            _sessions_cap_snapshots.pop(key, None)
+            while len(_sessions_cap_generations) > _SESSIONS_CAP_SNAPSHOT_MAX:
+                evicted = next(iter(_sessions_cap_generations))
+                if evicted == key:
+                    break
+                _sessions_cap_generations.pop(evicted, None)
+                _sessions_cap_snapshots.pop(evicted, None)
+        return generation
+
+
+def publish_sessions_cap_snapshot(profile_home: Path | str, config_data: dict, *, generation: int,
+                                  owner: str, process_authority: str | None = None) -> None:
+    if owner not in {"profile", "process"}:
+        raise ValueError("session cap snapshot owner must be profile or process")
+    key = _sessions_cap_home_key(profile_home)
+    cap = get_sessions_cache_max(config_data)
+    with _sessions_cap_snapshot_lock:
+        current = _sessions_cap_generations.get(key)
+        if current is None or current[2] != generation:
+            return
+        if owner == "process" and process_authority != key:
+            return
+        record = _sessions_cap_snapshots.setdefault(key, {"generation": generation})
+        if record.get("generation") != generation:
+            return
+        lane = record.get(owner) or {}
+        record[owner] = {
+            "cap": int(cap),
+            "version": max(
+                int(lane.get("version", 0)),
+                max((int(value.get("version", 0)) for value in record.values()
+                     if isinstance(value, dict)), default=0),
+            ) + 1,
+            **({"authority": process_authority} if owner == "process" else {}),
+        }
+        record["generation"] = generation
+        _sessions_cap_snapshots[key] = record
+        _sessions_cap_snapshots.move_to_end(key)
+        while len(_sessions_cap_snapshots) > _SESSIONS_CAP_SNAPSHOT_MAX:
+            evicted, _ = _sessions_cap_snapshots.popitem(last=False)
+            _sessions_cap_generations.pop(evicted, None)
+
+
+def invalidate_sessions_cap_snapshot(profile_home: Path | str) -> None:
+    key = _sessions_cap_home_key(profile_home)
+    with _sessions_cap_snapshot_lock:
+        previous = _sessions_cap_generations.get(key)
+        generation = (previous[2] + 1) if previous else 1
+        signatures = previous[:2] if previous else (None, None)
+        _sessions_cap_generations[key] = (*signatures, generation)
+        _sessions_cap_snapshots.pop(key, None)
+        while len(_sessions_cap_generations) > _SESSIONS_CAP_SNAPSHOT_MAX:
+            evicted = next(iter(_sessions_cap_generations))
+            if evicted == key:
+                break
+            _sessions_cap_generations.pop(evicted, None)
+            _sessions_cap_snapshots.pop(evicted, None)
+
+
+def try_get_sessions_cap_snapshot(profile_home: Path | str, *, process_authority: str | None = None) -> tuple[int, bool]:
+    key = _sessions_cap_home_key(profile_home)
+    fallback = get_sessions_cache_max({})
+    if not _sessions_cap_snapshot_lock.acquire(blocking=False):
+        return fallback, False
+    try:
+        record = _sessions_cap_snapshots.get(key)
+        generation = _sessions_cap_generations.get(key)
+        if not record or not generation or record["generation"] != generation[2]:
+            return fallback, False
+        candidates = []
+        profile_lane = record.get("profile")
+        if profile_lane:
+            candidates.append(profile_lane)
+        process_lane = record.get("process")
+        current_authority = process_authority or _process_interpolation_authority()
+        if process_lane and process_lane.get("authority") == key == current_authority:
+            candidates.append(process_lane)
+        if not candidates:
+            return fallback, False
+        lane = max(candidates, key=lambda value: int(value["version"]))
+        _sessions_cap_snapshots.move_to_end(key)
+        return int(lane["cap"]), True
+    finally:
+        _sessions_cap_snapshot_lock.release()
 
 
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
@@ -693,7 +831,8 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     if not raw:
         return {}
     expanded = _expand_env_vars(raw)
-    return expanded if isinstance(expanded, dict) else {}
+    result = expanded if isinstance(expanded, dict) else {}
+    return result
 
 
 def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
@@ -791,6 +930,7 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     # serve a stale dict (#4650 review) — evicting on our own write closes that gap.
     with _yaml_file_cache_lock:
         _yaml_file_cache.pop(str(config_path), None)
+    invalidate_sessions_cap_snapshot(config_path.parent)
 
 
 # Initial load
@@ -9848,11 +9988,19 @@ if _settings_file_exists:
 SESSIONS: collections.OrderedDict = collections.OrderedDict()
 
 # ── Profile state initialisation ────────────────────────────────────────────
-# Must run after all imports are resolved to correctly patch module-level caches
-try:
+def _initialize_profile_state_and_publish_startup_cap() -> None:
     from api.profiles import init_profile_state
 
     init_profile_state()
+    try:
+        reload_config(invalidate_models_disk=False)
+    except Exception:
+        logger.debug("Failed to publish startup session cap snapshot", exc_info=True)
+
+
+# Must run after all imports are resolved to correctly patch module-level caches
+try:
+    _initialize_profile_state_and_publish_startup_cap()
 except ImportError:
     pass  # hermes_cli not available -- default profile only
 
