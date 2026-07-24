@@ -1321,20 +1321,21 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     import api.config as _cfg
 
     old_cfg = dict(_cfg.cfg)
-    _cfg.cfg['model'] = {
-        'provider': 'custom',
-        'default': 'gpt-5.4',
-        'base_url': 'https://example.test/v1',
-        'api_key': 'sk-test-model-key',
-    }
+    _cfg.cfg.clear()
+    _cfg.cfg.update({
+        'model': {
+            'provider': 'custom',
+            'default': 'gpt-5.4',
+            'base_url': 'https://example.test/v1',
+            'api_key': 'sk-test-model-key',
+        },
+    })
     try:
         _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
     except Exception:
         # No config.yaml on this machine (e.g. CI); pin to 0.0 so the mtime check
         # inside get_available_models() sees 0.0 == 0.0 and skips reload_config().
         _cfg._cfg_mtime = 0.0
-    _cfg.cfg.pop('providers', None)
-
     captured = {}
 
     class _Resp:
@@ -1357,6 +1358,14 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     monkeypatch.setattr(
         'api.providers._provider_has_key',
         lambda _provider_id: False,
+    )
+    monkeypatch.setattr(
+        'hermes_cli.models.list_available_providers',
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        'hermes_cli.auth.get_auth_status',
+        lambda _provider_id: {},
     )
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('HERMES_API_KEY', raising=False)

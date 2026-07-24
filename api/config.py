@@ -5031,29 +5031,6 @@ def _invoke_models_rebuild(builder):
     return builder()
 
 
-def _norm_static_model_id(model_id: str) -> str:
-    """Normalize equivalent picker IDs for network-free catalog matching."""
-    normalized = str(model_id or "").strip().lower()
-    stripped_at_provider = False
-    if normalized.startswith("@") and ":" in normalized:
-        colon_idx = normalized.index(":", 1)
-        candidate = normalized[colon_idx + 1:]
-        stripped_at_provider = bool(candidate)
-        normalized = candidate or normalized
-    if "://" not in normalized:
-        if (
-            not stripped_at_provider
-            and "/" in normalized
-            and ":" in normalized
-            and normalized.index(":") < normalized.index("/")
-        ):
-            normalized = normalized[normalized.index("/") + 1:] or normalized
-        if "/" in normalized:
-            stripped = normalized.split("/", 1)[1]
-            normalized = stripped or normalized
-    return normalized.replace("-", ".")
-
-
 def _configured_model_badges_from_static_catalog(
     groups: list[dict],
     *,
@@ -5102,6 +5079,27 @@ def _configured_model_badges_from_static_catalog(
         for m in g.get("models", [])
         if m.get("id")
     }
+
+    def _norm_static_model_id(model_id: str) -> str:
+        s = str(model_id or "").strip().lower()
+        stripped_at_provider = False
+        if s.startswith("@") and ":" in s:
+            colon_idx = s.index(":", 1)
+            candidate = s[colon_idx + 1:]
+            stripped_at_provider = bool(candidate)
+            s = candidate or s
+        if "://" not in s:
+            if (
+                not stripped_at_provider
+                and "/" in s
+                and ":" in s
+                and s.index(":") < s.index("/")
+            ):
+                s = s[s.index("/") + 1 :] or s
+            if "/" in s:
+                stripped = s.split("/", 1)[1]
+                s = stripped or s
+        return s.replace("-", ".")
 
     norm_lookup: dict[str, list[str]] = {}
     for opt_id in option_ids:
@@ -5269,6 +5267,18 @@ def _static_models_catalog_without_live_probes() -> dict:
             configured_model_ids.setdefault(pid, [])
             if mid not in configured_model_ids[pid]:
                 configured_model_ids[pid].append(mid)
+
+        def _provider_model_identity(model_id: object, provider_id: object) -> str:
+            """Strip only this group's routing prefix, preserving vendor paths."""
+            raw = str(model_id or "").strip()
+            pid = str(provider_id or "").strip()
+            if not raw or not pid:
+                return raw
+            raw_lower = raw.lower()
+            for prefix in (f"@{pid.lower()}:", f"{pid.lower()}/"):
+                if raw_lower.startswith(prefix):
+                    return raw[len(prefix):]
+            return raw
 
         if active_provider:
             detected_providers.add(active_provider)
@@ -5456,18 +5466,18 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if _plugin_profile is not None:
                     _fallback = getattr(_plugin_profile, "fallback_models", ()) or ()
                     raw_models = [{"id": str(mid), "label": str(mid)} for mid in _fallback]
-            raw_model_ids_normalized = {
-                _norm_static_model_id(model.get("id"))
+            raw_model_identities = {
+                _provider_model_identity(model.get("id"), pid)
                 for model in raw_models
                 if isinstance(model, dict)
             }
             for model_id in configured_model_ids.get(pid, []):
-                normalized_model_id = _norm_static_model_id(model_id)
-                if model_id and normalized_model_id not in raw_model_ids_normalized:
+                model_identity = _provider_model_identity(model_id, pid)
+                if model_id and model_identity not in raw_model_identities:
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
-                    raw_model_ids_normalized.add(normalized_model_id)
+                    raw_model_identities.add(model_identity)
             # Plugin-only providers (e.g. 9router) must enter `groups` even
             # when `raw_models` is empty so the post-loop filter sees them.
             # Without this, the earlier plugin-fallback pass only seeds
@@ -5483,17 +5493,19 @@ def _static_models_catalog_without_live_probes() -> dict:
                 )
 
         if default_model:
-            all_model_ids_normalized = {
-                _norm_static_model_id(model.get("id"))
-                for group in groups
-                for model in group.get("models", [])
+            target_group = next(
+                (group for group in groups if group.get("provider_id") == active_provider),
+                None,
+            )
+            target_model_identities = {
+                _provider_model_identity(model.get("id"), active_provider)
+                for model in (target_group or {}).get("models", [])
             }
-            if _norm_static_model_id(default_model) not in all_model_ids_normalized:
+            if (
+                _provider_model_identity(default_model, active_provider)
+                not in target_model_identities
+            ):
                 label = _get_label_for_model(default_model, groups)
-                target_group = next(
-                    (group for group in groups if group.get("provider_id") == active_provider),
-                    None,
-                )
                 if target_group is not None:
                     target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
                 elif groups:
