@@ -5477,6 +5477,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
+        target_provider_id = _canonicalise_provider_id(active_provider) or None
         default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
@@ -5506,9 +5507,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                     return raw[len(prefix):]
             return raw
 
-        if active_provider:
-            detected_providers.add(active_provider)
-            _append_model_id(active_provider, default_model)
+        if target_provider_id:
+            detected_providers.add(target_provider_id)
+            _append_model_id(target_provider_id, default_model)
 
         try:
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
@@ -5618,7 +5619,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         if cfg_base_url:
             detected_providers.add(
                 _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
-                or active_provider
+                or target_provider_id
                 or "custom"
             )
 
@@ -5634,7 +5635,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             if pid.startswith("custom:"):
                 custom_group = named_custom_groups.get(pid, {})
                 group_models = copy.deepcopy(custom_group.get("models", []))
-                if group_models or pid == active_provider:
+                if group_models or pid == target_provider_id:
                     groups.append(
                         {
                             "provider": custom_group.get("name") or pid.replace("custom:", ""),
@@ -5642,7 +5643,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                             "models": _apply_provider_prefix(
                                 group_models,
                                 pid,
-                                active_provider,
+                                target_provider_id,
                             ),
                         }
                     )
@@ -5655,7 +5656,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                         group_models.append(
                             {"id": model_id, "label": _get_label_for_model(model_id, [])}
                         )
-                if group_models or cfg_base_url or pid == active_provider:
+                if group_models or cfg_base_url or pid == target_provider_id:
                     groups.append(
                         {
                             "provider": _PROVIDER_DISPLAY.get(pid, "Custom"),
@@ -5663,7 +5664,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                             "models": _apply_provider_prefix(
                                 group_models,
                                 pid,
-                                active_provider,
+                                target_provider_id,
                             ),
                         }
                     )
@@ -5714,21 +5715,29 @@ def _static_models_catalog_without_live_probes() -> dict:
                     {
                         "provider": provider_name,
                         "provider_id": pid,
-                        "models": _apply_provider_prefix(raw_models, pid, active_provider),
+                        "models": _apply_provider_prefix(
+                            raw_models,
+                            pid,
+                            target_provider_id,
+                        ),
                     }
                 )
 
         if default_model:
             target_group = next(
-                (group for group in groups if group.get("provider_id") == active_provider),
+                (
+                    group
+                    for group in groups
+                    if group.get("provider_id") == target_provider_id
+                ),
                 None,
             )
             target_model_identities = {
-                _provider_model_identity(model.get("id"), active_provider)
+                _provider_model_identity(model.get("id"), target_provider_id)
                 for model in (target_group or {}).get("models", [])
             }
             if (
-                _provider_model_identity(default_model, active_provider)
+                _provider_model_identity(default_model, target_provider_id)
                 not in target_model_identities
             ):
                 label = _get_label_for_model(default_model, groups)
@@ -5738,7 +5747,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                     groups.append(
                         {
                             "provider": "Default",
-                            "provider_id": active_provider or "default",
+                            "provider_id": target_provider_id or "default",
                             "models": [{"id": default_model, "label": label}],
                         }
                     )
@@ -5782,7 +5791,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         def _group_sort_key(group: dict) -> tuple[int, str]:
             provider_id = str(group.get("provider_id") or "")
-            if provider_id == active_provider:
+            if provider_id == target_provider_id:
                 return (0, provider_id)
             if provider_id.startswith("custom:"):
                 return (1, provider_id)
@@ -5808,11 +5817,11 @@ def _static_models_catalog_without_live_probes() -> dict:
             return copy.deepcopy(_minimal_static_models_catalog())
 
         return _annotate_fast_tier_model_groups({
-            "active_provider": active_provider,
+            "active_provider": target_provider_id,
             "default_model": default_model,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
                 groups,
-                active_provider=active_provider,
+                active_provider=target_provider_id,
                 default_model=default_model,
             ),
             "groups": groups,

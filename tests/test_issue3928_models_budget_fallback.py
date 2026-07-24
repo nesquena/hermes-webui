@@ -265,6 +265,52 @@ def test_static_catalog_injects_default_into_active_named_custom_group():
     assert [model["id"] for model in custom["models"]] == ["model-x"]
 
 
+@pytest.mark.parametrize(
+    ("configured_provider", "canonical_provider"),
+    [
+        ("CLIPpoxy", "clippoxy"),
+        ("CLIP_poxy", "clip-poxy"),
+    ],
+)
+def test_static_catalog_canonicalizes_active_provider_ownership(
+    configured_provider,
+    canonical_provider,
+):
+    """Active ownership uses the same canonical provider ID as its group."""
+    cfg.cfg = {
+        "model": {
+            "provider": configured_provider,
+            "default": "my-model",
+        },
+        "providers": {
+            configured_provider: {
+                "models": ["my-model", "another-model"],
+            },
+        },
+        "fallback_providers": [
+            {"provider": "anthropic", "model": "claude-sonnet-4.6"},
+        ],
+    }
+
+    catalog = cfg._static_models_catalog_without_live_probes()
+    provider_ids = [group["provider_id"] for group in catalog["groups"]]
+    owned_groups = [
+        group
+        for group in catalog["groups"]
+        if group["provider_id"] == canonical_provider
+    ]
+
+    assert catalog["active_provider"] == canonical_provider
+    assert provider_ids[0] == canonical_provider
+    assert configured_provider not in provider_ids
+    assert len(owned_groups) == 1
+    assert not any(group["provider"] == "Default" for group in catalog["groups"])
+    assert [model["id"] for model in owned_groups[0]["models"]] == [
+        "my-model",
+        "another-model",
+    ]
+
+
 def test_budget_exceeded_foreground_uses_richer_static_catalog_and_refreshes_out_of_band(
     monkeypatch,
     isolate_models_catalog_state,
