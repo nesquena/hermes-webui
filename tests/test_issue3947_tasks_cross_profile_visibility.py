@@ -44,18 +44,92 @@ def _extract_function(src: str, name: str) -> str:
     marker = f"function {name}("
     start = src.find(marker)
     assert start >= 0, f"{name} not found in panels.js"
-    open_brace = src.find("{", start)
+    paren = src.find("(", start)
+    assert paren >= 0, f"{name} signature not found"
+
+    def _scan(idx: int, opener: str, closer: str) -> int:
+        depth = 1
+        in_single = False
+        in_double = False
+        in_backtick = False
+        in_line_comment = False
+        in_block_comment = False
+        escape = False
+        i = idx + 1
+        while i < len(src):
+            ch = src[i]
+            nxt = src[i + 1] if i + 1 < len(src) else ""
+            if in_line_comment:
+                if ch == "\n":
+                    in_line_comment = False
+                i += 1
+                continue
+            if in_block_comment:
+                if ch == "*" and nxt == "/":
+                    in_block_comment = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if escape:
+                escape = False
+                i += 1
+                continue
+            if in_single:
+                if ch == "\\":
+                    escape = True
+                elif ch == "'":
+                    in_single = False
+                i += 1
+                continue
+            if in_double:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_double = False
+                i += 1
+                continue
+            if in_backtick:
+                if ch == "\\":
+                    escape = True
+                elif ch == "`":
+                    in_backtick = False
+                i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                in_line_comment = True
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                in_block_comment = True
+                i += 2
+                continue
+            if ch == "'":
+                in_single = True
+                i += 1
+                continue
+            if ch == '"':
+                in_double = True
+                i += 1
+                continue
+            if ch == "`":
+                in_backtick = True
+                i += 1
+                continue
+            if ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        raise AssertionError(f"{name} scan failed")
+
+    body_start = _scan(paren, "(", ")")
+    open_brace = src.find("{", body_start)
     assert open_brace >= 0, f"{name} opening brace not found"
-    depth = 0
-    for idx in range(open_brace, len(src)):
-        char = src[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : idx + 1]
-    raise AssertionError(f"{name} closing brace not found")
+    close_brace = _scan(open_brace, "{", "}")
+    return src[start : close_brace + 1]
 
 
 def _run_node(script: str) -> dict:
@@ -436,59 +510,105 @@ const parent = {{
     assert result["sourceUsesQuery"] is True
 
 
-def test_profile_switch_resets_cross_profile_tasks_toggle():
-    profile_switch_panel_load = _extract_function(PANELS_JS, "_profileSwitchPanelLoad").replace(
-        "function _profileSwitchPanelLoad",
-        "async function _profileSwitchPanelLoad",
+def test_profile_switch_on_scripts_then_jobs_refetches_crons():
+    ensure_tasks_subtab_loaded = _extract_function(PANELS_JS, "_ensureTasksSubtabLoaded").replace(
+        "function _ensureTasksSubtabLoaded",
+        "async function _ensureTasksSubtabLoaded",
         1,
     )
+    switch_tasks_subtab = _extract_function(PANELS_JS, "switchTasksSubtab")
+    reset_tasks = _extract_function(PANELS_JS, "_resetTasksForProfileTransition")
     script = f"""
 const results = {{}};
 let _showAllCronProfiles = true;
 let _cronOtherProfileCount = 9;
-let _currentPanel = 'chat';
-let _tasksSubtab = 'jobs';
-let skillLoads = 0;
-let memoryLoads = 0;
-let taskLoads = 0;
-let kanbanLoads = 0;
-let profileLoads = 0;
-let workspaceLoads = 0;
+let _cronList = [{{ id: 'old-job', name: 'daily-digest' }}];
+let _cronListAllProfiles = true;
+let _cronsRequestId = 0;
+let _tasksSubtab = 'scripts';
 let clearCronDetailCalls = 0;
 let _editingCronId = 'old-job';
 let _cronPreFormDetail = {{ id: 'old-job' }};
 let _cronIsDuplicate = true;
-async function loadSkills() {{ skillLoads += 1; }}
-async function loadMemory() {{ memoryLoads += 1; }}
-async function loadCrons() {{ taskLoads += 1; }}
-async function loadKanban() {{ kanbanLoads += 1; }}
-async function loadProfilesPanel() {{ profileLoads += 1; }}
-async function loadWorkspacesPanel() {{ workspaceLoads += 1; }}
+let _scriptsData = [{{ name: 'old.py' }}];
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+const jobsPane = {{ style: {{}}, setAttribute(name, value) {{ this[name] = String(value); }} }};
+const scriptsPane = {{ style: {{}}, setAttribute(name, value) {{ this[name] = String(value); }} }};
+const jobActions = {{ style: {{ display: 'none' }} }};
+const scriptActions = {{ style: {{}} }};
+const jobsTab = {{
+  id: 'tasksSubtabJobs',
+  classList: {{ toggle() {{}} }},
+  setAttribute(name, value) {{ this[name] = String(value); }},
+  tabIndex: -1,
+}};
+const scriptsTab = {{
+  id: 'tasksSubtabScripts',
+  classList: {{ toggle() {{}} }},
+  setAttribute(name, value) {{ this[name] = String(value); }},
+  tabIndex: 0,
+}};
+const cronList = {{ children: [{{ textContent: 'daily-digest' }}], replaceChildren() {{ this.children = []; }} }};
+const cronRefreshBtn = {{ style: {{ opacity: '0.5' }}, disabled: true }};
+const scriptsList = {{ children: [{{ textContent: 'old.py' }}], replaceChildren() {{ this.children = []; }} }};
+const scriptsRefreshBtn = {{ style: {{ opacity: '0.5' }}, disabled: true }};
+const loadCronsCalls = [];
+let loadScriptsCalls = 0;
+const document = {{
+  querySelectorAll(selector) {{
+    return selector === '.tasks-subtab' ? [jobsTab, scriptsTab] : [];
+  }},
+}};
+function $(id) {{
+  return {{
+    tasksJobsPane: jobsPane,
+    tasksScriptsPane: scriptsPane,
+    tasksJobActions: jobActions,
+    tasksScriptActions: scriptActions,
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }}[id] || null;
+}}
+async function loadCrons(animate, options) {{
+  loadCronsCalls.push({{
+    animate,
+    allowCache: !!(options && options.allowCache),
+    cronListIsNull: _cronList === null,
+    cronCards: cronList.children.length,
+  }});
+}}
+async function loadScripts() {{ loadScriptsCalls += 1; }}
 function _clearCronDetail() {{ clearCronDetailCalls += 1; }}
-{profile_switch_panel_load}
+function _invalidateScriptsRequests() {{
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}}
+{ensure_tasks_subtab_loaded}
+{switch_tasks_subtab}
+{reset_tasks}
 (async () => {{
-  await _profileSwitchPanelLoad();
-  results.chatPanelToggle = _showAllCronProfiles;
-  results.chatPanelCount = _cronOtherProfileCount;
-  results.chatPanelTaskLoads = taskLoads;
-  results.chatPanelClears = clearCronDetailCalls;
-  results.chatPanelEditing = _editingCronId;
-  results.chatPanelPreForm = _cronPreFormDetail;
-  results.chatPanelDuplicate = _cronIsDuplicate;
-  _showAllCronProfiles = true;
-  _cronOtherProfileCount = 4;
-  _currentPanel = 'tasks';
-  _editingCronId = 'second-job';
-  _cronPreFormDetail = {{ id: 'second-job' }};
-  _cronIsDuplicate = true;
-  await _profileSwitchPanelLoad();
-  results.tasksPanelToggle = _showAllCronProfiles;
-  results.tasksPanelCount = _cronOtherProfileCount;
-  results.tasksPanelTaskLoads = taskLoads;
-  results.tasksPanelClears = clearCronDetailCalls;
-  results.tasksPanelEditing = _editingCronId;
-  results.tasksPanelPreForm = _cronPreFormDetail;
-  results.tasksPanelDuplicate = _cronIsDuplicate;
+  switchTasksSubtab('scripts', {{ ensure: false }});
+  _resetTasksForProfileTransition();
+  switchTasksSubtab('jobs');
+  await Promise.resolve();
+  await Promise.resolve();
+  results.toggle = _showAllCronProfiles;
+  results.otherProfileCount = _cronOtherProfileCount;
+  results.loadCronsCalls = loadCronsCalls;
+  results.loadScriptsCalls = loadScriptsCalls;
+  results.clearCronDetailCalls = clearCronDetailCalls;
+  results.editing = _editingCronId;
+  results.preForm = _cronPreFormDetail;
+  results.duplicate = _cronIsDuplicate;
+  results.cronList = _cronList;
+  results.cronCards = cronList.children.length;
+  results.cronRefreshDisabled = cronRefreshBtn.disabled;
+  results.jobsSelected = jobsTab['aria-selected'];
+  results.scriptsSelected = scriptsTab['aria-selected'];
   process.stdout.write(JSON.stringify(results));
 }})().catch((err) => {{
   console.error(err);
@@ -497,20 +617,110 @@ function _clearCronDetail() {{ clearCronDetailCalls += 1; }}
 """
     result = _run_node(script)
 
-    assert result["chatPanelToggle"] is False
-    assert result["chatPanelCount"] == 0
-    assert result["chatPanelTaskLoads"] == 0
-    assert result["chatPanelClears"] == 1
-    assert result["chatPanelEditing"] is None
-    assert result["chatPanelPreForm"] is None
-    assert result["chatPanelDuplicate"] is False
-    assert result["tasksPanelToggle"] is False
-    assert result["tasksPanelCount"] == 0
-    assert result["tasksPanelTaskLoads"] == 1
-    assert result["tasksPanelClears"] == 2
-    assert result["tasksPanelEditing"] is None
-    assert result["tasksPanelPreForm"] is None
-    assert result["tasksPanelDuplicate"] is False
+    assert result["toggle"] is False
+    assert result["otherProfileCount"] == 0
+    assert result["loadCronsCalls"] == [
+        {
+            "animate": False,
+            "allowCache": True,
+            "cronListIsNull": True,
+            "cronCards": 0,
+        }
+    ]
+    assert result["loadScriptsCalls"] == 0
+    assert result["clearCronDetailCalls"] == 1
+    assert result["editing"] is None
+    assert result["preForm"] is None
+    assert result["duplicate"] is False
+    assert result["cronList"] is None
+    assert result["cronCards"] == 0
+    assert result["cronRefreshDisabled"] is False
+    assert result["jobsSelected"] == "true"
+    assert result["scriptsSelected"] == "false"
+
+
+def test_stale_crons_response_after_profile_switch_is_ignored():
+    tasks_owner = _extract_function(PANELS_JS, "_tasksOwner")
+    tasks_owns = _extract_function(PANELS_JS, "_tasksOwns")
+    load_crons = _extract_function(PANELS_JS, "loadCrons").replace(
+        "function loadCrons",
+        "async function loadCrons",
+        1,
+    )
+    script = f"""
+const results = {{}};
+let resolveList;
+let _profileSwitchGeneration = 0;
+let _cronsRequestId = 0;
+let _showAllCronProfiles = false;
+let _cronList = null;
+let _cronListAllProfiles = false;
+let _cronOtherProfileCount = 0;
+let _cronMode = 'empty';
+let _currentCronDetail = null;
+let _currentCronDetailKey = '';
+const _cronNewJobIds = new Set();
+const S = {{ activeProfile: 'alpha' }};
+const box = {{ innerHTML: 'beta placeholder' }};
+const refreshBtn = {{ style: {{}}, disabled: false }};
+const localStorage = {{ getItem() {{ return null; }}, setItem() {{}} }};
+const document = {{
+  createElement() {{
+    return {{
+      className: '',
+      id: '',
+      style: {{}},
+      children: [],
+      appendChild(child) {{ this.children.push(child); }},
+      addEventListener() {{}},
+      classList: {{ add() {{}}, remove() {{}}, toggle() {{ return false; }} }},
+      onclick: null,
+      set textContent(value) {{ this._textContent = value; }},
+      get textContent() {{ return this._textContent || ''; }},
+    }};
+  }},
+}};
+function $(id) {{ return id === 'cronList' ? box : id === 'cronRefreshBtn' ? refreshBtn : null; }}
+function loadCronGatewayNotice() {{}}
+async function loadCronProfiles() {{}}
+function esc(value) {{ return String(value); }}
+function t(key) {{ return key; }}
+function _appendCronProfileToggle() {{}}
+function _clearCronDetail() {{}}
+function _cronStatusMeta() {{ return {{ state: 'active', listClass: 'active', detailClass: 'ok', label: 'active' }}; }}
+function _cronItemId(job) {{ return String(job.id); }}
+function _cronJobKey(job) {{ return String(job.id); }}
+function openCronDetail() {{}}
+async function api(url) {{
+  if (url !== '/api/crons') throw new Error('unexpected url: ' + url);
+  return new Promise((resolve) => {{ resolveList = resolve; }});
+}}
+{tasks_owner}
+{tasks_owns}
+{load_crons}
+(async () => {{
+  const pending = loadCrons(false, {{ allowCache: true }});
+  await Promise.resolve();
+  await Promise.resolve();
+  S.activeProfile = 'beta';
+  _profileSwitchGeneration += 1;
+  _cronsRequestId += 1;
+  resolveList({{ jobs: [{{ id: 'job-a', name: 'Alpha job' }}], other_profile_count: 0 }});
+  await pending;
+  results.innerHTML = box.innerHTML;
+  results.cronList = _cronList;
+  results.otherProfileCount = _cronOtherProfileCount;
+  process.stdout.write(JSON.stringify(results));
+}})().catch((err) => {{
+  console.error(err);
+  process.exit(1);
+}});
+"""
+    result = _run_node(script)
+
+    assert result["innerHTML"] == "beta placeholder"
+    assert result["cronList"] is None
+    assert result["otherProfileCount"] == 0
 
 
 def test_panels_js_uses_composite_cron_row_identity():

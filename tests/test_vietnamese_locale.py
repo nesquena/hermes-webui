@@ -92,6 +92,10 @@ def test_vietnamese_locale_includes_representative_translations():
         "checkpoint_title: 'Checkpoint'",
         "composer_send: 'Gửi tin nhắn'",
         "gateway_restart: 'Khởi động lại'",
+        "tab_tasks_jobs: 'Công việc'",
+        "tab_tasks_scripts: 'Tập lệnh'",
+        "scripts_no_scripts: 'Không tìm thấy tập lệnh nào cho hồ sơ này.'",
+        "scripts_load_error: 'Không thể tải mã nguồn tập lệnh.'",
         "wiki_browse: 'Duyệt wiki'",
         "yolo_pill_title_active: 'Chế độ YOLO đang bật — bấm để tắt'",
     ]
@@ -115,6 +119,31 @@ def test_vietnamese_locale_has_no_duplicate_keys():
     keys = key_pattern.findall(extract_locale_block(src, "vi"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Vietnamese locale has duplicate keys: {duplicates}"
+
+
+def test_tasks_jobs_label_is_distinct_in_requested_locales():
+    src = read(REPO / "static" / "i18n.js")
+    expected = {
+        "ru": "tab_tasks_jobs: 'Задания'",
+        "de": "tab_tasks_jobs: 'Jobs'",
+        "zh": "tab_tasks_jobs: '定时任务'",
+        "pt": "tab_tasks_jobs: 'Agendamentos'",
+        "ko": "tab_tasks_jobs: '예약 작업'",
+        "fr": "tab_tasks_jobs: 'Tâches planifiées'",
+    }
+    for locale_key, entry in expected.items():
+        block = extract_locale_block(src, locale_key)
+        assert entry in block
+
+
+def test_scripts_empty_state_copy_is_profile_neutral():
+    src = read(REPO / "static" / "i18n.js")
+    assert "scripts_no_scripts: 'No scripts found for this profile.'" in extract_locale_block(src, "en")
+    assert "scripts_no_scripts: 'Không tìm thấy tập lệnh nào cho hồ sơ này.'" in extract_locale_block(src, "vi")
+    for locale_key in ["en", "ru", "de", "zh", "pt", "ko", "fr", "vi"]:
+        block = extract_locale_block(src, locale_key)
+        line = next(line for line in block.splitlines() if "scripts_no_scripts:" in line)
+        assert "~/.hermes/scripts/" not in line
 
 
 def test_french_locale_keeps_cron_translations():

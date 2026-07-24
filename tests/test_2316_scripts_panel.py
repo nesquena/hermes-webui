@@ -22,7 +22,9 @@ NODE = shutil.which("node")
 def _clear_scripts_dir():
     """Clear the scripts directory before test."""
     scripts_dir = TEST_STATE_DIR / "scripts"
-    if scripts_dir.exists():
+    if scripts_dir.is_symlink():
+        scripts_dir.unlink(missing_ok=True)
+    elif scripts_dir.exists():
         shutil.rmtree(scripts_dir)
 
 
@@ -54,13 +56,83 @@ function extractFunc(name) {{
   const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
   const start = src.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start);
-  let depth = 1; i++;
-  while (depth > 0 && i < src.length) {{
-    if (src[i] === '{{') depth++;
-    else if (src[i] === '}}') depth--;
-    i++;
-  }}
+  const scan = (i, closer) => {{
+    let inSingle = false;
+    let inDouble = false;
+    let inBacktick = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+    let escape = false;
+    let depth = 1;
+    for (i += 1; i < src.length; i += 1) {{
+      const ch = src[i];
+      const next = src[i + 1];
+      if (inLineComment) {{
+        if (ch === '\\n') inLineComment = false;
+        continue;
+      }}
+      if (inBlockComment) {{
+        if (ch === '*' && next === '/') {{
+          inBlockComment = false;
+          i += 1;
+        }}
+        continue;
+      }}
+      if (escape) {{
+        escape = false;
+        continue;
+      }}
+      if (inSingle) {{
+        if (ch === '\\\\') escape = true;
+        else if (ch === "'") inSingle = false;
+        continue;
+      }}
+      if (inDouble) {{
+        if (ch === '\\\\') escape = true;
+        else if (ch === '"') inDouble = false;
+        continue;
+      }}
+      if (inBacktick) {{
+        if (ch === '\\\\') escape = true;
+        else if (ch === '`') inBacktick = false;
+        continue;
+      }}
+      if (ch === '/' && next === '/') {{
+        inLineComment = true;
+        i += 1;
+        continue;
+      }}
+      if (ch === '/' && next === '*') {{
+        inBlockComment = true;
+        i += 1;
+        continue;
+      }}
+      if (ch === "'") {{
+        inSingle = true;
+        continue;
+      }}
+      if (ch === '"') {{
+        inDouble = true;
+        continue;
+      }}
+      if (ch === '`') {{
+        inBacktick = true;
+        continue;
+      }}
+      if (ch === closer[0]) depth += 1;
+      else if (ch === closer[1]) {{
+        depth -= 1;
+        if (depth === 0) return i;
+      }}
+    }}
+    throw new Error(name + ' scan failed');
+  }};
+  let paren = src.indexOf('(', start);
+  if (paren < 0) throw new Error(name + ' signature not found');
+  let bodyStart = scan(paren, '()');
+  while (bodyStart < src.length && src[bodyStart] !== '{{') bodyStart += 1;
+  if (bodyStart >= src.length) throw new Error(name + ' body not found');
+  const i = scan(bodyStart, '{{}}') + 1;
   return src.slice(start, i);
 }}
 """
@@ -97,20 +169,23 @@ def test_scripts_list_empty():
     assert data["scripts"] == []
 
 
-def test_scripts_list_iterdir_oserror_returns_empty(monkeypatch):
+def test_scripts_list_iterdir_oserror_returns_empty(monkeypatch, tmp_path):
     """Direct list walk failures should degrade to an empty result, not a 500."""
     import api.routes as routes
 
-    class _ScriptsDir:
-        def exists(self):
-            return True
-
-        def iterdir(self):
-            raise PermissionError("scripts dir unreadable")
-
+    active_home = tmp_path / "active-home"
+    scripts_dir = active_home / "scripts"
+    scripts_dir.mkdir(parents=True)
     captured = {}
 
-    monkeypatch.setattr(routes, "_hermes_scripts_dir", lambda: _ScriptsDir())
+    monkeypatch.setattr(routes, "_hermes_active_home", lambda: active_home)
+    monkeypatch.setattr(routes, "open_anchored_fd", lambda root, target, want_dir=False: 99)
+    monkeypatch.setattr(routes.os, "fstat", lambda fd: scripts_dir.stat())
+    monkeypatch.setattr(
+        routes.os,
+        "scandir",
+        lambda fd: (_ for _ in ()).throw(PermissionError("scripts dir unreadable")),
+    )
     monkeypatch.setattr(
         routes,
         "j",
@@ -201,6 +276,81 @@ def test_scripts_list_skips_symlink_escape():
     assert data["scripts"] == []
 
 
+def test_scripts_list_rejects_root_symlink_escape():
+    _clear_scripts_dir()
+    foreign_dir = TEST_STATE_DIR / "foreign-scripts-root-link"
+    if foreign_dir.exists():
+        shutil.rmtree(foreign_dir)
+    foreign_dir.mkdir(parents=True, exist_ok=True)
+    (foreign_dir / "foreign_secret.py").write_text(
+        '"""PR3935_ROOT_SYMLINK_ESCAPE"""\nprint("PR3935_ROOT_SYMLINK_ESCAPE")\n',
+        encoding="utf-8",
+    )
+
+    scripts_link = TEST_STATE_DIR / "scripts"
+    try:
+        os.symlink(str(foreign_dir), str(scripts_link), target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    with urllib.request.urlopen(TEST_BASE + "/api/scripts/list", timeout=5) as r:
+        data = json.loads(r.read())
+
+    assert data["scripts"] == []
+
+
+def test_scripts_list_rejects_scripts_dir_swap_after_resolve(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    if os.open not in getattr(os, "supports_dir_fd", set()):
+        pytest.skip("anchored scripts-dir swap proof requires dir_fd support")
+
+    active_home = tmp_path / "active-home"
+    scripts_dir = active_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "visible.py").write_text(
+        '"""Inside."""\nprint("inside")\n',
+        encoding="utf-8",
+    )
+    foreign_dir = tmp_path / "foreign-scripts"
+    foreign_dir.mkdir()
+    (foreign_dir / "foreign_secret.py").write_text(
+        '"""PR3935_SCRIPTS_DIR_SWAP"""\nprint("PR3935_SCRIPTS_DIR_SWAP")\n',
+        encoding="utf-8",
+    )
+
+    original = routes.open_anchored_fd
+    swapped = False
+    captured = {}
+
+    def swapping_open(root, target, want_dir=False):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            shutil.rmtree(scripts_dir)
+            os.symlink(str(foreign_dir), str(scripts_dir), target_is_directory=True)
+        return original(root, target, want_dir=want_dir)
+
+    monkeypatch.setattr(routes, "_hermes_active_home", lambda: active_home)
+    monkeypatch.setattr(routes, "open_anchored_fd", swapping_open)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200: captured.setdefault(
+            "result", {"handler": handler, "payload": payload, "status": status}
+        ),
+    )
+
+    handler = object()
+    routes._handle_scripts_list(handler)
+
+    assert captured["result"] == {
+        "handler": handler,
+        "payload": {"scripts": []},
+        "status": 200,
+    }
+
+
 def test_scripts_list_skips_leaf_swap_after_resolve(monkeypatch):
     import api.routes as routes
 
@@ -255,6 +405,39 @@ def test_scripts_list_skips_leaf_swap_after_resolve(monkeypatch):
     }
 
 
+def test_scripts_list_allows_regular_active_home(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    active_home = tmp_path / "profiles" / "worker"
+    scripts_dir = active_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "worker.py").write_text(
+        '"""Regular active home."""\nprint("ok")\n',
+        encoding="utf-8",
+    )
+    captured = {}
+
+    monkeypatch.setattr(routes, "_hermes_active_home", lambda: active_home)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200: captured.setdefault(
+            "result", {"handler": handler, "payload": payload, "status": status}
+        ),
+    )
+
+    handler = object()
+    routes._handle_scripts_list(handler)
+
+    assert captured["result"] == {
+        "handler": handler,
+        "payload": {
+            "scripts": [{"name": "worker.py", "description": "Regular active home."}]
+        },
+        "status": 200,
+    }
+
+
 def test_scripts_raw_returns_source():
     """GET /api/scripts/raw?path=<name> should return file source."""
     _clear_scripts_dir()
@@ -270,6 +453,80 @@ def test_scripts_raw_returns_source():
 
     assert data["name"] == "test.sh"
     assert data["source"] == content
+
+
+def test_scripts_raw_rejects_root_symlink_escape():
+    _clear_scripts_dir()
+    foreign_dir = TEST_STATE_DIR / "foreign-scripts-root-link"
+    if foreign_dir.exists():
+        shutil.rmtree(foreign_dir)
+    foreign_dir.mkdir(parents=True, exist_ok=True)
+    (foreign_dir / "foreign_secret.py").write_text(
+        'print("PR3935_ROOT_SYMLINK_ESCAPE")\n',
+        encoding="utf-8",
+    )
+
+    scripts_link = TEST_STATE_DIR / "scripts"
+    try:
+        os.symlink(str(foreign_dir), str(scripts_link), target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(
+            TEST_BASE + "/api/scripts/raw?path=foreign_secret.py",
+            timeout=5,
+        )
+
+    assert exc_info.value.code == 404
+
+
+def test_scripts_raw_rejects_scripts_dir_swap_after_resolve(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    if os.open not in getattr(os, "supports_dir_fd", set()):
+        pytest.skip("anchored scripts-dir swap proof requires dir_fd support")
+
+    active_home = tmp_path / "active-home"
+    scripts_dir = active_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    target = scripts_dir / "visible.py"
+    target.write_text("print('inside')\n", encoding="utf-8")
+    foreign_dir = tmp_path / "foreign-scripts"
+    foreign_dir.mkdir()
+    (foreign_dir / "visible.py").write_text(
+        "print('PR3935_SCRIPTS_DIR_SWAP')\n",
+        encoding="utf-8",
+    )
+
+    original = routes._read_anchored_file_bytes
+    swapped = False
+    failures = []
+
+    def swapping_read(
+        root, resolved_target, max_bytes=routes.MAX_FILE_BYTES, allow_prefix=False
+    ):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            shutil.rmtree(scripts_dir)
+            os.symlink(str(foreign_dir), str(scripts_dir), target_is_directory=True)
+        return original(root, resolved_target, max_bytes, allow_prefix)
+
+    monkeypatch.setattr(routes, "_hermes_active_home", lambda: active_home)
+    monkeypatch.setattr(routes, "_read_anchored_file_bytes", swapping_read)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: failures.append((msg, status)),
+    )
+
+    routes._handle_scripts_raw(
+        object(),
+        type("Parsed", (), {"query": "path=visible.py"})(),
+    )
+
+    assert failures == [("script not found", 404)]
 
 
 def test_scripts_raw_rejects_leaf_swap_after_resolve(monkeypatch):
@@ -451,8 +708,9 @@ def test_scripts_list_profile_generation_rejects_out_of_order_responses():
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _scriptsData = null;
-let _scriptsGeneration = 0;
+let _profileSwitchGeneration = 0;
 let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
 const S = { activeProfile: 'a' };
 const box = { innerHTML: '' };
 const renders = [];
@@ -463,12 +721,15 @@ function t(key){ return key; }
 function _renderScriptsList(scripts){ renders.push(scripts.map(s => s.name)); }
 function api(){ return new Promise(resolve => pending.push(resolve)); }
 eval(extractFunc('_invalidateScriptsRequests'));
+eval(extractFunc('_tasksOwner'));
+eval(extractFunc('_tasksOwns'));
 eval(extractFunc('_scriptsOwner'));
 eval(extractFunc('_scriptsOwns'));
 eval(extractFunc('loadScripts'));
 (async () => {
   const first = loadScripts();
   S.activeProfile = 'b';
+  _profileSwitchGeneration += 1;
   _invalidateScriptsRequests();
   const second = loadScripts();
   pending[1]({ scripts: [{ name: 'b.py' }] });
@@ -566,8 +827,9 @@ class FakeElement {
   get textContent() { return this._textContent; }
 }
 let _scriptsData = null;
-let _scriptsGeneration = 0;
+let _profileSwitchGeneration = 0;
 let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
 const S = { activeProfile: 'a' };
 const box = new FakeElement('box');
 const document = { createElement(){ return new FakeElement(); } };
@@ -588,6 +850,8 @@ async function api(url) {
   });
 }
 eval(extractFunc('_invalidateScriptsRequests'));
+eval(extractFunc('_tasksOwner'));
+eval(extractFunc('_tasksOwns'));
 eval(extractFunc('_scriptsOwner'));
 eval(extractFunc('_scriptsOwns'));
 eval(extractFunc('_renderScriptsList'));
@@ -598,6 +862,7 @@ eval(extractFunc('_renderScriptsList'));
   const card = box.children[0];
   const clickPromise = card.querySelector('.script-header').listeners.click();
   S.activeProfile = 'b';
+  _profileSwitchGeneration += 1;
   _invalidateScriptsRequests();
   _scriptsData = [{ name: 'b.py' }];
   resolver({ source: '#!/bin/bash\\necho stolen\\n' });
@@ -702,9 +967,10 @@ class FakeElement {
   get textContent() { return this._textContent; }
 }
 let _scriptsData = [{ name: 'old.py', description: '' }];
-let _scriptsGeneration = 0;
+let _profileSwitchGeneration = 0;
 let _scriptsRequestId = 0;
 let _scriptsRawRequestId = 0;
+let _scriptsRefreshOwnerRequestId = 0;
 const S = { activeProfile: 'a' };
 const box = new FakeElement('box');
 const refreshBtn = { style: {}, disabled: false };
@@ -736,6 +1002,8 @@ async function api(url) {
   throw new Error('unexpected url: ' + url);
 }
 eval(extractFunc('_invalidateScriptsRequests'));
+eval(extractFunc('_tasksOwner'));
+eval(extractFunc('_tasksOwns'));
 eval(extractFunc('_scriptsOwner'));
 eval(extractFunc('_scriptsOwns'));
 eval(extractFunc('_renderScriptsList'));
@@ -825,6 +1093,8 @@ function $(id){
   }[id] || null;
 }
 async function loadScripts(){ loadScriptsCalls += 1; }
+async function loadCrons(){}
+eval(extractFunc('_ensureTasksSubtabLoaded'));
 eval(extractFunc('switchTasksSubtab'));
 eval(extractFunc('handleTasksSubtabKeydown'));
 function press(currentTarget, key) {
@@ -876,16 +1146,40 @@ def test_failed_profile_switch_reloads_visible_scripts_owner():
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
 let _scriptsData = [{ name: 'old.py' }];
-let _scriptsGeneration = 0;
 let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = [{ id: 'old-job' }];
 let _currentPanel = 'tasks';
 let _tasksSubtab = 'scripts';
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 4;
+let _cronPreFormDetail = { id: 'old-job' };
+let _editingCronId = 'old-job';
+let _cronIsDuplicate = true;
 let invalidations = 0;
 let reloads = [];
 const S = { activeProfile: 'old', session: null, messages: [] };
 const window = {};
-function $(id){ return null; }
-function _invalidateScriptsRequests(){ invalidations++; _scriptsData = null; }
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
+const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
+function $(id){
+  return {
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
+function _clearCronDetail(){}
+function _invalidateScriptsRequests(){
+  invalidations += 1;
+  _scriptsData = null;
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+}
 async function api(){ throw new Error('switch rejected'); }
 function showToast(){}
 function t(key){ return key; }
@@ -896,6 +1190,9 @@ function bumpWorkspaceTreeGen(){}
 function _refreshProfileSwitchBackground(){}
 function renderSessionListFromCache(){}
 async function loadScripts(force){ reloads.push(force); }
+async function loadCrons(){}
+eval(extractFunc('_ensureTasksSubtabLoaded'));
+eval(extractFunc('_resetTasksForProfileTransition'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   await switchToProfile('new');
@@ -956,7 +1253,7 @@ def test_tasks_panes_scroll_in_chromium(width, height):
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_switch_to_profile_clears_scripts_cache_before_panel_reload():
-    """Profile switch must retire Scripts state before the panel reload hook runs."""
+    """Profile switch must retire Tasks state before the panel reload hook runs."""
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _profileSwitchGeneration = 0;
@@ -964,16 +1261,31 @@ let _scriptsData = ['stale'];
 let _skillsData = ['old'];
 let _workspaceList = ['old'];
 let _showAllProfiles = true;
-let _scriptsGeneration = 0;
 let _scriptsRequestId = 0;
 let _scriptsRawRequestId = 0;
+let _cronsRequestId = 0;
+let _cronList = ['stale-job'];
+let _showAllCronProfiles = true;
+let _cronOtherProfileCount = 3;
+let _cronPreFormDetail = { id: 'stale-job' };
+let _editingCronId = 'stale-job';
+let _cronIsDuplicate = true;
 const localStorage = { removed: [], removeItem(key){ this.removed.push(key); } };
 const window = {};
 const S = { activeProfile: 'default', session: null, messages: [] };
 const panelLoads = [];
+const cronList = { children: [{}], replaceChildren(){ this.children = []; } };
+const cronRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
 const scriptsList = { children: [{}], replaceChildren(){ this.children = []; } };
 const scriptsRefreshBtn = { style: { opacity: '0.5' }, disabled: true };
-function $(id){ return id === 'scriptsList' ? scriptsList : id === 'scriptsRefreshBtn' ? scriptsRefreshBtn : null; }
+function $(id){
+  return {
+    cronList,
+    cronRefreshBtn,
+    scriptsList,
+    scriptsRefreshBtn,
+  }[id] || null;
+}
 async function api(url, opts){
   if (url !== '/api/profile/switch') throw new Error('unexpected api: ' + url);
   return { active: 'work', is_default: false };
@@ -983,19 +1295,26 @@ function syncTopbar(){}
 function loadDir(){ return Promise.resolve(); }
 function showToast(){}
 function t(key){ return key; }
+function _clearCronDetail(){}
+function _invalidateScriptsRequests(){
+  _scriptsRequestId += 1;
+  _scriptsRawRequestId += 1;
+  _scriptsData = null;
+}
 async function _profileSwitchPanelLoad(){ panelLoads.push(_scriptsData); }
 function _refreshProfileSwitchBackground(){}
 function animateNextSessionListRefresh(){}
-eval(extractFunc('_invalidateScriptsRequests'));
-eval(extractFunc('_resetScriptsForProfileTransition'));
+eval(extractFunc('_resetTasksForProfileTransition'));
 eval(extractFunc('switchToProfile'));
 (async () => {
   await switchToProfile('work');
   console.log(JSON.stringify({
     activeProfile: S.activeProfile,
     scriptsData: _scriptsData,
-    generation: _scriptsGeneration,
+    switchGeneration: _profileSwitchGeneration,
+    cronList: _cronList,
     cards: scriptsList.children.length,
+    cronCards: cronList.children.length,
     refreshDisabled: scriptsRefreshBtn.disabled,
     refreshOpacity: scriptsRefreshBtn.style.opacity,
     panelLoads,
@@ -1006,8 +1325,10 @@ eval(extractFunc('switchToProfile'));
     result = json.loads(_run_node(source))
     assert result["activeProfile"] == "work"
     assert result["scriptsData"] is None
-    assert result["generation"] == 1
+    assert result["switchGeneration"] == 1
+    assert result["cronList"] is None
     assert result["cards"] == 0
+    assert result["cronCards"] == 0
     assert result["refreshDisabled"] is False
     assert result["refreshOpacity"] == ""
     assert result["panelLoads"] == [None]
@@ -1108,7 +1429,6 @@ def test_session_load_profile_switch_clears_scripts_dom_before_destination_rende
           _tasksSubtab = 'scripts';
           _profileSwitchGeneration = 0;
           _showAllProfiles = true;
-          _scriptsGeneration = 0;
           _scriptsRequestId = 0;
           _scriptsRawRequestId = 0;
           _scriptsData = [{ name: 'a.py', description: 'Alpha script' }];
@@ -1135,7 +1455,7 @@ def test_session_load_profile_switch_clears_scripts_dom_before_destination_rende
 
           const mid = {
             profile: S.activeProfile,
-            generation: _scriptsGeneration,
+            generation: _profileSwitchGeneration,
             scriptsDataCleared: _scriptsData === null,
             cards: scriptsList.children.length,
             hasAlphaSource: scriptsList.textContent.includes('alpha source'),
@@ -1153,7 +1473,7 @@ def test_session_load_profile_switch_clears_scripts_dom_before_destination_rende
             mid,
             final: {
               profile: S.activeProfile,
-              generation: _scriptsGeneration,
+              generation: _profileSwitchGeneration,
               cards: scriptsList.children.length,
               name: scriptsList.querySelector('.script-name')?.textContent || null,
               text: scriptsList.textContent,
@@ -1269,7 +1589,6 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
           _tasksSubtab = 'scripts';
           _profileSwitchGeneration = 0;
           _showAllProfiles = true;
-          _scriptsGeneration = 0;
           _scriptsRequestId = 0;
           _scriptsRawRequestId = 0;
           _scriptsData = [{ name: 'a.py', description: 'Alpha script' }];
@@ -1290,7 +1609,7 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
 
           const afterB = {
             profile: S.activeProfile,
-            generation: _scriptsGeneration,
+            generation: _profileSwitchGeneration,
             text: scriptsList.textContent,
           };
 
@@ -1308,7 +1627,7 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
 
           const beforeStale = {
             profile: S.activeProfile,
-            generation: _scriptsGeneration,
+            generation: _profileSwitchGeneration,
             cards: scriptsList.children.length,
             expanded: currentHeader.getAttribute('aria-expanded'),
             source: scriptsList.querySelector('.script-source code').textContent,
@@ -1323,7 +1642,7 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
             beforeStale,
             afterStale: {
               profile: S.activeProfile,
-              generation: _scriptsGeneration,
+              generation: _profileSwitchGeneration,
               cards: scriptsList.children.length,
               expanded: scriptsList.querySelector('.script-header').getAttribute('aria-expanded'),
               source: scriptsList.querySelector('.script-source code').textContent,
@@ -1364,8 +1683,8 @@ def test_session_load_profile_switch_retires_first_profile_owner_after_return():
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_profile_switch_panel_load_prefers_scripts_subtab_fetch():
-    """Tasks panel reload should refetch Scripts only when the Scripts subtab is active."""
+def test_profile_switch_panel_load_routes_tasks_reload_by_active_subtab():
+    """Tasks panel reload should delegate to the active subtab consumer."""
     js = PANELS_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let _currentPanel = 'tasks';
@@ -1374,11 +1693,11 @@ const calls = [];
 async function loadSkills(){ calls.push('skills'); }
 async function loadMemory(){ calls.push('memory'); }
 async function loadScripts(){ calls.push('scripts'); }
-async function loadCrons(){ calls.push('crons'); }
+async function loadCrons(animate, options){ calls.push(['crons', animate, !!(options && options.allowCache)]); }
 async function loadKanban(){ calls.push('kanban'); }
 async function loadProfilesPanel(){ calls.push('profiles'); }
 async function loadWorkspacesPanel(){ calls.push('workspaces'); }
-function _clearCronDetail(){}
+eval(extractFunc('_ensureTasksSubtabLoaded'));
 eval(extractFunc('_profileSwitchPanelLoad'));
 (async () => {
   await _profileSwitchPanelLoad();
@@ -1388,7 +1707,17 @@ eval(extractFunc('_profileSwitchPanelLoad'));
 })().catch(err => { console.error(err); process.exit(1); });
 """
     calls = json.loads(_run_node(source))
-    assert calls == ["scripts", "crons"]
+    assert calls == ["scripts", ["crons", False, True]]
+
+
+def test_scripts_description_row_stays_inside_header_button():
+    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    header_open = js.index('<button type="button" class="script-header"')
+    desc = js.index("${s.description ? `<span class=\"script-desc\">${esc(s.description)}</span>` : ''}")
+    header_close = js.index("</button>", header_open)
+    source = js.index('<div class="script-source"', header_open)
+
+    assert header_open < desc < header_close < source
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -1478,6 +1807,7 @@ class FakeElement {
 const box = new FakeElement('box');
 const document = { createElement(){ return new FakeElement(); } };
 const window = { Prism: null };
+let _scriptsRawRequestId = 0;
 function $(id){ return id === 'scriptsList' ? box : null; }
 function esc(value){ return escapeHtml(value); }
 function t(key){
@@ -1601,6 +1931,7 @@ class FakeElement {{
 const box = new FakeElement('box');
 const document = {{ createElement(){{ return new FakeElement(); }} }};
 const window = {{ Prism: null }};
+let _scriptsRawRequestId = 0;
 function $(id){{ return id === 'scriptsList' ? box : null; }}
 function esc(value){{ return escapeHtml(value); }}
 function t(key){{

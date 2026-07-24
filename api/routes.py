@@ -20580,10 +20580,12 @@ def _read_active_project_context(workspace: Path | None) -> dict:
         }
     )
     return payload
-def _hermes_scripts_dir() -> Path:
+
+
+def _hermes_active_home() -> Path:
     from api.profiles import get_active_hermes_home
 
-    return Path(get_active_hermes_home()).expanduser().resolve() / "scripts"
+    return Path(get_active_hermes_home()).expanduser().resolve()
 
 
 def _parse_script_docstring(data: bytes, ext: str) -> str:
@@ -20612,30 +20614,61 @@ def _parse_script_docstring(data: bytes, ext: str) -> str:
 
 def _handle_scripts_list(handler) -> None:
     try:
-        scripts_dir = _hermes_scripts_dir()
+        active_home = _hermes_active_home()
     except Exception:
         return bad(handler, "scripts unavailable", 503)
+    requested_scripts_dir = active_home / "scripts"
+    if requested_scripts_dir.is_symlink():
+        return j(handler, {"scripts": []})
+    try:
+        scripts_dir = safe_resolve_ws(active_home, "scripts")
+    except ValueError:
+        return j(handler, {"scripts": []})
     if not scripts_dir.exists():
         return j(handler, {"scripts": []})
     scripts = []
+    dir_fd = None
     try:
-        entries = sorted(scripts_dir.iterdir())
-    except OSError:
-        return j(handler, {"scripts": []})
-    for p in entries:
-        if p.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
-            continue
         try:
-            target = safe_resolve(scripts_dir, p.name)
-            data = _read_anchored_file_bytes(
-                scripts_dir, target, 64 * 1024, allow_prefix=True
-            )
-        except (OSError, ValueError):
-            continue
-        scripts.append({
-            "name": p.name,
-            "description": _parse_script_docstring(data, p.suffix.lower()),
-        })
+            if os.open in getattr(os, "supports_dir_fd", set()):
+                dir_fd = open_anchored_fd(active_home, scripts_dir, want_dir=True)
+                st = os.fstat(dir_fd)
+                if not _stat.S_ISDIR(st.st_mode):
+                    raise FileNotFoundError(f"Not a directory: {scripts_dir}")
+                scan_root = dir_fd
+            else:
+                if not scripts_dir.is_dir():
+                    raise FileNotFoundError(f"Not a directory: {scripts_dir}")
+                scan_root = str(scripts_dir)
+            with os.scandir(scan_root) as scan:
+                entries = sorted(scan, key=lambda de: de.name.lower())
+        except OSError:
+            return j(handler, {"scripts": []})
+        for de in entries:
+            name = de.name
+            ext = Path(name).suffix.lower()
+            if ext not in (".py", ".sh", ".bash", ".zsh"):
+                continue
+            if de.is_symlink():
+                continue
+            try:
+                target = safe_resolve_ws(active_home, f"scripts/{name}")
+                target.relative_to(scripts_dir)
+                data = _read_anchored_file_bytes(
+                    active_home, target, 64 * 1024, allow_prefix=True
+                )
+            except (OSError, ValueError):
+                continue
+            scripts.append({
+                "name": name,
+                "description": _parse_script_docstring(data, ext),
+            })
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass
     return j(handler, {"scripts": scripts})
 
 
@@ -20645,21 +20678,35 @@ def _handle_scripts_raw(handler, parsed) -> None:
     if not name:
         return bad(handler, "path required", 400)
     try:
-        scripts_dir = _hermes_scripts_dir()
+        active_home = _hermes_active_home()
     except Exception:
         return bad(handler, "scripts unavailable", 503)
+    requested_scripts_dir = active_home / "scripts"
+    if requested_scripts_dir.is_symlink():
+        return bad(handler, "script not found", 404)
+    try:
+        scripts_dir = safe_resolve_ws(active_home, "scripts")
+    except ValueError:
+        return bad(handler, "script not found", 404)
     if not scripts_dir.exists():
         return bad(handler, "scripts directory not found", 404)
     try:
-        target = safe_resolve(scripts_dir, name)
+        target = safe_resolve_ws(active_home, f"scripts/{name}")
     except ValueError:
         if any(part == ".." for part in Path(name).parts):
             return bad(handler, "invalid path", 400)
         return bad(handler, "script not found", 404)
+    requested_target = active_home / "scripts" / name
+    if requested_target.is_symlink():
+        return bad(handler, "script not found", 404)
+    try:
+        target.relative_to(scripts_dir)
+    except ValueError:
+        return bad(handler, "script not found", 404)
     if target.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
         return bad(handler, "unsupported file type", 400)
     try:
-        source = _read_anchored_file_bytes(scripts_dir, target).decode(
+        source = _read_anchored_file_bytes(active_home, target).decode(
             "utf-8", errors="replace"
         ).replace("\r\n", "\n")
     except FileNotFoundError:

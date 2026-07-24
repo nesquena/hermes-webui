@@ -21,6 +21,8 @@ let _kanbanEventSource = null;
 let _kanbanEventSourceFailures = 0;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
+let _cronListAllProfiles = false;
+let _cronsRequestId = 0;
 let _currentCronDetail = null; // full cron job object
 let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
@@ -413,8 +415,8 @@ async function switchPanel(name, opts = {}) {
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') {
-    if (_tasksSubtab === 'scripts') switchTasksSubtab(_tasksSubtab);
-    else await loadCrons();
+    switchTasksSubtab(_tasksSubtab, { ensure: false });
+    await _ensureTasksSubtabLoaded(_tasksSubtab);
   }
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
@@ -1004,24 +1006,13 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
+async function loadCrons(animate, options = {}) {
+  const allowCache = !!options.allowCache;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
-  loadCronGatewayNotice();
-  if (animate && refreshBtn) {
-    refreshBtn.style.opacity = '0.5';
-    refreshBtn.disabled = true;
-  }
-  try {
-    await loadCronProfiles();
-    const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
-    const data = await api('/api/crons' + allProfilesQS);
-    _cronList = data.jobs || [];
-    _cronOtherProfileCount = Number(data.other_profile_count || 0);
-    if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
-      _showAllCronProfiles = false;
-      _cronOtherProfileCount = 0;
-    }
+  const owner = _tasksOwner();
+  const requestId = ++_cronsRequestId;
+  const renderCronList = () => {
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1092,15 +1083,47 @@ async function loadCrons(animate) {
       box.appendChild(details);
     }
     _appendCronProfileToggle(box);
-    // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+  };
+  loadCronGatewayNotice();
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  try {
+    await loadCronProfiles();
+    if (
+      allowCache &&
+      _cronList &&
+      _cronListAllProfiles === _showAllCronProfiles &&
+      _tasksOwns(owner) &&
+      requestId === _cronsRequestId
+    ) {
+      renderCronList();
+      return;
+    }
+    const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
+    const data = await api('/api/crons' + allProfilesQS);
+    if (!_tasksOwns(owner) || requestId !== _cronsRequestId) return;
+    _cronList = data.jobs || [];
+    _cronOtherProfileCount = Number(data.other_profile_count || 0);
+    if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
+      _showAllCronProfiles = false;
+      _cronOtherProfileCount = 0;
+    }
+    _cronListAllProfiles = _showAllCronProfiles;
+    renderCronList();
+  } catch(e) {
+    if (_tasksOwns(owner) && requestId === _cronsRequestId && box) {
+      box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+    }
+  }
   finally {
-    if (animate && refreshBtn) {
+    if (animate && refreshBtn && _tasksOwns(owner)) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
@@ -1466,6 +1489,20 @@ function _clearCronDetail(){
 }
 
 let _tasksSubtab = 'jobs';
+function _tasksOwner() {
+  return { profile: (S && S.activeProfile) || 'default', generation: _profileSwitchGeneration };
+}
+function _tasksOwns(owner) {
+  return owner.profile === ((S && S.activeProfile) || 'default')
+    && owner.generation === _profileSwitchGeneration;
+}
+async function _ensureTasksSubtabLoaded(tab) {
+  if (tab === 'scripts') {
+    await loadScripts();
+    return;
+  }
+  await loadCrons(false, { allowCache: true });
+}
 function handleTasksSubtabKeydown(event) {
   if (!event) return;
   const tabs = Array.from(document.querySelectorAll('.tasks-subtab'));
@@ -1484,7 +1521,8 @@ function handleTasksSubtabKeydown(event) {
   next.focus();
   switchTasksSubtab(next.id === 'tasksSubtabScripts' ? 'scripts' : 'jobs');
 }
-function switchTasksSubtab(tab) {
+function switchTasksSubtab(tab, options = {}) {
+  const { ensure = true } = options;
   const jobsPane = $('tasksJobsPane');
   const scriptsPane = $('tasksScriptsPane');
   const jobActions = $('tasksJobActions');
@@ -1502,36 +1540,49 @@ function switchTasksSubtab(tab) {
     b.setAttribute('aria-selected', String(selected));
     b.tabIndex = selected ? 0 : -1;
   });
-  if (tab === 'scripts') loadScripts();
+  if (ensure) void _ensureTasksSubtabLoaded(tab);
 }
 
 let _scriptsData = null;
-let _scriptsGeneration = 0;
 let _scriptsRequestId = 0;
 let _scriptsRawRequestId = 0;
+let _scriptsRefreshOwnerRequestId = 0;
 function _invalidateScriptsRequests(clearCache = true) {
-  _scriptsGeneration++;
   _scriptsRequestId++;
-  if (typeof _scriptsRawRequestId === 'undefined') _scriptsRawRequestId = 1;
-  else _scriptsRawRequestId++;
+  _scriptsRawRequestId++;
   if (clearCache) _scriptsData = null;
 }
-function _resetScriptsForProfileTransition() {
+function _resetTasksForProfileTransition() {
+  _showAllCronProfiles = false;
+  _cronOtherProfileCount = 0;
+  _cronPreFormDetail = null;
+  _editingCronId = null;
+  _cronIsDuplicate = false;
+  _cronList = null;
+  _cronListAllProfiles = false;
+  _cronsRequestId++;
+  _clearCronDetail();
+  const cronBox = $('cronList');
+  const cronRefreshBtn = $('cronRefreshBtn');
+  if (cronBox) cronBox.replaceChildren();
+  if (cronRefreshBtn) {
+    cronRefreshBtn.style.opacity = '';
+    cronRefreshBtn.disabled = false;
+  }
   _invalidateScriptsRequests();
-  const box = $('scriptsList');
-  const refreshBtn = $('scriptsRefreshBtn');
-  if (box) box.replaceChildren();
-  if (refreshBtn) {
-    refreshBtn.style.opacity = '';
-    refreshBtn.disabled = false;
+  const scriptsBox = $('scriptsList');
+  const scriptsRefreshBtn = $('scriptsRefreshBtn');
+  if (scriptsBox) scriptsBox.replaceChildren();
+  if (scriptsRefreshBtn) {
+    scriptsRefreshBtn.style.opacity = '';
+    scriptsRefreshBtn.disabled = false;
   }
 }
 function _scriptsOwner() {
-  return { profile: (S && S.activeProfile) || 'default', generation: _scriptsGeneration };
+  return _tasksOwner();
 }
 function _scriptsOwns(owner, requestId, record) {
-  return owner.profile === ((S && S.activeProfile) || 'default')
-    && owner.generation === _scriptsGeneration
+  return _tasksOwns(owner)
     && (record || requestId === _scriptsRequestId)
     && (!record || (_scriptsData && _scriptsData.includes(record)));
 }
@@ -1539,13 +1590,13 @@ async function loadScripts(animate) {
   const box = $('scriptsList');
   const refreshBtn = $('scriptsRefreshBtn');
   if (animate) {
-    if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
-    else _scriptsData = null;
+    _invalidateScriptsRequests();
     if (refreshBtn) { refreshBtn.style.opacity = '0.5'; refreshBtn.disabled = true; }
   }
   if (_scriptsData) { _renderScriptsList(_scriptsData); return; }
   const owner = _scriptsOwner();
   const requestId = ++_scriptsRequestId;
+  if (animate) _scriptsRefreshOwnerRequestId = requestId;
   try {
     const data = await api('/api/scripts/list');
     if (!_scriptsOwns(owner, requestId)) return;
@@ -1556,7 +1607,7 @@ async function loadScripts(animate) {
       box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
     }
   } finally {
-    if (animate && refreshBtn && _scriptsOwns(owner, requestId)) {
+    if (animate && refreshBtn && _tasksOwns(owner) && requestId === _scriptsRefreshOwnerRequestId) {
       refreshBtn.style.opacity = ''; refreshBtn.disabled = false;
     }
   }
@@ -1586,8 +1637,8 @@ function _renderScriptsList(scripts, owner) {
         <span class="script-name">${esc(stem)}</span>
         <span class="script-ext">.${esc(ext)}</span>
         <span class="script-expand" aria-hidden="true">▸</span>
+        ${s.description ? `<span class="script-desc">${esc(s.description)}</span>` : ''}
       </button>
-      ${s.description ? `<div class="script-desc">${esc(s.description)}</div>` : ''}
       <div class="script-source" style="display:none">
         <pre><code class="${langClass}">${esc(s.source || '')}</code></pre>
       </div>`;
@@ -1599,9 +1650,7 @@ function _renderScriptsList(scripts, owner) {
       header.querySelector('.script-expand').textContent = expanded ? '▾' : '▸';
       sourceEl.style.display = expanded ? '' : 'none';
       if (expanded && !s._loaded) {
-        const rawRequestId = typeof _scriptsRawRequestId === 'undefined'
-          ? 1
-          : ++_scriptsRawRequestId;
+        const rawRequestId = ++_scriptsRawRequestId;
         s._rawRequestId = rawRequestId;
         sourceEl.querySelector('code').textContent = t('loading') || 'Loading...';
         try {
@@ -6687,18 +6736,9 @@ function _openProfileDropdownShell(){
 }
 
 async function _profileSwitchPanelLoad(){
-  // Cross-profile cron visibility is an active-profile opt-in; never carry it
-  // into the next profile when the Tasks panel wasn't the visible panel.
-  _showAllCronProfiles = false;
-  _cronOtherProfileCount = 0;
-  _cronPreFormDetail = null;
-  _editingCronId = null;
-  _cronIsDuplicate = false;
-  _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();
-  else if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'tasks') await _ensureTasksSubtabLoaded(_tasksSubtab);
   if (_currentPanel === 'kanban') await loadKanban();
   if (_currentPanel === 'profiles') await loadProfilesPanel();
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
@@ -7171,9 +7211,7 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
-    if (typeof _resetScriptsForProfileTransition === 'function') _resetScriptsForProfileTransition();
-    else if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
-    else _scriptsData = null;
+    if (typeof _resetTasksForProfileTransition === 'function') _resetTasksForProfileTransition();
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
@@ -7366,9 +7404,7 @@ async function switchToProfile(name) {
     // are intact — restore the real list/tree so the loading skeletons we showed
     // up front don't strand. (#4662)
     if (_switchGen === _profileSwitchGeneration) {
-      if (typeof _resetScriptsForProfileTransition === 'function') _resetScriptsForProfileTransition();
-      else if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
-      else _scriptsData = null;
+      if (typeof _resetTasksForProfileTransition === 'function') _resetTasksForProfileTransition();
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
       // rather than strand the up-front skeleton (#4671). Lift the embargo too so the
@@ -7384,7 +7420,7 @@ async function switchToProfile(name) {
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
       }
-      if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();
+      if (_currentPanel === 'tasks') await _ensureTasksSubtabLoaded(_tasksSubtab);
     }
     return false;
   } finally {
