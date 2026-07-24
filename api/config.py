@@ -4914,14 +4914,53 @@ def _moa_clean_slot(slot: dict) -> dict:
     return clean
 
 
-def _moa_merged_slot(new_slot: dict, old_slot) -> dict:
-    """Merge-don't-replace at slot level: unknown fields another tool wrote
-    into a persisted slot survive a UI save (gate finding 1). Known fields
-    always take the UI's value (including dropping a cleared effort)."""
-    extras = {}
-    if isinstance(old_slot, dict):
-        extras = {k: v for k, v in old_slot.items() if k not in _MOA_SLOT_KEYS}
-    return {**extras, **new_slot}
+def _moa_slot_identity(slot) -> tuple[str, str] | None:
+    if not isinstance(slot, dict):
+        return None
+    provider = str(slot.get("provider") or "").strip()
+    model = str(slot.get("model") or "").strip()
+    if not provider and not model:
+        return None
+    return (provider, model)
+
+
+def _moa_merge_slot_extras(new_slots: list[dict], old_slots) -> list[dict]:
+    """Merge-don't-replace at slot level -- by IDENTITY, never by position.
+
+    Independent review P1: an index-based merge reassigns another tool's
+    slot metadata to the wrong agent as soon as a reference model is
+    removed or reordered. Unknown fields are carried over only when the
+    old slot is UNAMBIGUOUSLY identified by its (provider, model) pair:
+
+    * exactly one unclaimed old slot with the same identity -> carry its
+      unknown fields;
+    * duplicate identities on either side, or no match -> carry nothing
+      (dropping metadata is recoverable via the other tool; binding it to
+      the wrong agent silently corrupts semantics).
+
+    Known fields always take the UI's value."""
+    old_list = old_slots if isinstance(old_slots, list) else []
+    by_identity: dict[tuple[str, str], list[dict]] = {}
+    for old in old_list:
+        identity = _moa_slot_identity(old)
+        if identity is not None:
+            by_identity.setdefault(identity, []).append(old)
+
+    new_identities = [_moa_slot_identity(slot) for slot in new_slots]
+    merged: list[dict] = []
+    for slot, identity in zip(new_slots, new_identities):
+        candidates = by_identity.get(identity, []) if identity is not None else []
+        unambiguous = (
+            len(candidates) == 1
+            and new_identities.count(identity) == 1
+        )
+        if unambiguous:
+            old = candidates[0]
+            extras = {k: v for k, v in old.items() if k not in _MOA_SLOT_KEYS}
+            merged.append({**extras, **slot})
+        else:
+            merged.append(dict(slot))
+    return merged
 
 
 def _moa_read_slot(slot) -> dict:
@@ -5200,14 +5239,15 @@ def set_moa_config(payload: dict) -> dict:
         merged = dict(existing_preset) if isinstance(existing_preset, dict) else {}
         old_refs = merged.get("reference_models")
         old_refs = old_refs if isinstance(old_refs, list) else []
-        preset_update["reference_models"] = [
-            _moa_merged_slot(slot, old_refs[i] if i < len(old_refs) else None)
-            for i, slot in enumerate(preset_update["reference_models"])
-        ]
+        preset_update["reference_models"] = _moa_merge_slot_extras(
+            preset_update["reference_models"], old_refs
+        )
         if not aggregator_blank:
-            preset_update["aggregator"] = _moa_merged_slot(
-                preset_update["aggregator"], merged.get("aggregator")
-            )
+            # The aggregator is a singleton slot: identity-match against the
+            # persisted aggregator only (same rule, list of one).
+            preset_update["aggregator"] = _moa_merge_slot_extras(
+                [preset_update["aggregator"]], [merged.get("aggregator")]
+            )[0]
         merged.update(preset_update)
 
         presets = raw_moa.get("presets")

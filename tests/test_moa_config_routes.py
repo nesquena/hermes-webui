@@ -593,13 +593,17 @@ class TestMoaGateFollowups:
         )
         config.set_moa_config({
             "enabled": True,
-            "reference_models": [{"provider": "openai", "model": "gpt-6"}],
+            # Same identity (provider+model): slot extras survive. Round 2
+            # switched the merge to identity-binding -- editing the model
+            # would (correctly) drop the old slot's foreign metadata instead
+            # of misbinding it, see TestMoaSlotIdentityMerge.
+            "reference_models": [{"provider": "openai", "model": "gpt-5.5"}],
             "aggregator": {"provider": "openrouter", "model": "agg"},
         })
         saved = config._load_yaml_config_file(config_path)["moa"]
         assert saved["future_root_flag"] == "keep-me"
         assert saved["reference_models"][0]["future_slot_flag"] == "keep-me-too"
-        assert saved["reference_models"][0]["model"] == "gpt-6"
+        assert saved["reference_models"][0]["model"] == "gpt-5.5"
         assert saved["aggregator"]["agg_extra"] == "keep-me-three"
 
     def test_unknown_named_preset_fields_survive(self, monkeypatch, tmp_path):
@@ -771,3 +775,102 @@ class TestMoaGateFollowups:
         assert "minWidth='44px'" in body
         assert "setAttribute('aria-label'" in body
         assert "_restoreMoaFocus" in body
+
+
+class TestMoaSlotIdentityMerge:
+    """Review round 2 (P1): slot extras bind by IDENTITY, never by index."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_config_module_state(self):
+        from api import config
+
+        real_get_config_path = config._get_config_path
+        yield
+        with config._cfg_lock:
+            config._refresh_config_cache(real_get_config_path())
+
+    def _seed_two_slots(self, tmp_path, monkeypatch):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  enabled: true\n"
+            "  reference_models:\n"
+            "    - provider: prov-a\n"
+            "      model: model-a\n"
+            "      future_owner: first-slot\n"
+            "    - provider: prov-b\n"
+            "      model: model-b\n"
+            "      future_owner: second-slot\n"
+            "  aggregator: {provider: agg, model: agg-m}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        return config, config_path
+
+    def _put(self, config, refs):
+        config.reload_config()
+        current = config.get_moa_config()
+        return config.set_moa_config({
+            "enabled": True,
+            "reference_models": refs,
+            "aggregator": {"provider": "agg", "model": "agg-m"},
+            "preset": current["preset"],
+            "revision": current["revision"],
+        })
+
+    def test_removing_the_first_slot_keeps_extras_on_the_right_agent(
+        self, monkeypatch, tmp_path
+    ):
+        """The reviewer's exact counter-case: after deleting agent 1, the
+        surviving agent must keep ITS OWN metadata, not inherit agent 1's."""
+        config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
+        self._put(config, [{"provider": "prov-b", "model": "model-b"}])
+        saved = config._load_yaml_config_file(config_path)["moa"]
+        assert len(saved["reference_models"]) == 1
+        assert saved["reference_models"][0]["future_owner"] == "second-slot"
+
+    def test_reordering_slots_keeps_extras_with_their_identities(
+        self, monkeypatch, tmp_path
+    ):
+        config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
+        self._put(config, [
+            {"provider": "prov-b", "model": "model-b"},
+            {"provider": "prov-a", "model": "model-a"},
+        ])
+        saved = config._load_yaml_config_file(config_path)["moa"]["reference_models"]
+        assert saved[0]["future_owner"] == "second-slot"
+        assert saved[1]["future_owner"] == "first-slot"
+
+    def test_duplicate_identities_carry_nothing(self, monkeypatch, tmp_path):
+        """Ambiguity fails SAFE: with two old slots sharing one identity, no
+        extras are carried (dropping is recoverable; misbinding is not)."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "moa:\n"
+            "  enabled: true\n"
+            "  reference_models:\n"
+            "    - {provider: p, model: m, future_owner: twin-one}\n"
+            "    - {provider: p, model: m, future_owner: twin-two}\n"
+            "  aggregator: {provider: agg, model: agg-m}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        self._put(config, [{"provider": "p", "model": "m"}])
+        saved = config._load_yaml_config_file(config_path)["moa"]["reference_models"]
+        assert "future_owner" not in saved[0]
+
+    def test_changed_identity_drops_stale_extras(self, monkeypatch, tmp_path):
+        """Editing a slot's model changes its identity -- the OLD slot's
+        metadata must not follow the position onto the new model."""
+        config, config_path = self._seed_two_slots(tmp_path, monkeypatch)
+        self._put(config, [
+            {"provider": "prov-a", "model": "model-NEW"},
+            {"provider": "prov-b", "model": "model-b"},
+        ])
+        saved = config._load_yaml_config_file(config_path)["moa"]["reference_models"]
+        assert "future_owner" not in saved[0]
+        assert saved[1]["future_owner"] == "second-slot"
