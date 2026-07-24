@@ -4894,15 +4894,34 @@ def _moa_slot_problem(slot, *, label: str) -> str | None:
     return None
 
 
+def _moa_effort_string(raw) -> str:
+    """Runtime-parity effort read: the agent canonicalizes YAML
+    ``reasoning_effort: false`` to the string ``"none"`` — mirror that
+    instead of blanking it out (gate finding 5)."""
+    if raw is False:
+        return "none"
+    return str(raw or "").strip()
+
+
 def _moa_clean_slot(slot: dict) -> dict:
     clean = {
         "provider": str(slot.get("provider") or "").strip(),
         "model": str(slot.get("model") or "").strip(),
     }
-    effort = str(slot.get("reasoning_effort") or "").strip()
+    effort = _moa_effort_string(slot.get("reasoning_effort"))
     if effort:
         clean["reasoning_effort"] = effort
     return clean
+
+
+def _moa_merged_slot(new_slot: dict, old_slot) -> dict:
+    """Merge-don't-replace at slot level: unknown fields another tool wrote
+    into a persisted slot survive a UI save (gate finding 1). Known fields
+    always take the UI's value (including dropping a cleared effort)."""
+    extras = {}
+    if isinstance(old_slot, dict):
+        extras = {k: v for k, v in old_slot.items() if k not in _MOA_SLOT_KEYS}
+    return {**extras, **new_slot}
 
 
 def _moa_read_slot(slot) -> dict:
@@ -4915,49 +4934,119 @@ def _moa_read_slot(slot) -> dict:
         "provider": str(slot.get("provider") or "").strip(),
         "model": str(slot.get("model") or "").strip(),
     }
-    effort = str(slot.get("reasoning_effort") or "").strip()
+    effort = _moa_effort_string(slot.get("reasoning_effort"))
     if effort:
         out["reasoning_effort"] = effort
     return out
 
 
 def _moa_float_or_none(value):
-    if value is None or value == "":
+    """Read-side display helper (lenient by design; write path validates)."""
+    if value is None or value == "" or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        f = float(value)
     except (TypeError, ValueError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def _moa_positive_int_or_none(value):
-    if value is None or value == "":
+    """Read-side display helper (lenient by design; write path validates)."""
+    if value is None or value == "" or isinstance(value, bool):
         return None
     try:
         n = int(value)
     except (TypeError, ValueError):
         try:
             n = int(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
+    except OverflowError:
+        return None
     return n if n > 0 else None
 
 
 def _moa_int_or_default(value, default: int) -> int:
-    if value is None or value == "":
+    """Read-side display helper (lenient by design; write path validates)."""
+    if value is None or value == "" or isinstance(value, bool):
         return default
     try:
         return int(value)
     except (TypeError, ValueError):
         try:
             return int(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return default
+    except OverflowError:
+        return default
 
 
 def _moa_fanout_or_default(value) -> str:
     mode = str(value or "").strip().lower()
     return mode if mode in ("per_iteration", "user_turn") else "per_iteration"
+
+
+# ── Strict write-side validators (gate finding 2): exact types, finite
+# ranges, loud ValueError — never coerce, never silently repair. ──────────────
+
+def _moa_require_bool(payload: dict, key: str, default: bool) -> bool:
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _moa_require_temperature(payload: dict, key: str):
+    value = payload.get(key)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be a number")
+    f = float(value)
+    if not math.isfinite(f):
+        raise ValueError(f"{key} must be a finite number")
+    if not (0.0 <= f <= 2.0):
+        raise ValueError(f"{key} must be between 0 and 2")
+    return f
+
+
+def _moa_require_positive_int(payload: dict, key: str, *, default=None):
+    value = payload.get(key, None)
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{key} must be a positive integer")
+    if value > 100_000_000:
+        raise ValueError(f"{key} is implausibly large")
+    return value
+
+
+def _moa_require_fanout(payload: dict) -> str:
+    value = payload.get("fanout", None)
+    if value is None or value == "":
+        return "per_iteration"
+    mode = str(value).strip().lower()
+    if mode not in ("per_iteration", "user_turn"):
+        raise ValueError("fanout must be 'per_iteration' or 'user_turn'")
+    return mode
+
+
+def _moa_preset_revision(preset: dict) -> str:
+    """Stable identity of the currently persisted preset content, carried
+    through GET→PUT so a stale editor cannot overwrite concurrent CLI/
+    dashboard edits (gate finding 4)."""
+    try:
+        canonical = json.dumps(preset, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        canonical = repr(sorted(preset.items(), key=lambda kv: str(kv[0])))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+class MoaStaleEditError(ValueError):
+    """The editor's loaded preset/revision no longer matches the config."""
 
 
 def _moa_locate_preset(raw_moa: dict) -> tuple[str, dict, list[str]]:
@@ -4981,8 +5070,12 @@ def _moa_preset_for_read(preset: dict) -> dict:
     if not isinstance(refs, list):
         refs = [refs] if isinstance(refs, dict) else []
     aggregator = preset.get("aggregator")
+    # Runtime parity (gate finding 5): the agent treats a preset WITHOUT an
+    # ``enabled`` key as enabled. Mirror that for configured presets; a fully
+    # unset/empty preset still reads as disabled (nothing to enable).
+    enabled_default = bool(preset)
     return {
-        "enabled": bool(preset.get("enabled", False)),
+        "enabled": bool(preset.get("enabled", enabled_default)),
         "reference_models": [_moa_read_slot(slot) for slot in refs],
         "aggregator": _moa_read_slot(aggregator) if isinstance(aggregator, dict) else {"provider": "", "model": ""},
         "reference_temperature": _moa_float_or_none(preset.get("reference_temperature")),
@@ -5009,6 +5102,8 @@ def get_moa_config() -> dict:
         **_moa_preset_for_read(preset),
         "preset": preset_name,
         "other_presets": other_presets,
+        # Optimistic-concurrency handle (gate finding 4): PUT must echo both.
+        "revision": _moa_preset_revision(preset),
     }
 
 
@@ -5024,11 +5119,16 @@ def set_moa_config(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("MoA config must be an object")
 
+    payload = dict(payload)
+    # Concurrency handles from GET (gate finding 4) — not preset content.
+    target_preset = payload.pop("preset", None)
+    client_revision = payload.pop("revision", None)
+
     unknown_top = sorted(set(payload) - _MOA_PRESET_KEYS)
     if unknown_top:
         raise ValueError(f"Unknown field(s): {', '.join(unknown_top)}")
 
-    enabled = bool(payload.get("enabled", False))
+    enabled = _moa_require_bool(payload, "enabled", False)
     refs_raw = payload.get("reference_models", [])
     if not isinstance(refs_raw, list):
         raise ValueError("reference_models must be a list")
@@ -5058,15 +5158,18 @@ def set_moa_config(payload: dict) -> dict:
     if problems:
         raise ValueError("; ".join(problems))
 
+    # Strict scalars (gate finding 2): exact types, finite/ranged values,
+    # loud rejection — bool("false"), NaN temperatures, zero/negative or
+    # string token limits and unknown fanout modes are all 400s now.
     preset_update = {
         "enabled": enabled,
         "reference_models": clean_refs,
         "aggregator": {} if aggregator_blank else _moa_clean_slot(aggregator_raw),
-        "reference_temperature": _moa_float_or_none(payload.get("reference_temperature")),
-        "aggregator_temperature": _moa_float_or_none(payload.get("aggregator_temperature")),
-        "max_tokens": _moa_int_or_default(payload.get("max_tokens"), 4096),
-        "reference_max_tokens": _moa_positive_int_or_none(payload.get("reference_max_tokens")),
-        "fanout": _moa_fanout_or_default(payload.get("fanout")),
+        "reference_temperature": _moa_require_temperature(payload, "reference_temperature"),
+        "aggregator_temperature": _moa_require_temperature(payload, "aggregator_temperature"),
+        "max_tokens": _moa_require_positive_int(payload, "max_tokens", default=4096),
+        "reference_max_tokens": _moa_require_positive_int(payload, "reference_max_tokens"),
+        "fanout": _moa_require_fanout(payload),
     }
 
     config_path = _get_config_path()
@@ -5074,14 +5177,50 @@ def set_moa_config(payload: dict) -> dict:
         config_data = _load_yaml_config_file(config_path)
         raw_moa = config_data.get("moa")
         raw_moa = raw_moa if isinstance(raw_moa, dict) else {}
+        preset_name, existing_preset, _others = _moa_locate_preset(raw_moa)
+
+        # Optimistic concurrency (gate finding 4): the editor pins WHICH
+        # preset it loaded and WHAT content it saw. If the default preset
+        # was repointed or the content changed underneath (CLI/dashboard),
+        # reject instead of overwriting the wrong or newer state. Clients
+        # that never sent handles (older UI) keep legacy last-write-wins.
+        if target_preset is not None and str(target_preset) != preset_name:
+            raise MoaStaleEditError(
+                f"The editor loaded preset {str(target_preset)!r}, but the "
+                f"config's edit target is now {preset_name!r}. Reload before saving."
+            )
+        if client_revision is not None and str(client_revision) != _moa_preset_revision(existing_preset):
+            raise MoaStaleEditError(
+                "The MoA configuration changed while this editor was open. "
+                "Reload before saving."
+            )
+
+        # Merge-don't-replace (gate finding 1): unknown root/preset/slot
+        # fields written by other tooling survive a UI save.
+        merged = dict(existing_preset) if isinstance(existing_preset, dict) else {}
+        old_refs = merged.get("reference_models")
+        old_refs = old_refs if isinstance(old_refs, list) else []
+        preset_update["reference_models"] = [
+            _moa_merged_slot(slot, old_refs[i] if i < len(old_refs) else None)
+            for i, slot in enumerate(preset_update["reference_models"])
+        ]
+        if not aggregator_blank:
+            preset_update["aggregator"] = _moa_merged_slot(
+                preset_update["aggregator"], merged.get("aggregator")
+            )
+        merged.update(preset_update)
+
         presets = raw_moa.get("presets")
         if isinstance(presets, dict) and presets:
-            preset_name, _existing, _others = _moa_locate_preset(raw_moa)
-            presets[preset_name] = preset_update
+            presets[preset_name] = merged
             raw_moa["presets"] = presets
             config_data["moa"] = raw_moa
         else:
-            config_data["moa"] = preset_update
+            # Flat layout: the moa dict IS the preset — merge into it, so
+            # unknown root-level keys survive too.
+            flat = dict(raw_moa)
+            flat.update({k: v for k, v in merged.items()})
+            config_data["moa"] = flat
         _save_yaml_config_file(config_path, config_data)
 
     reload_config()

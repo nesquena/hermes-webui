@@ -12474,8 +12474,25 @@ function _moaSelectStyle(){
  return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
 }
 
+let _moaLoaded=false;   // successful GET completed for the current panel open
+let _moaDirty=false;    // section-owned (gate finding 6): MoA saves via its
+                        // OWN button/transaction; the global Settings save
+                        // path neither saves nor reports MoA state.
+function _updateMoaSaveButtonState(){
+ const saveBtn=$('btnSaveMoa');
+ if(saveBtn) saveBtn.disabled=!(_moaLoaded&&_moaDirty);
+}
 function _markMoaDirty(){
- _markSettingsDirty();
+ _moaDirty=true;
+ _updateMoaSaveButtonState();
+}
+function _moaStatus(text,isError){
+ const note=$('moaStatusNote');
+ if(!note) return;
+ if(!text){note.style.display='none';note.textContent='';return;}
+ note.style.display='';
+ note.style.color=isError?'var(--error,#e05)':'var(--muted)';
+ note.textContent=text;
 }
 
 function _updateMoaFieldsVisibility(){
@@ -12538,15 +12555,23 @@ async function _onMoaModelSelectChange(modelSel,onPick){
  _markMoaDirty();
 }
 
+function _restoreMoaFocus(container,focusKey){
+ if(!focusKey) return;
+ const el=container.querySelector(`[data-moa-focus="${focusKey}"]`);
+ if(el) el.focus();
+}
 function _renderMoaAgents(){
  const container=$('moaAgentsContainer');
  if(!container) return;
+ const focusKey=document.activeElement&&document.activeElement.dataset?document.activeElement.dataset.moaFocus:null;
  container.innerHTML='';
  _moaAgentsState.forEach((agent,index)=>{
   const row=document.createElement('div');
-  row.style.cssText='display:grid;grid-template-columns:1fr 1fr 34px;gap:8px;align-items:center;margin-bottom:8px';
+  row.style.cssText='display:grid;grid-template-columns:1fr 1fr 44px;gap:8px;align-items:center;margin-bottom:8px';
 
   const provSel=document.createElement('select');
+  provSel.dataset.moaFocus=`agent-${index}-provider`;
+  provSel.setAttribute('aria-label',(t('settings_moa_agent_provider_placeholder')||'Provider')+' '+(index+1));
   provSel.style.cssText=_moaSelectStyle();
   _buildMoaProviderOptions(provSel,_moaProviders,agent.provider);
   provSel.addEventListener('change',()=>{
@@ -12558,6 +12583,8 @@ function _renderMoaAgents(){
   row.appendChild(provSel);
 
   const modelSel=document.createElement('select');
+  modelSel.dataset.moaFocus=`agent-${index}-model`;
+  modelSel.setAttribute('aria-label',(t('settings_moa_agent_model_placeholder')||'Model')+' '+(index+1));
   modelSel.style.cssText=_moaSelectStyle();
   _buildMoaModelOptions(modelSel,agent.provider,_moaProviders,agent.model);
   modelSel.addEventListener('change',()=>_onMoaModelSelectChange(modelSel,(model)=>{
@@ -12569,6 +12596,8 @@ function _renderMoaAgents(){
   const removeBtn=document.createElement('button');
   removeBtn.type='button';
   removeBtn.className='model-advanced-btn';
+  removeBtn.style.minWidth='44px';
+  removeBtn.style.minHeight='44px';
   removeBtn.title=t('settings_moa_btn_remove_agent')||'Remove agent';
   removeBtn.setAttribute('aria-label',t('settings_moa_btn_remove_agent')||'Remove agent');
   removeBtn.textContent='×';
@@ -12581,17 +12610,21 @@ function _renderMoaAgents(){
 
   container.appendChild(row);
  });
+ _restoreMoaFocus(container,focusKey);
 }
 
 function _renderMoaAggregator(){
  const container=$('moaAggregatorContainer');
  if(!container) return;
+ const focusKey=document.activeElement&&document.activeElement.dataset?document.activeElement.dataset.moaFocus:null;
  container.innerHTML='';
  const row=document.createElement('div');
  row.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center';
 
  const provSel=document.createElement('select');
  provSel.id='moaAggregatorProvider';
+ provSel.dataset.moaFocus='aggregator-provider';
+ provSel.setAttribute('aria-label',(t('settings_moa_aggregator_label')||'Aggregator')+' '+(t('settings_moa_agent_provider_placeholder')||'Provider'));
  provSel.style.cssText=_moaSelectStyle();
  _buildMoaProviderOptions(provSel,_moaProviders,_moaAggregatorState.provider);
  provSel.addEventListener('change',()=>{
@@ -12604,6 +12637,8 @@ function _renderMoaAggregator(){
 
  const modelSel=document.createElement('select');
  modelSel.id='moaAggregatorModel';
+ modelSel.dataset.moaFocus='aggregator-model';
+ modelSel.setAttribute('aria-label',(t('settings_moa_aggregator_label')||'Aggregator')+' '+(t('settings_moa_agent_model_placeholder')||'Model'));
  modelSel.style.cssText=_moaSelectStyle();
  _buildMoaModelOptions(modelSel,_moaAggregatorState.provider,_moaProviders,_moaAggregatorState.model);
  modelSel.addEventListener('change',()=>_onMoaModelSelectChange(modelSel,(model)=>{
@@ -12613,6 +12648,7 @@ function _renderMoaAggregator(){
  row.appendChild(modelSel);
 
  container.appendChild(row);
+ _restoreMoaFocus(container,focusKey);
 }
 
 function _bindMoaControls(){
@@ -12641,18 +12677,33 @@ async function _loadMoaConfig(){
  const enabledCb=$('moaEnabled');
  if(!enabledCb) return;
  _bindMoaControls();
+ // Gate finding 3: Save stays unusable until a load actually SUCCEEDED --
+ // a fast click or a transient GET failure must never overwrite a valid
+ // CLI config with a blank disabled default.
+ _moaLoaded=false;
+ _moaDirty=false;
+ _updateMoaSaveButtonState();
+ _moaStatus(t('settings_moa_loading')||'Loading Mixture of Agents settings…');
+ let moaData;
+ let modelsData=null;
  try{
-  const [moaData,modelsData]=await Promise.all([
-   api('/api/model/moa').catch(()=>null),
+  [moaData,modelsData]=await Promise.all([
+   api('/api/model/moa'),
    api('/api/models').catch(()=>null),
   ]);
+ }catch(e){
+  console.warn('[settings] moa config load failed',e);
+  _moaStatus(t('settings_moa_load_failed')||'Could not load Mixture of Agents settings.',true);
+  return;
+ }
+ try{
   const groups=(modelsData&&modelsData.groups)||[];
   _moaProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
    slug:g.provider_id||g.provider,
    name:g.provider,
    models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
   }));
-  _moaMeta=moaData||{enabled:false,reference_models:[],aggregator:{provider:'',model:''},preset:'default',other_presets:[]};
+  _moaMeta=moaData;
   enabledCb.checked=!!_moaMeta.enabled;
   // reasoning_effort has no UI control of its own (yet), but the backend
   // persists it per slot (see api/config.py _MOA_SLOT_KEYS) -- carry
@@ -12673,8 +12724,13 @@ async function _loadMoaConfig(){
     note.style.display='none';
    }
   }
+  _moaStatus('');
+  _moaLoaded=true;
+  _moaDirty=false;
+  _updateMoaSaveButtonState();
  }catch(e){
-  console.warn('[settings] moa config load failed',e);
+  console.warn('[settings] moa config render failed',e);
+  _moaStatus(t('settings_moa_load_failed')||'Could not load Mixture of Agents settings.',true);
  }
 }
 
@@ -12696,6 +12752,11 @@ async function _saveMoaConfig(){
   .filter(a=>a.provider||a.model)
   .map(_moaSlotPayload);
  const aggregator=_moaSlotPayload(_moaAggregatorState);
+ if(!_moaLoaded){
+  // Defense in depth: the button is disabled pre-load, but keyboard/JS
+  // activation must not slip through either (gate finding 3).
+  return;
+ }
  const body={enabled,reference_models:referenceModels,aggregator};
  // Round-trip advanced fields this UI doesn't expose (reference_temperature,
  // max_tokens, fanout, …) so saving here never clobbers values a user set
@@ -12704,13 +12765,23 @@ async function _saveMoaConfig(){
   for(const key of ['reference_temperature','aggregator_temperature','max_tokens','reference_max_tokens','fanout']){
    if(Object.prototype.hasOwnProperty.call(_moaMeta,key)) body[key]=_moaMeta[key];
   }
+  // Optimistic concurrency (gate finding 4): pin WHICH preset this editor
+  // loaded and WHAT content revision it saw; the server 409s stale writes.
+  if(_moaMeta.preset) body.preset=_moaMeta.preset;
+  if(_moaMeta.revision) body.revision=_moaMeta.revision;
  }
  try{
   await api('/api/model/moa',{method:'PUT',body:JSON.stringify(body)});
   if(typeof showToast==='function') showToast(t('settings_moa_saved')||'Mixture of Agents settings saved');
   _loadMoaConfig();
  }catch(e){
-  if(typeof showToast==='function') showToast((t('settings_moa_save_failed')||'Failed to save Mixture of Agents settings')+(e&&e.message?': '+e.message:''));
+  const msg=e&&e.message?e.message:'';
+  if(typeof showToast==='function') showToast((t('settings_moa_save_failed')||'Failed to save Mixture of Agents settings')+(msg?': '+msg:''));
+  if(e&&(e.status===409||/reload before saving/i.test(msg))){
+   // Stale editor: bring the fresh state in instead of letting the user
+   // hammer Save against a moved target.
+   _loadMoaConfig();
+  }
  }
 }
 

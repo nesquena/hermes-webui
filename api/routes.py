@@ -16645,9 +16645,12 @@ def handle_put(handler, parsed) -> bool:
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
     if parsed.path == "/api/model/moa":
-        from api.config import set_moa_config
+        from api.config import MoaStaleEditError, set_moa_config
         try:
             return j(handler, {"ok": True, **set_moa_config(body)})
+        except MoaStaleEditError as exc:
+            # Optimistic-concurrency conflict: the editor must reload.
+            return bad(handler, str(exc), status=409)
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
     return False

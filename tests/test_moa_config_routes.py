@@ -73,7 +73,7 @@ class TestMoaSettingsJS:
     def test_save_uses_put_method(self):
         idx = PANELS_JS.find("async function _saveMoaConfig")
         assert idx >= 0
-        save_body = PANELS_JS[idx:idx + 1200]
+        save_body = PANELS_JS[idx:idx + 2600]
         assert "/api/model/moa" in save_body
         assert "method:'PUT'" in save_body
 
@@ -106,11 +106,16 @@ class TestMoaSettingsJS:
         assert "__custom__" in body
         assert "showPromptDialog" in body
 
-    def test_dirty_flag_marking(self):
+    def test_dirty_flag_is_section_owned(self):
+        """Gate finding 6: MoA saves through its OWN button/transaction; the
+        global Settings dirty/save path must not be involved (previously the
+        global form went dirty but saveSettings() never saved MoA)."""
         assert "function _markMoaDirty" in PANELS_JS
         idx = PANELS_JS.find("function _markMoaDirty")
-        body = PANELS_JS[idx:idx + 200]
-        assert "_markSettingsDirty" in body
+        body = PANELS_JS[idx:idx + 220]
+        assert "_markSettingsDirty" not in body
+        assert "_moaDirty=true" in body
+        assert "_updateMoaSaveButtonState" in body
 
     def test_load_preserves_reasoning_effort_for_agents_and_aggregator(self):
         """#audit MEDIUM: reasoning_effort has no UI control, but the backend
@@ -118,7 +123,7 @@ class TestMoaSettingsJS:
         drop it, or the very next save silently erases it."""
         idx = PANELS_JS.find("async function _loadMoaConfig")
         assert idx >= 0
-        body = PANELS_JS[idx:idx + 1800]
+        body = PANELS_JS[idx:idx + 3600]
         assert "reasoning_effort:(a&&a.reasoning_effort)||''" in body, (
             "_loadMoaConfig must carry reasoning_effort into _moaAgentsState"
         )
@@ -140,30 +145,24 @@ class TestMoaSettingsJS:
     def test_moa_slot_payload_preserves_reasoning_effort_and_omits_when_blank(self):
         """Live-executes _moaSlotPayload (pure, DOM-free) to prove the fix, not
         just that the right substrings are present."""
-        script = r"""
-const fs = require('fs');
-const src = fs.readFileSync(process.argv[1], 'utf8');
-
-function extract(name){
-  const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
-  if(start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
-  let depth = 0;
-  while(i < src.length){
-    const ch = src[i];
-    if(ch === '{') depth += 1;
-    else if(ch === '}') {
-      depth -= 1;
-      if(depth === 0) break;
-    }
-    i += 1;
-  }
-  if(depth !== 0) throw new Error(name + ' parse failed');
-  return src.slice(start, i + 1);
-}
-
-eval(extract('_moaSlotPayload'));
+        # Scanner-clean harness: the function under test is extracted in
+        # PYTHON and embedded as ordinary program text -- node never eval()s
+        # runtime-assembled code (gate safety-boundary requirement).
+        src = PANELS_JS
+        start = src.find("function _moaSlotPayload(")
+        assert start >= 0
+        i = src.index("{", start)
+        depth = 0
+        while i < len(src):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        fn_source = src[start:i + 1]
+        script = fn_source + r"""
 
 const withEffort = _moaSlotPayload({provider:'openai-codex', model:'gpt-5.5', reasoning_effort:'low'});
 const blankEffort = _moaSlotPayload({provider:'openrouter', model:'x', reasoning_effort:''});
@@ -172,7 +171,7 @@ const missingField = _moaSlotPayload({provider:'openrouter', model:'x'});
 console.log(JSON.stringify({withEffort, blankEffort, missingField}));
 """
         proc = subprocess.run(
-            [NODE, "-e", script, str(PANELS_JS_PATH)],
+            [NODE, "-e", script],
             capture_output=True,
             text=True,
             timeout=20,
@@ -263,7 +262,7 @@ class TestMoaBackendRoutes:
         same primitives set_auxiliary_model uses — no bespoke config writer."""
         idx = CONFIG_PY.find("def set_moa_config")
         assert idx >= 0
-        body = CONFIG_PY[idx:idx + 4000]
+        body = CONFIG_PY[idx:idx + 9000]
         assert "_get_config_path()" in body
         assert "with _cfg_lock:" in body
         assert "_load_yaml_config_file(config_path)" in body
@@ -550,3 +549,225 @@ class TestMoaRouteDispatch:
 
         assert result["ok"] is True
         assert result["enabled"] is False
+
+
+class TestMoaGateFollowups:
+    """Contracts from the config-data-loss gate review."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_config_module_state(self):
+        from api import config
+
+        real_get_config_path = config._get_config_path
+        yield
+        with config._cfg_lock:
+            config._refresh_config_cache(real_get_config_path())
+
+    def _seed(self, tmp_path, monkeypatch, yaml_text):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml_text, encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        return config, config_path
+
+    # ── Finding 1: merge-don't-replace ──────────────────────────────────
+
+    def test_unknown_root_preset_and_slot_fields_survive_a_ui_save(
+        self, monkeypatch, tmp_path
+    ):
+        config, config_path = self._seed(
+            tmp_path,
+            monkeypatch,
+            "moa:\n"
+            "  enabled: true\n"
+            "  future_root_flag: keep-me\n"
+            "  reference_models:\n"
+            "    - provider: openai\n"
+            "      model: gpt-5.5\n"
+            "      future_slot_flag: keep-me-too\n"
+            "  aggregator:\n"
+            "    provider: openrouter\n"
+            "    model: agg\n"
+            "    agg_extra: keep-me-three\n",
+        )
+        config.set_moa_config({
+            "enabled": True,
+            "reference_models": [{"provider": "openai", "model": "gpt-6"}],
+            "aggregator": {"provider": "openrouter", "model": "agg"},
+        })
+        saved = config._load_yaml_config_file(config_path)["moa"]
+        assert saved["future_root_flag"] == "keep-me"
+        assert saved["reference_models"][0]["future_slot_flag"] == "keep-me-too"
+        assert saved["reference_models"][0]["model"] == "gpt-6"
+        assert saved["aggregator"]["agg_extra"] == "keep-me-three"
+
+    def test_unknown_named_preset_fields_survive(self, monkeypatch, tmp_path):
+        config, config_path = self._seed(
+            tmp_path,
+            monkeypatch,
+            "moa:\n"
+            "  default_preset: main\n"
+            "  presets:\n"
+            "    main:\n"
+            "      enabled: true\n"
+            "      cli_only_field: precious\n"
+            "      reference_models:\n"
+            "        - provider: openai\n"
+            "          model: gpt-5.5\n"
+            "      aggregator: {provider: openrouter, model: agg}\n",
+        )
+        config.set_moa_config({
+            "enabled": False,
+            "reference_models": [],
+            "aggregator": {},
+        })
+        saved = config._load_yaml_config_file(config_path)["moa"]["presets"]["main"]
+        assert saved["cli_only_field"] == "precious"
+        assert saved["enabled"] is False
+
+    # ── Finding 2: strict scalar validation ─────────────────────────────
+
+    @pytest.mark.parametrize("payload,fragment", [
+        ({"enabled": "false"}, "enabled must be a boolean"),
+        ({"fanout": "sideways"}, "fanout must be"),
+        ({"reference_temperature": float("nan")}, "finite"),
+        ({"reference_temperature": float("inf")}, "finite"),
+        ({"aggregator_temperature": 5.0}, "between 0 and 2"),
+        ({"reference_temperature": "0.5"}, "must be a number"),
+        ({"max_tokens": 0}, "positive integer"),
+        ({"max_tokens": -5}, "positive integer"),
+        ({"max_tokens": "4096"}, "positive integer"),
+        ({"max_tokens": 4.5}, "positive integer"),
+        ({"max_tokens": True}, "positive integer"),
+        ({"reference_max_tokens": -1}, "positive integer"),
+        ({"max_tokens": 10**12}, "implausibly large"),
+    ])
+    def test_malformed_scalars_are_rejected_not_coerced(
+        self, monkeypatch, tmp_path, payload, fragment
+    ):
+        config, _p = self._seed(tmp_path, monkeypatch, "model:\n  default: x\n")
+        body = {"enabled": False, "reference_models": [], "aggregator": {}}
+        body.update(payload)
+        with pytest.raises(ValueError, match=fragment):
+            config.set_moa_config(body)
+
+    # ── Finding 4: preset identity / optimistic concurrency ─────────────
+
+    def test_get_exposes_a_stable_revision(self, monkeypatch, tmp_path):
+        config, _p = self._seed(
+            tmp_path, monkeypatch,
+            "moa: {enabled: true, reference_models: [{provider: a, model: b}], aggregator: {provider: c, model: d}}\n",
+        )
+        config.reload_config()
+        first = config.get_moa_config()
+        second = config.get_moa_config()
+        assert first["revision"] and first["revision"] == second["revision"]
+
+    def test_put_with_stale_revision_is_rejected(self, monkeypatch, tmp_path):
+        config, _p = self._seed(
+            tmp_path, monkeypatch,
+            "moa: {enabled: true, reference_models: [{provider: a, model: b}], aggregator: {provider: c, model: d}}\n",
+        )
+        with pytest.raises(config.MoaStaleEditError):
+            config.set_moa_config({
+                "enabled": False, "reference_models": [], "aggregator": {},
+                "revision": "deadbeefdeadbeef",
+            })
+
+    def test_put_with_wrong_target_preset_is_rejected(self, monkeypatch, tmp_path):
+        config, _p = self._seed(
+            tmp_path, monkeypatch,
+            "moa:\n"
+            "  default_preset: bravo\n"
+            "  presets:\n"
+            "    alpha: {enabled: true}\n"
+            "    bravo: {enabled: true}\n",
+        )
+        with pytest.raises(config.MoaStaleEditError):
+            config.set_moa_config({
+                "enabled": False, "reference_models": [], "aggregator": {},
+                "preset": "alpha",
+            })
+
+    def test_put_with_current_handles_succeeds(self, monkeypatch, tmp_path):
+        config, config_path = self._seed(
+            tmp_path, monkeypatch,
+            "moa: {enabled: true, reference_models: [{provider: a, model: b}], aggregator: {provider: c, model: d}}\n",
+        )
+        config.reload_config()
+        current = config.get_moa_config()
+        result = config.set_moa_config({
+            "enabled": False, "reference_models": [], "aggregator": {},
+            "preset": current["preset"], "revision": current["revision"],
+        })
+        assert result["enabled"] is False
+
+    # ── Finding 5: runtime-semantic parity ──────────────────────────────
+
+    def test_preset_without_enabled_key_reads_as_enabled(self, monkeypatch):
+        from api import config
+
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "cfg", {
+            "moa": {"reference_models": [{"provider": "a", "model": "b"}],
+                     "aggregator": {"provider": "c", "model": "d"}},
+        })
+        assert config.get_moa_config()["enabled"] is True
+
+    def test_truly_unset_moa_still_reads_disabled(self, monkeypatch):
+        from api import config
+
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "cfg", {})
+        assert config.get_moa_config()["enabled"] is False
+
+    def test_yaml_false_reasoning_effort_reads_and_saves_as_none(
+        self, monkeypatch, tmp_path
+    ):
+        config, config_path = self._seed(
+            tmp_path, monkeypatch,
+            "moa:\n"
+            "  enabled: true\n"
+            "  reference_models:\n"
+            "    - provider: a\n"
+            "      model: b\n"
+            "      reasoning_effort: false\n"
+            "  aggregator: {provider: c, model: d}\n",
+        )
+        config.reload_config()
+        read = config.get_moa_config()
+        assert read["reference_models"][0]["reasoning_effort"] == "none"
+        config.set_moa_config({
+            "enabled": True,
+            "reference_models": [read["reference_models"][0]],
+            "aggregator": {"provider": "c", "model": "d"},
+        })
+        saved = config._load_yaml_config_file(config_path)["moa"]
+        assert saved["reference_models"][0]["reasoning_effort"] == "none"
+
+    # ── Finding 3/6 + secondary UI: static contracts ─────────────────────
+
+    def test_save_is_gated_on_successful_load(self):
+        idx = PANELS_JS.find("async function _loadMoaConfig")
+        body = PANELS_JS[idx:idx + 1200]
+        assert "_moaLoaded=false" in body
+        assert "settings_moa_loading" in body
+        assert "settings_moa_load_failed" in body
+        save_idx = PANELS_JS.find("async function _saveMoaConfig")
+        save_body = PANELS_JS[save_idx:save_idx + 600]
+        assert "if(!_moaLoaded)" in save_body
+
+    def test_save_pins_preset_and_revision(self):
+        idx = PANELS_JS.find("async function _saveMoaConfig")
+        body = PANELS_JS[idx:idx + 1600]
+        assert "body.preset=_moaMeta.preset" in body
+        assert "body.revision=_moaMeta.revision" in body
+
+    def test_agent_rows_meet_touch_targets_and_have_accessible_names(self):
+        idx = PANELS_JS.find("function _renderMoaAgents")
+        body = PANELS_JS[idx:idx + 2600]
+        assert "1fr 1fr 44px" in body
+        assert "minWidth='44px'" in body
+        assert "setAttribute('aria-label'" in body
+        assert "_restoreMoaFocus" in body
