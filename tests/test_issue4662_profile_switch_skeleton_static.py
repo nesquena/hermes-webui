@@ -248,9 +248,9 @@ class TestSwitchRaceGuards:
         # /api/sessions resolves.
         idx = SESSIONS.index("function renderSessionListFromCache(")
         head = SESSIONS[idx: idx + 800]
-        # signature changed to (opts) for the touch-scroll force-bypass guard
-        assert "function renderSessionListFromCache(opts){" in SESSIONS, (
-            "renderSessionListFromCache signature must be (opts) — touch guard needs the force flag"
+        # signature unchanged (many static tests anchor on the empty-paren marker)
+        assert "function renderSessionListFromCache(){" in SESSIONS, (
+            "renderSessionListFromCache signature must stay () — tests anchor on it"
         )
         assert "if(_sessionListSkeletonActive) return;" in head, (
             "renderSessionListFromCache must bail while the profile-switch skeleton is up"

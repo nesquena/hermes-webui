@@ -114,10 +114,16 @@ def test_touch_defer_function_exists():
 
 
 def test_render_session_list_accepts_force_option():
-    """renderSessionListFromCache must accept an opts parameter with force flag."""
-    assert "function renderSessionListFromCache(opts)" in SESSIONS_JS
+    """renderSessionListFromCache must read a force flag from arguments[0].
+
+    The signature stays () (many static tests anchor on the empty-paren
+    marker), but callers can pass {force:true} as a positional arg to
+    bypass the touch scroll guard.
+    """
+    assert "function renderSessionListFromCache(){" in SESSIONS_JS
     fn = _extract_fn(SESSIONS_JS, "renderSessionListFromCache")
-    assert "opts&&opts.force" in fn
+    assert "arguments[0]" in fn
+    assert "force" in fn
     assert "_isSessionListTouchScrolling()" in fn
     assert "_deferRenderSessionListFromCache()" in fn
 
@@ -139,19 +145,22 @@ def test_deferred_timer_cleared_on_render():
 
 
 def test_virtual_scroll_render_uses_force():
-    """The scroll-driven virtual render must bypass the touch guard so rows appear during scroll."""
-    # With virtualization disabled on touch, the scroll listener bails early.
-    # This test verifies the force bypass exists for non-touch virtual scroll.
+    """The scroll-driven virtual render path must exist (desktop path only).
+
+    On touch devices, _scheduleSessionVirtualizedRender bails early — the
+    IntersectionObserver handles incremental appends. On desktop, the scroll
+    listener calls renderSessionListFromCache() to recompute the virtual window.
+    """
     fn = _extract_fn(SESSIONS_JS, "_scheduleSessionVirtualizedRender")
-    assert "{force:true}" in fn, \
-        "Virtual scroll render must use {force:true} so new rows load during scroll"
+    assert "renderSessionListFromCache()" in fn, \
+        "Virtual scroll render must call renderSessionListFromCache()"
 
 
 def test_virtual_resync_render_uses_force():
-    """The post-render virtual window resync must also bypass the touch guard."""
+    """The post-render virtual window resync must exist for scroll correction."""
     fn = _extract_fn(SESSIONS_JS, "_resyncSessionVirtualWindowAfterRender")
-    assert "{force:true}" in fn, \
-        "Virtual resync render must use {force:true} so scroll correction works during touch scroll"
+    assert "renderSessionListFromCache()" in fn, \
+        "Virtual resync render must call renderSessionListFromCache()"
 
 
 def test_virtualization_disabled_on_touch():
@@ -163,6 +172,69 @@ def test_virtualization_disabled_on_touch():
         "_sessionVirtualWindow must use SESSION_TOUCH_INITIAL_BATCH for the initial batch size"
     assert "virtualized:false" in fn, \
         "_sessionVirtualWindow must return virtualized:false on touch devices"
+    assert "batched:true" in fn, \
+        "_sessionVirtualWindow must return batched:true on touch devices so the row loop limits DOM"
+
+
+def test_row_loop_respects_batched_end():
+    """The row rendering loop must respect the batched end limit, not render every row."""
+    # The inWindow check must include batched mode — when batched is true,
+    # only rows [0, end) should be rendered, not every row.
+    assert "!virtualWindow.batched" in SESSIONS_JS, \
+        "Row loop must check batched flag to limit rendered rows"
+
+
+def test_append_touch_batch_exists():
+    """An incremental append function must exist (no innerHTML wipe during scroll)."""
+    assert "function _appendTouchBatch()" in SESSIONS_JS
+    fn = _extract_fn(SESSIONS_JS, "_appendTouchBatch")
+    # Must NOT call renderSessionListFromCache({force:true}) — that wipes innerHTML
+    assert "renderSessionListFromCache({force:true})" not in fn, \
+        "_appendTouchBatch must NOT call renderSessionListFromCache({force:true})"
+    # Must append rows incrementally
+    assert "appendChild" in fn
+    # Must adjust the bottom spacer
+    assert "bottomSpacer" in fn or "after" in fn
+
+
+def test_observer_calls_append_not_full_render():
+    """The IntersectionObserver callback must call _appendTouchBatch, not renderSessionListFromCache."""
+    fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
+    assert "_appendTouchBatch()" in fn, \
+        "Observer must call _appendTouchBatch() for incremental append"
+    # Must NOT call renderSessionListFromCache with force (that wipes innerHTML)
+    assert "renderSessionListFromCache({force:true})" not in fn, \
+        "Observer must NOT call renderSessionListFromCache({force:true})"
+
+
+def test_touch_batch_pending_cleared_on_all_branches():
+    """_touchBatchPending must be cleared on every branch, including the no-op."""
+    fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
+    # When loaded >= total, pending must be set to false
+    assert "_touchBatchPending=false" in fn
+    # When the batch is loaded, pending must be cleared in the microtask
+    assert fn.count("_touchBatchPending=false") >= 2, \
+        "_touchBatchPending must be cleared both on the no-op branch and in the microtask"
+
+
+def test_generation_scoping_exists():
+    """A generation token must exist to invalidate stale observer callbacks."""
+    assert "_sessionTouchGen" in SESSIONS_JS
+    fn = _extract_fn(SESSIONS_JS, "_ensureTouchSentinelObserver")
+    assert "gen" in fn and "_sessionTouchGen" in fn, \
+        "Observer must capture and check generation token"
+    setup = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    assert "_sessionTouchGen++" in setup, \
+        "_setupTouchSentinel must bump the generation token on each setup"
+
+
+def test_intersection_observer_fallback_exists():
+    """A scroll-based fallback must exist for browsers without IntersectionObserver."""
+    fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
+    assert "IntersectionObserver" in fn
+    assert "_touchScrollFallbackRaf" in fn, \
+        "Fallback must use a RAF-based scroll check when IntersectionObserver is absent"
+    assert "requestAnimationFrame" in fn
 
 
 def test_scroll_listener_skips_on_touch():

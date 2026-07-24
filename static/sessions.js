@@ -4248,45 +4248,178 @@ function _deferRenderSessionListFromCache(){
 // Instead of the wipe-and-rebuild virtualization (which kills iOS momentum),
 // we render an initial batch of rows and append more as the user scrolls.
 // An IntersectionObserver on a sentinel div detects when the user reaches
-// the bottom and triggers a re-render with a larger batch. The re-render
-// happens after layout settles (IntersectionObserver fires post-scroll),
-// so momentum is preserved.
+// the bottom and triggers an incremental append — no innerHTML wipe happens
+// during scroll.
 let _touchSentinelObserver=null;
 let _touchBatchPending=false;
+let _sessionTouchGen=0; // generation token — bumped on profile/filter changes
+let _touchScrollFallbackRaf=0;
 
 function _ensureTouchSentinelObserver(list){
   if(!list) return;
   if(!('IntersectionObserver' in window)) return;
   if(_touchSentinelObserver) _touchSentinelObserver.disconnect();
   _touchSentinelObserver=null;
+  const gen=_sessionTouchGen;
   _touchSentinelObserver=new IntersectionObserver((entries)=>{
+    // Reject stale callbacks from a previous view/profile generation
+    if(gen!==_sessionTouchGen) return;
     for(const entry of entries){
       if(entry.isIntersecting&&!_touchBatchPending){
-        _touchBatchPending=true;
-        // Increase the loaded count and re-render. The re-render happens
-        // after the scroll has settled (IntersectionObserver fires post-layout),
-        // so momentum is not interrupted.
         const total=_sessionTouchTotalCount||0;
         const loaded=_sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH;
-        if(loaded<total){
-          _sessionTouchLoadedCount=Math.min(total, loaded+SESSION_TOUCH_BATCH_SIZE);
-          // Use a microtask to avoid blocking the observer callback
-          Promise.resolve().then(()=>{
-            _touchBatchPending=false;
-            const savedScrollTop=list.scrollTop||0;
-            renderSessionListFromCache({force:true});
-            list.scrollTop=savedScrollTop;
-          });
+        if(loaded>=total){
+          _touchBatchPending=false;
+          return;
         }
+        _touchBatchPending=true;
+        _sessionTouchLoadedCount=Math.min(total, loaded+SESSION_TOUCH_BATCH_SIZE);
+        // Use a microtask to avoid blocking the observer callback.
+        // _appendTouchBatch appends only new rows — no innerHTML wipe.
+        Promise.resolve().then(()=>{
+          _touchBatchPending=false;
+          _appendTouchBatch();
+        });
       }
     }
   },{root:list,rootMargin:'200px 0px 0px 0px',threshold:0});
+}
+
+/// Append new session rows to the list without wiping existing DOM.
+/// Uses the flat session-row list and the current touch batch count to
+/// determine which rows are new. Adjusts the bottom spacer to account
+/// for rows not yet rendered.
+function _appendTouchBatch(){
+  const list=_sessionTouchListEl;
+  if(!list) return;
+  const total=_sessionTouchTotalCount||0;
+  const loaded=_sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH;
+  if(loaded>=total) return;
+  // Re-derive the flat session rows from the current cache state.
+  // This is the same partitioning logic as renderSessionListFromCache,
+  // but we only append rows [oldLoaded, loaded) and adjust the bottom spacer.
+  const searchQueryRaw=($('sessionSearch').value||'').trim();
+  const q=searchQueryRaw.toLowerCase();
+  const activeSidForSidebar=_activeSessionIdForSidebar();
+  const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);
+  const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
+  const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  const {
+    profileFiltered,
+    sessionsRaw,
+    archivedCount,
+    webuiReferenceRaw,
+    cliReferenceRaw,
+    webuiSessionsRaw,
+    cliSessionsRaw,
+  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
+  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
+  const isCliView=_sessionSourceFilter==='cli';
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
+  const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
+  const pinned=orderedSessions.filter(s=>s.pinned);
+  const unpinned=orderedSessions.filter(s=>!s.pinned);
+  const now=_serverNowMs();
+  let _groupCollapsed={};
+  try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
+  const groups=[];
+  let curLabel=null,curItems=[];
+  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+  for(const s of unpinned){
+    const ts=_sessionSortTimestampMs(s);
+    const label=_sessionTimeBucketLabel(ts, now);
+    if(label!==curLabel){
+      if(curItems.length) groups.push({label:curLabel,items:curItems});
+      curLabel=label;curItems=[s];
+    } else { curItems.push(s); }
+  }
+  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  const flatSessionRows=[];
+  for(const g of groups){
+    if(_groupCollapsed[g.label]) continue;
+    for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
+  }
+  // Determine how many rows are currently in the DOM (before sentinel).
+  // Count existing session-item rows (skip group headers, spacers, sentinel, etc.)
+  const existingRows=list.querySelectorAll('.session-item[data-sid]');
+  const oldLoaded=existingRows.length;
+  if(loaded<=oldLoaded) return; // nothing to append
+  // Find the sentinel and bottom spacer to insert before
+  let sentinel=list.querySelector('[data-touch-sentinel]');
+  let bottomSpacer=list.querySelector('[data-virtual-spacer="after"]');
+  // Build and append only the new rows [oldLoaded, loaded)
+  let globalSessionRowIndex=0;
+  let appended=0;
+  for(const g of groups){
+    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
+    if(isGroupCollapsed) continue;
+    for(const s of g.items){
+      const rowIndex=globalSessionRowIndex++;
+      if(rowIndex>=oldLoaded&&rowIndex<loaded){
+        // Find or create the group wrapper and body for this group
+        let wrapper=list.querySelector('.session-date-group[data-group-label="'+g.label+'"]');
+        let body;
+        if(!wrapper){
+          wrapper=document.createElement('div');
+          wrapper.className='session-date-group';
+          wrapper.setAttribute('data-group-label',g.label);
+          const hdr=document.createElement('div');
+          hdr.className='session-date-header'+(g.isPinned?' pinned':'');
+          const caret=document.createElement('span');
+          caret.className='session-date-caret';
+          caret.textContent='\u25BE';
+          const label=document.createElement('span');
+          label.textContent=g.label;
+          hdr.appendChild(caret);hdr.appendChild(label);
+          body=document.createElement('div');
+          body.className='session-date-body';
+          hdr.onclick=()=>{
+            const isCollapsed=body.style.display==='none';
+            body.style.display=isCollapsed?'':'none';
+            caret.classList.toggle('collapsed',!isCollapsed);
+            _groupCollapsed[g.label]=!isCollapsed;
+            try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}
+            renderSessionListFromCache();
+          };
+          wrapper.appendChild(hdr);
+          wrapper.appendChild(body);
+          if(sentinel) list.insertBefore(wrapper,sentinel);
+          else if(bottomSpacer) list.insertBefore(wrapper,bottomSpacer);
+          else list.appendChild(wrapper);
+        } else {
+          body=wrapper.querySelector('.session-date-body');
+        }
+        if(body){
+          body.appendChild(_renderOneSession(s, Boolean(g.isPinned)));
+          appended++;
+        }
+      }
+    }
+  }
+  // Update the bottom spacer to reflect remaining unrendered rows
+  if(bottomSpacer){
+    const remaining=Math.max(0,total-loaded);
+    bottomSpacer.style.height=(remaining*SESSION_VIRTUAL_ROW_HEIGHT)+'px';
+  }
+  // Update sentinel visibility
+  if(sentinel){
+    if(loaded>=total){
+      sentinel.style.display='none';
+      if(_touchSentinelObserver) _touchSentinelObserver.unobserve(sentinel);
+    } else {
+      sentinel.style.display='';
+      sentinel.textContent='Loading more…';
+      if(_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+    }
+  }
 }
 
 function _setupTouchSentinel(list, total){
   if(!list||!_isTouchPrimary()) return;
   _sessionTouchListEl=list;
   _sessionTouchTotalCount=total;
+  _sessionTouchGen++; // bump generation to invalidate stale observer callbacks
   _ensureTouchSentinelObserver(list);
   // Find or create the sentinel
   let sentinel=list.querySelector('[data-touch-sentinel]');
@@ -4304,6 +4437,27 @@ function _setupTouchSentinel(list, total){
     sentinel.style.display='';
     sentinel.textContent='Loading more…';
     if(_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+  }
+  // Fallback for browsers without IntersectionObserver: use scroll position
+  // to detect when the user is near the bottom and append more rows.
+  if(!('IntersectionObserver' in window)){
+    if(_touchScrollFallbackRaf) cancelAnimationFrame(_touchScrollFallbackRaf);
+    _touchScrollFallbackRaf=requestAnimationFrame(function check(){
+      if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+      const el=_sessionTouchListEl;
+      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
+      const t=_sessionTouchTotalCount||0;
+      const l=_sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH;
+      if(nearBottom&&l<t&&!_touchBatchPending){
+        _touchBatchPending=true;
+        _sessionTouchLoadedCount=Math.min(t,l+SESSION_TOUCH_BATCH_SIZE);
+        Promise.resolve().then(()=>{
+          _touchBatchPending=false;
+          _appendTouchBatch();
+        });
+      }
+      _touchScrollFallbackRaf=requestAnimationFrame(check);
+    });
   }
 }
 
@@ -6058,9 +6212,9 @@ function _sessionVirtualWindow(opts){
   // initial batch, then append more rows on scroll without wiping innerHTML.
   // The "window" is always [0, loadedCount) — rows are never removed, only
   // appended. The scroll listener calls _appendTouchBatch() to grow it.
-  if(_isTouchPrimary()){
+  if(typeof _isTouchPrimary==='function'&&_isTouchPrimary()){
     const loadedCount=Math.min(total, _sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH);
-    return {virtualized:false,start:0,end:loadedCount,topPad:0,bottomPad:Math.max(0,(total-loadedCount)*itemHeight),itemHeight,total};
+    return {virtualized:false,batched:true,start:0,end:loadedCount,topPad:0,bottomPad:Math.max(0,(total-loadedCount)*itemHeight),itemHeight,total};
   }
   if(total<=threshold){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
@@ -6134,7 +6288,7 @@ function _scheduleSessionVirtualizedRender(){
       const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
       if(nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
     }
-    renderSessionListFromCache({force:true});
+    renderSessionListFromCache();
   });
 }
 
@@ -6179,7 +6333,7 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
     const actualScrollTop=Number(list.scrollTop)||0;
     const tolerance=Math.max(2, Number(virtualWindow.itemHeight||SESSION_VIRTUAL_ROW_HEIGHT)/2);
     if(Math.abs(actualScrollTop-expectedScrollTop)<=tolerance) return;
-    renderSessionListFromCache({force:true});
+    renderSessionListFromCache();
   });
 }
 
@@ -6343,7 +6497,7 @@ function _attachProjectQuickCreateButton(chip, project){
 }
 
 
-function renderSessionListFromCache(opts){
+function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
   // PREVIOUS profile's rows until /api/sessions resolves, so any unrelated caller
   // (sidebar SSE syncs, stream/unread updates, gateway-poll timers, panel-resync
@@ -6364,7 +6518,8 @@ function renderSessionListFromCache(opts){
   // be scrolled further until a fresh touch starts. Defer background renders
   // (SSE syncs, unread updates, gateway polls) until the user stops scrolling.
   // Direct user actions pass {force:true} to bypass.
-  if(!(opts&&opts.force)&&_isSessionListTouchScrolling()){
+  var _opts=arguments[0];
+  if(!(_opts&&_opts.force)&&_isSessionListTouchScrolling()){
     _deferRenderSessionListFromCache();
     return;
   }
@@ -6747,7 +6902,7 @@ function renderSessionListFromCache(opts){
     for(const s of g.items){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
-      const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
+      const inWindow=!virtualWindow.virtualized&&!virtualWindow.batched||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
       if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
       else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
       else { groupBottomPad+=virtualWindow.itemHeight; }
