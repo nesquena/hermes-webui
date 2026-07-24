@@ -93,25 +93,8 @@ def _reset_skills_hub_state():
     from api import skills_hub_actions as sha
 
     def _reset():
-        with sha._STATE_LOCK:
-            sha._STATE.update(
-                {
-                    "action": None,
-                    "target": None,
-                    "status": "idle",
-                    "started_at": None,
-                    "finished_at": None,
-                    "returncode": None,
-                    "log": "",
-                    "error": None,
-                    "scan_result": None,
-                }
-            )
-        if sha._ACTION_LOCK.locked():
-            try:
-                sha._ACTION_LOCK.release()
-            except RuntimeError:
-                pass
+        with sha._REGISTRY_LOCK:
+            sha._PROFILES.clear()
 
     _reset()
     yield
@@ -123,7 +106,7 @@ def _wait_until_not_running(timeout=5.0):
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = sha.get_status()
+        status = sha.get_status("default")
         if status["status"] != "running":
             return status
         time.sleep(0.02)
@@ -203,8 +186,9 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
     parsed_scan_result = sha.parse_scan_report(raw_log)
     assert parsed_scan_result is not None
     assert parsed_scan_result["decision_reason"] == "synthetic-decision-marker"
-    with sha._STATE_LOCK:
-        sha._STATE.update(
+    hub = sha._profile_hub("default")
+    with hub.state_lock:
+        hub.state.update(
             {
                 "status": "failed",
                 "log": raw_log,
@@ -213,7 +197,7 @@ def test_hub_status_redacts_scan_transcripts_and_common_credentials(monkeypatch)
             }
         )
 
-    direct = sha.get_status()
+    direct = sha.get_status("default")
     handler = _call_get(monkeypatch, "/api/skills/hub/status")
     routed = handler.get_json()
 
@@ -462,44 +446,30 @@ def test_hub_install_action_uses_yes_flag_and_no_stdin_interaction(monkeypatch, 
     assert kwargs["stdin"] == subprocess.DEVNULL
 
 
-def test_hub_install_force_flag_forwarded(monkeypatch, tmp_path):
-    from api import profiles, skills_hub_actions as sha
-
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    spawned = []
-    fake_proc = _make_fake_popen(["x\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append(cmd))
-    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
-
-    _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "id", "force": True})
-    _wait_until_not_running()
-    assert "--force" in spawned[0]
-
-
-@pytest.mark.parametrize(
-    ("provided_force", "expected_force"),
-    [(False, False), ("false", False), (0, False), (1, False), ("0", False), (None, False), (True, True)],
-)
-def test_hub_install_route_forwards_only_json_boolean_true_as_force(monkeypatch, provided_force, expected_force):
-    """Exercise the real POST route, not its source text, at the force seam."""
+@pytest.mark.parametrize("provided_force", [True, False, "false", 0, 1, "0", None])
+def test_hub_route_rejects_any_client_force(monkeypatch, provided_force):
+    """Gate finding 1: security verdicts cannot be overridden from the
+    browser. ANY force key -- even falsey -- is rejected with 400 so no
+    cached client keeps believing the seam exists."""
     from api import skills_hub_actions as sha
 
     monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
-    forwarded = []
-
-    def fake_start_action(action, target, **kwargs):
-        forwarded.append((action, target, kwargs["force"]))
-        return True, {"status": "running"}
-
-    monkeypatch.setattr(sha, "start_action", fake_start_action)
+    called = []
+    monkeypatch.setattr(sha, "start_action", lambda *a, **k: called.append(1) or (True, {}))
     handler, _data = _call_post(
         monkeypatch,
         "/api/skills/hub/install",
         {"identifier": "example", "force": provided_force},
     )
+    assert handler.status == 400
+    assert called == []
 
-    assert handler.status == 200
-    assert forwarded == [("install", "example", expected_force)]
+
+def test_hub_install_command_never_contains_force(monkeypatch, tmp_path):
+    from api import skills_hub_actions as sha
+
+    cmd = sha._command_for_action("install", "id", category="docs")
+    assert "--force" not in cmd
 
 
 def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):
@@ -508,7 +478,7 @@ def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
-    fake_proc = _make_fake_popen(["Removed pdf\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw)))
+    fake_proc = _make_fake_popen(["Uninstalled 'pdf' from skills/user/pdf\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw)))
     monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
 
     handler, data = _call_post(monkeypatch, "/api/skills/hub/uninstall", {"name": "pdf"})
@@ -522,23 +492,88 @@ def test_hub_uninstall_action_preanswers_stdin_y(monkeypatch, tmp_path):
     assert kwargs["stdin"] == subprocess.PIPE
 
 
-def test_hub_update_action_no_stdin_interaction(monkeypatch, tmp_path):
+_ALLOWED_SCAN_TRANSCRIPT = (
+    "Scan: pdf (skills-sh/anthropics/skills/pdf/trusted) Verdict: SAFE\n"
+    "Decision: ALLOWED \u2014 Allowed (trusted source, safe verdict)\n"
+)
+_BLOCKED_SCAN_TRANSCRIPT = (
+    "Scan: evil (skills-sh/x/evil/community) Verdict: DANGEROUS\n"
+    "Decision: BLOCKED \u2014 Dangerous verdict from community source\n"
+)
+
+
+def _make_phase_popen(transcripts, spawned):
+    """Fake Popen returning the next canned transcript per spawn."""
+    calls = {"n": 0}
+
+    def factory(cmd, **kwargs):
+        idx = min(calls["n"], len(transcripts) - 1)
+        calls["n"] += 1
+        spawned.append((cmd, kwargs))
+        return _make_fake_popen([transcripts[idx]], returncode=0)(cmd, **kwargs)
+
+    return factory
+
+
+def test_hub_update_requires_identifier(monkeypatch):
+    from api import skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/update", {"name": "pdf"})
+    assert handler.status == 400
+    assert "identifier" in (data.get("error") or "")
+
+
+def test_hub_update_is_scan_gated_and_two_phase(monkeypatch, tmp_path):
+    """Gate finding 1: update runs a NON-FORCE scan first; the update CLI is
+    invoked only after Decision ALLOWED."""
     from api import profiles, skills_hub_actions as sha
 
     monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
-    fake_proc = _make_fake_popen(["No updates available.\n"], returncode=0, on_spawn=lambda cmd, kw: spawned.append((cmd, kw)))
-    monkeypatch.setattr(sha.subprocess, "Popen", fake_proc)
-
-    handler, data = _call_post(monkeypatch, "/api/skills/hub/update", {})
+    monkeypatch.setattr(
+        sha.subprocess,
+        "Popen",
+        _make_phase_popen([_ALLOWED_SCAN_TRANSCRIPT, "Updated 1 skill(s).\n"], spawned),
+    )
+    handler, _ = _call_post(
+        monkeypatch, "/api/skills/hub/update",
+        {"name": "pdf", "identifier": "anthropics/skills/pdf"},
+    )
     assert handler.status == 200
     final = _wait_until_not_running()
     assert final["status"] == "completed"
+    assert len(spawned) == 2
+    scan_cmd, _sk = spawned[0]
+    update_cmd, update_kw = spawned[1]
+    assert "install" in scan_cmd and "--yes" not in scan_cmd and "--force" not in scan_cmd
+    assert update_cmd[-4:-2] == ["skills", "update"] or "update" in update_cmd
+    assert update_kw["stdin"] == subprocess.DEVNULL
 
-    cmd, kwargs = spawned[0]
-    assert cmd[-2:] == ["skills", "update"]
-    assert kwargs["stdin"] == subprocess.DEVNULL
+
+def test_hub_update_blocked_scan_never_invokes_update_cli(monkeypatch, tmp_path):
+    """A denial leaves the installed tree untouched: only ONE subprocess
+    (the scan) ever runs, and the action fails."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    spawned = []
+    monkeypatch.setattr(
+        sha.subprocess,
+        "Popen",
+        _make_phase_popen([_BLOCKED_SCAN_TRANSCRIPT], spawned),
+    )
+    handler, _ = _call_post(
+        monkeypatch, "/api/skills/hub/update",
+        {"name": "evil", "identifier": "x/evil"},
+    )
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "failed"
+    assert "refused" in (final.get("error") or "").lower()
+    assert len(spawned) == 1, "the update CLI must never run after a denial"
 
 
 def test_hub_action_failure_is_reported(monkeypatch, tmp_path):
@@ -578,7 +613,7 @@ def test_hub_action_lock_is_released_when_profile_home_resolution_raises(monkeyp
     with pytest.raises(RuntimeError):
         sha.start_action("scan", "some-identifier")
 
-    assert not sha._ACTION_LOCK.locked(), "lock leaked after get_active_hermes_home() raised"
+    assert sha._profile_hub("default").running is False, "slot leaked after get_active_hermes_home() raised"
 
     # Prove the leak doesn't linger: a normal call right after must still work.
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
@@ -650,13 +685,13 @@ def test_hub_command_uses_double_dash_for_leading_dash_targets():
     scan_cmd = _command_for_action("scan", dashy)
     assert scan_cmd[-2:] == ["--", dashy]
 
-    install_cmd = _command_for_action("install", dashy, category="-docs", name_override="-n", force=True)
+    install_cmd = _command_for_action("install", dashy, category="-docs", name_override="-n")
     assert install_cmd[-2:] == ["--", dashy]
     # The real flags must all precede "--" so they're still parsed as
     # options, not swallowed as extra positionals after it.
     dd_index = install_cmd.index("--")
     assert "--yes" in install_cmd[:dd_index]
-    assert "--force" in install_cmd[:dd_index]
+    assert "--force" not in install_cmd  # gone entirely (gate finding 1)
     assert "--category" in install_cmd[:dd_index] and "-docs" in install_cmd[:dd_index]
     assert "--name" in install_cmd[:dd_index] and "-n" in install_cmd[:dd_index]
 
@@ -684,12 +719,15 @@ def test_hub_action_contention_returns_409_without_spawning(monkeypatch, tmp_pat
         _make_fake_popen(["x\n"], on_spawn=lambda cmd, kw: spawned.append(cmd)),
     )
 
-    acquired = sha._ACTION_LOCK.acquire(blocking=False)
-    assert acquired, "lock should be free at test start"
+    hub = sha._profile_hub("default")
+    with hub.state_lock:
+        assert hub.running is False, "slot should be free at test start"
+        hub.running = True
     try:
         handler, data = _call_post(monkeypatch, "/api/skills/hub/scan", {"identifier": "x"})
     finally:
-        sha._ACTION_LOCK.release()
+        with hub.state_lock:
+            hub.running = False
 
     assert handler.status == 409
     assert data["allowed"] is True
@@ -735,3 +773,122 @@ def test_skills_hub_html_has_tab_and_views():
     assert 'id="skillsHubView"' in html
     assert 'id="skillsMineView"' in html
     assert "switchSkillsTab('hub')" in html
+
+
+# ── Gate follow-ups: profile isolation, rc-0 business errors, auth boundary ──
+
+
+def test_two_profiles_have_isolated_status_and_slots(monkeypatch, tmp_path):
+    """Gate finding 3: profile B neither sees profile A's run state nor is
+    blocked by A's slot."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    hub_a = sha._profile_hub("profile-a")
+    with hub_a.state_lock:
+        hub_a.running = True
+        hub_a.state.update({
+            "action": "install", "target": "secret/skill", "status": "running",
+            "log": "sensitive transcript", "scan_result": None,
+        })
+
+    b_status = sha.get_status("profile-b")
+    assert b_status["status"] == "idle"
+    assert b_status["log"] == ""
+    assert b_status["target"] is None
+
+    # B can start its own action while A's slot is held.
+    monkeypatch.setattr(
+        sha.subprocess, "Popen",
+        _make_fake_popen([
+            "Scan: x (skills-sh/x/trusted) Verdict: SAFE\n"
+            "Decision: ALLOWED — ok\n"
+        ], returncode=0),
+    )
+    started, _ = sha.start_action("scan", "x", profile="profile-b")
+    assert started is True
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if sha.get_status("profile-b")["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert sha.get_status("profile-b")["status"] in ("completed", "failed")
+    # A's state is untouched throughout.
+    assert sha.get_status("profile-a")["status"] == "running"
+
+
+@pytest.mark.parametrize("action,transcript,expected_error_fragment", [
+    ("install", "Warning: 'pdf' is already installed at skills/user/pdf\n", "Already installed"),
+    ("install", "Failed to fetch bundle: network unreachable\n", "no completed install"),
+    ("uninstall", "'ghost' is not a hub-installed skill (may be a builtin)\n", "nothing was removed"),
+])
+def test_rc0_business_failures_are_failures(monkeypatch, tmp_path, action, transcript, expected_error_fragment):
+    """Gate finding 2: the CLI exits 0 for business failures — completion
+    requires the CLI's own positive success evidence, not the return code."""
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen([transcript], returncode=0))
+
+    target_field = "identifier" if action == "install" else "name"
+    handler, _ = _call_post(monkeypatch, f"/api/skills/hub/{action}", {target_field: "pdf" if action == "install" else "ghost"})
+    assert handler.status == 200
+    final = _wait_until_not_running()
+    assert final["status"] == "failed", final
+    assert expected_error_fragment.lower() in (final.get("error") or "").lower()
+
+
+def test_rc0_with_real_success_evidence_completes(monkeypatch, tmp_path):
+    from api import profiles, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        sha.subprocess, "Popen",
+        _make_fake_popen(["Installed: user/pdf\n"], returncode=0),
+    )
+    handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "pdf"})
+    assert handler.status == 200
+    assert _wait_until_not_running()["status"] == "completed"
+
+
+def test_remote_unauthenticated_mutation_is_denied(monkeypatch):
+    """Gate finding 4: the write flag is a capability switch, not an auth
+    boundary — a remote request without a trusted session gets 401 even
+    with the flag enabled."""
+    from api import routes
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+
+    def _reject(handler):
+        handler._trusted_auth_session_rejected = True
+        return None
+
+    monkeypatch.setattr("api.auth.ensure_trusted_auth_session", _reject)
+    monkeypatch.setattr(routes, "_onboarding_request_is_local", lambda handler: False)
+    called = []
+    monkeypatch.setattr(
+        "api.skills_hub_actions.start_action",
+        lambda *a, **k: called.append(1) or (True, {}),
+    )
+    handler, data = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "x"})
+    assert handler.status == 401
+    assert called == []
+
+
+def test_local_unauthenticated_mutation_is_allowed(monkeypatch, tmp_path):
+    from api import profiles, routes, skills_hub_actions as sha
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    def _reject(handler):
+        handler._trusted_auth_session_rejected = True
+        return None
+
+    monkeypatch.setattr("api.auth.ensure_trusted_auth_session", _reject)
+    monkeypatch.setattr(routes, "_onboarding_request_is_local", lambda handler: True)
+    monkeypatch.setattr(sha.subprocess, "Popen", _make_fake_popen(["Installed: x\n"], returncode=0))
+    handler, _ = _call_post(monkeypatch, "/api/skills/hub/install", {"identifier": "x"})
+    assert handler.status == 200

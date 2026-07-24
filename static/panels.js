@@ -4907,6 +4907,20 @@ let _skillsHubResults = [];
 let _skillsHubInstalled = [];
 let _skillsHubScanResults = {}; // identifier -> parsed scan_result
 let _skillsHubPollTimer = null;
+let _skillsHubGeneration = 0; // bumped on profile switch: stale async fills are dropped
+function resetSkillsHubClientState() {
+  // Gate finding 3 (client half): a profile switch must not leave the prior
+  // profile's search results, installed rows, scan verdicts, or action
+  // buttons rendered/actionable. The generation counter invalidates every
+  // in-flight async fill from the old profile.
+  _skillsHubGeneration += 1;
+  _skillsHubLoadedOnce = false;
+  _skillsHubResults = [];
+  _skillsHubInstalled = [];
+  _skillsHubScanResults = {};
+  _skillsHubLastAction = null;
+  if (_skillsHubPollTimer) { clearInterval(_skillsHubPollTimer); _skillsHubPollTimer = null; }
+}
 let _skillsHubAllowed = true; // optimistic default; corrected by the first /status poll
 let _skillsHubLastAction = null;
 
@@ -4945,8 +4959,10 @@ function _skillsHubVerdictBadge(verdict) {
 async function loadSkillsHubInstalled() {
   const box = $('skillsHubInstalledList');
   if (!box) return;
+  const gen = _skillsHubGeneration;
   try {
     const data = await api('/api/skills/hub/installed', {timeoutToast:false});
+    if (gen !== _skillsHubGeneration) return; // profile switched mid-flight
     _skillsHubInstalled = data.installed || [];
     renderSkillsHubInstalled();
   } catch (e) {
@@ -4988,8 +5004,10 @@ async function searchSkillsHub() {
   if (!box) return;
   if (!query) { box.innerHTML = `<div style="color:var(--muted);font-size:12px">${esc(t('skills_hub_search_hint'))}</div>`; return; }
   box.innerHTML = `<div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>`;
+  const gen = _skillsHubGeneration;
   try {
     const data = await api(`/api/skills/hub/search?q=${encodeURIComponent(query)}&limit=20`, {timeoutMs:40000, timeoutToast:false});
+    if (gen !== _skillsHubGeneration) return; // profile switched mid-flight
     _skillsHubResults = data.results || [];
     renderSkillsHubResults();
   } catch (e) {
@@ -5120,28 +5138,36 @@ async function installSkillsHubResult(identifier) {
   const scan = _skillsHubScanResults[identifier];
   let message = t('skills_hub_confirm_install');
   let danger = false;
-  let force = false;
   if (scan && (scan.verdict === 'dangerous' || scan.decision === 'BLOCKED')) {
-    message = t('skills_hub_confirm_install_blocked').replace('{reason}', scan.decision_reason || '');
-    danger = true;
-    force = true; // the only path that can proceed past a blocked verdict
+    // Gate finding 1: the browser can no longer override a security
+    // verdict -- there is no force path. Blocked stays blocked.
+    if (typeof showToast === 'function') showToast(t('skills_hub_install_blocked_toast') || 'Blocked by the security scan.', 5000, 'error');
+    return;
   } else if (!scan) {
     message = t('skills_hub_confirm_install_unscanned');
   } else if (scan.verdict === 'caution' || scan.decision === 'NEEDS CONFIRMATION') {
     message = t('skills_hub_confirm_install_caution').replace('{reason}', scan.decision_reason || '');
+    danger = true;
   }
   const confirmed = await showConfirmDialog({title:t('skills_hub_install'), message, danger, confirmLabel:t('skills_hub_install')});
   if (!confirmed) return;
   try {
-    const result = await _startSkillsHubAction('install', {identifier, force});
+    const result = await _startSkillsHubAction('install', {identifier});
     renderSkillsHubActionStatus(result);
     _syncSkillsHubPolling(result);
   } catch (e) { _skillsHubActionErrorToast(e); }
 }
 
 async function updateSkillsHubSkill(name) {
+  // Verified update (gate finding 1): the server scan-gates the update and
+  // needs the installed skill's hub identifier for the scan phase.
+  const row = (_skillsHubInstalled || []).find(e => e && e.name === name) || {};
+  if (!row.identifier) {
+    if (typeof showToast === 'function') showToast(t('skills_hub_update_no_identifier') || 'Cannot verify this skill (no hub identifier recorded); update refused.', 5000, 'error');
+    return;
+  }
   try {
-    const result = await _startSkillsHubAction('update', {name});
+    const result = await _startSkillsHubAction('update', {name, identifier: row.identifier});
     renderSkillsHubActionStatus(result);
     _syncSkillsHubPolling(result);
   } catch (e) { _skillsHubActionErrorToast(e); }
@@ -7307,6 +7333,7 @@ async function switchToProfile(name) {
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
+    if (typeof resetSkillsHubClientState === 'function') resetSkillsHubClientState();
     _workspaceList = null;
     if (data.default_model) window._defaultModel = data.default_model;
     if (data.default_model_provider) window._activeProvider = data.default_model_provider;

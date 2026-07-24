@@ -13683,9 +13683,12 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"installed": list_installed_hub_skills(_active_skills_dir())})
 
     if parsed.path == "/api/skills/hub/status":
+        from api.profiles import get_active_profile_name as _hub_profile
         from api.skills_hub_actions import get_status
 
-        status = get_status()
+        # Profile-owned (gate finding 3): only the requesting profile's own
+        # target/log/error/scan metadata is ever returned.
+        status = get_status(_hub_profile())
         status["allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE")
         return j(handler, status)
 
@@ -15593,6 +15596,17 @@ def handle_post(handler, parsed) -> bool:
                 {"error": _SKILLS_HUB_GATE_MESSAGE, "allowed": False},
                 status=403,
             )
+        # Gate finding 4: the feature flag is a capability switch, not an
+        # authentication boundary. Every mutation additionally requires an
+        # authenticated trusted session OR a spoof-resistant local request
+        # (the same posture as the other subprocess-backed mutation
+        # surfaces) -- a remotely reachable passwordless deployment with the
+        # flag on no longer exposes install/update/uninstall.
+        from api.auth import ensure_trusted_auth_session
+
+        ensure_trusted_auth_session(handler)
+        if getattr(handler, "_trusted_auth_session_rejected", False) and not _onboarding_request_is_local(handler):
+            return bad(handler, "Authentication required", 401)
         action = _SKILLS_HUB_ACTION_BY_PATH[parsed.path]
         if action in ("scan", "install"):
             target = str(body.get("identifier", "")).strip()
@@ -15601,7 +15615,12 @@ def handle_post(handler, parsed) -> bool:
         if action in ("scan", "install", "uninstall") and not target:
             field = "identifier" if action in ("scan", "install") else "name"
             return bad(handler, f"{field} is required", 400)
+        # Gate finding 1: client-supplied force is gone -- reject instead of
+        # ignore so no cached client keeps believing it works.
+        if "force" in body:
+            return bad(handler, "'force' is not accepted; security verdicts cannot be overridden from the browser", 400)
 
+        from api.profiles import get_active_profile_name as _hub_profile
         from api.skills_hub_actions import start_action
 
         try:
@@ -15610,7 +15629,8 @@ def handle_post(handler, parsed) -> bool:
                 target,
                 category=str(body.get("category", "") or "").strip(),
                 name_override=str(body.get("name_override", "") or "").strip(),
-                force=body.get("force") is True,
+                identifier=str(body.get("identifier", "") or "").strip(),
+                profile=_hub_profile(),
             )
         except ValueError as exc:
             return bad(handler, str(exc), 400)

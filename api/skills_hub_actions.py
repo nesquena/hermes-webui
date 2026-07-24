@@ -63,12 +63,13 @@ _AUTHORIZATION_BASIC_RE = re.compile(r"(?i)\bauthorization\s*:\s*basic\s+[^\s,;]
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _COOKIE_HEADER_RE = re.compile(r"(?i)\b(?:set-)?cookie\s*:\s*[^\r\n]+")
 
-# Held for the lifetime of a running scan/install/update/uninstall. Search is
-# read-only and stateless, so it does not take this lock.
-_ACTION_LOCK = threading.Lock()
-_STATE_LOCK = threading.Lock()
+# Per-profile run state (gate finding 3): action status/log/scan metadata are
+# owned by the profile that started the run — another profile neither sees
+# them nor is blocked by them (each profile home is an independent skills
+# store, so cross-profile serialization would only couple unrelated stores).
+_REGISTRY_LOCK = threading.Lock()
 
-_STATE: dict = {
+_IDLE_STATE: dict = {
     "action": None,
     "target": None,  # identifier (scan/install) or name (uninstall/update)
     "status": "idle",  # idle | running | completed | failed | timeout
@@ -79,6 +80,69 @@ _STATE: dict = {
     "error": None,
     "scan_result": None,  # populated whenever the transcript contains a scan report
 }
+
+
+class _ProfileHub:
+    def __init__(self, profile: str) -> None:
+        self.profile = profile
+        self.state_lock = threading.Lock()
+        self.state = dict(_IDLE_STATE)
+        self.running = False
+
+
+_PROFILES: dict[str, _ProfileHub] = {}
+
+
+def _profile_hub(profile: str) -> _ProfileHub:
+    key = str(profile or "default")
+    with _REGISTRY_LOCK:
+        hub = _PROFILES.get(key)
+        if hub is None:
+            hub = _ProfileHub(key)
+            _PROFILES[key] = hub
+        return hub
+
+
+# ── Evidence-based completion (gate finding 2): the CLI exits 0 for fetch
+# failures, scanner blocks, already-installed no-ops and invalid uninstall
+# targets, so the return code alone is NOT authority. An action counts as
+# completed only with the CLI's own positive success evidence in the
+# transcript; blocked/no-op/evidence-less runs fail. All markers below are
+# the CLI's real output strings (hermes_cli/skills_hub.py / tools/skills_hub.py).
+_UPDATED_RE = re.compile(r"Updated (\d+) skill\(s\)")
+
+
+def _evaluate_outcome(action: str, log: str, scan_result) -> tuple[bool, str | None]:
+    """Return (ok, error). rc==0 and no timeout are already established."""
+    decision = (scan_result or {}).get("decision") if isinstance(scan_result, dict) else None
+    if action == "scan":
+        if scan_result is not None:
+            return True, None
+        return False, "The CLI produced no scan report for this identifier."
+    if action == "install":
+        if decision == "BLOCKED":
+            return False, "Blocked by the security scan."
+        if "Installed:" in log:
+            return True, None
+        if "is already installed at" in log:
+            return False, "Already installed — nothing was changed."
+        return False, "The CLI reported no completed install."
+    if action == "update":
+        m = _UPDATED_RE.search(log)
+        if m and int(m.group(1)) > 0:
+            return True, None
+        if "No updates available." in log:
+            return False, "No updates available — nothing was changed."
+        if decision == "BLOCKED":
+            return False, "Update blocked by the security scan."
+        return False, "The CLI reported no completed update."
+    if action == "uninstall":
+        if "Uninstalled '" in log:
+            return True, None
+        if "is not a hub-installed skill" in log:
+            return False, "Not a hub-installed skill — nothing was removed."
+        return False, "The CLI reported no completed uninstall."
+    return False, f"Unknown action {action!r}"
 
 
 def _resolve_hermes_command() -> str:
@@ -98,7 +162,6 @@ def _command_for_action(
     *,
     category: str = "",
     name_override: str = "",
-    force: bool = False,
 ) -> list[str]:
     hermes_cmd = _resolve_hermes_command()
     # "--" marks the end of option parsing for argparse, so identifier/name
@@ -116,9 +179,10 @@ def _command_for_action(
         # confirm prompt. Never installs anything on its own.
         return [hermes_cmd, "skills", "install", "--", target]
     if action == "install":
+        # NO --force, ever (gate finding 1): the browser must not be able to
+        # override a security verdict. Replacement flows go through the
+        # scan-gated update pipeline instead.
         cmd = [hermes_cmd, "skills", "install", "--yes"]
-        if force:
-            cmd.append("--force")
         if category:
             cmd.extend(["--category", category])
         if name_override:
@@ -403,21 +467,23 @@ def list_installed_hub_skills(skills_dir: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _append_log(text: str) -> None:
+def _append_log(hub: "_ProfileHub", gen: int, text: str) -> None:
     if not text:
         return
-    with _STATE_LOCK:
-        _STATE["log"] += text
-        if len(_STATE["log"]) > _LOG_TAIL_MAX_CHARS:
-            _STATE["log"] = _STATE["log"][-_LOG_TAIL_MAX_CHARS:]
+    with hub.state_lock:
+        if hub.state.get("_gen") != gen:
+            return  # late reader from a superseded run: never poison new state
+        hub.state["log"] += text
+        if len(hub.state["log"]) > _LOG_TAIL_MAX_CHARS:
+            hub.state["log"] = hub.state["log"][-_LOG_TAIL_MAX_CHARS:]
 
 
-def _drain_stdout(stream) -> None:
+def _drain_stdout(hub: "_ProfileHub", gen: int, stream) -> None:
     try:
         for line in iter(stream.readline, ""):
             if not line:
                 break
-            _append_log(line)
+            _append_log(hub, gen, line)
     except Exception:
         logger.debug("skills hub log reader failed", exc_info=True)
     finally:
@@ -427,9 +493,19 @@ def _drain_stdout(stream) -> None:
             pass
 
 
-def get_status() -> dict:
-    with _STATE_LOCK:
-        return _safe_status_projection(_STATE)
+def _busy_snapshot() -> dict:
+    """What one profile may learn about ANOTHER profile's world: nothing.
+    Each profile has its own slot; this envelope only exists for legacy
+    callers that query without a resolvable profile."""
+    return {"status": "busy", "busy": True}
+
+
+def get_status(profile: str) -> dict:
+    hub = _profile_hub(profile)
+    with hub.state_lock:
+        snapshot = dict(hub.state)
+    snapshot.pop("_gen", None)
+    return _safe_status_projection(snapshot)
 
 
 def start_action(
@@ -438,12 +514,21 @@ def start_action(
     *,
     category: str = "",
     name_override: str = "",
-    force: bool = False,
+    identifier: str = "",
+    profile: str = "default",
 ) -> tuple[bool, dict]:
-    """Start *action* in the background if no other hub action is running.
+    """Start *action* for *profile* if that profile's slot is free.
 
-    Returns ``(started, status_snapshot)``; ``started=False`` means another
-    hub action is already running and the caller should respond 409.
+    Single-flight PER PROFILE (gate finding 3): profiles neither see nor
+    block each other — their skill stores are independent. Returns
+    ``(started, status_snapshot)``; ``started=False`` → HTTP 409 with the
+    caller's OWN state.
+
+    ``update`` runs a two-phase, fail-closed pipeline (gate finding 1): a
+    plain scan of the installed skill's identifier first, and the actual
+    update only when the scanner's NON-FORCE decision is ALLOWED — the
+    browser can never override a security verdict, and a denial leaves the
+    installed tree untouched because the update CLI is never invoked.
     """
     if action not in ACTIONS:
         raise ValueError(f"unsupported hub action: {action!r}")
@@ -451,9 +536,21 @@ def start_action(
         raise ValueError("identifier is required")
     if action == "uninstall" and not target:
         raise ValueError("name is required")
+    if action == "update" and not identifier:
+        raise ValueError(
+            "identifier is required for a verified update (the scan phase "
+            "needs the hub identifier of the installed skill)"
+        )
 
-    if not _ACTION_LOCK.acquire(blocking=False):
-        return False, get_status()
+    hub = _profile_hub(profile)
+    with hub.state_lock:
+        if hub.running:
+            already = True
+        else:
+            hub.running = True
+            already = False
+    if already:
+        return False, get_status(profile)
 
     # Imported locally (not at module load) so the active profile is always
     # resolved fresh -- see the module docstring's SKILLS_DIR warning, and
@@ -461,17 +558,31 @@ def start_action(
     from api.profiles import get_active_hermes_home
 
     # get_active_hermes_home() can raise (profile resolution failure) just
-    # like the command-building call below -- both must stay inside this
-    # try/except. If it raised outside of it, the lock acquired above would
-    # never be released, and every subsequent hub action would 409 forever
-    # until the WebUI process restarts.
+    # like the command-building calls below -- both must stay inside this
+    # try/except so the slot reserved above is always released on failure.
     try:
         hermes_home = Path(get_active_hermes_home())
-        cmd = _command_for_action(
-            action, target, category=category, name_override=name_override, force=force
-        )
+        phases: list[tuple[str, list[str], str | None]] = []
+        if action == "update":
+            phases.append(
+                ("scan", _command_for_action("scan", identifier), _STDIN_ANSWER.get("scan"))
+            )
+            phases.append(
+                ("update", _command_for_action("update", target), _STDIN_ANSWER.get("update"))
+            )
+        else:
+            phases.append(
+                (
+                    action,
+                    _command_for_action(
+                        action, target, category=category, name_override=name_override
+                    ),
+                    _STDIN_ANSWER.get(action),
+                )
+            )
     except Exception:
-        _ACTION_LOCK.release()
+        with hub.state_lock:
+            hub.running = False
         raise
 
     env = os.environ.copy()
@@ -483,24 +594,21 @@ def start_action(
     # reliably single-line per record (verified live).
     env["COLUMNS"] = "400"
 
-    stdin_answer = _STDIN_ANSWER.get(action)
-
-    with _STATE_LOCK:
-        _STATE.update(
+    with hub.state_lock:
+        gen = int(hub.state.get("_gen") or 0) + 1
+        hub.state = dict(_IDLE_STATE)
+        hub.state.update(
             {
+                "_gen": gen,
                 "action": action,
                 "target": target or None,
                 "status": "running",
                 "started_at": time.time(),
-                "finished_at": None,
-                "returncode": None,
-                "log": "",
-                "error": None,
-                "scan_result": None,
             }
         )
 
-    try:
+    def _exec_phase(cmd: list[str], stdin_answer: str | None) -> tuple[int, bool]:
+        """Run one CLI phase, streaming into the log. Returns (rc, timed_out)."""
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE if stdin_answer is not None else subprocess.DEVNULL,
@@ -510,77 +618,98 @@ def start_action(
             env=env,
             cwd=str(hermes_home) if hermes_home.exists() else None,
         )
-    except Exception as exc:
-        logger.exception("Failed to spawn skills hub action %r", action)
-        with _STATE_LOCK:
-            _STATE["status"] = "failed"
-            _STATE["finished_at"] = time.time()
-            _STATE["error"] = f"{type(exc).__name__}: {exc}"
-        _ACTION_LOCK.release()
-        return True, get_status()
-
-    if stdin_answer is not None:
+        if stdin_answer is not None:
+            try:
+                proc.stdin.write(stdin_answer)
+                proc.stdin.close()
+            except Exception:
+                logger.debug("Failed to pre-answer hub subprocess stdin", exc_info=True)
+        reader = threading.Thread(
+            target=_drain_stdout, args=(hub, gen, proc.stdout), daemon=True
+        )
+        reader.start()
         try:
-            proc.stdin.write(stdin_answer)
-            proc.stdin.close()
-        except Exception:
-            logger.debug("Failed to pre-answer hub subprocess stdin for %r", action, exc_info=True)
+            rc = proc.wait(timeout=_ACTION_TIMEOUT_SECONDS)
+            timed = False
+        except subprocess.TimeoutExpired:
+            timed = True
+            logger.error(
+                "skills hub action %r timed out after %ss; killing process",
+                action,
+                _ACTION_TIMEOUT_SECONDS,
+            )
+            proc.kill()
+            try:
+                rc = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rc = -9
+                threading.Thread(
+                    target=proc.wait,
+                    name=f"hermes-webui-skills-hub-{action}-reap",
+                    daemon=True,
+                ).start()
+        reader.join(timeout=5)
+        return rc, timed
+
+    def _finalize(status: str, rc, error: str | None) -> None:
+        with hub.state_lock:
+            if hub.state.get("_gen") != gen:
+                return
+            hub.state["returncode"] = rc
+            hub.state["finished_at"] = time.time()
+            hub.state["status"] = status
+            hub.state["error"] = error
+            scan_result = parse_scan_report(hub.state["log"])
+            if scan_result is not None:
+                hub.state["scan_result"] = scan_result
 
     def _run() -> None:
-        timed_out = False
         try:
-            reader = threading.Thread(target=_drain_stdout, args=(proc.stdout,), daemon=True)
-            reader.start()
-            try:
-                returncode = proc.wait(timeout=_ACTION_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                logger.error(
-                    "skills hub action %r timed out after %ss; killing process",
-                    action,
-                    _ACTION_TIMEOUT_SECONDS,
-                )
-                proc.kill()
-                try:
-                    returncode = proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    returncode = -9
-                    # SIGKILL should be near-instant; if the process is
-                    # still not reaped after 5s (e.g. stuck in
-                    # uninterruptible I/O) it would otherwise sit as a
-                    # zombie forever. Keep waiting on a throwaway daemon
-                    # thread -- a blocking, no-timeout proc.wait() -- so
-                    # the OS process table entry is eventually reclaimed
-                    # without delaying the timeout status reported below.
-                    threading.Thread(
-                        target=proc.wait,
-                        name=f"hermes-webui-skills-hub-{action}-reap",
-                        daemon=True,
-                    ).start()
-            reader.join(timeout=5)
-
-            with _STATE_LOCK:
-                _STATE["returncode"] = returncode
-                _STATE["finished_at"] = time.time()
-                scan_result = parse_scan_report(_STATE["log"])
-                if scan_result is not None:
-                    _STATE["scan_result"] = scan_result
-                if timed_out:
-                    _STATE["status"] = "timeout"
-                    _STATE["error"] = f"Action timed out after {_ACTION_TIMEOUT_SECONDS}s and was killed"
-                elif returncode == 0:
-                    _STATE["status"] = "completed"
-                else:
-                    _STATE["status"] = "failed"
-                    _STATE["error"] = f"Exited with code {returncode}"
+            for index, (phase_name, cmd, stdin_answer) in enumerate(phases):
+                rc, timed = _exec_phase(cmd, stdin_answer)
+                if timed:
+                    _finalize(
+                        "timeout",
+                        rc,
+                        f"Action timed out after {_ACTION_TIMEOUT_SECONDS}s and was killed",
+                    )
+                    return
+                if rc != 0:
+                    _finalize("failed", rc, f"Exited with code {rc}")
+                    return
+                if action == "update" and phase_name == "scan":
+                    # Fail-closed verdict gate BETWEEN the phases: the update
+                    # CLI is only ever invoked for a skill whose scan would be
+                    # allowed WITHOUT any force/override semantics.
+                    with hub.state_lock:
+                        scan_result = parse_scan_report(hub.state["log"])
+                        if scan_result is not None:
+                            hub.state["scan_result"] = scan_result
+                    decision = (
+                        _safe_scan_decision(scan_result)
+                        if isinstance(scan_result, dict)
+                        else None
+                    )
+                    if decision != "ALLOWED":
+                        _finalize(
+                            "failed",
+                            rc,
+                            "Update refused: the security scan did not allow "
+                            "this skill (installed version left untouched).",
+                        )
+                        return
+                    _append_log(hub, gen, "\n--- scan allowed; updating ---\n")
+            with hub.state_lock:
+                log_text = hub.state["log"]
+                scan_result = parse_scan_report(log_text)
+            ok, error = _evaluate_outcome(action, log_text, scan_result)
+            _finalize("completed" if ok else "failed", 0, error)
         except Exception as exc:
             logger.exception("skills hub action %r runner failed", action)
-            with _STATE_LOCK:
-                _STATE["status"] = "failed"
-                _STATE["finished_at"] = time.time()
-                _STATE["error"] = f"{type(exc).__name__}: {exc}"
+            _finalize("failed", None, f"{type(exc).__name__}: {exc}")
         finally:
-            _ACTION_LOCK.release()
+            with hub.state_lock:
+                hub.running = False
 
     threading.Thread(target=_run, name=f"hermes-webui-skills-hub-{action}", daemon=True).start()
-    return True, get_status()
+    return True, get_status(profile)
