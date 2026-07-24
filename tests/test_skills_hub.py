@@ -515,13 +515,24 @@ def _make_phase_popen(transcripts, spawned):
     return factory
 
 
-def test_hub_update_requires_identifier(monkeypatch):
+def test_hub_update_route_is_disabled_until_agent_contract(monkeypatch):
+    """Review P0: without artifact binding (agent prepare/commit), browser
+    updates stay off — 501 with a precise message, regardless of payload."""
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
+    handler, data = _call_post(
+        monkeypatch, "/api/skills/hub/update",
+        {"name": "pdf", "identifier": "anthropics/skills/pdf"},
+    )
+    assert handler.status == 501
+    assert data.get("update_unavailable") is True
+    assert "artifact-bound" in (data.get("error") or "")
+
+
+def test_hub_update_pipeline_requires_identifier(monkeypatch):
     from api import skills_hub_actions as sha
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE", "1")
-    handler, data = _call_post(monkeypatch, "/api/skills/hub/update", {"name": "pdf"})
-    assert handler.status == 400
-    assert "identifier" in (data.get("error") or "")
+    with pytest.raises(ValueError, match="identifier"):
+        sha.start_action("update", "pdf", profile="default")
 
 
 def test_hub_update_is_scan_gated_and_two_phase(monkeypatch, tmp_path):
@@ -537,11 +548,10 @@ def test_hub_update_is_scan_gated_and_two_phase(monkeypatch, tmp_path):
         "Popen",
         _make_phase_popen([_ALLOWED_SCAN_TRANSCRIPT, "Updated 1 skill(s).\n"], spawned),
     )
-    handler, _ = _call_post(
-        monkeypatch, "/api/skills/hub/update",
-        {"name": "pdf", "identifier": "anthropics/skills/pdf"},
+    started, _ = sha.start_action(
+        "update", "pdf", identifier="anthropics/skills/pdf", profile="default"
     )
-    assert handler.status == 200
+    assert started is True
     final = _wait_until_not_running()
     assert final["status"] == "completed"
     assert len(spawned) == 2
@@ -565,11 +575,10 @@ def test_hub_update_blocked_scan_never_invokes_update_cli(monkeypatch, tmp_path)
         "Popen",
         _make_phase_popen([_BLOCKED_SCAN_TRANSCRIPT], spawned),
     )
-    handler, _ = _call_post(
-        monkeypatch, "/api/skills/hub/update",
-        {"name": "evil", "identifier": "x/evil"},
+    started, _ = sha.start_action(
+        "update", "evil", identifier="x/evil", profile="default"
     )
-    assert handler.status == 200
+    assert started is True
     final = _wait_until_not_running()
     assert final["status"] == "failed"
     assert "refused" in (final.get("error") or "").lower()

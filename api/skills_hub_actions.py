@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -607,8 +608,31 @@ def start_action(
             }
         )
 
+    def _signal_group(proc, sig: int) -> None:
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, int) and pid > 0:
+            try:
+                os.killpg(pid, sig)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        try:
+            proc.send_signal(sig)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
     def _exec_phase(cmd: list[str], stdin_answer: str | None) -> tuple[int, bool]:
-        """Run one CLI phase, streaming into the log. Returns (rc, timed_out)."""
+        """Run one CLI phase, streaming into the log. Returns (rc, timed_out).
+
+        The subprocess owns its process GROUP, a timeout escalates
+        SIGTERM->SIGKILL against the group, and this function does not
+        return -- so the profile slot is not released -- until the leader
+        is actually reaped (review P0: git/scanner children must never
+        outlive the run into a newly admitted one).
+        """
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE if stdin_answer is not None else subprocess.DEVNULL,
@@ -617,6 +641,7 @@ def start_action(
             text=True,
             env=env,
             cwd=str(hermes_home) if hermes_home.exists() else None,
+            start_new_session=True,
         )
         if stdin_answer is not None:
             try:
@@ -634,20 +659,19 @@ def start_action(
         except subprocess.TimeoutExpired:
             timed = True
             logger.error(
-                "skills hub action %r timed out after %ss; killing process",
+                "skills hub action %r timed out after %ss; terminating process group",
                 action,
                 _ACTION_TIMEOUT_SECONDS,
             )
-            proc.kill()
+            _signal_group(proc, signal.SIGTERM)
             try:
                 rc = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                rc = -9
-                threading.Thread(
-                    target=proc.wait,
-                    name=f"hermes-webui-skills-hub-{action}-reap",
-                    daemon=True,
-                ).start()
+                _signal_group(proc, signal.SIGKILL)
+                # Reap-before-release: block until the leader is gone. A
+                # process stuck in uninterruptible I/O keeps this profile's
+                # slot closed -- honest 409s instead of overlapping trees.
+                rc = proc.wait()
         reader.join(timeout=5)
         return rc, timed
 
@@ -665,7 +689,7 @@ def start_action(
 
     def _run() -> None:
         try:
-            for index, (phase_name, cmd, stdin_answer) in enumerate(phases):
+            for phase_name, cmd, stdin_answer in phases:
                 rc, timed = _exec_phase(cmd, stdin_answer)
                 if timed:
                     _finalize(
@@ -711,5 +735,19 @@ def start_action(
             with hub.state_lock:
                 hub.running = False
 
-    threading.Thread(target=_run, name=f"hermes-webui-skills-hub-{action}", daemon=True).start()
+    try:
+        threading.Thread(
+            target=_run, name=f"hermes-webui-skills-hub-{action}", daemon=True
+        ).start()
+    except Exception:
+        # Thread admission failed (resource exhaustion): _run never ran, its
+        # finally can never release the slot -- release synchronously or the
+        # profile 409s forever (review P1, same class as plugin-lifecycle).
+        with hub.state_lock:
+            hub.running = False
+            if hub.state.get("_gen") == gen:
+                hub.state["status"] = "failed"
+                hub.state["finished_at"] = time.time()
+                hub.state["error"] = "Could not start the background runner"
+        raise
     return True, get_status(profile)

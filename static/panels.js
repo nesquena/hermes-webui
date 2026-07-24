@@ -4986,8 +4986,8 @@ function renderSkillsHubInstalled() {
       </div>
       ${_skillsHubTrustBadge(entry.trust_level)}
       ${_skillsHubVerdictBadge(entry.scan_verdict)}
-      <button type="button" class="sm-btn skills-hub-update" ${gated ? 'disabled' : ''} style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_update">${esc(t('skills_hub_update'))}</button>
-      <button type="button" class="sm-btn skills-hub-uninstall" ${gated ? 'disabled' : ''} style="padding:4px 8px;font-size:11px;color:#ef4444" data-i18n="skills_hub_uninstall">${esc(t('skills_hub_uninstall'))}</button>
+      <button type="button" class="sm-btn skills-hub-update" ${gated ? 'disabled' : ''} style="padding:12px;min-height:44px;font-size:11px" data-i18n="skills_hub_update">${esc(t('skills_hub_update'))}</button>
+      <button type="button" class="sm-btn skills-hub-uninstall" ${gated ? 'disabled' : ''} style="padding:12px;min-height:44px;font-size:11px;color:#ef4444" data-i18n="skills_hub_uninstall">${esc(t('skills_hub_uninstall'))}</button>
     </div>`).join('');
   box.querySelectorAll('.skills-hub-update').forEach((button, index) => {
     button.addEventListener('click', () => updateSkillsHubSkill(_skillsHubInstalled[index].name));
@@ -5045,8 +5045,8 @@ function renderSkillsHubResults() {
           ${scanBlock}
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
-          <button type="button" class="sm-btn skills-hub-scan" ${gated ? 'disabled' : ''} style="padding:4px 8px;font-size:11px" data-i18n="skills_hub_scan">${esc(t('skills_hub_scan'))}</button>
-          <button type="button" class="sm-btn skills-hub-install" ${gated || alreadyInstalled ? 'disabled' : ''} style="padding:4px 8px;font-size:11px">${esc(installLabel)}</button>
+          <button type="button" class="sm-btn skills-hub-scan" ${gated ? 'disabled' : ''} style="padding:12px;min-height:44px;font-size:11px" data-i18n="skills_hub_scan">${esc(t('skills_hub_scan'))}</button>
+          <button type="button" class="sm-btn skills-hub-install" ${gated || alreadyInstalled ? 'disabled' : ''} style="padding:12px;min-height:44px;font-size:11px">${esc(installLabel)}</button>
         </div>
       </div>
     </div>`;
@@ -5140,8 +5140,21 @@ async function installSkillsHubResult(identifier) {
   let danger = false;
   if (scan && (scan.verdict === 'dangerous' || scan.decision === 'BLOCKED')) {
     // Gate finding 1: the browser can no longer override a security
-    // verdict -- there is no force path. Blocked stays blocked.
-    if (typeof showToast === 'function') showToast(t('skills_hub_install_blocked_toast') || 'Blocked by the security scan.', 5000, 'error');
+    // verdict -- there is no force path. Blocked stays blocked, and the
+    // user gets a deterministic findings summary instead of a vanishing
+    // toast (review question 2 follow-up).
+    const findingCount = Array.isArray(scan.findings) ? scan.findings.length : 0;
+    const reason = scan.decision_reason || '';
+    await showConfirmDialog({
+      title: t('skills_hub_install') || 'Install',
+      message: (t('skills_hub_install_blocked_toast') || 'Blocked by the security scan.')
+        + '\n\n' + (t('skills_hub_verdict') || 'Verdict') + ': ' + String(scan.verdict || '').toUpperCase()
+        + (findingCount ? ' · ' + findingCount + ' ' + (t('skills_hub_findings') || 'finding(s)') : '')
+        + (reason ? '\n' + reason : '')
+        + '\n\n' + (t('skills_hub_blocked_see_results') || 'Details are in the scan result below the action log.'),
+      confirmLabel: t('close') || 'OK',
+      danger: true,
+    });
     return;
   } else if (!scan) {
     message = t('skills_hub_confirm_install_unscanned');

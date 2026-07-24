@@ -15619,6 +15619,27 @@ def handle_post(handler, parsed) -> bool:
         # ignore so no cached client keeps believing it works.
         if "force" in body:
             return bad(handler, "'force' is not accepted; security verdicts cannot be overridden from the browser", 400)
+        if action == "update":
+            # Review P0: even the scan-gated two-phase pipeline cannot bind
+            # the security decision to the installed BYTES -- scan and update
+            # fetch the bundle independently, so upstream can change in
+            # between. Browser-triggered updates stay disabled until the
+            # agent provides the prepare/commit contract (single fetch to
+            # quarantine, bundle-hash-bound single-use commit capability).
+            # Use `hermes skills update` in the CLI meanwhile.
+            return j(
+                handler,
+                {
+                    "error": (
+                        "Browser-triggered skill updates are disabled until the "
+                        "Hermes agent provides an artifact-bound update contract. "
+                        "Use `hermes skills update` in the CLI instead."
+                    ),
+                    "allowed": True,
+                    "update_unavailable": True,
+                },
+                status=501,
+            )
 
         from api.profiles import get_active_profile_name as _hub_profile
         from api.skills_hub_actions import start_action
