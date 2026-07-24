@@ -259,13 +259,28 @@ function _workspaceRouteForPath(path, kind, opts={}){
 }
 
 function _workspaceRouteForPathRel(path, kind, opts={}){
-  const owner = _artifactOwnerFromOptions(opts);
+  const asScalar = (value) => typeof value === 'string' ? value.trim() : '';
+  const candidateOwner = opts && opts.owner;
+  const owner = (() => {
+    const sessionId = asScalar(candidateOwner && candidateOwner.session_id)
+      || asScalar(S && S.session && S.session.session_id);
+    if(!sessionId) return null;
+    const workspaceRoot = asScalar(
+      candidateOwner && candidateOwner.workspace_root !== undefined
+        ? candidateOwner.workspace_root
+        : (S && S.session && S.session.workspace),
+    );
+    return {
+      session_id: sessionId,
+      workspace_root: workspaceRoot ? workspaceRoot.replace(/\/+$/,'') : '',
+    };
+  })();
   if(!owner) return '';
   const normalizedPath = _normalizeWorkspaceRelPath(path);
   const ownerSessionId = owner.session_id;
   const activeSessionId = S.session ? S.session.session_id : null;
-  const activeWorkspaceRoot = _artifactScalarString(S.session && S.session.workspace).replace(/\/+$/,'');
-  const ownerWorkspaceRoot = _artifactScalarString(owner.workspace_root);
+  const activeWorkspaceRoot = asScalar(S.session && S.session.workspace).replace(/\/+$/,'');
+  const ownerWorkspaceRoot = owner.workspace_root;
   const workspaceRootsMatch = !ownerWorkspaceRoot && !activeWorkspaceRoot
     ? true
     : ownerWorkspaceRoot === activeWorkspaceRoot;
