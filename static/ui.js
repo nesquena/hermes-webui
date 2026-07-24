@@ -15243,6 +15243,10 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
     const bottom=Number(snapshot.bottom);
+    // Mobile/touch viewports have native overflow anchoring to hold an
+    // unpinned reader across a rebuild. Desktop deliberately disables that
+    // browser behavior, so it must continue into the explicit fallback below.
+    const _fbTouchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(el));
     // #5637: when the reader has scrolled UP into history (userUnpinned) and the
     // semantic anchor restore failed, do NOT snap scrollTop to the captured
     // ABSOLUTE snapshot.top. During streaming, the live activity-scene refresh
@@ -15252,7 +15256,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     // untouched lets the browser's own scroll anchoring hold the reader's
     // position. Pinned / near-bottom readers still get the tail-relative restore
     // below (that path is correct and must run).
-    if(snapshot.userUnpinned===true&&snapshot.pinned!==true){
+    if(snapshot.userUnpinned===true&&snapshot.pinned!==true&&_fbTouchHold){
       _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
       _messageUserUnpinned=true;
       _scrollPinned=false;
@@ -15283,7 +15287,6 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     const _grewSinceSnap=Number.isFinite(_snapSH)&&_snapSH>0&&(el.scrollHeight-_snapSH)>4;
     const _fbActiveIntent=(typeof _recentMessageScrollIntent==='function' && _recentMessageScrollIntent())
       || (typeof _recentMessageTouchScrollIntent==='function' && _recentMessageTouchScrollIntent());
-    const _fbTouchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(el));
     if(_fbTouchHold && snapshot.pinned!==true && _grewSinceSnap && !_fbActiveIntent
        && Math.abs((Math.max(0,Math.min(target,maxTop)))-el.scrollTop)>8){
       _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
