@@ -115,6 +115,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     const uiSrc = fs.readFileSync(process.argv[7], 'utf8');
     const i18nSrc = fs.readFileSync(process.argv[8], 'utf8');
     const panelsSrc = fs.readFileSync(process.argv[9], 'utf8');
+    const helperCases = JSON.parse(process.argv[10] || '[]');
 
     const modeEl = makeButton('settingsDashboardMode');
     const urlEl = makeButton('settingsDashboardUrl');
@@ -196,7 +197,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
       result.lastRenderMode = modeEl.value;
     };
 
-    const dashboardLoopbackHostFallback = "function _dashboardIsLoopbackHost(host){host=(host||'').replace(/^\\\\[|\\\\]$/g,'').toLowerCase();return host==='127.0.0.1'||host==='localhost'||host==='::1';}";
+    const dashboardLoopbackHostFallback = "function _dashboardIsLoopbackHost(host){host=(host||'').replace(/^\\\\[|\\\\]$/g,'').toLowerCase();if(host.endsWith('.'))host=host.slice(0,-1);if(host==='localhost'||host==='::1')return true;const parts=host.split('.');return parts.length===4&&parts[0]==='127'&&parts.every(part=>/^\\\\d+$/.test(part)&&Number(part)>=0&&Number(part)<=255);}";
 
     for (const name of ['_normalizeDashboardEnabledMode','_setDashboardModeForChip','_getDashboardChipRestoreMode']) {
       eval(extractFn(uiSrc, name));
@@ -234,6 +235,13 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     }
 
     (async () => {
+      if (action === 'helper-matrix') {
+        console.log(JSON.stringify({
+          helperCases: helperCases.map((host) => ({ host, loopback: _dashboardIsLoopbackHost(host) })),
+        }));
+        return;
+      }
+
       if (action === 'load') {
         await loadDashboardSettings();
         recordButtons();
@@ -325,6 +333,7 @@ def _run_dashboard_link_driver(
     url: str = '',
     origin_hostname: str = '127.0.0.1',
     dashboard_target: str = 'http://127.0.0.1:1234',
+    helper_cases: list[str] | None = None,
 ) -> dict:
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
         f.write(_DASHBOARD_LINK_DRIVER)
@@ -342,6 +351,7 @@ def _run_dashboard_link_driver(
                 str(UI_PATH),
                 str(I18N_PATH),
                 str(PANELS_PATH),
+                json.dumps(helper_cases or []),
             ],
             cwd=REPO,
             text=True,
@@ -377,7 +387,14 @@ def test_issue6459_remote_public_dashboard_url_uses_normal_label_from_fixture():
 
 @requires_node
 def test_issue6459_remote_loopback_targets_keep_warning():
-    for target in ("http://127.0.0.1:9119", "http://localhost:9119", "http://[::1]:9119"):
+    for target in (
+        "http://127.0.0.1:9119",
+        "http://127.0.0.2:9119",
+        "http://127.5.5.5:9119",
+        "http://localhost:9119",
+        "http://localhost.:9119",
+        "http://[::1]:9119",
+    ):
         out = _run_dashboard_link_driver(
             "save",
             mode="always",
@@ -386,6 +403,29 @@ def test_issue6459_remote_loopback_targets_keep_warning():
             dashboard_target=target,
         )
         assert all(state["tooltip"] == "Loopback" for state in out["buttonStates"])
+
+
+@requires_node
+def test_issue6459_loopback_helper_classifies_terminal_dot_and_bounds():
+    out = _run_dashboard_link_driver(
+        "helper-matrix",
+        helper_cases=[
+            "127.0.0.2",
+            "127.255.255.255",
+            "localhost.",
+            "126.255.255.255",
+            "127.256.0.1",
+            "localhost.example.test",
+        ],
+    )
+    assert {row["host"]: row["loopback"] for row in out["helperCases"]} == {
+        "127.0.0.2": True,
+        "127.255.255.255": True,
+        "localhost.": True,
+        "126.255.255.255": False,
+        "127.256.0.1": False,
+        "localhost.example.test": False,
+    }
 
 
 @requires_node

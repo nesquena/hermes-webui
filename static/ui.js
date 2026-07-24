@@ -1672,7 +1672,10 @@ let _dashboardSettingsWriteSeq=0;
 
 function _dashboardIsLoopbackHost(host){
   host=(host||'').replace(/^\[|\]$/g,'').toLowerCase();
-  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+  if(host.endsWith('.'))host=host.slice(0,-1);
+  if(host==='localhost'||host==='::1')return true;
+  const parts=host.split('.');
+  return parts.length===4&&parts[0]==='127'&&parts.every(part=>/^\d+$/.test(part)&&Number(part)>=0&&Number(part)<=255);
 }
 function _dashboardIsBrowserLoopback(){
   return _dashboardIsLoopbackHost(window.location.hostname);
