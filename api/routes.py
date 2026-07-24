@@ -14552,10 +14552,18 @@ def handle_post(handler, parsed) -> bool:
         try:
             if action == "install":
                 source = validate_source(body.get("source") or "")
-                force = bool(body.get("force"))
+                # Strict JSON booleans: bool("false") is True, so a string
+                # here silently grants destructive force semantics. Reject
+                # anything that isn't a real JSON true/false.
+                force_raw = body.get("force", False)
+                if not isinstance(force_raw, bool):
+                    return bad(handler, "'force' must be a JSON boolean", 400)
                 enable_raw = body.get("enable")
-                enable = None if enable_raw is None else bool(enable_raw)
-                started, status = start_action("install", source, force=force, enable=enable)
+                if enable_raw is not None and not isinstance(enable_raw, bool):
+                    return bad(handler, "'enable' must be a JSON boolean", 400)
+                started, status = start_action(
+                    "install", source, force=force_raw, enable=enable_raw
+                )
             else:
                 try:
                     installed = list_installed_plugins()

@@ -10689,6 +10689,9 @@ const enabled=plugin&&plugin.enabled!==false;
 // acknowledgement) in addition to the browser having writable+available.
 let _pluginLifecyclePollTimer=null;
 let _pluginLifecycleData=null;
+let _pluginLifecycleStatusInFlight=false;
+let _pluginLifecycleStatusSeq=0;
+let _pluginLifecycleMutationInFlight=false;
 
 function _pluginConfirmModal(opts){
  return new Promise(resolve=>{
@@ -10740,13 +10743,31 @@ function _bindPluginLifecycleControls(){
 }
 
 async function loadPluginLifecyclePanel(){
+ // Single-flight + sequence token (gate finding 4): every 2s tick used to
+ // launch an unguarded status call with a 30s timeout, so slow responses
+ // fanned out into ~15 concurrent `hermes plugins list` subprocesses per
+ // tab, and an out-of-order response (or one from a previous profile) could
+ // overwrite newer data. One request at a time; only the newest response
+ // (per sequence AND per active profile at request time) may render; status
+ // scans never overlap an in-flight install/update/remove mutation.
+ if(_pluginLifecycleStatusInFlight) return _pluginLifecycleData;
+ if(_pluginLifecycleMutationInFlight) return _pluginLifecycleData;
+ _pluginLifecycleStatusInFlight=true;
+ const seq=++_pluginLifecycleStatusSeq;
+ const profileAtRequest=(_currentProfileDetail&&_currentProfileDetail.name)||null;
  try{
   const data=await api('/api/plugins/lifecycle/status',{timeoutToast:false});
+  _pluginLifecycleStatusInFlight=false;
+  const profileNow=(_currentProfileDetail&&_currentProfileDetail.name)||null;
+  if(seq!==_pluginLifecycleStatusSeq||profileAtRequest!==profileNow) return _pluginLifecycleData;
   _pluginLifecycleData=data;
   _renderPluginLifecycle(data);
   _syncPluginLifecyclePolling(data);
   return data;
  }catch(e){
+  _pluginLifecycleStatusInFlight=false;
+  _stopPluginLifecyclePolling();
+  if(seq!==_pluginLifecycleStatusSeq) return _pluginLifecycleData;
   const fallback={available:false,writable:false,running:false,last:null,installed:[]};
   _pluginLifecycleData=fallback;
   _renderPluginLifecycle(fallback);
@@ -10754,18 +10775,24 @@ async function loadPluginLifecyclePanel(){
  }
 }
 
+function _stopPluginLifecyclePolling(){
+ if(_pluginLifecyclePollTimer){clearTimeout(_pluginLifecyclePollTimer);_pluginLifecyclePollTimer=null;}
+}
+
 function _syncPluginLifecyclePolling(data){
  const shouldPoll=!!(data&&data.running);
  const wasPolling=!!_pluginLifecyclePollTimer;
- if(shouldPoll&&!_pluginLifecyclePollTimer){
-  _pluginLifecyclePollTimer=setInterval(loadPluginLifecyclePanel,2000);
- }else if(!shouldPoll&&_pluginLifecyclePollTimer){
-  clearInterval(_pluginLifecyclePollTimer);
-  _pluginLifecyclePollTimer=null;
+ if(!shouldPoll){
+  _stopPluginLifecyclePolling();
   // A poll cycle just observed the in-flight action finish -- refresh the
   // read-only hooks list too (a completed install/remove changes it).
   if(wasPolling&&typeof loadPluginsPanel==='function') loadPluginsPanel();
+  return;
  }
+ if(_pluginLifecyclePollTimer) return;
+ // Self-scheduling: the next tick is armed only after the prior request
+ // settled (loadPluginLifecyclePanel is single-flight), never stacked.
+ _pluginLifecyclePollTimer=setTimeout(()=>{_pluginLifecyclePollTimer=null;loadPluginLifecyclePanel();},2000);
 }
 
 function _renderPluginLifecycleNote(data){
@@ -10868,6 +10895,9 @@ async function _installPluginFromForm(){
   confirmLabel:t('settings_plugin_btn_install')||'Install',
  });
  if(!confirmed) return;
+ if(_pluginLifecycleMutationInFlight) return;
+ _pluginLifecycleMutationInFlight=true;
+ _stopPluginLifecyclePolling();
  try{
   const r=await api('/api/plugins/lifecycle/install',{method:'POST',body:JSON.stringify({source})});
   if(input) input.value='';
@@ -10877,6 +10907,8 @@ async function _installPluginFromForm(){
   _syncPluginLifecyclePolling(r);
  }catch(e){
   if(typeof showToast==='function') showToast((t('settings_plugin_install_failed')||'Failed to install plugin')+(e&&e.message?': '+e.message:''));
+ }finally{
+  _pluginLifecycleMutationInFlight=false;
  }
 }
 
@@ -10887,6 +10919,9 @@ async function _updateInstalledPlugin(name){
   confirmLabel:t('settings_plugin_btn_update')||'Update',
  });
  if(!confirmed) return;
+ if(_pluginLifecycleMutationInFlight) return;
+ _pluginLifecycleMutationInFlight=true;
+ _stopPluginLifecyclePolling();
  try{
   const r=await api('/api/plugins/lifecycle/update',{method:'POST',body:JSON.stringify({name})});
   if(typeof showToast==='function') showToast(t('settings_plugin_update_started')||'Update started…');
@@ -10895,6 +10930,8 @@ async function _updateInstalledPlugin(name){
   _syncPluginLifecyclePolling(r);
  }catch(e){
   if(typeof showToast==='function') showToast((t('settings_plugin_update_failed')||'Failed to update plugin')+(e&&e.message?': '+e.message:''));
+ }finally{
+  _pluginLifecycleMutationInFlight=false;
  }
 }
 
@@ -10905,6 +10942,9 @@ async function _removeInstalledPlugin(name){
   confirmLabel:t('settings_plugin_btn_remove')||'Remove',
  });
  if(!confirmed) return;
+ if(_pluginLifecycleMutationInFlight) return;
+ _pluginLifecycleMutationInFlight=true;
+ _stopPluginLifecyclePolling();
  try{
   const r=await api('/api/plugins/lifecycle/remove',{method:'POST',body:JSON.stringify({name})});
   if(typeof showToast==='function') showToast(t('settings_plugin_remove_started')||'Remove started…');
@@ -10913,6 +10953,8 @@ async function _removeInstalledPlugin(name){
   _syncPluginLifecyclePolling(r);
  }catch(e){
   if(typeof showToast==='function') showToast((t('settings_plugin_remove_failed')||'Failed to remove plugin')+(e&&e.message?': '+e.message:''));
+ }finally{
+  _pluginLifecycleMutationInFlight=false;
  }
 }
 

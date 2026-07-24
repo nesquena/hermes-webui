@@ -164,9 +164,23 @@ class TestSourceValidation:
 
 
 class TestPluginNameValidation:
-    def test_accepts_name_in_installed_list(self, pl):
+    def test_accepts_name_backed_by_a_real_directory(self, pl, monkeypatch, tmp_path):
+        # Gate follow-up: authority is the on-disk DIRECTORY (the identity
+        # the CLI acts on), cross-checked against the CLI listing -- a name
+        # that only exists in the listing is no longer actionable.
+        d = tmp_path / "plugins" / "my-plugin"
+        d.mkdir(parents=True)
+        (d / "plugin.yaml").write_text("name: my-plugin\n")
+        monkeypatch.setattr(
+            pl, "_gateway_restart_profile_context", lambda: (tmp_path, None)
+        )
         installed = [{"name": "my-plugin"}]
         assert pl.validate_plugin_name("my-plugin", installed) == "my-plugin"
+
+    def test_rejects_listing_only_name_without_directory(self, pl):
+        # /fake/home has no plugins directory at all: nothing is actionable.
+        with pytest.raises(LookupError):
+            pl.validate_plugin_name("my-plugin", [{"name": "my-plugin"}])
 
     def test_rejects_traversal(self, pl):
         with pytest.raises(pl.PluginSourceError):
@@ -643,6 +657,11 @@ class TestPluginLifecycleRoutesGating:
         monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
         monkeypatch.setattr("api.plugin_lifecycle.is_available", lambda: True)
         monkeypatch.setattr("api.plugin_lifecycle.list_installed_plugins", lambda: [{"name": "my-plugin"}])
+        # Disk truth for the actionable-identity resolver (gate follow-up).
+        monkeypatch.setattr(
+            "api.plugin_lifecycle._actionable_plugin_dirs",
+            lambda: {"my-plugin": "my-plugin"},
+        )
         seen = {}
 
         def fake_start(action, arg, **kw):
@@ -782,11 +801,22 @@ class TestPluginLifecycleJS:
         assert "installBtn.disabled=" in body
 
     def test_polls_status_while_running(self):
+        # Gate follow-up (finding 4): ONE self-scheduling poll, armed only
+        # after the prior request settled -- never a stacked setInterval.
         idx = PANELS_JS.find("function _syncPluginLifecyclePolling")
         assert idx >= 0
-        body = PANELS_JS[idx:idx + 700]
-        assert "setInterval(loadPluginLifecyclePanel,2000)" in body
-        assert "clearInterval" in body
+        body = PANELS_JS[idx:idx + 900]
+        assert "setInterval" not in body
+        assert "setTimeout" in body and "loadPluginLifecyclePanel" in body
+        assert "_stopPluginLifecyclePolling" in body
+
+    def test_status_requests_are_single_flight_and_sequence_guarded(self):
+        idx = PANELS_JS.find("async function loadPluginLifecyclePanel")
+        assert idx >= 0
+        body = PANELS_JS[idx:idx + 1600]
+        assert "_pluginLifecycleStatusInFlight" in body
+        assert "_pluginLifecycleStatusSeq" in body
+        assert "_pluginLifecycleMutationInFlight" in body
 
     def test_load_plugins_panel_gates_tab_hide_on_writable(self):
         idx = PANELS_JS.find("async function loadPluginsPanel")
@@ -859,3 +889,155 @@ class TestPluginLifecycleI18n:
         for key in self.REQUIRED_KEYS:
             key_idx = I18N_JS.find(f"{key}:")
             assert en_start < key_idx < it_start, f"'{key}' must be inside LOCALES.en"
+
+
+# ── Gate follow-ups: identity binding, stdin, redaction, strict booleans ─────
+
+
+def _plugin_dir(tmp_path, dirname, manifest_name=None):
+    d = tmp_path / "plugins" / dirname
+    d.mkdir(parents=True)
+    if manifest_name is not None:
+        (d / "plugin.yaml").write_text(f"name: {manifest_name}\nversion: 1.0\n")
+    return d
+
+
+@pytest.fixture
+def pl_disk(monkeypatch, tmp_path):
+    """Like ``pl`` but with the profile home on a real tmp_path so the
+    actionable-identity resolver sees actual plugin directories."""
+    from api import plugin_lifecycle as mod
+
+    monkeypatch.setattr(mod, "_resolve_hermes_command", lambda: "/fake/hermes")
+    monkeypatch.setattr(
+        mod, "_gateway_restart_profile_context", lambda: (tmp_path, None)
+    )
+    monkeypatch.setattr(mod, "_RUNNING_PROFILES", set(), raising=False)
+    monkeypatch.setattr(mod, "_LAST_BY_PROFILE", {}, raising=False)
+    return mod
+
+
+def test_update_remove_authorize_the_directory_not_the_manifest_name(
+    pl_disk, tmp_path
+):
+    """A checkout at ``plugins/repo-dir`` with manifest ``name: fancy`` must
+    resolve to the DIRECTORY the CLI actually acts on."""
+    _plugin_dir(tmp_path, "repo-dir", manifest_name="fancy")
+    installed = [{"name": "fancy"}]
+    assert pl_disk.validate_plugin_name("fancy", installed) == "repo-dir"
+    # Direct directory requests keep working.
+    installed_dir = [{"name": "repo-dir"}]
+    assert pl_disk.validate_plugin_name("repo-dir", installed_dir) == "repo-dir"
+
+
+def test_spoofed_manifest_name_cannot_redirect_to_another_directory(
+    pl_disk, tmp_path
+):
+    """Two checkouts claiming the same manifest name are ambiguous: neither
+    may be deleted via that display name."""
+    _plugin_dir(tmp_path, "victim-dir", manifest_name="shared-name")
+    _plugin_dir(tmp_path, "attacker-dir", manifest_name="shared-name")
+    with pytest.raises(pl_disk.PluginSourceError):
+        pl_disk.validate_plugin_name("shared-name", [{"name": "shared-name"}])
+
+
+def test_unknown_name_is_rejected(pl_disk, tmp_path):
+    _plugin_dir(tmp_path, "real-dir", manifest_name="real")
+    with pytest.raises(LookupError):
+        pl_disk.validate_plugin_name("ghost", [{"name": "real"}])
+
+
+def test_symlinked_plugin_dir_is_not_actionable(pl_disk, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "plugin.yaml").write_text("name: outside\n")
+    (tmp_path / "plugins").mkdir()
+    (tmp_path / "plugins" / "linked").symlink_to(outside)
+    assert "linked" not in pl_disk._actionable_plugin_dirs()
+
+
+def test_lifecycle_subprocesses_never_inherit_stdin(pl, monkeypatch):
+    """The installer prompts via input()/getpass without a TTY guard: with an
+    inherited stdin that consumes the server's terminal or stalls the slot
+    for the whole timeout. Both spawn paths must use DEVNULL."""
+    import subprocess as sp
+
+    captured = _install_fake_popen(monkeypatch, stdout="ok\n", returncode=0)
+    started, _ = pl.start_action("install", "owner/repo")
+    assert started
+    _wait_until_idle(pl)
+    assert captured, "no subprocess spawned"
+    assert captured[0]["kwargs"].get("stdin") == sp.DEVNULL
+
+    run_kwargs = {}
+    monkeypatch.setattr(
+        sp,
+        "run",
+        lambda *a, **k: run_kwargs.update(k) or _fake_proc(0, "[]"),
+    )
+    try:
+        pl.list_installed_plugins()
+    except RuntimeError:
+        pass
+    assert run_kwargs.get("stdin") == sp.DEVNULL
+
+
+def test_redaction_covers_query_fragment_and_userinfo(pl):
+    red = pl._redact_credentials
+    assert "sekret" not in red("https://host/repo?token=sekret")
+    assert "sekret" not in red("https://host/repo#access_token=sekret")
+    assert "sekret" not in red("https://x:sekret@host/repo.git")
+    assert "sekret" not in red("https://we:ird@sekret@host/x")  # raw @ userinfo
+    assert "sekret" not in red("clone https://host/a?api_key=sekret&x=1 done")
+    # Non-secret params survive.
+    assert "branch=main" in red("https://host/repo?branch=main")
+
+
+def test_routes_reject_string_booleans(monkeypatch):
+    """bool("false") is True — the route must 400 on non-JSON-boolean
+    force/enable instead of granting destructive semantics."""
+    import io as _io
+    import json as _json
+    from urllib.parse import urlparse
+
+    import api.routes as routes
+
+    class _H:
+        def __init__(self):
+            self.status = None
+            self.wfile = _io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, *a):
+            pass
+
+        def end_headers(self):
+            pass
+
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_PLUGIN_WRITE", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    spawned = []
+    from api import plugin_lifecycle as mod
+
+    monkeypatch.setattr(
+        mod, "start_action", lambda *a, **k: spawned.append((a, k)) or (True, {})
+    )
+    monkeypatch.setattr(mod, "is_available", lambda: True)
+
+    for payload in ({"source": "owner/repo", "force": "false"},
+                    {"source": "owner/repo", "enable": "true"}):
+        h = _H()
+        monkeypatch.setattr(routes, "read_body", lambda handler, _p=payload: _p)
+        routes.handle_post(h, urlparse("http://x/api/plugins/lifecycle/install"))
+        assert h.status == 400, (payload, h.status)
+    assert spawned == [], "string boolean must never reach start_action"
+
+
+def test_plugin_write_flag_is_operator_protected():
+    """Gate finding 1: a profile's own .env must not be able to open the
+    RCE-capable write gate."""
+    from api.profiles import _PROTECTED_ENV_KEYS
+
+    assert "HERMES_WEBUI_ALLOW_PLUGIN_WRITE" in _PROTECTED_ENV_KEYS

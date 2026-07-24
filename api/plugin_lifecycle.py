@@ -74,11 +74,19 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
 # this module; the credential itself must still reach the `hermes` subprocess
 # (it needs it to actually clone), so this is applied only at the
 # storage/display boundary, never to the argv passed to subprocess.run.
-_URL_USERINFO_RE = re.compile(r"://([^/@\s]+)@")
+_URL_USERINFO_RE = re.compile(r"://[^/\s]*@")
+# Secrets carried in query/fragment parameters (?token=..., #access_token=...)
+# survive the userinfo scrub; catch the common credential-ish parameter names.
+_URL_SECRET_PARAM_RE = re.compile(
+    r"([?&#][A-Za-z0-9_\-]*(?:token|secret|key|password|passwd|auth|bearer|credential)"
+    r"[A-Za-z0-9_\-]*=)[^&#\s]+",
+    re.IGNORECASE,
+)
 
 
 def _redact_credentials(text: str) -> str:
-    return _URL_USERINFO_RE.sub("://***@", text or "")
+    text = _URL_USERINFO_RE.sub("://***@", text or "")
+    return _URL_SECRET_PARAM_RE.sub(r"\1***", text)
 
 
 class PluginSourceError(ValueError):
@@ -146,20 +154,86 @@ def validate_source(source: str) -> str:
     return source
 
 
-def validate_plugin_name(name: str, installed: list[dict]) -> str:
-    """Reject path traversal and names the current installed list doesn't recognize.
+def _user_plugins_dir() -> "Path":
+    from pathlib import Path
 
-    Checking membership in ``installed`` (itself sourced from ``hermes
-    plugins list --json``, disk truth) means update/remove can never be
-    pointed at an arbitrary string the CLI's own sanitizer would have to
-    catch -- the WebUI only ever asks for a name it just saw listed.
+    active_home, _cli_profile = _gateway_restart_profile_context()
+    return Path(active_home) / "plugins"
+
+
+def _manifest_name(plugin_dir) -> Optional[str]:
+    """Best-effort ``name:`` from ``plugin.yaml`` -- display metadata only."""
+    manifest = plugin_dir / "plugin.yaml"
+    try:
+        if not manifest.is_file() or manifest.is_symlink():
+            return None
+        for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.match(r"^name:\s*['\"]?([^'\"#]+)", line.strip())
+            if m:
+                return m.group(1).strip()
+    except OSError:
+        pass
+    return None
+
+
+def _actionable_plugin_dirs() -> dict:
+    """Disk truth: ``{directory-name: manifest-name-or-None}`` for the active
+    profile's user plugin directory. The DIRECTORY name is the identity the
+    CLI's update/remove actually key on; the manifest ``name`` is mutable
+    display data a hostile checkout controls."""
+    out: dict = {}
+    try:
+        root = _user_plugins_dir()
+        if not root.is_dir():
+            return out
+        for child in root.iterdir():
+            if not child.is_dir() or child.is_symlink():
+                continue
+            if not _SAFE_NAME_RE.match(child.name):
+                continue
+            out[child.name] = _manifest_name(child)
+    except OSError:
+        pass
+    return out
+
+
+def validate_plugin_name(name: str, installed: list[dict]) -> str:
+    """Authorize update/remove against the ACTIONABLE identity, not display data.
+
+    The CLI keys update/remove on the plugin's directory name; ``plugins
+    list --json`` reports the manifest ``name`` -- mutable data a checkout
+    controls, so it cannot be deletion authority. This resolves the request
+    against the on-disk directory set of the active profile:
+
+    * a request matching a directory name directly is authorized as-is;
+    * a request matching exactly ONE directory's manifest name resolves to
+      that directory -- but only when the mapping is unambiguous;
+    * anything ambiguous, unknown, or not present in the CLI listing is
+      rejected.
     """
     name = str(name or "").strip()
     if not name or not _SAFE_NAME_RE.match(name):
         raise PluginSourceError("Invalid plugin name.")
-    if not any(p.get("name") == name for p in installed):
+    dirs = _actionable_plugin_dirs()
+    if name in dirs:
+        resolved = name
+    else:
+        candidates = [d for d, manifest in dirs.items() if manifest == name]
+        if len(candidates) > 1:
+            raise PluginSourceError(
+                f"Plugin name {name!r} is ambiguous across {sorted(candidates)!r}."
+            )
+        if not candidates:
+            raise LookupError(f"Plugin '{name}' is not installed.")
+        resolved = candidates[0]
+    # The CLI listing remains a secondary gate: only act on identities the
+    # CLI itself currently reports (bundled/entry-point rows have no user
+    # directory and are never actionable from here).
+    listed = {str(p.get("name") or "") for p in installed}
+    manifest = dirs.get(resolved)
+    if resolved not in listed and (manifest or "") not in listed:
         raise LookupError(f"Plugin '{name}' is not installed.")
-    return name
+    return resolved
 
 
 def _run_env() -> tuple[list[str], dict]:
@@ -197,6 +271,7 @@ def list_installed_plugins() -> list[dict]:
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=_LIST_TIMEOUT_SECONDS, env=env,
+            stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise RuntimeError(f"Failed to list plugins: {exc}") from exc
@@ -337,6 +412,9 @@ def start_action(
         try:
             proc = subprocess.Popen(
                 cmd,
+                stdin=subprocess.DEVNULL,  # the installer's input()/getpass
+                # prompts must fail fast instead of consuming the server's
+                # terminal or holding the profile slot for the full timeout
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
