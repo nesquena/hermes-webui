@@ -2,6 +2,7 @@
 import collections
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -9,10 +10,11 @@ import logging
 import math
 import os
 import re
+import stat
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
 try:  # pragma: no cover - platform-specific imports.
@@ -24,6 +26,11 @@ try:  # pragma: no cover - platform-specific imports.
     import msvcrt as _msvcrt
 except ImportError:  # pragma: no cover
     _msvcrt = None
+
+try:  # optional fast JSON codec for the session-save hotpath (big sessions)
+    import orjson as _orjson
+except ImportError:  # pragma: no cover - environment without orjson
+    _orjson = None
 
 import api.config as _cfg
 from api.compression_anchor import is_context_compression_marker
@@ -179,6 +186,10 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+# Serialize each session's complete check/backup/replace sequence without an
+# unbounded per-session lock cache. A rare stripe collision only delays an
+# unrelated save and cannot affect correctness.
+_SESSION_SAVE_LOCK_STRIPES = tuple(threading.RLock() for _ in range(64))
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
@@ -742,13 +753,13 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
     )
 
 
-def _save_webui_deleted_session_tombstone(ids) -> None:
+def _save_webui_deleted_session_tombstone(ids) -> bool:
     try:
         sorted_ids = sorted(set(
             str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
         ))
     except TypeError:
-        return
+        return False
     if len(sorted_ids) > WEBUI_DELETED_SESSION_TOMBSTONE_CAP:
         sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
     payload = {
@@ -767,6 +778,8 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, p)
+        _fsync_composer_draft_directory(SESSION_DIR)
+        return True
     except Exception:
         logger.debug("Failed to save webui deleted-session tombstone", exc_info=True)
         if _tmp is not None:
@@ -774,18 +787,19 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        return False
 
 
-def _record_webui_deleted_session_tombstone(sid: str) -> None:
+def _record_webui_deleted_session_tombstone(sid: str) -> bool:
     sid = str(sid or "").strip()
     if not sid:
-        return
+        return False
     with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
         current = set(_load_webui_deleted_session_tombstone())
         if sid in current:
-            return
+            return True
         current.add(sid)
-        _save_webui_deleted_session_tombstone(current)
+        return _save_webui_deleted_session_tombstone(current)
 
 
 def _clear_webui_deleted_session_tombstone(sid: str) -> None:
@@ -1078,6 +1092,106 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
+def _read_top_level_json_value_from_head(text: str, key: str):
+    """Decode one top-level value from a bounded, possibly incomplete JSON prefix."""
+    key_pos = _find_top_level_json_key(text, key)
+    if key_pos is None:
+        return None
+    colon_pos = text.find(':', key_pos + len(json.dumps(key)))
+    if colon_pos < 0:
+        return None
+    value_pos = colon_pos + 1
+    while value_pos < len(text) and text[value_pos] in ' \t\r\n':
+        value_pos += 1
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text, value_pos)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value
+
+
+def _json_dumps_session(obj) -> str:
+    """Serialize a session payload compactly (big-session hotpath, 2026-07-13).
+
+    Session files used to be written with ``indent=2``; on multi-MB sessions
+    the pretty-printing alone costs hundreds of milliseconds per save and
+    inflates the file (and every subsequent parse) by ~30-40%. Compact output
+    is byte-for-byte JSON-compatible with every reader (json.loads and the
+    metadata-prefix scanner are both whitespace-agnostic).
+
+    orjson is used when available and silently falls back to the stdlib for
+    payloads it cannot encode. Legacy session files may contain the stdlib's
+    non-standard NaN/Infinity literals; keep those float values stable instead
+    of letting orjson silently rewrite them to ``null``.
+    """
+    if _orjson is not None and not _contains_nonfinite_float(obj):
+        try:
+            return _orjson.dumps(obj, option=_orjson.OPT_NON_STR_KEYS).decode('utf-8')
+        except Exception:
+            pass
+    return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
+def _contains_nonfinite_float(value) -> bool:
+    """Return whether a JSON-shaped value contains NaN or either infinity."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(
+            _contains_nonfinite_float(key) or _contains_nonfinite_float(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_nonfinite_float(item) for item in value)
+    return False
+
+
+def _json_loads_session(text):
+    """Parse session JSON, preferring orjson with a stdlib fallback.
+
+    The fallback also covers legacy files containing the non-standard ``NaN``
+    literal, which the stdlib accepts but orjson rejects.
+    """
+    if _orjson is not None:
+        try:
+            return _orjson.loads(text)
+        except Exception:
+            pass
+    return json.loads(text)
+
+
+def _stream_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Hash one stable regular-file generation without buffering it in memory."""
+    def identity(file_stat):
+        return (
+            file_stat.st_dev,
+            file_stat.st_ino,
+            stat.S_IFMT(file_stat.st_mode),
+            file_stat.st_size,
+            file_stat.st_mtime_ns,
+            file_stat.st_ctime_ns,
+        )
+
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError(f'refusing to hash non-regular session file: {path}')
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+        if identity(before) != identity(after):
+            raise OSError(f'session file changed while hashing: {path}')
+        current = os.stat(path, follow_symlinks=False)
+        if identity(after) != identity(current):
+            raise OSError(f'session file identity changed while hashing: {path}')
+    return digest.hexdigest()
+
+
+def _session_save_lock(session_id):
+    return _SESSION_SAVE_LOCK_STRIPES[hash(str(session_id)) % len(_SESSION_SAVE_LOCK_STRIPES)]
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     """Read only the metadata portion before the large arrays.
 
@@ -1111,10 +1225,303 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
+# ── Composer-draft sidecar store (big-session hotpath, 2026-07-13) ─────────
+# Keystroke autosaves used to persist the draft by rewriting the entire
+# session JSON via Session.save(); on a multi-MB session that turns every
+# debounced draft POST into a multi-second full-file parse+serialize and
+# starves the whole server. Drafts now live in a tiny per-session sidecar
+# file under SESSION_DIR/_drafts/ (mirroring the _turn_journal convention so
+# top-level '*.json' session scans never see it). The legacy composer_draft
+# field inside the session JSON remains as a read fallback for drafts saved
+# before the sidecar existed, and keeps being persisted opportunistically
+# with regular session saves.
+
+_DRAFT_SIDECAR_DIRNAME = '_drafts'
+# Drafts are small, but a server can see arbitrarily many session ids. Keep the
+# cache bounded just like the other sidecar caches in this module; the sidecar
+# stat signature remains the freshness authority on a cache miss.
+_DRAFT_SIDECAR_CACHE: "collections.OrderedDict[str, tuple]" = collections.OrderedDict()
+_DRAFT_SIDECAR_CACHE_MAX = 256
+_DRAFT_SIDECAR_LOCK = threading.Lock()
+# Use fixed lock stripes instead of retaining one lock per historical session.
+# A stripe collision merely serializes two unrelated draft writes; it cannot
+# merge drafts because each operation still addresses its own sidecar path.
+# RLock keeps a same-stripe old/new pair safe during draft migration.
+_COMPOSER_DRAFT_LOCK_STRIPES = tuple(threading.RLock() for _ in range(64))
+
+
+def _composer_draft_lock_stripe_index(sid) -> int:
+    return hash(str(sid)) % len(_COMPOSER_DRAFT_LOCK_STRIPES)
+
+
+def get_composer_draft_lock(sid):
+    """Return a bounded lock stripe for draft read-merge-write operations."""
+    return _COMPOSER_DRAFT_LOCK_STRIPES[_composer_draft_lock_stripe_index(sid)]
+
+
+def _cache_composer_draft_sidecar(sid, stat_key, draft) -> None:
+    """Store a draft cache entry and evict least-recently-used stale entries."""
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        _DRAFT_SIDECAR_CACHE[key] = (stat_key, copy.deepcopy(draft))
+        _DRAFT_SIDECAR_CACHE.move_to_end(key)
+        while len(_DRAFT_SIDECAR_CACHE) > _DRAFT_SIDECAR_CACHE_MAX:
+            _DRAFT_SIDECAR_CACHE.popitem(last=False)
+
+
+def _composer_draft_sidecar_signature(stat_result):
+    """Return an identity-sensitive cache token for a derived draft sidecar."""
+    return (
+        int(getattr(stat_result, "st_dev", 0)),
+        int(getattr(stat_result, "st_ino", 0)),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(getattr(stat_result, "st_ctime_ns", 0)),
+    )
+
+
+def _fsync_composer_draft_directory(path: Path) -> None:
+    """Durably publish a directory entry where the platform supports it."""
+    # Windows does not provide portable directory handles for ``os.fsync``.
+    # Sidecar writes still use fsynced files plus atomic replace; directory fsync
+    # is an unsupported extra durability step, not a reason to reject drafts.
+    if os.name == "nt":
+        return
+    flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_RDONLY", 0)
+    try:
+        directory_fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+            return
+        raise
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        if exc.errno in {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+            return
+        raise
+    finally:
+        os.close(directory_fd)
+
+
+def _fsync_composer_draft_parent(path: Path) -> None:
+    """Durably publish a draft replace or unlink in its parent directory."""
+    _fsync_composer_draft_directory(path.parent)
+
+
+def composer_draft_sidecar_path(sid):
+    if not is_safe_session_id(str(sid or '')):
+        return None
+    return SESSION_DIR / _DRAFT_SIDECAR_DIRNAME / f'{sid}.json'
+
+
+def composer_draft_sidecar_state(sid) -> tuple[str, dict | None]:
+    """Return ``present``, ``absent``, or ``unreadable`` without conflating loss.
+
+    Destructive operations must not treat a malformed or temporarily unreadable
+    authoritative draft as absent; only callers that intentionally display the
+    legacy fallback should use ``read_composer_draft_sidecar`` below.
+    """
+    p = composer_draft_sidecar_path(sid)
+    if p is None:
+        return "unreadable", None
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+    stat_key = _composer_draft_sidecar_signature(st)
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        cached = _DRAFT_SIDECAR_CACHE.get(key)
+        if cached is not None and cached[0] == stat_key:
+            _DRAFT_SIDECAR_CACHE.move_to_end(key)
+            return "present", copy.deepcopy(cached[1])
+    try:
+        data = _json_loads_session(p.read_text(encoding='utf-8'))
+        draft = data.get('draft') if isinstance(data, dict) else None
+        if not isinstance(draft, dict):
+            raise ValueError("draft sidecar has invalid shape")
+    except Exception:
+        return "unreadable", None
+    _cache_composer_draft_sidecar(sid, stat_key, draft)
+    return "present", draft
+
+
+def read_composer_draft_sidecar(sid):
+    """Return the sidecar draft dict for display, or None when not usable."""
+    state, draft = composer_draft_sidecar_state(sid)
+    return draft if state == "present" else None
+
+
+def write_composer_draft_sidecar(sid, draft) -> dict:
+    """Atomically persist *draft* to the sidecar and return the stored dict."""
+    p = composer_draft_sidecar_path(sid)
+    if p is None:
+        raise ValueError(f'Unsafe session_id {sid!r}; refusing to write draft sidecar')
+    draft = dict(draft) if isinstance(draft, dict) else {}
+    drafts_dir_created = not p.parent.exists()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if drafts_dir_created:
+        _fsync_composer_draft_directory(SESSION_DIR)
+    payload = _json_dumps_session({'draft': draft, 'updated_at': time.time()})
+    tmp = p.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        _safe_replace(tmp, p)
+        _fsync_composer_draft_parent(p)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    try:
+        st = p.stat()
+        _cache_composer_draft_sidecar(sid, _composer_draft_sidecar_signature(st), draft)
+    except OSError:
+        pass
+    return draft
+
+
+def delete_composer_draft_sidecar(sid) -> bool:
+    """Remove a draft sidecar and report whether no authoritative copy remains.
+
+    Callers that tell the browser a draft was cleared must fail closed when an
+    unlink error leaves the sidecar in place: sidecars override the legacy
+    in-session draft on the next load.
+    """
+    p = composer_draft_sidecar_path(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        _DRAFT_SIDECAR_CACHE.pop(str(sid), None)
+    if p is None:
+        return True
+    try:
+        if not p.exists():
+            return True
+        p.unlink()
+        _fsync_composer_draft_parent(p)
+    except OSError:
+        logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+        return False
+    return not p.exists()
+
+
+def migrate_composer_draft_sidecar(old_sid, new_sid, *, finalize_source: bool = True) -> bool:
+    """Move/copy a draft across a session-id rotation.
+
+    With ``finalize_source=False`` the destination is made durable but the old
+    owner remains authoritative until its continuation session JSON is saved.
+    """
+    old_sid = str(old_sid or '')
+    new_sid = str(new_sid or '')
+    if old_sid == new_sid or not is_safe_session_id(old_sid) or not is_safe_session_id(new_sid):
+        return True
+    # Acquire unique fixed stripes by stripe index, not by session id. Two
+    # unrelated migrations can map their old/new ids to the same pair of
+    # stripes in inverse SID order; a global stripe order prevents deadlock.
+    stripe_indexes = sorted({
+        _composer_draft_lock_stripe_index(old_sid),
+        _composer_draft_lock_stripe_index(new_sid),
+    })
+    with ExitStack() as lock_stack:
+        for stripe_index in stripe_indexes:
+            lock_stack.enter_context(_COMPOSER_DRAFT_LOCK_STRIPES[stripe_index])
+        old_state, old_draft = composer_draft_sidecar_state(old_sid)
+        new_state, new_draft = composer_draft_sidecar_state(new_sid)
+        if old_state == "unreadable" or new_state == "unreadable":
+            return False
+        if old_state == "absent":
+            return True
+        copied_destination = False
+        if new_state == "absent":
+            write_composer_draft_sidecar(new_sid, old_draft)
+            update_cached_composer_draft(new_sid, old_draft)
+            copied_destination = True
+        elif old_draft != new_draft:
+            # The old session remains the explicit owner until this operation
+            # succeeds, so its current draft is authoritative even when files
+            # share an mtime on coarse/coalesced filesystems.
+            write_composer_draft_sidecar(new_sid, old_draft)
+            update_cached_composer_draft(new_sid, old_draft)
+        if not finalize_source:
+            return True
+        if delete_composer_draft_sidecar(old_sid):
+            return True
+        if copied_destination:
+            # Do not leave a partial move when the source remains authoritative.
+            # Best effort only: a second filesystem error still reports failure
+            # and the caller will keep the original session ownership.
+            delete_composer_draft_sidecar(new_sid)
+        return False
+
+
+def resolve_composer_draft(sid, legacy=None) -> dict:
+    """Sidecar draft when present, else the legacy in-file composer_draft."""
+    sidecar = read_composer_draft_sidecar(sid)
+    if sidecar is not None:
+        return sidecar
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def update_cached_composer_draft(sid, draft) -> None:
+    """Keep an already-cached full Session object's composer_draft in sync so
+    code paths that still read the attribute directly see the sidecar value."""
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
+            cached.composer_draft = copy.deepcopy(draft) if isinstance(draft, dict) else {}
+
+
+def _recover_staged_session_owner(sid, path: Path) -> Path:
+    """Restore a staged delete owner after its rollback failed.
+
+    Callers only invoke this after the primary owner path is absent. Acquiring
+    the draft stripe prevents a concurrent delete from being resurrected while
+    it still owns the staged file; once that delete releases the lock, a leftover
+    stage is an incomplete deletion and must be made discoverable again.
+    """
+    with get_composer_draft_lock(sid):
+        if path.exists():
+            return path
+        staged_candidates = sorted(path.parent.glob(f'.{path.name}.deleting-*'))
+        if not staged_candidates:
+            return path
+        try:
+            os.replace(staged_candidates[-1], path)
+            _fsync_composer_draft_directory(path.parent)
+        except OSError:
+            logger.exception("Failed to recover staged session owner for %s", sid)
+    return path
+
+
+def _recover_all_staged_session_owners() -> None:
+    """Make rollback leftovers visible before a sidebar/index scan."""
+    try:
+        staged_paths = list(SESSION_DIR.glob('.*.json.deleting-*'))
+    except OSError:
+        logger.debug("Failed to scan staged session owners", exc_info=True)
+        return
+    for staged_path in staged_paths:
+        name = staged_path.name
+        prefix = '.'
+        marker = '.json.deleting-'
+        if not name.startswith(prefix) or marker not in name:
+            continue
+        sid = name[len(prefix):].split(marker, 1)[0]
+        if not is_safe_session_id(sid):
+            continue
+        _recover_staged_session_owner(sid, SESSION_DIR / f'{sid}.json')
+
+
 def _load_session_from_path(path: Path) -> "Session | None":
     """Load a session from an explicit JSON path without consulting SESSION_DIR."""
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = _json_loads_session(path.read_text(encoding='utf-8'))
     except Exception:
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
@@ -1344,8 +1751,29 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        with _session_save_lock(self.session_id):
+            self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_locked(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        allow_deleted_session_restore: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        # Session deletion records a durable tombstone while holding this same
+        # save stripe. A stale Session object queued behind deletion must not
+        # recreate its owner file after the delete endpoint has acknowledged
+        # success. Fresh sessions receive new IDs; explicit recovery paths own
+        # tombstone clearing before they persist a restored owner.
+        if (
+            not allow_deleted_session_restore
+            and not self.path.exists()
+            and self.session_id in _load_webui_deleted_session_tombstone()
+        ):
+            raise RuntimeError(f"Refusing to save deleted session {self.session_id!r}")
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial
@@ -1418,7 +1846,47 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        payload = _json_dumps_session({**meta, **extra})
+
+        # ── No-op save skip (big-session hotpath, 2026-07-13) ───────────
+        # Several periodic callers re-save byte-identical content (observed
+        # as full 23 MB rewrites every ~15-30s on an idle large session).
+        # If this object produced the exact same payload it last wrote, verify
+        # the real on-disk bytes before skipping. The stat tuple is only a cache
+        # hint: same-size replacements can preserve/coarsen mtime, including an
+        # in-place overwrite. A freshly-loaded object has no digest cache, so it
+        # also verifies once and can retain the no-op optimization after restart.
+        # touch_updated_at=True saves always differ (updated_at changed),
+        # so recency semantics are unaffected.
+        payload_bytes = payload.encode('utf-8')
+        payload_digest = hashlib.sha256(payload_bytes).hexdigest()
+        last_saved_digest = getattr(self, '_last_saved_digest', None)
+        if last_saved_digest is None or payload_digest == last_saved_digest:
+            verified_stat = None
+            try:
+                verified_stat = os.stat(self.path)
+                disk_unchanged = (
+                    verified_stat.st_size == len(payload_bytes)
+                    and _stream_file_sha256(self.path) == payload_digest
+                )
+            except OSError:
+                disk_unchanged = False
+            if disk_unchanged and verified_stat is not None:
+                self._last_saved_digest = payload_digest
+                self._last_saved_stat = (verified_stat.st_mtime_ns, verified_stat.st_size)
+                if not skip_index:
+                    _write_session_index(updates=[self])
+                if self.messages:
+                    try:
+                        _clear_webui_zero_message_orphan_tombstone(self.session_id)
+                        _clear_webui_deleted_session_tombstone(self.session_id)
+                    except Exception:
+                        logger.debug(
+                            "Failed to clear webui tombstone for %s",
+                            self.session_id,
+                            exc_info=True,
+                        )
+                return
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1434,13 +1902,19 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
+                incoming_msg_count = len(self.messages or [])
+                # ``message_count`` is an accelerator written by this class,
+                # not a generation/integrity proof for legacy or external
+                # writers.  A stale low count must never make a real shrink
+                # overwrite history without a parseable recovery backup.
+                # Therefore read and verify the existing payload before every
+                # overwrite; grow still avoids making a backup.
                 existing_text = self.path.read_text(encoding='utf-8')
                 try:
-                    existing = json.loads(existing_text)
+                    existing = _json_loads_session(existing_text)
                     existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                except Exception:
+                    existing_msg_count = -1  # corrupt → never infer a safe shrink
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1496,6 +1970,14 @@ class Session:
             except Exception:
                 pass
             raise
+        # Record what this object wrote so the no-op skip above can prove
+        # "same payload, file untouched since" on the next save.
+        self._last_saved_digest = payload_digest
+        try:
+            st = os.stat(self.path)
+            self._last_saved_stat = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self._last_saved_stat = None
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1532,12 +2014,14 @@ class Session:
             return None
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
+            p = _recover_staged_session_owner(sid, p)
+        if not p.exists():
             return None
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        data = _json_loads_session(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
@@ -1585,6 +2069,8 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
+        if not p.exists():
+            p = _recover_staged_session_owner(sid, p)
         if not p.exists():
             return None
         try:
@@ -1772,7 +2258,13 @@ class Session:
             'source_label': self.source_label,
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
-            'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            # Sidecar draft wins over the in-file field (big-session save
+            # hotpath): draft autosaves no longer rewrite the session JSON,
+            # so the sidecar is the authoritative, freshest copy.
+            'composer_draft': resolve_composer_draft(
+                self.session_id,
+                self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            ),
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
@@ -3385,7 +3877,6 @@ def _has_compression_continuation(session) -> bool:
     # shallow JSON metadata scan; session files write parent_session_id before
     # the messages array, so this avoids loading multi-MB transcripts.
     try:
-        needle = f'"parent_session_id": "{sid}"'
         for path in SESSION_DIR.glob('*.json'):
             if path.name.startswith('_') or path.stem == sid:
                 continue
@@ -3399,7 +3890,7 @@ def _has_compression_continuation(session) -> bool:
                 head = _read_file_head(path, max_prefix_bytes=16384)[:4096]
             except OSError:
                 continue
-            if needle in head:
+            if _read_top_level_json_value_from_head(head, 'parent_session_id') == sid:
                 return True
     except Exception:
         logger.debug("Failed to scan session files for compression continuation", exc_info=True)
@@ -5753,6 +6244,7 @@ def _diag_stage(diag, name: str) -> None:
 
 
 def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
+    _recover_all_staged_session_owners()
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan

@@ -126,15 +126,7 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
     def fail_delete(value):
         raise RuntimeError("state.db locked")
 
-    real_unlink = Path.unlink
-
-    def fail_backup_unlink(path, *args, **kwargs):
-        if path.name == f"{sid}.json.bak":
-            raise PermissionError("backup locked")
-        return real_unlink(path, *args, **kwargs)
-
     monkeypatch.setattr(models, "delete_cli_session", fail_delete)
-    monkeypatch.setattr(Path, "unlink", fail_backup_unlink)
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
 

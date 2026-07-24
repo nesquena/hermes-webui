@@ -330,10 +330,31 @@ function _clearComposerDraft(sid, text, files) {
   else _suppressComposerDraftRestoreAfterSubmit(sid);
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+    retries: 2,
+    retryTimeouts: true,
+    retryStatuses: [429, 500, 502, 503, 504],
+    body: JSON.stringify({
+      session_id: sid,
+      clear: true,
+      expected: {
+        text: String(text || ''),
+        files: _composerDraftFilesForPersist(files),
+      },
+    }),
+  }).then((result) => {
+    const confirmed = result && result.draft;
+    _rememberComposerDraftPayloadState(
+      sid,
+      confirmed && typeof confirmed.text === 'string' ? confirmed.text : '',
+      confirmed && Array.isArray(confirmed.files) ? confirmed.files : [],
+    );
+  }).catch((error) => {
+    console.warn('[composer-draft] clear failed after retries', error);
+    if (typeof showToast === 'function') {
+      showToast('Could not clear the saved draft. It may reappear after reload.', 5000, 'warning');
+    }
+    throw error;
+  });
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';

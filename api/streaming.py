@@ -3963,13 +3963,26 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(
+    s,
+    old_sid: str,
+    *,
+    draft_already_migrated: bool = False,
+) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
+    if not draft_already_migrated:
+        from api.models import migrate_composer_draft_sidecar
+
+        if not migrate_composer_draft_sidecar(old_sid, s.session_id):
+            logger.warning(
+                "Refusing to archive compression snapshot %s because its draft sidecar did not migrate", old_sid
+            )
+            return
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return
@@ -9263,8 +9276,28 @@ def _run_agent_streaming(
                 _compression_origin_session_id = session_id
                 _compression_continuation_session_id = None
                 _agent_sid = getattr(agent, 'session_id', None)
-                _compressed = False
+                _draft_migration_ready = True
                 if _agent_sid and _agent_sid != session_id:
+                    # Move the authoritative draft before committing any
+                    # WebUI-side session-ID rotation. A corrupt/unreadable
+                    # sidecar must leave the current owner intact instead of
+                    # creating a continuation that cannot recover its draft.
+                    from api.models import migrate_composer_draft_sidecar
+                    try:
+                        _draft_migration_ready = migrate_composer_draft_sidecar(
+                            session_id,
+                            _agent_sid,
+                            finalize_source=False,
+                        )
+                    except Exception:
+                        _draft_migration_ready = False
+                        logger.exception(
+                            "Failed to migrate composer draft before compression rotation: old_sid=%s new_sid=%s",
+                            session_id,
+                            _agent_sid,
+                        )
+                _compressed = False
+                if _agent_sid and _agent_sid != session_id and _draft_migration_ready:
                     old_sid = session_id
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
@@ -9299,7 +9332,11 @@ def _run_agent_streaming(
                     # compression removes messages from the model's context. Skip
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
+                    _preserve_pre_compression_snapshot(
+                        s,
+                        old_sid,
+                        draft_already_migrated=True,
+                    )
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains
@@ -9364,6 +9401,24 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
+                elif _agent_sid and _agent_sid != session_id:
+                    # The agent has already rotated internally, but WebUI must
+                    # retain the old owner until its authoritative draft can
+                    # move with it. Restore the agent identity before ordinary
+                    # finalization writes the current session.
+                    try:
+                        agent.session_id = session_id
+                    except Exception:
+                        logger.exception(
+                            "Failed to restore agent session identity after aborted compression rotation: old_sid=%s new_sid=%s",
+                            session_id,
+                            _agent_sid,
+                        )
+                    logger.error(
+                        "Aborted WebUI compression rotation because composer draft migration did not complete: old_sid=%s new_sid=%s",
+                        session_id,
+                        _agent_sid,
+                    )
 
                 # ── Detect silent agent failure (no assistant reply produced) ──
                 # When the agent catches an auth/network error internally it may return
@@ -10132,6 +10187,26 @@ def _run_agent_streaming(
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
+                if _compressed:
+                    # The continuation owner is now durable. Only now may the
+                    # preflight copy retire the preserved source draft.
+                    try:
+                        from api.models import migrate_composer_draft_sidecar
+                        if not migrate_composer_draft_sidecar(
+                            _compression_origin_session_id,
+                            s.session_id,
+                        ):
+                            logger.warning(
+                                "Retained pre-compression draft source after continuation save failed to finalize migration: old_sid=%s new_sid=%s",
+                                _compression_origin_session_id,
+                                s.session_id,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Failed to finalize composer draft migration after continuation save: old_sid=%s new_sid=%s",
+                            _compression_origin_session_id,
+                            s.session_id,
+                        )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:

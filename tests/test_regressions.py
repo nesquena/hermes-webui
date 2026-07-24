@@ -344,9 +344,19 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
-            assert "prune_session_from_index(sid)" in delete_block, \
-                f"{label} session/delete must prune SESSION_INDEX_FILE"
+            clear_idx = max(
+                text.find("if parsed.path == '/api/session/clear':", delete_idx),
+                text.find('if parsed.path == "/api/session/clear":', delete_idx),
+            )
+            assert clear_idx > delete_idx, f"{label} session/delete handler boundary not found"
+            delete_block = text[delete_idx:clear_idx]
+            lock_idx = delete_block.find("with get_composer_draft_lock(sid), _session_save_lock(sid):")
+            draft_delete_idx = delete_block.find("delete_composer_draft_sidecar(sid)")
+            prune_idx = delete_block.find("prune_session_from_index(sid)")
+            assert -1 not in (lock_idx, draft_delete_idx, prune_idx), \
+                f"{label} session/delete must lock drafts, remove the sidecar, and prune SESSION_INDEX_FILE"
+            assert lock_idx < draft_delete_idx < prune_idx, \
+                f"{label} session/delete must prune only after draft-locked sidecar cleanup"
             return
     assert False, "session/delete handler not found in server.py or api/routes.py"
 
@@ -359,9 +369,15 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    clear_idx = max(
+        routes_src.find("if parsed.path == '/api/session/clear':", delete_idx),
+        routes_src.find('if parsed.path == "/api/session/clear":', delete_idx),
+    )
+    assert clear_idx > delete_idx, "session/delete handler boundary not found"
+    delete_block = routes_src[delete_idx:clear_idx]
+    assert "backup_path = p.with_suffix('.json.bak')" in delete_block
+    assert "backup_path.unlink()" in delete_block, \
+        "session/delete must unlink <sid>.json.bak before acknowledging deletion"
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

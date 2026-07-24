@@ -34,6 +34,30 @@ class FakeSession:
         path.write_text(json.dumps(self.saved_payload), encoding="utf-8")
 
 
+
+def test_preserve_snapshot_skips_duplicate_draft_migration_after_preflight(tmp_path, monkeypatch):
+    from api import streaming
+
+    class SnapshotSession:
+        session_id = "continuation"
+        messages = []
+
+    monkeypatch.setattr(streaming, "SESSION_DIR", tmp_path)
+    (tmp_path / "parent.json").write_text(json.dumps({"messages": []}), encoding="utf-8")
+
+    def unexpected_migration(*_args):
+        raise AssertionError("preflight-successful rotation must not migrate drafts twice")
+
+    import api.models as models
+    monkeypatch.setattr(models, "migrate_composer_draft_sidecar", unexpected_migration)
+
+    streaming._preserve_pre_compression_snapshot(
+        SnapshotSession(),
+        "parent",
+        draft_already_migrated=True,
+    )
+
+
 def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring_continuation_state(tmp_path, monkeypatch):
     monkeypatch.setattr(streaming, "SESSION_DIR", tmp_path)
     (tmp_path / "old_session.json").write_text(json.dumps({"messages": []}), encoding="utf-8")

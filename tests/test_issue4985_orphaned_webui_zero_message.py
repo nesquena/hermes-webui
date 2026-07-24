@@ -255,6 +255,8 @@ def _payload_for_rows_webui(
     zero_message_ids,
     existing_ids=None,
     cli_existing_ids=None,
+    sidecar_state=None,
+    sidecar_delete_success=True,
 ):
     """Variant of #3238's ``_payload_for_rows`` for the #4985 path.
 
@@ -288,9 +290,18 @@ def _payload_for_rows_webui(
         lambda ids, profile=None: frozenset(zero_message_ids or []),
     )
     monkeypatch.setattr(
+        routes,
+        "composer_draft_sidecar_state",
+        lambda _sid: sidecar_state or ("absent", None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "delete_composer_draft_sidecar",
+        lambda _sid: sidecar_delete_success,
+    )
+    monkeypatch.setattr(
         routes, "prune_session_from_index", lambda sid: pruned.append(sid)
     )
-
     payload = routes._build_session_list_cache_payload(
         active_profile="default",
         all_profiles=False,
@@ -330,7 +341,60 @@ def test_webui_titled_orphan_in_state_db_is_pruned(monkeypatch):
     assert pruned == ["webui-orphan"]
 
 
-# 2. Titled Webui row with state.db.messages NON-empty -> RETAINED. The gate
+def test_webui_zero_message_orphan_is_retained_when_draft_sidecar_delete_fails(monkeypatch):
+    row = {
+        "session_id": "webui-orphan-sidecar-delete-failure",
+        "title": "Native WebUI",
+        "profile": "default",
+        "updated_at": 20,
+        "last_message_at": 20,
+        "message_count": 0,
+        "read_only": False,
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "source_label": "WebUI",
+        "is_cli_session": False,
+    }
+
+    payload, pruned = _payload_for_rows_webui(
+        monkeypatch,
+        [row],
+        zero_message_ids=["webui-orphan-sidecar-delete-failure"],
+        sidecar_delete_success=False,
+    )
+
+    assert [session["session_id"] for session in payload["sessions"]] == [
+        "webui-orphan-sidecar-delete-failure"
+    ]
+    assert pruned == []
+
+
+def test_webui_zero_message_orphan_with_unreadable_draft_is_retained(monkeypatch):
+    row = {
+        "session_id": "webui-unreadable-draft",
+        "title": "Native WebUI",
+        "profile": "default",
+        "updated_at": 20,
+        "last_message_at": 20,
+        "message_count": 0,
+        "read_only": False,
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "source_label": "WebUI",
+        "is_cli_session": False,
+    }
+
+    payload, pruned = _payload_for_rows_webui(
+        monkeypatch,
+        [row],
+        zero_message_ids=["webui-unreadable-draft"],
+        sidecar_state=("unreadable", None),
+    )
+
+    assert [session["session_id"] for session in payload["sessions"]] == ["webui-unreadable-draft"]
+    assert pruned == []
 #    fires, the helper confirms messages exist, the row is NOT in the missing
 #    set, prune_session_from_index is NOT called.
 def test_webui_titled_row_with_messages_in_state_db_is_retained(monkeypatch):

@@ -2125,7 +2125,48 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 )
         _diag("self_heal_webui_zero_message_orphan")
     if missing_webui_orphan_ids:
-        for _sid in missing_webui_orphan_ids:
+        for _sid in missing_webui_orphan_ids.copy():
+            with get_composer_draft_lock(_sid):
+                # Re-read ownership at the destructive boundary. A WebUI
+                # session can intentionally have no transcript yet while its
+                # sidecar holds the user's durable composer draft.
+                try:
+                    owner = Session.load(_sid)
+                    sidecar_state, sidecar_draft = composer_draft_sidecar_state(_sid)
+                    if sidecar_state == "unreadable":
+                        logger.warning(
+                            "Retaining webui zero-message row %s because its draft sidecar is unreadable",
+                            _sid,
+                        )
+                        missing_webui_orphan_ids.discard(_sid)
+                        continue
+                    draft = (
+                        sidecar_draft
+                        if sidecar_state == "present"
+                        else getattr(owner, "composer_draft", None) if owner else None
+                    )
+                except Exception:
+                    logger.warning(
+                        "Retaining webui zero-message row %s because durable owner reload failed",
+                        _sid,
+                        exc_info=True,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
+                has_draft = bool(
+                    isinstance(draft, dict)
+                    and (str(draft.get("text") or "") or draft.get("files"))
+                )
+                if owner is not None and has_draft:
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
+                if not delete_composer_draft_sidecar(_sid):
+                    logger.warning(
+                        "Retaining webui zero-message row %s because its draft sidecar could not be removed",
+                        _sid,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
             try:
                 prune_session_from_index(_sid)
                 _diag("prune_orphaned_webui_zero_message")
@@ -7884,6 +7925,17 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+def _session_source_marks_subagent(s) -> bool:
+    """True when a session object's source fields tag it as a delegated
+    subagent child. Works on metadata-only stubs (the source fields live in
+    the metadata prefix), so callers on hot paths can avoid a full load."""
+    src = (
+        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
+            or getattr(s, "session_source", "") or "").strip().lower()
+    )
+    return src == "subagent"
+
+
 def _session_is_subagent_view_only(sid: str) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
@@ -7901,11 +7953,7 @@ def _session_is_subagent_view_only(sid: str) -> bool:
         s = get_session(sid)
     except Exception:
         return False
-    src = (
-        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
-            or getattr(s, "session_source", "") or "").strip().lower()
-    )
-    return src == "subagent"
+    return _session_source_marks_subagent(s)
 
 
 def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
@@ -9437,6 +9485,14 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+    resolve_composer_draft,
+    composer_draft_sidecar_state,
+    write_composer_draft_sidecar,
+    delete_composer_draft_sidecar,
+    get_composer_draft_lock,
+    _session_save_lock,
+    _fsync_composer_draft_directory,
+    update_cached_composer_draft,
 )
 
 
@@ -14425,8 +14481,11 @@ def handle_post(handler, parsed) -> bool:
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 manual_title=getattr(session, "manual_title", False),
-                # Composer draft — preserve per-session draft state.
-                composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
+                # Composer draft — preserve per-session draft state. Resolve
+                # through the sidecar store so the freshest draft is copied.
+                composer_draft=copy.deepcopy(resolve_composer_draft(
+                    session.session_id, getattr(session, "composer_draft", None)
+                ) or {}),
                 # Context engine state — preserve so the duplicate's context engine
                 # starts from the same point as the original.
                 context_engine=getattr(session, "context_engine", None),
@@ -14710,6 +14769,14 @@ def handle_post(handler, parsed) -> bool:
         # GET ?session_id=X  → return current draft
         # POST body          → save draft { session_id, text?, files? }
         # HTTP method is in handler.command (e.g. "POST", "GET"), parsed has no .method
+        #
+        # Big-session save hotpath: drafts persist to a tiny per-session sidecar
+        # file (models.write_composer_draft_sidecar) instead of Session.save().
+        # On a multi-MB session, every 400ms-debounced keystroke autosave used to
+        # rewrite the entire session JSON (~1s CPU each) behind the session lock,
+        # and the queued POSTs made the whole server unresponsive. This route now
+        # only ever does a metadata-prefix load for validation plus a small atomic
+        # file write. The legacy in-file composer_draft remains as a read fallback.
         import time as _draft_time
         _draft_t0 = _draft_time.monotonic()
         _draft_stages = []
@@ -14723,10 +14790,10 @@ def handle_post(handler, parsed) -> bool:
             if not sid:
                 return bad(handler, "session_id is required", 400)
             try:
-                s = get_session(sid)
+                s = get_session(sid, metadata_only=True)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
+            draft = resolve_composer_draft(sid, getattr(s, "composer_draft", None))
             return j(handler, {"draft": draft})
         # POST
         try:
@@ -14734,16 +14801,30 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
-            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        clear_requested = body.get("clear") is True
+        clear_expected = body.get("expected")
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
         # via the 400ms debounced auto-save.
         _MAX_DRAFT_TEXT = 50_000  # 50 KB cap on textarea content
         _MAX_DRAFT_FILES = 50  # max number of attached file references
+
+        def _canonical_draft(value):
+            value = value if isinstance(value, dict) else {}
+            draft_text = value.get("text")
+            if not isinstance(draft_text, str):
+                draft_text = ""
+            draft_files = value.get("files")
+            if not isinstance(draft_files, list):
+                draft_files = []
+            return {
+                "text": draft_text[:_MAX_DRAFT_TEXT],
+                "files": draft_files[:_MAX_DRAFT_FILES],
+            }
+
         if text is not None and not isinstance(text, str):
             text = ""
         if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT:
@@ -14753,32 +14834,93 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s_meta = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # Same #5307 view-only guard as before, evaluated on the (possibly
+        # metadata-only) session object so the check never forces a full
+        # multi-MB transcript load just to store a draft.
+        if _is_subagent_child_session_id(sid) or _session_source_marks_subagent(s_meta):
+            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         unchanged = False
-        with _get_session_agent_lock(sid):
+        # Dedicated per-session draft lock: drafts must never queue behind the
+        # session/agent lock a running turn may hold.
+        with get_composer_draft_lock(sid):
             _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
+            # Validation before this lock can race delete. Re-resolve ownership
+            # at the point of use so a late POST cannot recreate an orphan.
+            try:
+                s_meta = get_session(sid, metadata_only=True)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            sidecar_state, sidecar_draft = composer_draft_sidecar_state(sid)
+            if sidecar_state == "unreadable":
+                return bad(handler, "Saved draft is unreadable; refusing to overwrite it", status=500)
+            if sidecar_state == "present":
+                current_draft = dict(sidecar_draft)
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+                current_draft = dict(getattr(s_meta, "composer_draft", {}) or {})
+            current_clear_draft = _canonical_draft(current_draft)
+            expected_clear_draft = _canonical_draft(clear_expected)
+            if (
+                clear_requested
+                and isinstance(clear_expected, dict)
+                and current_clear_draft != expected_clear_draft
+            ):
+                unchanged = True
+                saved_draft = current_clear_draft
+            elif clear_requested:
+                saved_draft = {"text": "", "files": []}
+                # Clearing crosses two durable stores: the sidecar is
+                # authoritative while present, but the legacy session payload
+                # takes over after unlink. Checkpoint the current draft first,
+                # so either later operation can fail without losing it.
+                owner = get_session(sid)
+                owner.composer_draft = dict(current_clear_draft)
+                try:
+                    owner.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to checkpoint composer draft before clear for %s", sid, exc_info=True)
+                    update_cached_composer_draft(sid, current_clear_draft)
+                    return bad(handler, "Failed to clear the saved draft", status=500)
+                if not delete_composer_draft_sidecar(sid):
+                    update_cached_composer_draft(sid, current_clear_draft)
+                    return bad(handler, "Failed to clear the saved draft", status=500)
+                owner.composer_draft = dict(saved_draft)
+                try:
+                    owner.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    # The durable checkpoint above remains on disk. Restore the
+                    # in-memory view before reporting the failed clear.
+                    logger.debug("Failed to finalize composer draft clear for %s", sid, exc_info=True)
+                    update_cached_composer_draft(sid, current_clear_draft)
+                    return bad(handler, "Failed to clear the saved draft", status=500)
+                update_cached_composer_draft(sid, saved_draft)
+            else:
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft and sidecar_draft is not None:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    # A memory-only new chat needs one durable owner record or
+                    # its sidecar becomes undiscoverable after restart.
+                    if not (SESSION_DIR / f"{sid}.json").exists() and (
+                        str(next_draft.get("text") or "") or next_draft.get("files")
+                    ):
+                        owner = get_session(sid)
+                        owner.composer_draft = dict(next_draft)
+                        owner.save(touch_updated_at=False)
+                    # Draft persistence is not conversation activity: existing
+                    # session JSON and sidebar metadata remain untouched.
+                    _draft_mark("before_save")
+                    saved_draft = write_composer_draft_sidecar(sid, next_draft)
+                    update_cached_composer_draft(sid, saved_draft)
+                    _draft_mark("after_save")
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
@@ -14897,36 +15039,122 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Delete from WebUI session store
-        with LOCK:
-            SESSIONS.pop(sid, None)
-        # Evict cached agent so turn count doesn't leak into a recycled session
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
         except Exception:
             return bad(handler, "Invalid session_id", 400)
+        # Delete from WebUI session store and its draft under the same draft
+        # lock used by POST /api/session/draft. Whichever operation wins, the
+        # final state cannot contain a draft without an owning session.
         sidecar_deleted = False
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session file %s", p)
-        sidecar_deleted = not p.exists()
-        try:
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+        with get_composer_draft_lock(sid), _session_save_lock(sid):
+            sidecar_state, _sidecar_draft = composer_draft_sidecar_state(sid)
+            if sidecar_state == "unreadable":
+                return bad(handler, "Saved draft is unreadable; session was retained", 500)
+            owner = None
+            try:
+                owner = Session.load(sid)
+                if sidecar_state == "present":
+                    if owner is None:
+                        return bad(handler, "Saved draft has no session owner; session was retained", 500)
+                    # A failed unlink may mean ``unlink()`` succeeded but its
+                    # parent directory fsync did not. Persist the authoritative
+                    # draft in the legacy owner before staging so either outcome
+                    # is readable.
+                    owner.composer_draft = copy.deepcopy(_sidecar_draft)
+                    owner.save(touch_updated_at=False, skip_index=True)
+                    _fsync_composer_draft_directory(SESSION_DIR)
+            except Exception:
+                logger.exception("Failed to checkpoint draft before session deletion: %s", sid)
+                return bad(handler, "Failed to preserve saved draft; session was retained", 500)
+            # Stage the owner under the same directory first. That lets a
+            # sidecar-delete failure restore the owner atomically rather than
+            # orphaning the authoritative draft after a partial delete.
+            staged_owner = None
+            if owner is not None:
+                staged_owner = p.with_name(f".{p.name}.deleting-{uuid.uuid4().hex}")
+                try:
+                    os.replace(p, staged_owner)
+                except FileNotFoundError:
+                    staged_owner = None
+                except Exception:
+                    logger.debug("Failed to stage session file for deletion %s", p, exc_info=True)
+                    return bad(handler, "Failed to remove session; saved draft was retained", 500)
+            if not delete_composer_draft_sidecar(sid):
+                if staged_owner is not None:
+                    try:
+                        os.replace(staged_owner, p)
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                    except Exception:
+                        logger.exception("Failed to restore session owner after draft-delete failure: %s", sid)
+                return bad(handler, "Failed to remove saved draft; session was retained", 500)
+            backup_path = p.with_suffix('.json.bak')
+            try:
+                if backup_path.exists():
+                    backup_path.unlink()
+                    _fsync_composer_draft_directory(SESSION_DIR)
+            except Exception:
+                logger.exception("Failed to remove session backup for %s", sid)
+                try:
+                    if staged_owner is not None:
+                        os.replace(staged_owner, p)
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore session after backup-delete failure: %s", sid)
+                return bad(handler, "Failed to remove session backup; session was retained", 500)
+            try:
+                if staged_owner is not None:
+                    staged_owner.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Failed to finalize staged session deletion for %s", sid)
+                try:
+                    if staged_owner is not None:
+                        os.replace(staged_owner, p)
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore staged session after unlink failure: %s", sid)
+                return bad(handler, "Failed to finalize session deletion; session was retained", 500)
+            try:
+                if staged_owner is not None:
+                    _fsync_composer_draft_directory(SESSION_DIR)
+            except Exception:
+                logger.exception("Failed to durably finalize staged session deletion for %s", sid)
+                # unlink succeeded but its directory entry is not confirmed
+                # durable. Recreate the canonical owner from the loaded snapshot.
+                try:
+                    if sidecar_state == "present":
+                        write_composer_draft_sidecar(sid, _sidecar_draft)
+                    owner.save(touch_updated_at=False, skip_index=True)
+                    _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore session after final directory fsync failure: %s", sid)
+                return bad(handler, "Failed to finalize session deletion; session was retained", 500)
+            if not is_messaging_session and not _record_webui_deleted_session_tombstone(sid):
+                logger.error("Failed to record delete tombstone for %s", sid)
+                try:
+                    if sidecar_state == "present":
+                        write_composer_draft_sidecar(sid, _sidecar_draft)
+                    if owner is not None:
+                        owner._save_locked(
+                            touch_updated_at=False,
+                            skip_index=True,
+                            allow_deleted_session_restore=True,
+                        )
+                    _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore session after tombstone failure: %s", sid)
+                return bad(handler, "Failed to finalize session deletion; session was retained", 500)
+            with LOCK:
+                SESSIONS.pop(sid, None)
+            # Evict cached agent so turn count doesn't leak into a recycled session
+            from api.config import _evict_session_agent
+            _evict_session_agent(sid)
+
         try:
             prune_session_from_index(sid)
         except Exception:
             logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-        if sidecar_deleted and not is_messaging_session:
-            try:
-                _record_webui_deleted_session_tombstone(sid)
-            except Exception:
-                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
@@ -20618,17 +20846,83 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            sid = p.stem
+            with get_composer_draft_lock(sid):
+                # The draft sidecar is durable user state.  Check it under the
+                # same lock as POST/delete so cleanup cannot delete its owner
+                # between validation and a draft write.
+                s = Session.load(sid)
+                sidecar_state, sidecar_draft = composer_draft_sidecar_state(sid)
+                # Cleanup is destructive: a malformed or transiently unreadable
+                # authoritative sidecar is retention, never an empty fallback.
+                if sidecar_state == "unreadable":
+                    continue
+                draft = (
+                    sidecar_draft
+                    if sidecar_state == "present"
+                    else getattr(s, "composer_draft", None) if s else None
+                )
+                has_draft = bool(
+                    str(draft.get("text") or "") or draft.get("files")
+                ) if isinstance(draft, dict) else False
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0 and not has_draft
+                else:
+                    should_delete = (
+                        s and s.title == "Untitled" and len(s.messages) == 0
+                        and not has_draft
+                    )
+                if should_delete:
+                    if sidecar_state == "present":
+                        try:
+                            s.composer_draft = copy.deepcopy(sidecar_draft)
+                            s.save(touch_updated_at=False, skip_index=True)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except Exception:
+                            logger.exception("Failed to checkpoint draft before cleanup: %s", sid)
+                            continue
+                    staged_owner = p.with_name(f".{p.name}.deleting-{uuid.uuid4().hex}")
+                    try:
+                        os.replace(p, staged_owner)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        logger.warning("Failed to stage session file for cleanup: %s", sid, exc_info=True)
+                        continue
+                    if not delete_composer_draft_sidecar(sid):
+                        try:
+                            os.replace(staged_owner, p)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except OSError:
+                            logger.exception("Failed to restore staged session owner after cleanup failure: %s", sid)
+                        continue
+                    try:
+                        staged_owner.unlink()
+                    except OSError:
+                        logger.exception("Failed to finalize staged session cleanup: %s", sid)
+                        try:
+                            os.replace(staged_owner, p)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except OSError:
+                            logger.exception("Failed to restore staged cleanup owner after unlink failure: %s", sid)
+                        continue
+                    try:
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                    except OSError:
+                        logger.exception("Failed to durably finalize staged session cleanup: %s", sid)
+                        try:
+                            if sidecar_state == "present":
+                                write_composer_draft_sidecar(sid, sidecar_draft)
+                            s.save(touch_updated_at=False, skip_index=True)
+                            _fsync_composer_draft_directory(SESSION_DIR)
+                        except OSError:
+                            logger.exception("Failed to restore cleanup state after final directory fsync failure: %s", sid)
+                        continue
+                    with LOCK:
+                        SESSIONS.pop(sid, None)
+                    p.with_suffix('.json.bak').unlink(missing_ok=True)
+                    cleaned += 1
+                    phase1_removed_ids.add(sid)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -20708,6 +21002,38 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     # correct, so keep it (avoids a wasteful rebuild).
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
+
+    # A sidecar with neither a persisted nor in-memory owner is an orphan.
+    # Do this after the owner/index passes and recheck ownership while holding
+    # the draft lock; a draft-only new session writes owner then sidecar under
+    # that lock, so cleanup must never delete an in-flight legitimate draft.
+    drafts_dir = SESSION_DIR / '_drafts'
+    try:
+        for draft_path in drafts_dir.glob('*.json'):
+            sid = draft_path.stem
+            with get_composer_draft_lock(sid):
+                owner_path = SESSION_DIR / f'{sid}.json'
+                # Recover a rare failed delete rollback before deciding this
+                # draft is orphaned. The staging name is same-directory and
+                # contains the authoritative owner JSON.
+                if not owner_path.exists():
+                    staged_candidates = sorted(SESSION_DIR.glob(f'.{sid}.json.deleting-*'))
+                    if staged_candidates:
+                        try:
+                            os.replace(staged_candidates[-1], owner_path)
+                        except OSError:
+                            logger.warning("Failed to restore staged session owner for draft cleanup: %s", sid)
+                owner_exists = owner_path.exists()
+                with LOCK:
+                    in_memory_owner = sid in SESSIONS
+                if not owner_exists and not in_memory_owner:
+                    sidecar_state, _sidecar_draft = composer_draft_sidecar_state(sid)
+                    if sidecar_state == "unreadable":
+                        continue
+                    if delete_composer_draft_sidecar(sid):
+                        cleaned += 1
+    except Exception:
+        logger.debug("Failed to clean up draft-sidecar orphans", exc_info=True)
 
     return j(handler, {"ok": True, "cleaned": cleaned})
 
