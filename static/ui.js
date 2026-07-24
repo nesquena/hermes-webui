@@ -1175,7 +1175,7 @@ function _remountMessageViewportAnchor(anchor){
   if(visIdx<0) return false;
   // A virtualized anchor may be outside the current DOM. Scroll to its virtual
   // row and render once so the semantic restore below has a real target.
-  _programmaticScroll=true;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx,visIdx,container);
   _messageVirtualWindowKey='';
   _messageViewportAnchorRemounting=true;
@@ -5667,6 +5667,16 @@ let _scrollPinned=true;
 let _programmaticScroll=false;
 let _programmaticScrollSetAt=0;
 let _programmaticScrollResetTimer=0;
+const PROGRAMMATIC_SCROLL_VALID_MS=150;
+function _freshProgrammaticScrollActive(){
+  if(!_programmaticScroll) return false;
+  const age=performance.now()-_programmaticScrollSetAt;
+  if(!Number.isFinite(age)||age<0||age>PROGRAMMATIC_SCROLL_VALID_MS){
+    _programmaticScroll=false;
+    return false;
+  }
+  return true;
+}
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
 let _nearBottomCount=0;
 let _lastScrollTop=null;
@@ -5767,17 +5777,23 @@ function _recordNonMessageScrollIntent(e){
   // including gentle low-delta trackpad wheels (e.g. deltaY:-5) that never reach
   // the decisive -30 sticky-unpin threshold below. The post-render artifact
   // suppression consults _recentMessageWheelIntent() so it cannot swallow a real
-  // gentle scroll-up. This does NOT unpin on its own — only the <-30 branch and
-  // the scroll listener's movedUp branch flip _messageUserUnpinned.
+  // gentle scroll-up. Ordinarily this does NOT unpin on its own: the <-30 branch
+  // and the scroll listener's movedUp branch remain the stable threshold. The
+  // exception is an active programmatic-scroll guard. That guard returns before
+  // its listener can see the native scroll event, so even a small capture-phase
+  // upward wheel input must immediately stop live-tail follow (#6414).
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
     const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
     if(bottomDistance>120) _lastMessageScrollIntentMs=performance.now();
   }
   if(typeof e.deltaY==='number'&&e.deltaY<0) _lastMessageWheelIntentMs=performance.now();
-  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
+  // Keep e.deltaY< -30 as the ordinary direct sticky-unpin threshold.
+  const wheelUp=typeof e.deltaY==='number'&&e.deltaY<0;
+  const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
     _cancelBottomSettle();
     if(e.type==='touchmove') _markMessageTouchScrollIntent(true);
-    if(typeof e.deltaY==='number'&&e.deltaY< -30){
+    if((typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       _messageUserUnpinned=true;
       _nearBottomCount=0;
       _scrollPinned=false;
@@ -6020,8 +6036,7 @@ if(typeof window!=='undefined'){
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
-    if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
-    if(_programmaticScroll) return;
+    if(_freshProgrammaticScrollActive()) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
