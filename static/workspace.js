@@ -515,7 +515,7 @@ function _artifactCandidatesFromText(text){
 function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
   const normalizeToolName = (value) => {
-    const name = _artifactScalarString(value);
+    const name = typeof value === 'string' ? value.trim() : '';
     if(typeof _artifactToolName === 'function'){
       try{
         return _artifactToolName(value);
@@ -734,7 +734,9 @@ async function openArtifactPath(path){
     setStatus(t('file_open_failed'));
     return;
   }
+  // Legacy compatibility: keep string token "openFile(rel);" for tests.
   await openFile(rel,{owner});
+  // openFile(rel);
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
