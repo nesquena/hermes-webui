@@ -9,8 +9,8 @@ import pytest
 
 _agent_stub = types.ModuleType('agent')
 _aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
+sys.modules['agent'] = _agent_stub
+sys.modules['agent.auxiliary_client'] = _aux_stub
 _agent_stub.auxiliary_client = _aux_stub
 
 from api.streaming import _route_accepts_reasoning_extra, generate_title_raw_via_aux
@@ -194,6 +194,31 @@ class TestAuxReasoningExtraRouteContract:
         request = captured[-1]
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom:unconfigured', None, 'https://relay.example/v1',
+        )
+        assert request['extra_body'] is None
+
+    def test_unresolved_minimax_endpoint_omits_every_reasoning_extra(self):
+        """An unresolved custom route cannot inherit MiniMax-specific extras."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'custom:unconfigured',
+            'model': '',
+            'base_url': 'https://api.minimaxi.com/v1',
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='',
+            create=True,
+        ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom:unconfigured', None, 'https://api.minimaxi.com/v1',
         )
         assert request['extra_body'] is None
 

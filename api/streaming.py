@@ -3643,8 +3643,8 @@ def generate_title_raw_via_aux(
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
-    if _is_minimax_route(provider, model, base_url):
-        reasoning_extra["reasoning_split"] = True
+        if _is_minimax_route(provider, model, base_url):
+            reasoning_extra["reasoning_split"] = True
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     try:
         _timeout = _aux_title_timeout()
