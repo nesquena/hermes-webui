@@ -9800,19 +9800,18 @@ def _sidebar_child_runtime_fields(session: dict, *, attention: dict | None = Non
     attention_kind = _safe_first((attention or {}).get("kind"))
     if attention_kind in {"approval", "clarify"}:
         return "waiting", attention_kind
-    if session.get("is_streaming") is True or session.get("active_stream_id"):
+    # A bare active_stream_id can outlive its stream; only is_streaming is reconciled.
+    if session.get("is_streaming") is True:
         return "running", "live"
     runtime_reason = _normalize_sidebar_child_runtime_reason(session.get("end_reason"))
-    has_terminal_evidence = bool(session.get("ended_at")) or bool(runtime_reason)
-    if not has_terminal_evidence:
-        return "unknown", None
     if runtime_reason == "cancelled":
         return "cancelled", runtime_reason
-    if runtime_reason == "unknown":
-        return "unknown", runtime_reason
-    if runtime_reason in {None, "completed"}:
-        return "completed", "completed"
-    return "failed", runtime_reason
+    if runtime_reason == "completed":
+        return "completed", runtime_reason
+    if runtime_reason in {"tool_limit", "error"}:
+        return "failed", runtime_reason
+    # ended_at alone says the child stopped, not how; never infer an outcome from it.
+    return "unknown", runtime_reason
 
 
 def _sidebar_session_has_child_runtime(session: dict) -> bool:

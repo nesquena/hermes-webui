@@ -57,8 +57,11 @@ def test_sidebar_response_item_leaves_parent_runtime_fields_empty(monkeypatch):
 @pytest.mark.parametrize(
     ("session", "attention", "expected_state", "expected_reason"),
     [
-        ({"active_stream_id": "run-1"}, None, "running", "live"),
-        ({"ended_at": 42}, None, "completed", "completed"),
+        ({"is_streaming": True}, None, "running", "live"),
+        ({"active_stream_id": "run-1"}, None, "unknown", None),
+        ({"ended_at": 42, "active_stream_id": "run-1"}, None, "unknown", None),
+        ({"ended_at": 42}, None, "unknown", None),
+        ({"ended_at": 42, "end_reason": "completed"}, None, "completed", "completed"),
         ({"ended_at": 42, "end_reason": "tool-limit"}, None, "failed", "tool_limit"),
         ({"ended_at": 42, "end_reason": "cancelled"}, None, "cancelled", "cancelled"),
         ({"ended_at": 42, "end_reason": "approval"}, None, "unknown", "unknown"),
