@@ -265,7 +265,13 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
   const ownerSessionId = owner.session_id;
   const activeSessionId = S.session ? S.session.session_id : null;
   const activeWorkspaceRoot = _artifactScalarString(S.session && S.session.workspace).replace(/\/+$/,'');
-  const grant = ownerSessionId && ownerSessionId === activeSessionId && owner.workspace_root === activeWorkspaceRoot
+  const ownerWorkspaceRoot = _artifactScalarString(owner.workspace_root);
+  const hasWorkspaceRoots =
+    ownerWorkspaceRoot && activeWorkspaceRoot;
+  const grant = ownerSessionId &&
+    ownerSessionId === activeSessionId &&
+    hasWorkspaceRoots &&
+    ownerWorkspaceRoot === activeWorkspaceRoot
     ? _workspaceEscapeGrantForPath(normalizedPath)
     : null;
   const sessionId = encodeURIComponent(ownerSessionId);
@@ -456,21 +462,20 @@ function _artifactToolName(value){
 function _artifactOwnerFromCurrentSession(){
   if(!S.session || !S.session.session_id) return null;
   const workspaceRoot = _artifactScalarString(S.session.workspace);
-  if(!workspaceRoot) return null;
   return {
     session_id: String(S.session.session_id),
-    workspace_root: workspaceRoot.replace(/\/+$/,''),
+    workspace_root: workspaceRoot ? workspaceRoot.replace(/\/+$/,'') : '',
   };
 }
 
 function _artifactOwnerFromContext(owner){
   if(!owner || typeof owner !== 'object') return null;
   const sessionId = _artifactScalarString(owner.session_id);
+  if(!sessionId) return null;
   const workspaceRoot = _artifactScalarString(owner.workspace_root);
-  if(!sessionId || !workspaceRoot) return null;
   return {
     session_id: sessionId,
-    workspace_root: workspaceRoot.replace(/\/+$/,''),
+    workspace_root: workspaceRoot ? workspaceRoot.replace(/\/+$/,'') : '',
   };
 }
 
@@ -480,7 +485,9 @@ function _artifactOwnerFromOptions(opts){
 
 function _artifactOwnerMatchesSession(owner){
   const active = _artifactOwnerFromCurrentSession();
-  return !!(owner && active && owner.session_id === active.session_id && owner.workspace_root === active.workspace_root);
+  if(!owner || !active || owner.session_id !== active.session_id) return false;
+  if(owner.workspace_root && active.workspace_root) return owner.workspace_root === active.workspace_root;
+  return true;
 }
 
 function _artifactCandidatesFromText(text){
@@ -718,7 +725,7 @@ async function openArtifactPath(path){
     setStatus(t('file_open_failed'));
     return;
   }
-  await openFile(rel,{owner});
+  await openFile(rel);
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -1201,7 +1208,10 @@ async function openFile(path, opts={}){
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
-    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
+    const legacyRawUrl = _workspaceRouteForPath(path, 'raw', {inline:true});
+    const url=(routeOpts.owner
+      ? _workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true})
+      : legacyRawUrl) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
       frame.src=''; // clear first to avoid stale content
