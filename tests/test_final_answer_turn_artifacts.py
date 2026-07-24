@@ -29,7 +29,10 @@ def test_turn_artifact_references_require_successful_structured_write_evidence()
         + "turnArtifactReferencesFromToolCall({name:'write_file',is_error:true,arguments:{path:'output/report.md'}}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',output:'```diff\\n+++ output/inferred.md\\n```'}),"
         + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/report.md','output/notes.md']})}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:false,files_modified:['output/rejected.md']})})"
+        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:false,files_modified:['output/rejected.md']})}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',arguments:{source:'input/source.md',destination:'output/destination.md'}}),"
+        + "turnArtifactReferencesFromToolCall({name:'patch',result:[],output:JSON.stringify({success:true,files_modified:['output/from-output.md']})}),"
+        + "turnArtifactReferencesFromToolCall({name:'patch',content:JSON.stringify({success:true,files_created:['output/from-content.md']})})"
         + "]));"
     )
     assert output == [
@@ -38,6 +41,9 @@ def test_turn_artifact_references_require_successful_structured_write_evidence()
             {"path": "output/report.md", "source": "patch"},
             {"path": "output/notes.md", "source": "patch"},
         ], [],
+        [{"path": "output/destination.md", "source": "write_file"}],
+        [{"path": "output/from-output.md", "source": "patch"}],
+        [{"path": "output/from-content.md", "source": "patch"}],
     ]
 
 
@@ -169,6 +175,36 @@ def test_replay_rejects_write_arg_artifact_when_structured_result_failed():
     }
 
     assert routes._turn_artifact_paths_from_tool_result(message) == []
+
+
+def test_replay_ignores_source_arg_and_continues_past_array_result_candidates():
+    from api import routes
+
+    assert routes._turn_artifact_paths_from_tool_result(
+        {
+            "role": "tool",
+            "name": "write_file",
+            "args": {
+                "source": "/workspace/input/source.md",
+                "destination": "/workspace/output/destination.md",
+            },
+            "content": "Wrote /workspace/output/destination.md",
+        }
+    ) == ["/workspace/output/destination.md"]
+
+    assert routes._turn_artifact_paths_from_tool_result(
+        {
+            "role": "tool",
+            "name": "patch",
+            "result": [],
+            "output": json.dumps(
+                {
+                    "success": True,
+                    "files_modified": ["/workspace/output/from-output.md"],
+                }
+            ),
+        }
+    ) == ["/workspace/output/from-output.md"]
 
 
 def test_paginated_session_response_keeps_turn_artifacts_from_earlier_tool_rows():

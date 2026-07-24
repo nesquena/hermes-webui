@@ -8752,7 +8752,7 @@ def _turn_artifact_paths_from_tool_result(message) -> list[str]:
             seen.add(value)
             paths.append(value)
 
-    for key in ("path", "file_path", "source", "destination"):
+    for key in ("path", "file_path", "destination"):
         add(args.get(key))
     arg_paths = args.get("paths")
     for candidate in arg_paths if isinstance(arg_paths, list) else []:

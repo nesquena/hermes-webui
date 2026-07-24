@@ -499,11 +499,14 @@ function turnArtifactReferencesFromToolCall(tc){
   }
   if(!args||typeof args!=='object') args={};
   let result=null;
-  for(const candidate of [tc.result,tc.output,tc.snippet,tc.preview]){
+  for(const candidate of [tc.result,tc.output,tc.content,tc.snippet,tc.preview]){
     if(!candidate) continue;
-    if(typeof candidate==='object'){ result=candidate; break; }
+    if(typeof candidate==='object'&&!Array.isArray(candidate)){ result=candidate; break; }
     if(typeof candidate==='string'){
-      try{ result=JSON.parse(candidate); break; }catch(_){}
+      try{
+        const parsed=JSON.parse(candidate);
+        if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){ result=parsed; break; }
+      }catch(_){}
     }
   }
   if(result&&typeof result==='object'&&result.success===false) return [];
@@ -515,7 +518,7 @@ function turnArtifactReferencesFromToolCall(tc){
     seen.add(path);
     out.push({path,source:name});
   };
-  for(const key of ['path','file_path','source','destination']) add(args[key]);
+  for(const key of ['path','file_path','destination']) add(args[key]);
   if(Array.isArray(args.paths)) args.paths.forEach(add);
   if(Array.isArray(args.edits)) args.edits.forEach(edit=>add(edit&&edit.path));
   // Patch tools may return their changed paths in structured JSON rather than
