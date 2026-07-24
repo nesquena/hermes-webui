@@ -5750,6 +5750,22 @@ def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Deployment-owned security gates are decided ONCE, from the environment the
+# OPERATOR started the process with (TARS gate review P0): profile .env files
+# are loaded into the live os.environ at profile init/switch, so a live read
+# would let a profile flip an operator-closed gate (doctor / security audit /
+# credential-bearing backups) open at runtime. The snapshot is immutable for
+# the process lifetime; changing the gate requires an operator restart.
+_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT: bool = (
+    os.getenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+
+def _ops_actions_allowed() -> bool:
+    return _OPS_ACTIONS_GATE_STARTUP_SNAPSHOT
+
+
 def _request_client_ip(handler) -> str:
     try:
         address = getattr(handler, "client_address", None)
@@ -13715,7 +13731,7 @@ def handle_get(handler, parsed) -> bool:
         # profile's own run state (gate follow-up: a run started under
         # profile A must be invisible to profile B).
         status = get_status(_ops_profile())
-        allowed = _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS")
+        allowed = _ops_actions_allowed()
         status["allowed"] = allowed
         if not allowed:
             # Defense-in-depth: this route stays open even when the gate is
@@ -13731,7 +13747,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, status)
 
     if parsed.path == "/api/ops/backup/download":
-        if not _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS"):
+        if not _ops_actions_allowed():
             return bad(handler, _OPS_ACTIONS_GATE_MESSAGE, 403)
         from api.ops_actions import latest_backup_path
         from api.profiles import get_active_profile_name as _ops_profile
@@ -15590,7 +15606,7 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Ops actions (Maintenance card): doctor / security audit / backup ──
     if parsed.path in _OPS_ACTION_BY_PATH:
-        if not _truthy_env("HERMES_WEBUI_ALLOW_OPS_ACTIONS"):
+        if not _ops_actions_allowed():
             return j(
                 handler,
                 {"error": _OPS_ACTIONS_GATE_MESSAGE, "allowed": False},

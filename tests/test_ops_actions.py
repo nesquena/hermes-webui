@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from api import routes
+
 
 class _FakeHandler:
     def __init__(self):
@@ -154,7 +156,7 @@ def test_ops_backup_download_rejected_when_gate_closed(monkeypatch):
 def test_ops_doctor_action_runs_and_completes(monkeypatch, tmp_path):
     from api import ops_actions, profiles
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
     fake_proc = _make_fake_popen(
@@ -183,7 +185,7 @@ def test_ops_doctor_action_runs_and_completes(monkeypatch, tmp_path):
 def test_ops_security_audit_uses_expected_subcommand(monkeypatch, tmp_path):
     from api import ops_actions, profiles
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     spawned = []
     fake_proc = _make_fake_popen(
@@ -204,7 +206,7 @@ def test_ops_security_audit_uses_expected_subcommand(monkeypatch, tmp_path):
 def test_ops_backup_action_writes_file_and_is_downloadable(monkeypatch, tmp_path):
     from api import config, ops_actions, profiles
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     state_dir = tmp_path / "webui_state"
     monkeypatch.setattr(config, "STATE_DIR", state_dir)
@@ -237,7 +239,7 @@ def test_ops_backup_action_writes_file_and_is_downloadable(monkeypatch, tmp_path
 
 
 def test_ops_backup_download_404_before_any_backup(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     handler = _call_get(monkeypatch, "/api/ops/backup/download")
     assert handler.status == 404
 
@@ -245,7 +247,7 @@ def test_ops_backup_download_404_before_any_backup(monkeypatch):
 def test_ops_action_failure_is_reported(monkeypatch, tmp_path):
     from api import ops_actions, profiles
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     fake_proc = _make_fake_popen(["oops\n"], returncode=1)
     monkeypatch.setattr(ops_actions.subprocess, "Popen", fake_proc)
@@ -263,7 +265,7 @@ def test_ops_action_failure_is_reported(monkeypatch, tmp_path):
 def test_ops_action_contention_returns_409_without_spawning(monkeypatch):
     from api import ops_actions
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     spawned = []
     monkeypatch.setattr(
         ops_actions.subprocess,
@@ -332,7 +334,7 @@ def test_ops_action_timeout_reaps_zombie_via_background_thread(monkeypatch, tmp_
     proc.wait() to actually reclaim it."""
     from api import ops_actions, profiles
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
     wait_calls = []
@@ -379,14 +381,16 @@ def test_ops_status_redacts_log_error_backup_path_when_gate_closed(monkeypatch, 
     from api import ops_actions, profiles
 
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     fake_proc = _make_fake_popen(["some possibly sensitive log line\n"], returncode=1)
     monkeypatch.setattr(ops_actions.subprocess, "Popen", fake_proc)
 
     _call_post(monkeypatch, "/api/ops/doctor")
     _wait_until_not_running()
 
-    monkeypatch.delenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", raising=False)
+    # Gate now decided against the immutable startup snapshot -- flip the
+    # snapshot itself to model an operator-closed deployment.
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", False)
     handler = _call_get(monkeypatch, "/api/ops/status")
     data = handler.get_json()
     assert data["allowed"] is False
@@ -397,7 +401,7 @@ def test_ops_status_redacts_log_error_backup_path_when_gate_closed(monkeypatch, 
     assert data["status"] == "failed"
     assert data["action"] == "doctor"
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     handler2 = _call_get(monkeypatch, "/api/ops/status")
     data2 = handler2.get_json()
     assert data2["allowed"] is True
@@ -521,7 +525,7 @@ def test_cross_profile_cannot_see_running_state_or_backup(monkeypatch, tmp_path)
     log, error, backup path — and B's 409 must be a minimal busy envelope."""
     from api import config, ops_actions, profiles
 
-    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", True)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui_state")
 
@@ -813,3 +817,25 @@ def test_last_successful_backup_survives_later_runs_and_restart(monkeypatch, tmp
     with ops_actions._REGISTRY_LOCK:
         ops_actions._PROFILES.clear()
     assert ops_actions.latest_backup_path("default") == archive
+
+
+def test_profile_env_cannot_open_the_ops_gate(monkeypatch):
+    """TARS gate review P0: the gate decision is an immutable startup
+    snapshot — a profile .env writing the flag into the LIVE os.environ
+    after startup must not open status details, download, or start."""
+    monkeypatch.setattr(routes, "_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT", False)
+    # Simulates api.profiles._reload_dotenv() importing a profile .env:
+    monkeypatch.setenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "1")
+
+    assert routes._ops_actions_allowed() is False
+
+    handler, data = _call_post(monkeypatch, "/api/ops/doctor")
+    assert handler.status == 403
+
+    status_handler = _call_get(monkeypatch, "/api/ops/status")
+    body = status_handler.get_json()
+    assert body["allowed"] is False
+    assert body["log"] == "" and body["backup_path"] is None
+
+    dl = _call_get(monkeypatch, "/api/ops/backup/download")
+    assert dl.status == 403
