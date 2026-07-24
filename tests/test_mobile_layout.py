@@ -1694,6 +1694,54 @@ def test_mobile_enter_newline_respects_hardware_keyboard_on_touch_devices():
         "mobile Enter newline override must skip touch devices that also expose a fine pointer"
 
 
+def test_fine_pointer_coexisting_requires_hover_for_media_query():
+    """Media query path must require both fine pointer AND hover to exclude passive stylus digitizers."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    import re
+    match = re.search(r'function _hasFinePointerCoexisting\(\)\{[^}]+\}', boot_js, re.DOTALL)
+    assert match, "_hasFinePointerCoexisting function not found"
+    body = match.group(0)
+    assert "any-pointer:fine" in body, "must check any-pointer:fine"
+    assert "any-hover:hover" in body, \
+        "must also check any-hover:hover to exclude passive stylus digitizers"
+
+
+def test_fine_pointer_coexisting_uses_compound_media_query():
+    """Media queries should be combined into a single compound query for atomic evaluation."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "(any-pointer:fine) and (any-hover:hover)" in boot_js, \
+        "_hasFinePointerCoexisting must use a compound media query for atomic evaluation"
+
+
+def test_physical_keyboard_detection_uses_event_code():
+    """Runtime physical keyboard detection must use KeyboardEvent.code to distinguish HW from SW keyboards."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "_physicalKeyboardDetected" in boot_js, \
+        "boot.js must track physical keyboard detection at runtime"
+    assert "e.code" in boot_js, \
+        "physical keyboard detection must inspect KeyboardEvent.code (empty for virtual keyboards)"
+
+
+def test_physical_keyboard_detection_gates_fine_pointer():
+    """Once a physical keyboard is detected, _hasFinePointerCoexisting must return true."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    import re
+    match = re.search(r'function _hasFinePointerCoexisting\(\)\{[^}]+\}', boot_js, re.DOTALL)
+    assert match, "_hasFinePointerCoexisting function not found"
+    body = match.group(0)
+    assert "_physicalKeyboardDetected" in body, \
+        "_hasFinePointerCoexisting must check _physicalKeyboardDetected before media queries"
+
+
+def test_physical_keyboard_detection_excludes_ime_composing():
+    """Physical keyboard detection must not trigger during IME composition (isComposing or Process key)."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "isComposing" in boot_js, \
+        "physical keyboard detection must guard against IME composition events"
+    assert "Process" in boot_js, \
+        "physical keyboard detection must guard against Process key (IME placeholder)"
+
+
 def test_mobile_enter_newline_only_overrides_enter_default():
     """Mobile newline override must only apply when _sendKey is the default 'enter'."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
