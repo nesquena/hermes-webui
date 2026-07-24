@@ -11,8 +11,11 @@ HERMES_WEBUI_ALLOW_TOOLSET_WRITE), and each of the four write endpoints
 (toggle, provider select, model select, env save) including their
 validation-error paths.
 """
+import json
 import sys
+from io import BytesIO
 from types import ModuleType
+from urllib.parse import urlparse
 
 import pytest
 
@@ -112,7 +115,12 @@ def _install_fake_hermes_cli(monkeypatch, *, config=None, env=None):
                 {
                     "name": "FAL",
                     "imagegen_backend": "fal",
-                    "env_vars": [{"key": "FAL_KEY", "prompt": "FAL key"}],
+                    # Two keys so a partial-update test can prove that saving
+                    # one credential leaves the other one untouched.
+                    "env_vars": [
+                        {"key": "FAL_KEY", "prompt": "FAL key"},
+                        {"key": "FAL_ORG_ID", "prompt": "FAL org id"},
+                    ],
                 },
             ],
         },
@@ -429,3 +437,181 @@ def test_save_toolset_env_blank_value_is_skipped_not_saved(monkeypatch):
     assert result["saved"] == []
     assert result["skipped"] == ["FAL_KEY"]
     assert "FAL_KEY" not in state["env"]
+
+
+def test_save_toolset_env_blank_value_preserves_an_existing_secret(monkeypatch):
+    """The actual invariant: a blank submit must not clear a stored key.
+
+    The form round-trips a stored key as an empty input, so an ordinary save of
+    an unrelated field submits `""` for every untouched credential. Asserting
+    against an initially *empty* env only proves "blank writes nothing to an
+    empty dict" — it cannot catch a regression that overwrites a set key.
+    """
+    state = _install_fake_hermes_cli(
+        monkeypatch, config={}, env={"FAL_KEY": "sk-existing-secret"}
+    )
+    _enable_write_gate(monkeypatch)
+
+    result = toolset_config.save_toolset_env("image_gen", {"FAL_KEY": "   "})
+
+    assert result["saved"] == []
+    assert result["skipped"] == ["FAL_KEY"]
+    assert state["env"]["FAL_KEY"] == "sk-existing-secret"
+    assert state["env_saves"] == [], "a blank submit reached the env writer"
+    assert result["is_set"]["FAL_KEY"] is True
+
+
+def test_save_toolset_env_empty_string_preserves_an_existing_secret(monkeypatch):
+    """Same invariant for a literal empty string, not just whitespace."""
+    state = _install_fake_hermes_cli(
+        monkeypatch, config={}, env={"FAL_KEY": "sk-existing-secret"}
+    )
+    _enable_write_gate(monkeypatch)
+
+    result = toolset_config.save_toolset_env("image_gen", {"FAL_KEY": ""})
+
+    assert result["saved"] == []
+    assert state["env"]["FAL_KEY"] == "sk-existing-secret"
+    assert state["env_saves"] == []
+
+
+def test_save_toolset_env_updates_one_key_without_touching_the_other(monkeypatch):
+    """A partial update must rewrite only the field the user actually changed."""
+    state = _install_fake_hermes_cli(
+        monkeypatch,
+        config={},
+        env={"FAL_KEY": "sk-existing-secret", "FAL_ORG_ID": "org-existing"},
+    )
+    _enable_write_gate(monkeypatch)
+
+    result = toolset_config.save_toolset_env(
+        "image_gen", {"FAL_KEY": "sk-rotated", "FAL_ORG_ID": ""}
+    )
+
+    assert result["saved"] == ["FAL_KEY"]
+    assert state["env"]["FAL_KEY"] == "sk-rotated"
+    assert state["env"]["FAL_ORG_ID"] == "org-existing"
+    assert [key for key, _ in state["env_saves"]] == ["FAL_KEY"]
+
+
+# ── Route contract ──────────────────────────────────────────────────────────
+# The `/api/tools/toolsets/` prefix is owned by this API. Before, an unmatched
+# sub-path fell out of the block without returning, kept walking the remaining
+# matchers, and ended at the generic "unhandled" signal — so a stale client, a
+# typo'd JS call or a curl probe got an unpredictable reply instead of a 404.
+
+
+class _RouteHandler:
+    def __init__(self, path, body=None):
+        self.path = path
+        self.headers = {}
+        self.client_address = ("127.0.0.1", 12345)
+        self.status = None
+        self.wfile = BytesIO()
+        self.response_headers = []
+        self._body = body if body is not None else {}
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.response_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    @property
+    def response_json(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/tools/toolsets/image_gen",          # one segment, no action
+        "/api/tools/toolsets/image_gen/bogus",    # unrecognised action
+        "/api/tools/toolsets/image_gen/config/x",  # too many segments
+        "/api/tools/toolsets/",                   # empty remainder
+    ],
+)
+def test_get_unknown_toolset_subpath_returns_404_instead_of_falling_through(
+    monkeypatch, path
+):
+    import api.routes as routes
+
+    _install_fake_hermes_cli(monkeypatch, config={})
+    handler = _RouteHandler(path)
+
+    handled = routes.handle_get(handler, urlparse(path))
+
+    assert handled is not False, f"{path} fell through the toolset block"
+    assert handler.status == 404
+    assert "error" in handler.response_json
+
+
+def test_get_known_toolset_subpaths_still_dispatch(monkeypatch):
+    """The 404 guard must not swallow the two real GET actions."""
+    import api.routes as routes
+
+    _install_fake_hermes_cli(monkeypatch, config={})
+
+    for path in (
+        "/api/tools/toolsets/image_gen/config",
+        "/api/tools/toolsets/image_gen/models",
+    ):
+        handler = _RouteHandler(path)
+        assert routes.handle_get(handler, urlparse(path)) is not False
+        assert handler.status == 200, path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/tools/toolsets/image_gen/bogus",
+        "/api/tools/toolsets/image_gen/config/x",
+        "/api/tools/toolsets/",
+    ],
+)
+def test_put_unknown_toolset_subpath_returns_404(monkeypatch, path):
+    import api.routes as routes
+
+    _install_fake_hermes_cli(monkeypatch, config={})
+    _enable_write_gate(monkeypatch)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {})
+    monkeypatch.setattr(
+        routes, "_guard_request_session_visibility",
+        lambda *a, **kw: True,
+    )
+    handler = _RouteHandler(path)
+
+    handled = routes.handle_put(handler, urlparse(path))
+
+    assert handled is not False
+    assert handler.status == 404
+
+
+def test_put_bare_toolsets_collection_is_not_claimed(monkeypatch):
+    """`PUT /api/tools/toolsets` has no handler; the block must not claim it.
+
+    The old condition admitted the bare path, produced an empty `parts` list,
+    matched nothing and fell through anyway — dead code in the condition.
+    """
+    import api.routes as routes
+
+    _install_fake_hermes_cli(monkeypatch, config={})
+    _enable_write_gate(monkeypatch)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {})
+    monkeypatch.setattr(
+        routes, "_guard_request_session_visibility",
+        lambda *a, **kw: True,
+    )
+    path = "/api/tools/toolsets"
+    handler = _RouteHandler(path)
+
+    assert routes.handle_put(handler, urlparse(path)) is False
+    assert handler.status is None

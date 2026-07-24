@@ -13732,6 +13732,11 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, get_toolset_models(parts[0], provider))
         except ToolsetConfigError as exc:
             return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
+        # This prefix is owned by the toolset API. A one-segment path or an
+        # unrecognised action must answer 404 here rather than fall through the
+        # remaining GET matchers into the generic "unhandled" signal, which
+        # would give a stale client or a typo'd JS call an unpredictable reply.
+        return bad(handler, "Unknown toolset route", 404)
 
     if parsed.path == "/api/notes/sources":
         return _handle_notes_sources_list(handler)
@@ -16669,7 +16674,10 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
-    if parsed.path.startswith("/api/tools/toolsets/") or parsed.path == "/api/tools/toolsets":
+    # Prefix only: a bare PUT /api/tools/toolsets has no handler (the collection
+    # itself is read-only), so admitting it here only produced an empty `parts`
+    # list that matched nothing and fell through.
+    if parsed.path.startswith("/api/tools/toolsets/"):
         from api.toolset_config import (
             ToolsetConfigError,
             save_toolset_env,
@@ -16678,7 +16686,7 @@ def handle_put(handler, parsed) -> bool:
             toggle_toolset,
         )
 
-        rest = parsed.path[len("/api/tools/toolsets/"):] if parsed.path != "/api/tools/toolsets" else ""
+        rest = parsed.path[len("/api/tools/toolsets/"):]
         parts = [p for p in rest.split("/") if p != ""] if rest else []
         try:
             if len(parts) == 1:
@@ -16697,6 +16705,7 @@ def handle_put(handler, parsed) -> bool:
                 return j(handler, save_toolset_env(parts[0], env if isinstance(env, dict) else {}))
         except ToolsetConfigError as exc:
             return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
+        return bad(handler, "Unknown toolset route", 404)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────

@@ -319,25 +319,28 @@ def get_toolset_models(name: str, provider: str | None = None) -> dict[str, Any]
         if current not in catalog:
             current = default_model if default_model in catalog else None
 
-    models = [
-        {
-            "id": model_id,
-            "display": meta.get("display", model_id),
-            "speed": meta.get("speed", ""),
-            "strengths": meta.get("strengths", ""),
-            "price": meta.get("price", ""),
+        # Materialize inside the profile context like every other reader in this
+        # module: the catalog rows come from the agent's plugin registry, and a
+        # future lazily-resolved row must not be read under the wrong profile.
+        models = [
+            {
+                "id": model_id,
+                "display": meta.get("display", model_id),
+                "speed": meta.get("speed", ""),
+                "strengths": meta.get("strengths", ""),
+                "price": meta.get("price", ""),
+            }
+            for model_id, meta in catalog.items()
+        ]
+        return {
+            "name": name,
+            "has_models": bool(models),
+            "provider": row.get("name") if row else None,
+            "plugin": plugin,
+            "models": models,
+            "current": current,
+            "default": default_model,
         }
-        for model_id, meta in catalog.items()
-    ]
-    return {
-        "name": name,
-        "has_models": bool(models),
-        "provider": row.get("name") if row else None,
-        "plugin": plugin,
-        "models": models,
-        "current": current,
-        "default": default_model,
-    }
 
 
 # ── PUT /api/tools/toolsets/{name}/model ────────────────────────────────
