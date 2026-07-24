@@ -45,9 +45,10 @@ def test_apply_dashboard_status_suppresses_warning_when_browser_url_set():
     """
     body = _extract_function_body(_read_static("ui.js"), "function _applyDashboardStatus(")
 
-    # The warning derivation must reference status.browser_url (or status.url)
-    # — the mere presence of _dashboardIsBrowserLoopback alone is insufficient.
-    assert "browser_url" in body or "status.url" in body, (
+    # The warning derivation must reference the explicit browser_url field —
+    # the server's status.url is also populated for loopback auto-probes and
+    # must not suppress the warning.
+    assert "status.browser_url" in body, (
         "_applyDashboardStatus warning logic must check status.browser_url "
         "to suppress the false loopback-only warning (#6459)"
     )
@@ -68,6 +69,16 @@ def test_apply_dashboard_status_suppresses_warning_when_browser_url_set():
     assert "hasBrowserUrl" in warning_line, (
         "hasBrowserUrl guard must be used in the warning derivation ternary, "
         "not merely declared elsewhere in the function (#6459)"
+    )
+
+    guard_idx = body.index("const hasBrowserUrl=")
+    guard_line_end = body.index("\n", guard_idx)
+    guard_line = body[guard_idx:guard_line_end]
+    assert "status.browser_url" in guard_line, (
+        "hasBrowserUrl must be based on the explicit browser_url field (#6459)"
+    )
+    assert "status.url" not in guard_line, (
+        "the auto-probed loopback status.url must not suppress the warning (#6459)"
     )
 
 

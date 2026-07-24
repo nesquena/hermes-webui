@@ -1774,7 +1774,7 @@ else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const hasBrowserUrl=!!(status&&status.running&&(status.browser_url||status.url));
+  const hasBrowserUrl=!!(status&&status.running&&status.browser_url);
   const warning=running&&!hasBrowserUrl&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
