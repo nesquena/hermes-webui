@@ -219,7 +219,11 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             'base_url': 'http://openrouter:4000/v1',
             'api_key': 'test-title-api-key',
         }
-        with _patch_tg_config(tg_config):
+        # Patch the streaming boundary directly so this regression is
+        # independent of any real/stub Agent module or shared config/import
+        # state from another test.  The blank provider assertion below is the
+        # route-preservation contract for an explicit custom endpoint.
+        with patch('api.streaming._get_aux_title_config', return_value=tg_config):
             with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
                 result, status = generate_title_raw_via_aux(
                     user_text='Summarize this title routing bug.',

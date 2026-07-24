@@ -84,6 +84,10 @@ class TestAuxReasoningExtraRouteContract:
              {'reasoning': {'enabled': False}}),
             ('openrouter', 'anthropic/claude-sonnet-4.6:thinking', 'https://openrouter.ai/api/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
              ('openrouter', 'anthropic/claude-sonnet-4.6:thinking', 'https://openrouter.ai/api/v1'), None),
+            # An explicit relay/model contract with a blank provider is
+            # Agent-custom, not a request to borrow the differing main route.
+            ('', 'gemma-4-31b-it', 'https://relay.example.test/v1', 'openai', 'gpt-main', 'https://api.openai.com/v1',
+             (None, 'gemma-4-31b-it', 'https://relay.example.test/v1'), None),
         )
         for (
             provider, model, base_url, default_provider, default_model, default_url,
@@ -103,7 +107,11 @@ class TestAuxReasoningExtraRouteContract:
                     'default': default_model,
                     'base_url': default_url,
                 },
-            }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            }), patch(
+                'agent.auxiliary_client._get_aux_model_for_provider',
+                side_effect=lambda provider: {'deepseek': 'deepseek-v4-flash'}.get(provider, ''),
+                create=True,
+            ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
                 generate_title_raw_via_aux('question', 'answer')
             request = captured[-1]
             assert (request['provider'], request['model'], request['base_url']) == expected_route
@@ -121,12 +129,19 @@ class TestAuxReasoningExtraRouteContract:
         }), patch('api.config.cfg', {
             'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
             'providers': {'deepseek': {'models': ['deepseek-chat']}},
-        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='deepseek-v4-flash',
+            create=True,
+        ) as aux_default, patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
             generate_title_raw_via_aux('question', 'answer')
 
         request = captured[-1]
+        aux_default.assert_called_once_with('deepseek')
         assert request['provider'] == 'deepseek'
-        assert request['model'] == 'deepseek-chat'
+        assert request['model'] == 'deepseek-v4-flash'
         assert request['base_url'] is None
         assert request['extra_body'] == {'reasoning': {'enabled': False}}
 
@@ -141,12 +156,52 @@ class TestAuxReasoningExtraRouteContract:
             'provider': 'custom:unconfigured', 'model': '', 'base_url': 'https://relay.example/v1',
         }), patch('api.config.cfg', {
             'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
-        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='',
+            create=True,
+        ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
             generate_title_raw_via_aux('question', 'answer')
 
         request = captured[-1]
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom:unconfigured', None, 'https://relay.example/v1',
+        )
+        assert request['extra_body'] is None
+
+    @pytest.mark.parametrize(
+        ('main_provider', 'main_model', 'main_base_url'),
+        (
+            ('openai', 'gpt-main', 'https://api.openai.com/v1'),
+            ('anthropic', 'claude-main', 'https://api.anthropic.com'),
+        ),
+    )
+    def test_explicit_relay_route_never_uses_the_differing_main_resolver(
+        self, main_provider, main_model, main_base_url,
+    ):
+        """Production resolver regression: relay config is its own route."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': '',
+            'model': 'gemma-4-31b-it',
+            'base_url': 'https://relay.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': main_provider,
+                'default': main_model,
+                'base_url': main_base_url,
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            None, 'gemma-4-31b-it', 'https://relay.example.test/v1',
         )
         assert request['extra_body'] is None
 

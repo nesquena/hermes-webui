@@ -3376,32 +3376,24 @@ def _log_aux_title_failure(message: str, base_url: str, provider: str, model: st
 
 
 def _aux_default_model_for_provider(provider: str) -> str:
-    """Return an explicitly selected provider's own configured/catalog default."""
-    provider_lower = str(provider or '').strip().lower()
-    provider_canonical = str(_resolve_provider_alias(provider_lower) or provider_lower).strip().lower()
+    """Return the Agent's authoritative auxiliary default for *provider*.
+
+    The Agent owns these defaults because they are provider-profile data, not
+    WebUI picker/catalog data.  In particular, the first entry in
+    ``_PROVIDER_MODELS`` is a display choice and can differ from the cheap
+    auxiliary model that the Agent will actually request.  An empty result is
+    meaningful (for example, a provider whose valid model set is account
+    dependent) and must remain empty rather than falling back to the main
+    route.
+    """
     try:
-        providers = get_config().get('providers', {})
-        if isinstance(providers, dict):
-            for name, definition in providers.items():
-                name_canonical = str(_resolve_provider_alias(str(name).lower()) or name).strip().lower()
-                if name_canonical != provider_canonical or not isinstance(definition, dict):
-                    continue
-                configured_default = str(definition.get('default') or definition.get('model') or '').strip()
-                if configured_default:
-                    return configured_default
-                models = definition.get('models')
-                if isinstance(models, list) and models:
-                    first = models[0]
-                    return str(first.get('id') if isinstance(first, dict) else first or '').strip()
-                if isinstance(models, dict):
-                    return next((str(item).strip() for item in models if str(item).strip()), '')
+        from agent.auxiliary_client import _get_aux_model_for_provider
+
+        return str(_get_aux_model_for_provider(provider) or '').strip()
     except Exception:
-        pass
-    catalog = _PROVIDER_MODELS.get(provider_canonical) or _PROVIDER_MODELS.get(provider_lower) or []
-    if catalog:
-        first = catalog[0]
-        return str(first.get('id') if isinstance(first, dict) else first or '').strip()
-    return ''
+        # Version-skewed/missing Agent installs must not make WebUI invent a
+        # model from its display catalog or the main route.
+        return ''
 
 
 def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
@@ -3418,6 +3410,15 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
     implicit_route = provider_lower in {'', 'auto', 'local'}
     picker_route = supplied_model.startswith('@')
 
+    if supplied_base_url and supplied_model and not picker_route:
+        # A base URL is an explicit Agent-custom endpoint contract even when
+        # its provider is blank.  Running an unqualified model through the
+        # main-model resolver here would substitute the main provider/model
+        # (for example OpenAI/gpt-main) and silently send title traffic to the
+        # wrong route.  Keep blank provider blank so the Agent treats it as the
+        # supplied custom endpoint.
+        return supplied_provider, supplied_model, supplied_base_url
+
     if not implicit_route and not picker_route:
         if supplied_model:
             # Preserve explicit model IDs (including :free/:thinking suffixes)
@@ -3428,17 +3429,10 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
             # An unresolved explicit route must fail closed rather than borrow
             # a model from the main chat route.
             return supplied_provider, '', supplied_base_url
-        try:
-            resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                f'@{supplied_provider}:{own_default}'
-            )
-            return (
-                str(resolved_provider or supplied_provider),
-                str(resolved_model or own_default),
-                supplied_base_url or str(resolved_base_url or ''),
-            )
-        except Exception:
-            return supplied_provider, own_default, supplied_base_url
+        # Keep this exact Agent-selected model for both the request and the
+        # compatibility gate below.  Re-resolving through the WebUI picker can
+        # replace it with a main-route or display-catalog model.
+        return supplied_provider, own_default, supplied_base_url
 
     effective_model = supplied_model
     if not effective_model:

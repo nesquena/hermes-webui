@@ -159,6 +159,25 @@ PR-body content on GitHub. A future release-time or CI check could
 surface contract-affecting diffs whose PR body lacks `Contract Routing`, but this
 document only defines the review expectation.
 
+## Auxiliary-title request injection and omission
+
+Auxiliary title generation is routed through the Agent's
+`title_generation` auxiliary task. Its effective provider, model, and base URL
+form one request contract: the reasoning-compatibility gate and the LLM request
+must consume that same resolved route.
+
+- A configured explicit provider/model/base URL is injected into the auxiliary
+  request. A caller-supplied route does not receive the configured task API key.
+- A blank provider plus an explicit base URL and non-picker model is an
+  Agent-custom route. Preserve its blank provider, model, and URL; never borrow
+  the main chat provider or model.
+- An explicit provider with a blank model uses the Agent's authoritative
+  auxiliary default. If the Agent has no default, preserve the blank model; do
+  not substitute the WebUI picker catalog or the main route.
+- Reasoning suppression is injected only for a known compatible effective
+  route. Unknown/custom routes, rejected provider routes, and routes with no
+  resolved model omit it (fail closed).
+
 Release batches should list included contract-affecting PRs explicitly so
 reviewers can distinguish ordinary green-CI fixes from changes that update the
 project's product or runtime guardrails.
