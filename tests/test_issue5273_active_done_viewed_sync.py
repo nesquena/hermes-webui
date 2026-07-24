@@ -88,6 +88,7 @@ def _run_done_compaction_harness(
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_markSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_clearSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_migrateSessionCompletionUnreadToFinalSession"),
             _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_hasUnreadForSession"),
             _extract_function(SESSIONS_JS, "_markSessionCompletedInList"),
