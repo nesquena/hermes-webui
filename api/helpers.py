@@ -1261,10 +1261,19 @@ def clear_profile_cookie(handler) -> None:
     handler.send_header('Set-Cookie', build_clear_profile_cookie())
 
 
+def _is_browser_shell_get_path(path: str) -> bool:
+    """Return whether a stale profile cookie can recover through the app shell."""
+    return (
+        path in {"/", "/login", "/index.html", "/share"}
+        or path.startswith("/session/")
+        or path.startswith("/share/")
+    )
+
+
 def handle_invalid_profile_cookie(handler, parsed, exc: InvalidProfileCookie):
     clear_header = build_clear_profile_cookie()
     path = getattr(parsed, "path", "") or "/"
-    if getattr(handler, "command", "") == "GET" and path in {"/", "/login"}:
+    if getattr(handler, "command", "") == "GET" and _is_browser_shell_get_path(path):
         location = path
         query = getattr(parsed, "query", "")
         if query:

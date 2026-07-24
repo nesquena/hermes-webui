@@ -938,6 +938,33 @@ def test_invalid_profile_cookie_clears_cookie_and_blocks_api_dispatch(monkeypatc
     server.handle_get.assert_not_called()
 
 
+def test_invalid_profile_cookie_redirects_session_deep_link_to_exact_path(monkeypatch):
+    import server
+    from api.helpers import InvalidProfileCookie
+
+    handler = _server_handler("/session/session-123?focus=last")
+    monkeypatch.setattr(
+        server,
+        "get_profile_cookie",
+        lambda _handler, *, reject_invalid=False: (_ for _ in ()).throw(
+            InvalidProfileCookie("Invalid or unknown active profile cookie")
+        ),
+    )
+    monkeypatch.setattr(server, "check_auth", MagicMock())
+    monkeypatch.setattr(server, "handle_get", MagicMock())
+
+    server.Handler.do_GET(handler)
+
+    handler.send_response.assert_called_once_with(303)
+    assert _sent_headers(handler, "Location") == ["/session/session-123?focus=last"]
+    clear_headers = _sent_headers(handler, "Set-Cookie")
+    assert len(clear_headers) == 1
+    assert clear_headers[0].startswith("hermes_profile=")
+    assert "Max-Age=0" in clear_headers[0]
+    server.check_auth.assert_not_called()
+    server.handle_get.assert_not_called()
+
+
 def test_delete_profile_hands_request_active_profile_to_default(monkeypatch):
     from api import profiles
 
