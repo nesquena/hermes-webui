@@ -1006,7 +1006,8 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate, options = {}) {
+async function loadCrons(animate) {
+  const options = arguments[1] || {};
   const allowCache = !!options.allowCache;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
