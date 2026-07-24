@@ -797,14 +797,24 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
-    from agent.skill_utils import iter_skill_index_files
-    from tools.skills_tool import (
-        MAX_DESCRIPTION_LENGTH,
-        _EXCLUDED_SKILL_DIRS,
-        _parse_frontmatter,
-        _sort_skills,
-        skill_matches_platform,
-    )
+    try:
+        from agent.skill_utils import iter_skill_index_files
+        from tools.skills_tool import (
+            MAX_DESCRIPTION_LENGTH,
+            _EXCLUDED_SKILL_DIRS,
+            _parse_frontmatter,
+            _sort_skills,
+            skill_matches_platform,
+        )
+    except ImportError:
+        # Agent-free deployment (e.g. CI, standalone WebUI): the skills page
+        # must still load; it just has no local skill index to show.
+        return {
+            "success": True,
+            "skills": [],
+            "categories": [],
+            "message": "Skills are unavailable (hermes-agent not installed).",
+        }
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1192,6 +1202,16 @@ def _gateway_status_payload() -> dict:
         },
     }
 
+
+_SKILLS_HUB_ACTION_BY_PATH = {
+    "/api/skills/hub/scan": "scan",
+    "/api/skills/hub/install": "install",
+    "/api/skills/hub/update": "update",
+    "/api/skills/hub/uninstall": "uninstall",
+}
+_SKILLS_HUB_GATE_MESSAGE = (
+    "Skills Hub actions are disabled. Set HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE=1 to enable."
+)
 
 _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 
@@ -13638,6 +13658,40 @@ def handle_get(handler, parsed) -> bool:
             data["linked_files"] = {}
         return j(handler, data)
 
+    # ── Skills Hub API (GET): read-only, ungated -- only the mutating POST
+    # routes below are gated behind HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE ──
+    if parsed.path == "/api/skills/hub/search":
+        qs = parse_qs(parsed.query)
+        query = (qs.get("q", [""])[0] or "").strip()
+        if not query:
+            return j(handler, {"results": []})
+        source = qs.get("source", ["all"])[0] or "all"
+        try:
+            limit = int(qs.get("limit", ["20"])[0])
+        except ValueError:
+            limit = 20
+        from api.skills_hub_actions import search_hub_skills
+
+        try:
+            return j(handler, search_hub_skills(query, source=source, limit=limit))
+        except RuntimeError as exc:
+            return bad(handler, _sanitize_error(exc), 502)
+
+    if parsed.path == "/api/skills/hub/installed":
+        from api.skills_hub_actions import list_installed_hub_skills
+
+        return j(handler, {"installed": list_installed_hub_skills(_active_skills_dir())})
+
+    if parsed.path == "/api/skills/hub/status":
+        from api.profiles import get_active_profile_name as _hub_profile
+        from api.skills_hub_actions import get_status
+
+        # Profile-owned (gate finding 3): only the requesting profile's own
+        # target/log/error/scan metadata is ever returned.
+        status = get_status(_hub_profile())
+        status["allowed"] = _truthy_env("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE")
+        return j(handler, status)
+
     # ── Memory API (GET) ──
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler, parsed)
@@ -15530,6 +15584,79 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/skills/toggle":
         return _handle_skill_toggle(handler, body)
+
+    # ── Skills Hub (POST): search/install/update/uninstall run a fresh
+    # `hermes skills ...` subprocess (see api/skills_hub_actions.py for why:
+    # SKILLS_DIR/HERMES_HOME are bound at import time in the hub modules).
+    # Fail-closed behind HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE. ──
+    if parsed.path in _SKILLS_HUB_ACTION_BY_PATH:
+        if not _truthy_env("HERMES_WEBUI_ALLOW_SKILLS_HUB_WRITE"):
+            return j(
+                handler,
+                {"error": _SKILLS_HUB_GATE_MESSAGE, "allowed": False},
+                status=403,
+            )
+        # Gate finding 4: the feature flag is a capability switch, not an
+        # authentication boundary. Every mutation additionally requires an
+        # authenticated trusted session OR a spoof-resistant local request
+        # (the same posture as the other subprocess-backed mutation
+        # surfaces) -- a remotely reachable passwordless deployment with the
+        # flag on no longer exposes install/update/uninstall.
+        from api.auth import ensure_trusted_auth_session
+
+        ensure_trusted_auth_session(handler)
+        if getattr(handler, "_trusted_auth_session_rejected", False) and not _onboarding_request_is_local(handler):
+            return bad(handler, "Authentication required", 401)
+        action = _SKILLS_HUB_ACTION_BY_PATH[parsed.path]
+        if action in ("scan", "install"):
+            target = str(body.get("identifier", "")).strip()
+        else:
+            target = str(body.get("name", "")).strip()
+        if action in ("scan", "install", "uninstall") and not target:
+            field = "identifier" if action in ("scan", "install") else "name"
+            return bad(handler, f"{field} is required", 400)
+        # Gate finding 1: client-supplied force is gone -- reject instead of
+        # ignore so no cached client keeps believing it works.
+        if "force" in body:
+            return bad(handler, "'force' is not accepted; security verdicts cannot be overridden from the browser", 400)
+        if action == "update":
+            # Review P0: even the scan-gated two-phase pipeline cannot bind
+            # the security decision to the installed BYTES -- scan and update
+            # fetch the bundle independently, so upstream can change in
+            # between. Browser-triggered updates stay disabled until the
+            # agent provides the prepare/commit contract (single fetch to
+            # quarantine, bundle-hash-bound single-use commit capability).
+            # Use `hermes skills update` in the CLI meanwhile.
+            return j(
+                handler,
+                {
+                    "error": (
+                        "Browser-triggered skill updates are disabled until the "
+                        "Hermes agent provides an artifact-bound update contract. "
+                        "Use `hermes skills update` in the CLI instead."
+                    ),
+                    "allowed": True,
+                    "update_unavailable": True,
+                },
+                status=501,
+            )
+
+        from api.profiles import get_active_profile_name as _hub_profile
+        from api.skills_hub_actions import start_action
+
+        try:
+            started, status = start_action(
+                action,
+                target,
+                category=str(body.get("category", "") or "").strip(),
+                name_override=str(body.get("name_override", "") or "").strip(),
+                identifier=str(body.get("identifier", "") or "").strip(),
+                profile=_hub_profile(),
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        status["allowed"] = True
+        return j(handler, status, status=200 if started else 409)
 
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
