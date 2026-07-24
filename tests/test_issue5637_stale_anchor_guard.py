@@ -175,6 +175,7 @@ def test_realign_allows_on_desktop_no_native_anchor():
 def _fallback_harness(*, snapshot_scroll_height, cur_scroll_height, snapshot_top,
                       active_intent: bool = False, touch_like: bool = True,
                       init_scroll_top: int = 90030,
+                      snapshot_user_unpinned: bool = False,
                       anchor=None, anchor_row_content_pos=None, container_top: int = 0,
                       top_pad_now=None) -> str:
     """Node harness for the absolute-fallback path of _restoreMessageScrollSnapshotSameFrame.
@@ -241,7 +242,7 @@ function _deferClearProgrammaticScroll(){{}}
 function requestAnimationFrame(cb){{ cb(); }}
 function setTimeout(cb){{ cb(); return 1; }}
 const snapshot = {{ anchor: {anchor_js}, top: {snapshot_top}, bottom: 40,
-  scrollHeight: {sh}, pinned: false, userUnpinned: false }};
+  scrollHeight: {sh}, pinned: false, userUnpinned: {str(snapshot_user_unpinned).lower()} }};
 eval(extractFunc('_desktopAnchorRealignDelta'));
 eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
 _restoreMessageScrollSnapshotSameFrame(snapshot);
@@ -310,6 +311,21 @@ def test_fallback_allows_snapshot_top_on_desktop_no_native_anchor():
     )))
     assert m["writes"] == [89577]
     assert m["messageUserUnpinned"] is False and m["scrollPinned"] is True
+
+
+def test_unpinned_anchor_miss_restores_on_desktop_without_native_anchor():
+    """A desktop reader who deliberately scrolled up cannot be left to native
+    anchoring: desktop disables it. If the semantic row is temporarily absent,
+    the rebuild may clamp scrollTop toward zero before this function runs, so the
+    fallback must restore the snapshot rather than taking the mobile no-write exit.
+    """
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_user_unpinned=True,
+        init_scroll_top=0,
+    )))
+    assert m["writes"] == [89577]
+    assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
 
 
 # ---- round-3 desktop anchor-realign (PR #5742): app's own scrollTop += delta idiom -----
@@ -479,6 +495,7 @@ def test_predicate_stays_true_on_touch_when_inline_anchor_clobbered_to_none():
     assert m["touchLike"] is True
 
 
+
 def test_predicate_false_on_desktop_fine_pointer():
     """Desktop (fine pointer): matchMedia('(pointer:coarse)') is false and the resting
     computed overflow-anchor is 'none' -> predicate reports NOT touch, so the guards do
@@ -546,4 +563,3 @@ def test_predicate_true_on_android_not_ios():
         platform="Linux armv8l", max_touch_points=5,
     )))
     assert m["touchLike"] is True
-
