@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [normal, terminal-error]
+        scenario: [normal, terminal-error, session-reattach, detached-terminal, detached-terminal-error]
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +56,7 @@ jobs:
 
       - name: Run conversation lifecycle gate
         env:
-          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/${{ matrix.scenario }}
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
         run: python tests/browser_conversation_lifecycle.py
 

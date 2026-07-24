@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -84,13 +85,11 @@ def test_stream_writeback_diagnostics_cover_final_writeback_stages():
     for stage in expected_stages:
         assert f'_stream_writeback_stage(_writeback_timings, "{stage}")' in src
 
-    assert (
-        'with _stream_writeback_stage(_writeback_timings, "session_save"):\n'
-        '                    s.save()'
-    ) in src
-    assert src.index('with _stream_writeback_stage(_writeback_timings, "session_save")') < src.index(
-        'with _stream_writeback_stage(_writeback_timings, "state_sync")'
-    )
-    assert src.index('with _stream_writeback_stage(_writeback_timings, "state_sync")') < src.index(
+    session_save_idx = src.index('with _stream_writeback_stage(_writeback_timings, "session_save")')
+    state_sync_idx = src.index('with _stream_writeback_stage(_writeback_timings, "state_sync")')
+    session_save_block = src[session_save_idx:state_sync_idx]
+    assert re.search(r"\n\s+s\.save\(\)", session_save_block)
+    assert session_save_idx < state_sync_idx
+    assert state_sync_idx < src.index(
         'with _stream_writeback_stage(_writeback_timings, "done_payload")'
     )

@@ -120,6 +120,7 @@ def test_session_journal_replays_later_runs_after_cursor(tmp_path):
         seq=2,
         created_at=201.0,
     )
+    assert (tmp_path / "_run_journal" / "session_1" / "_terminal_runs.jsonl").exists()
     append_run_event(
         "session_2",
         "run_other",
@@ -202,7 +203,7 @@ def test_session_journal_rejects_bounds_and_invalid_contiguous_rows(tmp_path):
     append_run_event("session_1", "run_a", "token", {"text": "one"}, session_dir=tmp_path, seq=1)
     append_run_event("session_1", "run_a", "token", {"text": "two"}, session_dir=tmp_path, seq=2)
 
-    rows_limited = read_session_run_events("session_1", after_event_id="run_a:1", session_dir=tmp_path, max_rows=1)
+    rows_limited = read_session_run_events("session_1", after_event_id="run_a:1", session_dir=tmp_path, max_rows=0)
     bytes_limited = read_session_run_events("session_1", after_event_id="run_a:1", session_dir=tmp_path, max_bytes=1)
     assert rows_limited["status"] != "ok" and rows_limited["events"] == []
     assert bytes_limited["status"] != "ok" and bytes_limited["events"] == []
@@ -212,6 +213,19 @@ def test_session_journal_rejects_bounds_and_invalid_contiguous_rows(tmp_path):
     invalid = read_session_run_events("session_1", after_event_id="run_a:1", session_dir=tmp_path)
     assert invalid["status"] == "replay_noncontiguous"
     assert invalid["events"] == []
+
+
+def test_session_journal_replays_suffix_after_default_row_cap(tmp_path):
+    for seq in range(1, 2049):
+        append_run_event("session_1", "run_a", "token", {"text": str(seq)}, session_dir=tmp_path, seq=seq)
+    append_run_event("session_1", "run_a", "token", {"text": "suffix"}, session_dir=tmp_path, seq=2049)
+    append_run_event("session_1", "run_a", "done", {"session": {}}, session_dir=tmp_path, seq=2050)
+
+    replay = read_session_run_events("session_1", after_event_id="run_a:2048", session_dir=tmp_path)
+
+    assert replay["status"] == "ok"
+    assert [event["seq"] for event in replay["events"]] == [2049, 2050]
+    assert [event["event"] for event in replay["events"]] == ["token", "done"]
 
 
 def test_session_journal_rejects_oversized_line_before_decode(tmp_path, monkeypatch):

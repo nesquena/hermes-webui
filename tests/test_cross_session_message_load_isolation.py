@@ -37,7 +37,56 @@ def _extract_function(source: str, name: str) -> str:
         start = source.find(marker)
     assert start >= 0, f"{name} not found in sessions.js"
 
-    brace_start = source.find("{", start)
+    paren_start = source.find("(", start)
+    assert paren_start >= 0, f"function {name} is missing '('"
+
+    paren_depth = 0
+    in_string = None
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    paren_end = -1
+    for index in range(paren_start, len(source)):
+        ch = source[index]
+        nxt = source[index + 1] if index + 1 < len(source) else ""
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_string:
+                in_string = None
+            continue
+
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            continue
+        if ch in ('\'', '"', "`"):
+            in_string = ch
+            continue
+
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                paren_end = index
+                break
+
+    assert paren_end >= 0, f"function {name} is missing ')'"
+    brace_start = source.find("{", paren_end)
     assert brace_start >= 0, f"function {name} is missing '{{'"
 
     depth = 0
@@ -88,6 +137,7 @@ def _extract_function(source: str, name: str) -> str:
 
 
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
+NEW_SESSION_SRC = _extract_function(SESSIONS_SRC, "newSession")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
@@ -203,8 +253,12 @@ function createEnvironment() {
     activeStreamId: null,
   };
   globalThis._loadingSessionId = null;
+  globalThis._newSessionInFlight = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._activeProject = null;
+  globalThis.NO_PROJECT_FILTER = '__all_projects__';
+  globalThis._sessionSourceFilter = 'webui';
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -264,6 +318,7 @@ function createEnvironment() {
   globalThis._hydrateTodosFromSession = () => {};
   globalThis._resolveLineage = () => {};
   globalThis._clearPendingSelections = () => {};
+  globalThis._setNewSessionPending = () => {};
   globalThis._clearQueueCardDisplay = () => {};
   globalThis._syncTodosForSession = () => {};
   globalThis._clearAllTodosFromSession = () => {};
@@ -289,6 +344,11 @@ function createEnvironment() {
   globalThis._restoreComposerDraft = () => {};
   globalThis.renderSessionArtifacts = () => {};
   globalThis.renderMessages = () => {};
+  globalThis._rememberNewChatDraftSession = () => {};
+  globalThis._readEmptyComposerModelOverride = () => null;
+  globalThis._announceNewSessionWorkspace = () => {};
+  globalThis.loadDir = () => Promise.resolve();
+  globalThis.refreshSessionList = () => Promise.resolve();
   globalThis._checkAndShowHandoffHint = () => {};
   globalThis._hideHandoffHint = () => {};
   globalThis._isMessagingSession = () => true;
@@ -322,6 +382,7 @@ function createEnvironment() {
   };
 
   globalThis.window = {};
+  globalThis.document = { createElement: () => ({ dataset: {} }) };
   globalThis.history = { replaceState: () => {} };
   globalThis.localStorage = {
     removeItem: () => {},
@@ -348,14 +409,17 @@ let toastCalls = [];
 // Source under test
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
+__NEW_SESSION_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
 async function waitForQueued(apiHost, url) {
   const target = String(url);
-  while (!apiHost.pending.some((entry) => entry.url === target)) {
+  for (let i = 0; i < 1000; i += 1) {
+    if (apiHost.pending.some((entry) => entry.url === target)) return;
     await Promise.resolve();
   }
+  throw new Error('Timed out waiting for queued API call: ' + target + '; saw ' + JSON.stringify(apiHost.apiCalls));
 }
 
 const API_BEACON_META = {
@@ -427,6 +491,37 @@ const API_ATLAS_RELOAD_MSGS = {
     messages: [{ role: 'assistant', content: 'reloaded-active-transcript' }],
     message_count: 31,
     tool_calls: [{ name: 'tool-atlas-new' }],
+  },
+};
+
+const API_SEED_RELOAD_META = {
+  session: {
+    session_id: 'sid-seed',
+    message_count: 2,
+    active_stream_id: null,
+    resolve_model: 'qwen/qwq-32b-instruct',
+  },
+};
+
+const API_SEED_RELOAD_MSGS = {
+  session: {
+    session_id: 'sid-seed',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [{ role: 'assistant', content: 'stale-seed-transcript' }],
+    message_count: 2,
+    tool_calls: [{ name: 'tool-seed-stale' }],
+  },
+};
+
+const API_NEW_SESSION = {
+  session: {
+    session_id: 'sid-new',
+    message_count: 0,
+    messages: [],
+    active_stream_id: null,
+    model: '',
+    model_provider: null,
   },
 };
 
@@ -559,11 +654,95 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runNewSessionSupersedesOldForceReload() {
+  createEnvironment();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  S.session = { session_id: 'sid-seed', message_count: 2, active_stream_id: null };
+  S.messages = [{ role: 'assistant', content: 'settled-seed-transcript' }];
+
+  const calls = {
+    oldMeta: apiHost.enqueue(buildMessageUrl('sid-seed', 0)),
+    newSession: apiHost.enqueue('/api/session/new'),
+    oldMsgs: apiHost.enqueue(buildMessageUrl('sid-seed', 1)),
+  };
+
+  const oldReload = loadSession('sid-seed', {
+    force: true,
+    externalRefreshReason: 'session-updated',
+    keepStaleUntilLoaded: true,
+  });
+  await waitForQueued(apiHost, calls.oldMeta.url);
+
+  const created = newSession(false, {});
+  await waitForQueued(apiHost, calls.newSession.url);
+  calls.newSession._resolve(API_NEW_SESSION);
+  await created;
+
+  calls.oldMeta._resolve(API_SEED_RELOAD_META);
+  await Promise.resolve();
+  await Promise.resolve();
+  const staleMessagesFetch = apiHost.pending.find((entry) => entry.url === calls.oldMsgs.url);
+  if (staleMessagesFetch) {
+    staleMessagesFetch._resolve(API_SEED_RELOAD_MSGS);
+  }
+  await oldReload;
+
+  return {
+    scenario: 'new-session-supersedes-old-force-reload',
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    toolCalls: snapshotState().toolCalls,
+    loadingSid: snapshotState().loadingSid,
+    loadingGeneration: snapshotState().loadingGeneration,
+    apiCalls: snapshotState().apiCalls,
+    staleMessagesFetched: Boolean(staleMessagesFetch),
+  };
+}
+
+async function runSidebarLoadSupersedesPendingNewSession() {
+  createEnvironment();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  S.session = { session_id: 'sid-seed', message_count: 1, active_stream_id: null };
+  S.messages = [{ role: 'assistant', content: 'seed' }];
+  const calls = {
+    newSession: apiHost.enqueue('/api/session/new'),
+    atlasMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    atlasMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+  };
+
+  const creating = newSession(false, {});
+  await waitForQueued(apiHost, calls.newSession.url);
+  const loading = loadSession('sid-atlas', { force: true });
+  await waitForQueued(apiHost, calls.atlasMeta.url);
+  calls.atlasMeta._resolve(API_ATLAS_META);
+  await waitForQueued(apiHost, calls.atlasMsgs.url);
+  calls.atlasMsgs._resolve(API_ATLAS_MSGS);
+  await loading;
+
+  calls.newSession._resolve(API_NEW_SESSION);
+  await creating;
+
+  return {
+    scenario: 'sidebar-load-supersedes-pending-new-session',
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    apiCalls: apiHost.apiCalls.slice(),
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    newSessionSupersedesOldForceReload: await runNewSessionSupersedesOldForceReload(),
+    sidebarLoadSupersedesPendingNewSession: await runSidebarLoadSupersedesPendingNewSession(),
   };
 }
 
@@ -601,6 +780,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
         .replace(
             "__SELECT_LIVE_RECOVERY_INFLIGHT_SRC__", SELECT_LIVE_RECOVERY_INFLIGHT_SRC
         )
+        .replace("__NEW_SESSION_SRC__", NEW_SESSION_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
@@ -609,6 +789,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    new_session = body["newSessionSupersedesOldForceReload"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -675,5 +856,36 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
     ) == 2, "both old and active loads should have attempted message fetch"
 
+    # 4) New Chat is a pane navigation too. A stale same-session force reload
+    #    from the old pane must not resolve late and put the composer back on
+    #    the old session before send.
+    assert new_session["apiCalls"][0] == "/api/session?session_id=sid-seed&messages=0&resolve_model=0", (
+        "old session refresh should start before new chat creation in the race"
+    )
+    assert new_session["apiCalls"][1] == "/api/session/new", (
+        "new chat POST should overlap the stale old-session refresh"
+    )
+    assert new_session["finalSid"] == "sid-new", (
+        "newSession() must supersede older loadSession(force) continuations"
+    )
+    assert new_session["messages"] == [], (
+        "stale old-session transcript must not replace the new empty chat"
+    )
+    assert new_session["toolCalls"] == [], (
+        "stale old-session tool state must not leak into the new chat"
+    )
+    assert new_session["staleMessagesFetched"] is False, (
+        "stale old force reload should stop at metadata ownership check"
+    )
+
+    sidebar_new_session = body["sidebarLoadSupersedesPendingNewSession"]
+    assert sidebar_new_session["finalSid"] == "sid-atlas", (
+        "a newer sidebar selection must remain active when an older New Chat POST resolves"
+    )
+    assert sidebar_new_session["messages"] == ["new-active-transcript"], (
+        "stale New Chat response must not replace the selected sidebar transcript"
+    )
+
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
+    assert new_session["loadingSid"] is None, "new chat should leave no stale load marker"

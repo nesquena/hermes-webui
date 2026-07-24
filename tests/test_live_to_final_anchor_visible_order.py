@@ -118,6 +118,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 if(src.indexOf('function _anchorSceneActiveMode') !== -1){{
   eval(extractFunc('_anchorSceneActiveMode'));
@@ -891,11 +893,12 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")
     msg_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
 
-    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);" in attach
+    assert "const attachOptions=(typeof options==='object'&&options)?options:{};" in attach
+    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, attachOptions);" in attach
     assert "api('/api/session/anchor-scene'" in persist
     assert "session_id:activeSid" in persist
     assert "stream_id:streamId" in persist
-    assert "const messageOffset=_anchorSceneMessageOffsetForPersist();" in persist
+    assert "const messageOffset=_anchorSceneMessageOffsetForPersist(options.messageOffset);" in persist
     assert "message_index:_anchorSceneAbsoluteMessageIndexForPersist(messageIndex,messageOffset)" in persist
     assert "message_window_index:messageIndex" in persist
     assert "message_offset:messageOffset" in persist
@@ -905,13 +908,30 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     assert "content:String(content||'').replace(/\\s+/g,' ').trim()" in msg_ref
 
 
+def test_done_persists_owned_anchor_scene_during_session_switch_window():
+    done = _event_listener_body(MESSAGES_JS, "done")
+
+    background_idx = done.index("if(!isActiveSession&&Array.isArray(completedSession.messages)){")
+    attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(completedMessages,{", background_idx)
+    active_idx = done.index("if(isActiveSession){", background_idx)
+    assert background_idx < attach_idx < active_idx
+    assert "messageOffset:completedSession._messages_offset||0" in done[background_idx:active_idx]
+    assert "finalAnswer:_stripXmlToolCalls(assistantText.slice(segmentStart))" in done[background_idx:active_idx]
+    assert "S.session=completedSession" not in done[background_idx:active_idx]
+
+    complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
+    assert "const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';" in complete
+    assert "_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint" in complete
+    assert "const finalAnswer=_anchorSceneCleanText(finalAnswerHint)" in complete
+
+
 def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
     complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     reasoning_text = _function_body(MESSAGES_JS, "_anchorSceneMessageReasoningText")
 
-    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);" in attach
+    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene,attachOptions);" in attach
     assert "for(let idx=lastAsstIndex-1;idx>=0;idx-=1)" in complete
     assert "messages.slice(turnStart+1,lastAsstIndex+1)" in complete
     assert "message.reasoning||message._reasoning||message.reasoning_content||message.thinking" in reasoning_text
@@ -920,6 +940,52 @@ def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     assert "if(S.toolCalls) for(const tc of S.toolCalls){" in rows_by_message
     assert "for(const tool of (toolsByIdx.get(idx)||[]))" in rows_by_message
     assert "_anchorSceneToolRowFromCall(tool,0,idx)" in rows_by_message
+
+
+def test_structured_reasoning_is_not_duplicated_by_top_level_mirror():
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))},'utf8');
+{_EXTRACT_FUNC_JS}
+const activeSid='session';
+const streamId='stream';
+global.S={{toolCalls:[]}};
+function _anchorSceneMessageText(){{ return ''; }}
+function _anchorSceneMessageReasoningText(message){{ return String(message.reasoning||''); }}
+function _anchorSceneThinkingRow(text){{ return {{row_id:'top-level',role:'thinking',text}}; }}
+function _anchorSceneProseRow(text){{ return {{row_id:'prose',role:'prose',text}}; }}
+function _anchorSceneToolRowFromCall(tool){{
+  return {{row_id:'tool',role:'tool',tool_call_id:tool.id,tool:{{id:tool.id}}}};
+}}
+function _anchorSceneMatchingContentToolRow(){{ return null; }}
+function _anchorSceneToolRowsHaveDifferentExplicitIds(){{ return false; }}
+function _enrichSettledToolRowBodyFromLive(){{ return false; }}
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneContentText'));
+eval(extractFunc('_anchorSceneContentVisibleText'));
+eval(extractFunc('_anchorSceneMessageHasContentToolUse'));
+eval(extractFunc('_anchorSceneContentTool'));
+eval(extractFunc('_anchorSceneRowsFromContentParts'));
+eval(extractFunc('_anchorSceneRowsByMessageIndex'));
+const messages=[
+  {{role:'user',content:'prompt'}},
+  {{
+    role:'assistant',
+    content:[
+      {{type:'thinking',text:'same reasoning'}},
+      {{type:'tool_use',id:'tool-1',name:'read_file'}},
+      {{type:'text',text:'final answer'}},
+    ],
+    reasoning:'same reasoning',
+  }},
+];
+const rows=_anchorSceneRowsByMessageIndex(messages,0,1,{{includeFinal:true}}).get(1)||[];
+process.stdout.write(JSON.stringify(rows.filter(row=>row.role==='thinking').map(row=>row.text)));
+"""
+    rows = _run_node_script(script)
+
+    assert rows == ["same reasoning"]
 
 
 def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
@@ -940,19 +1006,174 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     assert "rowTextKey.includes(existing)||existing.includes(rowTextKey)" in overlap
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settled_anchor_scene_suppresses_final_suffix_live_accumulator():
+    final_answer = "Inspecting the fixture before the tool call. Lifecycle gate final answer."
+    suffix_text = "Lifecycle gate final answer."
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))},'utf8');
+{_EXTRACT_FUNC_JS}
+global.window = {{ chatActivityMode(){{ return 'compact_worklog'; }} }};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+function _anchorSceneActiveMode(){{ return 'compact_worklog'; }}
+function _anchorSceneFinalAnswerText(message){{ return message && (message.content || ''); }}
+function _anchorSceneRowsByMessageIndex(){{ return new Map(); }}
+function _anchorSceneMessageRef(message){{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement(){{ return 0; }}
+function _anchorSceneRowDisplayHintForMode(row){{ return row && row.display_hint || 'activity_row'; }}
+const scene = _completeSettledAnchorSceneForTurn([
+  {{role:'user', content:'Prompt', id:'user-1'}},
+  {{role:'assistant', content:{json.dumps(final_answer)}, id:'assistant-1'}},
+], 1, {{
+  mode:'compact_worklog',
+  final_answer:{json.dumps(final_answer)},
+  activity_rows:[
+    {{role:'thinking', text:'Checking the fixture', status:'running', local_id:'live-thinking:stream:1'}},
+    {{role:'tool', text:'tool output', status:'running', local_id:'live-tool:stream:1', tool_call_id:'call-1'}},
+    {{
+      role:'prose',
+      kind:'process_prose',
+      source_event_type:'token',
+      local_id:'live-prose:stream:2',
+      text:{json.dumps(suffix_text)},
+      status:'running',
+    }},
+  ],
+}});
+process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
+  role: row.role,
+  local_id: row.local_id || '',
+  text: row.text || '',
+  status: row.status || '',
+}}))));
+"""
+    rows = _run_node_script(script)
+
+    assert all(row["text"] != suffix_text for row in rows)
+    assert [row["role"] for row in rows] == ["thinking", "tool"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settled_anchor_scene_splits_final_suffix_from_owned_process_prefix():
+    final_answer = "Inspecting the fixture before the tool call. Lifecycle gate final answer."
+    prefix_text = "Inspecting the fixture before the tool call."
+    suffix_text = "Lifecycle gate final answer."
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))},'utf8');
+{_EXTRACT_FUNC_JS}
+global.window = {{ chatActivityMode(){{ return 'compact_worklog'; }} }};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+function _anchorSceneActiveMode(){{ return 'compact_worklog'; }}
+function _anchorSceneFinalAnswerText(message){{ return message && (message.content || ''); }}
+function _anchorSceneRowsByMessageIndex(){{
+  return new Map([[1,[{{
+    role:'prose',
+    kind:'process_prose',
+    source_event_type:'settled_message',
+    text:{json.dumps(final_answer)},
+    status:'completed',
+  }}]]]);
+}}
+function _anchorSceneMessageRef(message){{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement(){{ return 0; }}
+function _anchorSceneRowDisplayHintForMode(row){{ return row && row.display_hint || 'activity_row'; }}
+const scene = _completeSettledAnchorSceneForTurn([
+  {{role:'user', content:'Prompt', id:'user-1'}},
+  {{role:'assistant', content:{json.dumps(final_answer)}, id:'assistant-1'}},
+], 1, {{
+  mode:'compact_worklog',
+  final_answer:{json.dumps(final_answer)},
+  activity_rows:[
+    {{role:'thinking', text:'Checking the fixture', status:'running', local_id:'live-thinking:stream:1'}},
+    {{
+      role:'prose',
+      kind:'process_prose',
+      source_event_type:'token',
+      local_id:'live-prose:stream:1',
+      text:{json.dumps(prefix_text)},
+      status:'completed',
+    }},
+    {{role:'tool', text:'tool output', status:'running', local_id:'live-tool:stream:1', tool_call_id:'call-1'}},
+  ],
+}}, {{finalAnswer:{json.dumps(final_answer)}}});
+process.stdout.write(JSON.stringify({{
+  final_answer: scene.final_answer,
+  rows: scene.activity_rows.map(row => ({{
+    role: row.role,
+    source: row.source_event_type || '',
+    text: row.text || '',
+  }})),
+}}));
+"""
+    result = _run_node_script(script)
+
+    assert result["final_answer"] == suffix_text
+    assert all(row["source"] != "settled_message" for row in result["rows"])
+    assert result["rows"] == [
+        {"role": "thinking", "source": "", "text": "Checking the fixture"},
+        {"role": "prose", "source": "token", "text": prefix_text},
+        {"role": "tool", "source": "", "text": "tool output"},
+    ]
+
+
+def test_live_reasoning_placement_advances_after_restored_anchor_segments():
+    attach = _function_body(MESSAGES_JS, "attachLiveStream")
+
+    assert "let _liveReasoningSegmentSeq=0;" in attach
+    assert "function _anchorActivityMaxSegmentSeq()" in attach
+    assert "visit(payload.activitySegmentSeq);" in attach
+    assert "visit(group.activity_segment_seq);" in attach
+    assert "visit(_liveLocalIdSegmentSeq(event.local_id));" in attach
+    assert "const restoredAnchorSeq=_anchorActivityMaxSegmentSeq();" in attach
+    assert "Math.max(Number.isFinite(currentSeq)?currentSeq:0,restoredAnchorSeq)+1" in attach
+    assert "if(reasoningSeq>0&&String(liveReasoningText||'').trim()) segmentSeq=reasoningSeq;" in attach
+    assert "if(Number.isFinite(segmentSeq)&&segmentSeq>0) _liveReasoningSegmentSeq=segmentSeq;" in attach
+
+
 def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     live_identity = _function_body(MESSAGES_JS, "_anchorSceneRowHasLiveIdentity")
     settle_live = _function_body(MESSAGES_JS, "_anchorSceneSettleLiveRunningRow")
 
-    assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
-    assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
+    assert "const projectedReasoningKey=_anchorSceneTextKey(projectedRows" in complete
+    assert "const settledReasoningKey=_anchorSceneTextKey(settledReasoningParts.join(''));" in complete
+    assert "projectedReasoningKey===settledReasoningKey" in complete
+    assert "if(preferProjectedThinking&&row&&row.role==='thinking') continue;" in complete
+    assert "row=_anchorSceneSettleLiveRunningRow(row,dropProjectedThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
     assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
     assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
     assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
     assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
-    assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
+    drop_idx = settle_live.index(
+        "if(row.role==='thinking'&&dropLiveThinking&&hasLiveIdentity) return null;"
+    )
+    status_idx = settle_live.index("if(String(row.status||'').toLowerCase()!=='running') return row;")
+    assert drop_idx < status_idx
     assert "const sealed={...row,status:'completed'};" in settle_live
     assert "sealed.payload={...row.payload,status:'completed'};" in settle_live
     assert "if(row.role==='tool') sealed.payload.done=true;" in settle_live
@@ -1397,7 +1618,9 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
     visible_text = _function_body(MESSAGES_JS, "_anchorSceneContentVisibleText")
 
     assert "const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);" in complete
-    assert "const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)" in complete
+    assert "const finalAnswer=_anchorSceneCleanText(finalAnswerHint)" in complete
+    assert "_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer" in complete
+    assert "idx===lastAsstIndex&&sceneHasActivityRows" in complete
     assert "_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true})" in complete
     assert "for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)" in complete
     assert "options=(options&&typeof options==='object')?options:{};" in rows_by_message

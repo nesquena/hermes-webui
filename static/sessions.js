@@ -1383,6 +1383,11 @@ async function newSession(flash, options={}){
     return _newSessionInFlight;
   }
   _setNewSessionPending(true);
+  // New Chat is a pane navigation even though it does not call loadSession().
+  // Invalidate older loadSession(force) continuations from the previous pane so
+  // a late external refresh cannot put the composer back on that old session.
+  if(typeof _loadSessionGeneration==='number') _loadSessionGeneration += 1;
+  if(typeof _loadingSessionId!=='undefined') _loadingSessionId = null;
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
@@ -1438,7 +1443,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // Cold-start / picker-without-provider fallback (#2518): when the dropdown option's
       // data-provider is empty/'default' or the persisted state predates provider
       // tracking, newModelState.model_provider is null. POST /api/session/new's
       // fast path in _resolve_compatible_session_model_state requires both model
@@ -1481,7 +1486,10 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    const _newSessionGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // Do not let a newer sidebar load be overwritten by this response.
+    if(_newSessionGeneration!==null && _loadSessionGeneration!==_newSessionGeneration) return;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }

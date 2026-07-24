@@ -3136,20 +3136,49 @@ def _run_journal_snapshot_merge_args(existing, incoming):
 
 def _run_journal_envelope_run_id_result(event: dict) -> tuple[str | None, bool]:
     raw_run_id = event.get("run_id")
+    raw_event_id = event.get("event_id")
+    event_id = str(raw_event_id or "").strip()
+    event_run_id = None
+    event_seq = None
+    if event_id:
+        event_run_id, event_seq = _shared_parse_run_journal_event_id(event_id)
+        if not event_run_id or event_seq is None:
+            return None, True
     if raw_run_id is None:
-        return None, False
+        return event_run_id, False
     if not isinstance(raw_run_id, str):
         return None, True
     run_id = raw_run_id.strip()
     if not run_id:
         return None, True
-    raw_event_id = event.get("event_id")
-    event_id = str(raw_event_id or "").strip()
-    if event_id:
-        event_run_id, event_seq = _shared_parse_run_journal_event_id(event_id)
-        if event_run_id and event_seq is not None and event_run_id != run_id:
-            return None, True
+    if event_run_id and event_run_id != run_id:
+        return None, True
     return run_id, False
+
+
+def _run_journal_event_envelope_error(event: dict, session_id: str, run_id: str) -> str | None:
+    if not isinstance(event, dict):
+        return "journal_envelope_not_object"
+    if event.get("version") != 1:
+        return "unsupported_journal_envelope_version"
+    target_session_id = str(session_id or "").strip()
+    target_run_id = str(run_id or "").strip()
+    raw_session_id = event.get("session_id")
+    if not isinstance(raw_session_id, str) or raw_session_id.strip() != target_session_id:
+        return "journal_session_authority"
+    raw_run_id = event.get("run_id")
+    if not isinstance(raw_run_id, str) or raw_run_id.strip() != target_run_id:
+        return "journal_run_authority"
+    seq = event.get("seq")
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
+        return "journal_seq_authority"
+    event_id = str(event.get("event_id") or "").strip()
+    if not event_id:
+        return "journal_event_id_missing"
+    event_run_id, event_seq = _shared_parse_run_journal_event_id(event_id)
+    if event_run_id != target_run_id or event_seq != seq or event_id != f"{target_run_id}:{seq}":
+        return "journal_event_id_seq_mismatch"
+    return None
 
 
 def _run_journal_snapshot_event_id_for_run(
@@ -3166,7 +3195,311 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
-def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
+def _run_journal_terminal_envelope_error(event: dict, session_id: str, run_id: str) -> str | None:
+    return _run_journal_event_envelope_error(event, session_id, run_id)
+
+
+def _terminal_anchor_scene_target_from_payload(
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+    terminal_payload: dict,
+) -> dict | None:
+    if not isinstance(terminal_payload, dict):
+        return None
+    raw_target = terminal_payload.get("terminal_message_target")
+    if "terminal_message_target" in terminal_payload:
+        if not isinstance(raw_target, dict):
+            return None
+        if raw_target.get("version") != "terminal_message_target_v1":
+            return None
+        raw_message_index = raw_target.get("message_index")
+        if not isinstance(raw_message_index, int) or isinstance(raw_message_index, bool) or raw_message_index < 0:
+            return None
+        target_session_id = str(raw_target.get("session_id") or "").strip()
+        target_run_id = str(raw_target.get("run_id") or "").strip()
+        target_stream_id = str(raw_target.get("stream_id") or "").strip()
+        target_message_ref = _normalize_anchor_scene_message_ref(raw_target.get("message_ref") or "")
+        if not target_session_id or not target_run_id or not target_stream_id or not target_message_ref:
+            return None
+        terminal_session = (
+            terminal_payload.get("session")
+            if isinstance(terminal_payload.get("session"), dict)
+            else {}
+        )
+        if not _terminal_payload_lineage_valid(
+            session_id,
+            target_session_id,
+            terminal_payload,
+            terminal_session,
+        ):
+            return None
+        if target_run_id != run_id or target_stream_id != stream_id:
+            return None
+        return {
+            "version": "terminal_message_target_v1",
+            "session_id": target_session_id,
+            "run_id": target_run_id,
+            "stream_id": target_stream_id,
+            "message_index": raw_message_index,
+            "message_ref": target_message_ref,
+        }
+    terminal_session = terminal_payload.get("session")
+    if not isinstance(terminal_session, dict):
+        return None
+    terminal_messages = (
+        terminal_session.get("messages")
+        if isinstance(terminal_session.get("messages"), list)
+        else []
+    )
+    terminal_message_count = terminal_session.get("message_count")
+    terminal_session_id = str(terminal_session.get("session_id") or "").strip()
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        terminal_session_id,
+        terminal_payload,
+        terminal_session,
+    ):
+        return None
+    if (
+        not isinstance(terminal_message_count, int)
+        or isinstance(terminal_message_count, bool)
+        or terminal_message_count <= 0
+    ):
+        return None
+    terminal_message_index = terminal_message_count - 1
+    if terminal_message_index >= len(terminal_messages):
+        return None
+    message_ref = ""
+    if 0 <= terminal_message_index < len(terminal_messages):
+        terminal_message = terminal_messages[terminal_message_index]
+        if isinstance(terminal_message, dict) and terminal_message.get("role") == "assistant":
+            message_ref = _assistant_anchor_scene_message_ref(terminal_message)
+    if not message_ref:
+        return None
+    return {
+        "version": "terminal_message_target_v1",
+        "session_id": terminal_session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "message_index": terminal_message_index,
+        "message_ref": message_ref,
+    }
+
+
+def _terminal_payload_target_session_id_from_authority(
+    raw: dict,
+    authority_session_id: str,
+) -> str | None:
+    authority_session_id = str(authority_session_id or "").strip()
+    if not authority_session_id:
+        return None
+    raw_target_session_id = str(raw.get("target_session_id") or "").strip()
+    raw_continuation_session_id = str(raw.get("continuation_session_id") or "").strip()
+    if raw_target_session_id and raw_continuation_session_id and raw_target_session_id != raw_continuation_session_id:
+        return None
+    return raw_target_session_id or raw_continuation_session_id or authority_session_id
+
+
+def _terminal_payload_authorized_target_session_id(
+    terminal_payload: dict,
+    terminal_session: dict,
+    authority_session_id: str,
+    raw_target_session_id: str,
+) -> str | None:
+    authority_session_id = str(authority_session_id or "").strip()
+    raw_target_session_id = str(raw_target_session_id or "").strip()
+    if not authority_session_id or not raw_target_session_id:
+        return None
+    payload_session_id = str(
+        terminal_session.get("session_id")
+        or terminal_payload.get("session_id")
+        or raw_target_session_id
+    ).strip()
+    if raw_target_session_id == authority_session_id:
+        if payload_session_id and payload_session_id != authority_session_id:
+            return None
+        return authority_session_id
+    if payload_session_id != raw_target_session_id:
+        return None
+    if not _terminal_payload_lineage_valid(
+        authority_session_id,
+        raw_target_session_id,
+        terminal_payload,
+        terminal_session,
+    ):
+        return None
+    return raw_target_session_id
+
+
+def _terminal_anchor_scene_disposition_from_payload(
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+    terminal_payload: dict,
+) -> dict | None:
+    if not isinstance(terminal_payload, dict):
+        return None
+    raw = terminal_payload.get("terminal_disposition")
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("version") != "terminal_disposition_v1":
+        return None
+    kind = str(raw.get("kind") or "").strip()
+    if kind != "consumed_non_materializable":
+        return None
+    authority_session_id = str(raw.get("session_id") or "").strip()
+    target_run_id = str(raw.get("run_id") or "").strip()
+    target_stream_id = str(raw.get("stream_id") or "").strip()
+    if (
+        authority_session_id != session_id
+        or target_run_id != run_id
+        or target_stream_id != stream_id
+    ):
+        return None
+    raw_target_session_id = _terminal_payload_target_session_id_from_authority(
+        raw,
+        authority_session_id,
+    )
+    if raw_target_session_id is None:
+        return None
+    terminal_session = (
+        terminal_payload.get("session")
+        if isinstance(terminal_payload.get("session"), dict)
+        else {}
+    )
+    target_session_id = _terminal_payload_authorized_target_session_id(
+        terminal_payload,
+        terminal_session,
+        authority_session_id,
+        raw_target_session_id,
+    )
+    if target_session_id is None:
+        return None
+    disposition = {
+        "version": "terminal_disposition_v1",
+        "kind": kind,
+        "reason": str(raw.get("reason") or "").strip(),
+        "session_id": authority_session_id,
+        "run_id": target_run_id,
+        "stream_id": target_stream_id,
+    }
+    if target_session_id != authority_session_id:
+        disposition["target_session_id"] = target_session_id
+        disposition["continuation_session_id"] = target_session_id
+    return disposition
+
+
+_RUN_JOURNAL_COMPLETE_READ_MAX_PAGES = 128
+
+
+def _run_journal_page_complete(journal: dict) -> bool:
+    return bool(journal.get("complete", not journal.get("malformed")))
+
+
+def _read_run_journal_until_complete(
+    session_id: str,
+    stream_id: str,
+    *,
+    after_seq: int | None = None,
+    max_seq: int | None = None,
+) -> dict:
+    events: list[dict] = []
+    malformed: list[dict] = []
+    cursor = after_seq
+    complete = True
+    limit_reason: str | None = None
+    boundary_reasons = {"replay_limit_rows", "replay_limit_bytes"}
+    for _page_idx in range(_RUN_JOURNAL_COMPLETE_READ_MAX_PAGES):
+        if cursor is None and max_seq is None:
+            journal = read_run_events(session_id, stream_id)
+        else:
+            journal = read_run_events(
+                session_id,
+                stream_id,
+                after_seq=cursor,
+                max_seq=max_seq,
+            )
+        page_events = [
+            event for event in (journal.get("events") or []) if isinstance(event, dict)
+        ]
+        events.extend(page_events)
+        page_malformed = [
+            row for row in (journal.get("malformed") or []) if isinstance(row, dict)
+        ]
+        non_boundary_malformed = [
+            row for row in page_malformed if row.get("reason") not in boundary_reasons
+        ]
+        malformed.extend(non_boundary_malformed)
+        limit_reason = journal.get("limit_reason") or limit_reason
+        if _run_journal_page_complete(journal):
+            malformed.extend(
+                row for row in page_malformed if row.get("reason") in boundary_reasons
+            )
+            return {
+                "session_id": session_id,
+                "run_id": stream_id,
+                "events": events,
+                "malformed": malformed,
+                "complete": not malformed,
+                "limit_reason": limit_reason,
+                "next_after_seq": journal.get("next_after_seq", cursor),
+            }
+        complete = False
+        if non_boundary_malformed:
+            break
+        if not page_events:
+            malformed.extend(
+                row for row in page_malformed if row.get("reason") in boundary_reasons
+            )
+            break
+        try:
+            next_cursor = int(journal.get("next_after_seq"))
+        except (TypeError, ValueError):
+            try:
+                next_cursor = int(page_events[-1].get("seq") or 0)
+            except (TypeError, ValueError):
+                break
+        if cursor is not None and next_cursor <= int(cursor):
+            break
+        cursor = next_cursor
+    malformed.append({"line": None, "reason": limit_reason or "replay_incomplete"})
+    return {
+        "session_id": session_id,
+        "run_id": stream_id,
+        "events": events,
+        "malformed": malformed,
+        "complete": complete and not malformed,
+        "limit_reason": limit_reason or "replay_incomplete",
+        "next_after_seq": cursor,
+    }
+
+
+def _run_journal_incomplete_snapshot(
+    session_id: str,
+    stream_id: str,
+    reason: str | None,
+) -> dict:
+    return {
+        "_run_journal_incomplete": True,
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "reason": reason or "replay_incomplete",
+    }
+
+
+def _is_run_journal_incomplete_snapshot(snapshot: object) -> bool:
+    return isinstance(snapshot, dict) and bool(snapshot.get("_run_journal_incomplete"))
+
+
+def _run_journal_live_snapshot(
+    stream_id: str | None,
+    *,
+    handler=None,
+    settled: bool = False,
+    summary: dict | None = None,
+    return_incomplete: bool = False,
+) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
         return None
@@ -3176,32 +3509,95 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         emit_error=False,
     ):
         return None
-    summary = find_run_summary(stream_id)
+    summary = summary if isinstance(summary, dict) else find_run_summary(stream_id)
     if not summary:
         return None
     session_id = str(summary.get("session_id") or "")
     if not session_id:
         return None
-    journal = read_run_events(session_id, stream_id)
+    journal = _read_run_journal_until_complete(session_id, stream_id)
+    if not _run_journal_page_complete(journal):
+        if return_incomplete:
+            return _run_journal_incomplete_snapshot(
+                session_id,
+                stream_id,
+                journal.get("limit_reason") or "replay_incomplete",
+            )
+        return None
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
-    event_run_ids: set[str] = set()
-    malformed_envelope_run_id = False
-    for event in events:
-        event_run_id, event_run_id_malformed = _run_journal_envelope_run_id_result(event)
-        if event_run_id is not None:
-            event_run_ids.add(event_run_id)
-        if event_run_id_malformed:
-            malformed_envelope_run_id = True
-    # The event envelope is the durable identity authority. Older summaries
-    # are keyed by the transport id, so only use that fallback when the journal
-    # does not provide one unambiguous run id.
-    run_id = (
-        next(iter(event_run_ids))
-        if not malformed_envelope_run_id and len(event_run_ids) == 1
-        else str(summary.get("run_id") or stream_id).strip()
+    malformed_journal_rows = bool(journal.get("malformed"))
+    terminal_event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("terminal") and str(event.get("event") or event.get("type") or "") != "stream_end"
+        ),
+        next((event for event in reversed(events) if event.get("terminal")), None),
     )
+    terminal_settlement_snapshot = settled or terminal_event is not None
+    summary_run_id = str(summary.get("run_id") or stream_id).strip()
+    if terminal_settlement_snapshot:
+        if malformed_journal_rows or terminal_event is None:
+            return None
+        raw_terminal_run_id = terminal_event.get("run_id")
+        if not isinstance(raw_terminal_run_id, str) or not raw_terminal_run_id.strip():
+            return None
+        run_id = raw_terminal_run_id.strip()
+        # Older summaries can still be keyed by the transport stream id while
+        # the event envelope carries the stable run id. Any third identity is
+        # ambiguous and must not be trusted.
+        if summary_run_id and summary_run_id not in {run_id, stream_id}:
+            return None
+        for event in events:
+            if _run_journal_event_envelope_error(event, session_id, run_id) is not None:
+                return None
+    else:
+        event_run_ids: set[str] = set()
+        malformed_envelope_run_id = False
+        for event in events:
+            event_run_id, event_run_id_malformed = _run_journal_envelope_run_id_result(event)
+            if event_run_id is not None:
+                event_run_ids.add(event_run_id)
+            if event_run_id_malformed:
+                malformed_envelope_run_id = True
+        if len(event_run_ids) > 1:
+            return None
+        if malformed_envelope_run_id:
+            # For a non-terminal live snapshot, the transport cursor remains a
+            # recoverable observation path.
+            event_run_ids.clear()
+        if len(event_run_ids) == 1:
+            run_id = next(iter(event_run_ids))
+            if summary_run_id and summary_run_id not in {run_id, stream_id}:
+                return None
+        else:
+            run_id = summary_run_id or stream_id
+    terminal_payload = (
+        terminal_event.get("payload")
+        if isinstance(terminal_event, dict) and isinstance(terminal_event.get("payload"), dict)
+        else {}
+    )
+    terminal_state = str(summary.get("terminal_state") or "").strip() if summary.get("terminal") else ""
+    terminal_message_target = _terminal_anchor_scene_target_from_payload(
+        session_id,
+        stream_id,
+        run_id,
+        terminal_payload,
+    )
+    terminal_disposition = _terminal_anchor_scene_disposition_from_payload(
+        session_id,
+        stream_id,
+        run_id,
+        terminal_payload,
+    )
+    terminal_message_index = (
+        terminal_message_target.get("message_index")
+        if isinstance(terminal_message_target, dict)
+        else None
+    )
+    snapshot_row_status = "completed" if settled else "running"
 
     assistant_text = ""
     reasoning_text = ""
@@ -3211,25 +3607,66 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     current_activity_burst_id = 0
     fresh_segment = True
     last_ts = None
-    reasoning_first_tool_count: int | None = None
+    reasoning_segments: list[dict] = []
+    active_reasoning_segment: dict | None = None
+    live_segment_seq_high_water = 0
+    active_live_segment_seq: int | None = None
+    active_prose_started_order: int | None = None
+    current_event_order = 0
 
-    def mark_boundary() -> int:
+    def ensure_live_segment() -> int:
+        nonlocal active_live_segment_seq, live_segment_seq_high_water
+        if active_live_segment_seq is None:
+            live_segment_seq_high_water += 1
+            active_live_segment_seq = live_segment_seq_high_water
+        return active_live_segment_seq
+
+    def mark_boundary() -> tuple[int, int]:
         nonlocal current_activity_burst_id
+        nonlocal active_live_segment_seq, active_prose_started_order
+        # A tool arriving immediately after prose was sealed still belongs to
+        # that browser-visible segment. Reuse the consumed high-water without
+        # allocating a new segment; the next reasoning/prose event advances it.
+        segment_seq = int(active_live_segment_seq or live_segment_seq_high_water or 0)
         text_end = len(assistant_text)
-        if text_end <= 0:
-            return current_activity_burst_id
         last_end = max(
             [int(anchor.get("textEnd") or 0) for anchor in activity_burst_anchors]
             or [0]
         )
         if text_end > last_end:
+            if not segment_seq:
+                segment_seq = ensure_live_segment()
             current_activity_burst_id += 1
             activity_burst_anchors.append(
-                {"id": current_activity_burst_id, "textEnd": text_end}
+                {
+                    "id": current_activity_burst_id,
+                    "textEnd": text_end,
+                    "segment_seq": segment_seq,
+                    "journal_order": active_prose_started_order or current_event_order,
+                }
             )
-        return current_activity_burst_id
+        active_live_segment_seq = None
+        active_prose_started_order = None
+        return current_activity_burst_id, segment_seq
 
-    def update_completed_tool(payload: dict) -> None:
+    def append_reasoning_segment(text: str) -> None:
+        nonlocal active_reasoning_segment
+        if active_reasoning_segment is None:
+            segment_seq = ensure_live_segment()
+            active_reasoning_segment = {
+                "segment_seq": segment_seq,
+                "text": "",
+                "first_tool_count": len(tool_calls),
+                "text_offset": len(assistant_text),
+                "created_at": last_ts,
+                "journal_order": current_event_order,
+            }
+            reasoning_segments.append(active_reasoning_segment)
+        active_reasoning_segment["text"] += text
+        if active_reasoning_segment.get("created_at") is None and last_ts is not None:
+            active_reasoning_segment["created_at"] = last_ts
+
+    def update_completed_tool(payload: dict) -> bool:
         tool_id = _run_journal_snapshot_tool_id(payload)
         name = str(payload.get("name") or "").strip()
         for call in reversed(tool_calls):
@@ -3251,10 +3688,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     call["duration"] = payload.get("duration")
                 if payload.get("is_error") is not None:
                     call["is_error"] = bool(payload.get("is_error"))
-                return
+                return False
 
         if not name or name == "clarify":
-            return
+            return False
+        boundary_id, segment_seq = mark_boundary()
         call = {
             "name": name,
             "preview": str(payload.get("preview") or ""),
@@ -3264,6 +3702,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "_live": True,
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
+            "_journal_order": current_event_order,
         }
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
@@ -3271,10 +3710,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         for key in _RUN_JOURNAL_TOOL_ID_KEYS:
             if payload.get(key):
                 call[key] = str(payload.get(key))
-        if current_activity_burst_id:
-            call["activityBurstId"] = current_activity_burst_id
-            call["activitySegmentSeq"] = current_activity_burst_id
+        if boundary_id:
+            call["activityBurstId"] = boundary_id
+        if segment_seq:
+            call["activitySegmentSeq"] = segment_seq
         tool_calls.append(call)
+        return True
 
     def reasoning_echo_tail_matches(text: str) -> bool:
         candidate = _compact_for_echo_compare(text)
@@ -3283,29 +3724,47 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         return _compact_for_echo_compare(reasoning_text).endswith(candidate)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
+        nonlocal reasoning_text, active_reasoning_segment
         next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
         if did_remove:
             reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
+            scene_reasoning = "".join(str(segment.get("text") or "") for segment in reasoning_segments)
+            next_scene_reasoning, scene_removed = _strip_compact_echo_suffix(scene_reasoning, text)
+            if scene_removed:
+                remaining = len(next_scene_reasoning)
+                kept_segments = []
+                for segment in reasoning_segments:
+                    raw = str(segment.get("text") or "")
+                    if remaining <= 0:
+                        break
+                    keep = raw[:remaining]
+                    remaining -= len(raw)
+                    if not _compact_for_echo_compare(keep):
+                        continue
+                    segment["text"] = keep
+                    kept_segments.append(segment)
+                reasoning_segments[:] = kept_segments
+                active_reasoning_segment = kept_segments[-1] if kept_segments else None
         return did_remove
 
-    for event in events:
+    for current_event_order, event in enumerate(events, start=1):
         event_name = str(event.get("event") or event.get("type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
             text = str(payload.get("text") or "")
             if text:
+                ensure_live_segment()
+                if active_prose_started_order is None:
+                    active_prose_started_order = current_event_order
                 assistant_text += text
                 fresh_segment = False
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-            reasoning_text += text
+            if text:
+                reasoning_text += text
+                append_reasoning_segment(text)
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
@@ -3314,17 +3773,24 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     strip_reasoning_echo_tail(visible)
                 if payload.get("already_streamed"):
                     if not assistant_text:
+                        ensure_live_segment()
+                        if active_prose_started_order is None:
+                            active_prose_started_order = current_event_order
                         assistant_text = visible
                 else:
+                    ensure_live_segment()
+                    if active_prose_started_order is None:
+                        active_prose_started_order = current_event_order
                     assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
                 mark_boundary()
                 fresh_segment = True
+                active_reasoning_segment = None
             continue
         if event_name == "tool":
             name = str(payload.get("name") or "").strip()
             if not name or name == "clarify":
                 continue
-            boundary_id = mark_boundary()
+            boundary_id, segment_seq = mark_boundary()
             tool_id = _run_journal_snapshot_tool_id(payload)
             call = {
                 "name": name,
@@ -3334,6 +3800,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "_live": True,
                 "_journal_snapshot": True,
                 "_journal_stream_id": stream_id,
+                "_journal_order": current_event_order,
             }
             if tool_id:
                 call["tid"] = tool_id
@@ -3342,13 +3809,16 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     call[key] = str(payload.get(key))
             if boundary_id:
                 call["activityBurstId"] = boundary_id
-                call["activitySegmentSeq"] = boundary_id
+            if segment_seq:
+                call["activitySegmentSeq"] = segment_seq
             tool_calls.append(call)
             fresh_segment = True
+            active_reasoning_segment = None
             continue
         if event_name == "tool_complete":
-            update_completed_tool(payload)
-            fresh_segment = True
+            if update_completed_tool(payload):
+                fresh_segment = True
+                active_reasoning_segment = None
 
     if assistant_text or reasoning_text:
         message = {
@@ -3378,7 +3848,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             group["activity_burst_id"] = burst_id
         return group
 
-    def scene_prose_row(text: str, *, burst_id: int | None, segment_seq: int, status: str) -> dict | None:
+    def scene_prose_row(
+        text: str,
+        *,
+        burst_id: int | None,
+        segment_seq: int,
+        journal_order: int | None,
+        status: str,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
@@ -3418,14 +3895,22 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "activitySegmentSeq": segment_seq,
                 "activityBurstId": burst_id or 0,
             },
+            "_journal_order": journal_order,
         }
 
-    def scene_thinking_row(text: str, *, status: str) -> dict | None:
+    def scene_thinking_row(
+        text: str,
+        *,
+        segment_seq: int,
+        created_at,
+        journal_order: int | None,
+        status: str,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
         preview = " ".join(clean.split())
-        local_id = f"live-thinking:{stream_id}:1"
+        local_id = f"live-reasoning:{stream_id}:{segment_seq}"
         return {
             "row_id": local_id,
             "order_index": len(anchor_activity_rows),
@@ -3443,7 +3928,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "stream_id": stream_id,
             "seq": None,
             "status": status,
-            "created_at": last_ts,
+            "created_at": created_at,
             "identity": {
                 "event_id": None,
                 "local_id": local_id,
@@ -3451,7 +3936,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "stream_id": stream_id,
                 "seq": None,
             },
-            "group": scene_group(),
+            "group": scene_group(segment_seq),
             "text": clean,
             "thinking": {
                 "text": clean,
@@ -3462,7 +3947,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "tool": None,
             "payload": {
                 "text": clean,
+                "activitySegmentSeq": segment_seq,
             },
+            "_journal_order": journal_order,
         }
 
     def scene_tool_row(call: dict, *, fallback_order: int) -> dict | None:
@@ -3534,24 +4021,43 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "tool_call_id": tool_id,
             "tool": tool,
             "payload": payload,
+            "_journal_order": int(call.get("_journal_order") or 0) or None,
         }
 
     anchor_activity_rows: list[dict] = []
-    thinking_row_inserted = False
+    thinking_rows_inserted: set[int] = set()
     tool_rows_rendered = 0
 
-    def append_thinking_row(*, force: bool = False) -> None:
-        nonlocal thinking_row_inserted
-        if thinking_row_inserted:
-            return
-        if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
-            return
-        row = scene_thinking_row(reasoning_text, status="running")
-        if not row:
-            return
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        thinking_row_inserted = True
+    def append_thinking_rows(
+        *,
+        max_segment_seq: int | None = None,
+        max_text_offset: int | None = None,
+        force: bool = False,
+    ) -> None:
+        for index, segment in enumerate(reasoning_segments):
+            if index in thinking_rows_inserted:
+                continue
+            segment_seq = max(1, int(segment.get("segment_seq") or 1))
+            first_tool_count = max(0, int(segment.get("first_tool_count") or 0))
+            if not force and tool_rows_rendered < first_tool_count:
+                continue
+            if not force and max_segment_seq is not None and segment_seq > max_segment_seq:
+                continue
+            text_offset = max(0, int(segment.get("text_offset") or 0))
+            if not force and max_text_offset is not None and text_offset > max_text_offset:
+                continue
+            row = scene_thinking_row(
+                str(segment.get("text") or ""),
+                segment_seq=segment_seq,
+                created_at=segment.get("created_at"),
+                journal_order=int(segment.get("journal_order") or 0) or None,
+                status=snapshot_row_status,
+            )
+            if not row:
+                continue
+            row["order_index"] = len(anchor_activity_rows)
+            anchor_activity_rows.append(row)
+            thinking_rows_inserted.add(index)
 
     tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
     ungrouped_tool_rows: list[tuple[int, dict]] = []
@@ -3578,38 +4084,57 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     for anchor in sorted_anchors:
         burst_id = int(anchor.get("id") or 0) or None
         text_end = min(len(assistant_text), int(anchor.get("textEnd") or 0))
-        segment_seq = burst_id or (len(anchor_activity_rows) + 1)
+        segment_seq = max(1, int(anchor.get("segment_seq") or burst_id or 1))
         prose = scene_prose_row(
             assistant_text[text_start:text_end],
             burst_id=burst_id,
             segment_seq=segment_seq,
+            journal_order=int(anchor.get("journal_order") or 0) or None,
             status="completed",
         )
         if prose:
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=text_start,
+            )
             anchor_activity_rows.append(prose)
-            append_thinking_row()
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=text_end,
+            )
         for order, row in tool_rows_by_burst.get(burst_id or 0, []):
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             consumed_tools.add(order)
             tool_rows_rendered += 1
-            append_thinking_row()
+            append_thinking_rows(
+                max_segment_seq=segment_seq + 1,
+                max_text_offset=text_end,
+            )
         text_start = max(text_start, text_end)
 
     if text_start < len(assistant_text):
-        segment_seq = max(len(sorted_anchors) + 1, 1)
+        segment_seq = max(1, int(active_live_segment_seq or live_segment_seq_high_water or 1))
         tail = scene_prose_row(
             assistant_text[text_start:],
             burst_id=None,
             segment_seq=segment_seq,
-            status="running",
+            journal_order=active_prose_started_order,
+            status=snapshot_row_status,
         )
         if tail:
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=text_start,
+            )
             anchor_activity_rows.append(tail)
-            append_thinking_row()
+            append_thinking_rows(
+                max_segment_seq=segment_seq,
+                max_text_offset=len(assistant_text),
+            )
 
     if not assistant_text:
-        append_thinking_row()
+        append_thinking_rows(max_segment_seq=1, max_text_offset=0)
 
     for order, row in sorted(ungrouped_tool_rows, key=lambda item: item[0]):
         if order in consumed_tools:
@@ -3617,9 +4142,22 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         row["order_index"] = len(anchor_activity_rows)
         anchor_activity_rows.append(row)
         tool_rows_rendered += 1
-        append_thinking_row()
+        append_thinking_rows()
 
-    append_thinking_row(force=True)
+    append_thinking_rows(force=True)
+
+    for projection_order, row in enumerate(anchor_activity_rows):
+        row["_projection_order"] = projection_order
+    anchor_activity_rows.sort(
+        key=lambda row: (
+            int(row.get("_journal_order") or 0) or len(events) + 1,
+            int(row.get("_projection_order") or 0),
+        )
+    )
+    for order_index, row in enumerate(anchor_activity_rows):
+        row["order_index"] = order_index
+        row.pop("_journal_order", None)
+        row.pop("_projection_order", None)
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
@@ -3641,7 +4179,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "run_id": run_id,
                 "stream_id": stream_id,
                 "seq": None,
-                "status": "running",
+                "status": snapshot_row_status,
                 "created_at": last_ts,
                 "identity": {
                     "event_id": None,
@@ -3665,7 +4203,24 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if int(anchor.get("textEnd") or 0) < len(assistant_text)
     ]
     segment_count = len(visible_anchors) + (1 if assistant_text else 0)
-    current_live_segment_seq = max(segment_count, len(activity_burst_anchors), 0)
+    reasoning_segment_seq = max(
+        live_segment_seq_high_water,
+        max(
+            [int(segment.get("segment_seq") or 0) for segment in reasoning_segments]
+            or [0]
+        ),
+    )
+    tool_segment_seq = max(
+        [int(call.get("activitySegmentSeq") or 0) for call in tool_calls]
+        or [0]
+    )
+    current_live_segment_seq = max(
+        segment_count,
+        len(activity_burst_anchors),
+        reasoning_segment_seq,
+        tool_segment_seq,
+        0,
+    )
     try:
         summary_last_seq = max(0, int(summary.get("last_seq") or 0))
     except (TypeError, ValueError):
@@ -3688,18 +4243,35 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     # Keep returning a live snapshot even when the journal has events but no
     # projected message/tool rows yet. The frontend treats the empty activity
     # scene as "nothing renderable yet" while preserving the live cursor.
+    public_activity_burst_anchors = [
+        {"id": anchor.get("id"), "textEnd": anchor.get("textEnd")}
+        for anchor in activity_burst_anchors
+    ]
+    settled_final_answer = ""
+    if settled and terminal_state == "completed" and assistant_text:
+        last_activity_end = max(
+            [int(anchor.get("textEnd") or 0) for anchor in activity_burst_anchors]
+            or [0]
+        )
+        settled_final_answer = assistant_text[last_activity_end:].strip() or assistant_text.strip()
+    for call in tool_calls:
+        call.pop("_journal_order", None)
     return {
         "session_id": session_id,
         "stream_id": stream_id,
         "last_seq": last_seq,
         "last_event_id": last_event_id,
+        "terminal_state": terminal_state or None,
+        "terminal_message_index": terminal_message_index,
+        "terminal_message_target": terminal_message_target,
+        "terminal_disposition": terminal_disposition,
         "event_count": len(events),
         "fresh_segment": fresh_segment,
         "messages": messages,
         "tool_calls": tool_calls,
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
-        "activity_burst_anchors": activity_burst_anchors,
+        "activity_burst_anchors": public_activity_burst_anchors,
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
         "anchor_activity_scene": {
@@ -3712,12 +4284,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "source_message_refs": [],
             },
             "lifecycle": {
-                "status": "running",
-                "terminal_state": None,
+                "status": terminal_state or snapshot_row_status,
+                "terminal_state": terminal_state or None,
             },
-            "final_answer": "",
+            "final_answer": settled_final_answer,
             "final_message_ref": None,
-            "terminal_state": None,
+            "terminal_state": terminal_state or None,
             "activity_rows": anchor_activity_rows,
         },
     }
@@ -4105,6 +4677,57 @@ def _anchor_scene_message_turn_duration(message):
         if isinstance(value, (int, float)) and value >= 0:
             return value
     return None
+
+
+def _anchor_scene_final_answer_hint_from_scene(scene) -> str:
+    if not isinstance(scene, dict):
+        return ""
+    explicit = scene.get("final_answer") if isinstance(scene.get("final_answer"), str) else ""
+    if _anchor_scene_clean_text(explicit):
+        return explicit
+    return ""
+
+
+def _anchor_scene_final_answer_hint_from_transcript(message_text, scene) -> str:
+    raw = str(message_text or "").strip()
+    if not raw or not isinstance(scene, dict):
+        return ""
+    rows = scene.get("activity_rows") if isinstance(scene.get("activity_rows"), list) else []
+    last_tool_index = -1
+    for idx, row in enumerate(rows):
+        if isinstance(row, dict) and row.get("role") == "tool":
+            last_tool_index = idx
+    if last_tool_index < 0:
+        return ""
+    prefixes = []
+    for idx, row in enumerate(rows):
+        if idx > last_tool_index or not isinstance(row, dict):
+            continue
+        if row.get("role") != "prose" or row.get("kind") != "process_prose":
+            continue
+        if str(row.get("source_event_type") or "") != "token":
+            continue
+        if not str(row.get("local_id") or "").startswith("live-prose:"):
+            continue
+        text = str(row.get("text") or "").strip()
+        if text:
+            prefixes.append(text)
+    if not prefixes:
+        return ""
+    tail = raw
+    consumed = False
+    for prefix in prefixes:
+        if tail.startswith(prefix):
+            tail = tail[len(prefix) :].strip()
+            consumed = True
+    if consumed and _anchor_scene_clean_text(tail):
+        return tail
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if raw.startswith(prefix):
+            tail = raw[len(prefix) :].strip()
+            if _anchor_scene_clean_text(tail):
+                return tail
+    return ""
 
 
 def _anchor_scene_tool_id(tool) -> str:
@@ -4580,18 +5203,19 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     return has_stream_owner and not has_assistant_message_index
 
 
-def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
+def _anchor_scene_settle_live_running_row(row, *, drop_live_thinking: bool = False):
     if not isinstance(row, dict):
         return row
     role = row.get("role")
     if role not in ("thinking", "prose", "tool"):
         return row
+    has_live_identity = _anchor_scene_row_has_live_identity(row)
+    if role == "thinking" and drop_live_thinking and has_live_identity:
+        return None
     if str(row.get("status") or "").lower() != "running":
         return row
-    if not _anchor_scene_row_has_live_identity(row):
+    if not has_live_identity:
         return row
-    if role == "thinking" and has_settled_thinking:
-        return None
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
     payload = next_row.get("payload")
@@ -4621,11 +5245,45 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             turn_start = idx
             break
     message_final_answer = _anchor_scene_final_answer_text(final_message)
-    scene_final_answer = scene.get("final_answer") if isinstance(scene.get("final_answer"), str) else ""
-    final_answer = message_final_answer if _anchor_scene_clean_text(message_final_answer) else scene_final_answer
+    scene_final_answer = _anchor_scene_final_answer_hint_from_scene(scene)
+    if not _anchor_scene_clean_text(scene_final_answer):
+        scene_final_answer = _anchor_scene_final_answer_hint_from_transcript(message_final_answer, scene)
+    final_answer = scene_final_answer if _anchor_scene_clean_text(scene_final_answer) else message_final_answer
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
+    scene_thinking_rows = [
+        row
+        for row in scene.get("activity_rows") or []
+        if isinstance(row, dict)
+        and row.get("role") == "thinking"
+        and _anchor_scene_clean_text(row.get("text"))
+    ]
+    scene_has_activity_rows = any(
+        isinstance(row, dict) and row.get("role") != "terminal"
+        for row in scene.get("activity_rows") or []
+    )
+    scene_reasoning_key = _anchor_scene_text_key(
+        "".join(str(row.get("text") or "") for row in scene_thinking_rows)
+    )
+    transcript_reasoning_key = _anchor_scene_text_key(
+        "".join(
+            (
+                "".join(
+                    _anchor_scene_content_text(part)
+                    for part in (message.get("content") or [])
+                    if isinstance(part, dict) and part.get("type") in ("thinking", "reasoning")
+                )
+                or _anchor_scene_message_reasoning_text(message)
+            )
+            for message in messages[turn_start + 1 : local_final_idx + 1]
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        )
+    )
+    scene_has_authoritative_thinking = bool(scene_thinking_rows) and (
+        not transcript_reasoning_key or scene_reasoning_key == transcript_reasoning_key
+    )
+    drop_live_thinking = bool(transcript_reasoning_key) and not scene_has_authoritative_thinking
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -4694,7 +5352,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             return
         row = _anchor_scene_settle_live_running_row(
             row,
-            has_settled_thinking=any(existing.get("role") == "thinking" for existing in rows),
+            drop_live_thinking=drop_live_thinking,
         )
         if row is None or not isinstance(row, dict):
             return
@@ -4727,6 +5385,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         next_row["seq"] = len(rows)
         rows.append(next_row)
 
+    if scene_has_authoritative_thinking:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
+
     order = 0
     content_tool_indexes_by_idx = {}
     used_content_tool_indexes_by_idx = {}
@@ -4749,6 +5412,15 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         id_flexible_content_tool_indexes = set()
         if content_rows:
             for row in content_rows:
+                if scene_has_authoritative_thinking and row.get("role") == "thinking":
+                    continue
+                if (
+                    local_idx == local_final_idx
+                    and scene_has_activity_rows
+                    and _anchor_scene_clean_text(scene_final_answer)
+                    and row.get("role") == "prose"
+                ):
+                    continue
                 previous_len = len(rows)
                 push(row)
                 if row.get("role") == "tool" and len(rows) > previous_len:
@@ -4759,10 +5431,20 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                 used_content_tool_indexes_by_idx[absolute_idx] = used_content_tool_indexes
                 id_flexible_content_tool_indexes_by_idx[absolute_idx] = id_flexible_content_tool_indexes
         elif _anchor_scene_clean_text(text):
-            push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
-            order += 1
+            skip_transcript_final_prose = (
+                local_idx == local_final_idx
+                and scene_has_activity_rows
+                and _anchor_scene_clean_text(scene_final_answer)
+            )
+            if not skip_transcript_final_prose:
+                push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
+                order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
-        if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
+        if (
+            not scene_has_authoritative_thinking
+            and _anchor_scene_clean_text(reasoning)
+            and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
+        ):
             push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
@@ -4842,9 +5524,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             continue
         push(row, prefer_incoming_tool_body=True)
         order += 1
-    for row in scene.get("activity_rows") or []:
-        if isinstance(row, dict) and row.get("role") != "terminal":
-            push(row)
+    if not scene_has_authoritative_thinking:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
             push(row)
@@ -4932,6 +5615,739 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
             next_message["_anchor_stream_id"] = str(stream_id)
         out[local_idx] = next_message
     return out
+
+
+def _anchor_scene_record_exists_for_message(records, message, message_index) -> bool:
+    if not isinstance(records, dict) or not isinstance(message, dict):
+        return False
+    ref = _assistant_anchor_scene_message_ref(message)
+    for key, record in records.items():
+        if not isinstance(record, dict):
+            continue
+        if ref and (str(key or "") == ref or str(record.get("message_ref") or "") == ref):
+            return True
+        try:
+            record_index = int(record.get("message_index"))
+        except (TypeError, ValueError):
+            record_index = None
+        if record_index == message_index:
+            return True
+    return False
+
+
+def _anchor_scene_record_exists_for_stream(records, stream_id: str) -> bool:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id or not isinstance(records, dict):
+        return False
+    for record in records.values():
+        if isinstance(record, dict) and str(record.get("stream_id") or "") == stream_id:
+            return True
+    return False
+
+
+def _terminal_anchor_scene_message_index(
+    messages,
+    snapshot,
+    *,
+    expected_session_id: str | None = None,
+) -> int | None:
+    if not isinstance(messages, list) or not isinstance(snapshot, dict):
+        return None
+    target = snapshot.get("terminal_message_target")
+    if not isinstance(target, dict):
+        return None
+    if target.get("version") != "terminal_message_target_v1":
+        return None
+    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot.get("anchor_activity_scene"), dict) else {}
+    identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+    expected_target_session_id = str(expected_session_id or snapshot.get("session_id") or "").strip()
+    expected_stream_id = str(snapshot.get("stream_id") or "").strip()
+    expected_run_id = str(identity.get("run_id") or "").strip()
+    target_session_id = str(target.get("session_id") or "").strip()
+    target_stream_id = str(target.get("stream_id") or "").strip()
+    target_run_id = str(target.get("run_id") or "").strip()
+    if (
+        not target_session_id
+        or not target_stream_id
+        or not target_run_id
+        or not expected_run_id
+        or target_session_id != expected_target_session_id
+        or target_stream_id != expected_stream_id
+        or target_run_id != expected_run_id
+    ):
+        return None
+    terminal_index = target.get("message_index")
+    if not isinstance(terminal_index, int) or isinstance(terminal_index, bool) or terminal_index < 0:
+        return None
+    if terminal_index >= len(messages):
+        return None
+    message_ref = _normalize_anchor_scene_message_ref(target.get("message_ref") or "")
+    if not message_ref:
+        return None
+    message = messages[terminal_index]
+    if (
+        not isinstance(message, dict)
+        or message.get("role") != "assistant"
+        or _assistant_anchor_scene_message_ref(message) != message_ref
+    ):
+        return None
+    return terminal_index
+
+
+def _terminal_anchor_scene_non_materializable_disposition(snapshot) -> dict | None:
+    if not isinstance(snapshot, dict):
+        return None
+    disposition = snapshot.get("terminal_disposition")
+    if not isinstance(disposition, dict):
+        return None
+    if disposition.get("version") != "terminal_disposition_v1":
+        return None
+    if disposition.get("kind") != "consumed_non_materializable":
+        return None
+    return disposition
+
+
+def _terminal_anchor_scene_non_materializable_record(
+    session_id: str,
+    run_id: str,
+    stream_id: str,
+    reason: str,
+) -> dict:
+    return {
+        "version": "anchor_activity_scene_record_v1",
+        "message_index": None,
+        "message_ref": "",
+        "stream_id": stream_id,
+        "scene": None,
+        "terminal_disposition": {
+            "version": "terminal_disposition_v1",
+            "kind": "consumed_non_materializable",
+            "reason": str(reason or "non_materializable_terminal").strip(),
+            "session_id": session_id,
+            "run_id": run_id,
+            "stream_id": stream_id,
+        },
+        "updated_at": time.time(),
+    }
+
+
+_TERMINAL_ANCHOR_RECONCILIATION_VERSION = "terminal_anchor_reconciliation_v2"
+_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT = 128
+_TERMINAL_ANCHOR_RECONCILIATION_MAX_PAGES = 8
+
+
+def _terminal_anchor_reconciliation_recent_ids_from_raw(raw: dict) -> list[str]:
+    recent = raw.get("recent_stream_ids") if isinstance(raw, dict) else None
+    if isinstance(recent, list):
+        ids = [str(stream_id or "").strip() for stream_id in recent]
+        return [stream_id for stream_id in ids if stream_id][-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+    streams = raw.get("streams") if isinstance(raw, dict) else None
+    if not isinstance(streams, dict):
+        return []
+    ids: list[str] = []
+    for stream_id, record in streams.items():
+        if isinstance(record, dict):
+            candidate = str(record.get("stream_id") or stream_id or "").strip()
+        else:
+            candidate = str(stream_id or "").strip()
+        if candidate:
+            ids.append(candidate)
+    return ids[-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+
+
+def _terminal_anchor_reconciliation_progress(session) -> dict:
+    raw = getattr(session, "terminal_anchor_reconciliation", None)
+    progress = raw if isinstance(raw, dict) else {}
+    cursor = progress.get("index_cursor")
+    normalized_cursor: dict | None = None
+    if isinstance(cursor, dict):
+        try:
+            index_size = max(0, int(cursor.get("index_size") or 0))
+            end_offset = max(0, int(cursor.get("end_offset") or 0))
+        except (TypeError, ValueError):
+            index_size = 0
+            end_offset = 0
+        generation = _terminal_anchor_reconciliation_generation(cursor.get("generation"))
+        if index_size > 0 and generation is not None and int(generation.get("size") or 0) == index_size:
+            normalized_cursor = {
+                "index_size": index_size,
+                "generation": generation,
+                "end_offset": min(index_size, end_offset),
+                "updated_at": float(cursor.get("updated_at") or 0.0),
+            }
+    progress = {
+        "version": _TERMINAL_ANCHOR_RECONCILIATION_VERSION,
+        "recent_stream_ids": _terminal_anchor_reconciliation_recent_ids_from_raw(progress),
+    }
+    if normalized_cursor is not None:
+        progress["index_cursor"] = normalized_cursor
+    session.terminal_anchor_reconciliation = progress
+    return progress
+
+
+def _terminal_anchor_reconciliation_stream_ids(session) -> set[str]:
+    raw = getattr(session, "terminal_anchor_reconciliation", None)
+    if not isinstance(raw, dict):
+        return set()
+    return set(_terminal_anchor_reconciliation_recent_ids_from_raw(raw))
+
+
+def _terminal_anchor_reconciliation_generation(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    generation: dict[str, int | str | dict] = {}
+    for key in ("dev", "ino", "size", "mtime_ns", "ctime_ns"):
+        try:
+            generation[key] = int(raw.get(key))
+        except (TypeError, ValueError):
+            return None
+    generation["size"] = max(0, int(generation["size"]))
+    raw_digest = raw.get("digest")
+    if raw_digest is not None:
+        digest = str(raw_digest or "").strip().lower()
+        if len(digest) != 32 or any(char not in "0123456789abcdef" for char in digest):
+            return None
+        generation["digest"] = digest
+    raw_authority = raw.get("authority")
+    if raw_authority is not None:
+        if not isinstance(raw_authority, dict):
+            return None
+        epoch = str(raw_authority.get("epoch") or "").strip()
+        try:
+            mutation_seq = int(raw_authority.get("mutation_seq"))
+        except (TypeError, ValueError):
+            return None
+        if (
+            raw_authority.get("version") != TERMINAL_RUN_INDEX_AUTHORITY_VERSION
+            or not epoch
+            or mutation_seq < 0
+        ):
+            return None
+        generation["authority"] = {
+            "version": TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
+            "epoch": epoch,
+            "mutation_seq": mutation_seq,
+        }
+    return generation
+
+
+def _terminal_anchor_reconciliation_cursor(progress: dict) -> dict | None:
+    cursor = progress.get("index_cursor") if isinstance(progress, dict) else None
+    if not isinstance(cursor, dict):
+        return None
+    try:
+        cursor_index_size = int(cursor.get("index_size") or 0)
+        end_offset = int(cursor.get("end_offset") or 0)
+    except (TypeError, ValueError):
+        return None
+    generation = _terminal_anchor_reconciliation_generation(cursor.get("generation"))
+    if cursor_index_size <= 0 or generation is None or int(generation.get("size") or 0) != cursor_index_size:
+        return None
+    return {
+        "index_size": cursor_index_size,
+        "generation": generation,
+        "end_offset": max(0, min(cursor_index_size, end_offset)),
+    }
+
+
+def _terminal_anchor_reconciliation_page_cursor(page: dict | None) -> dict | None:
+    if not isinstance(page, dict):
+        return None
+    generation = _terminal_anchor_reconciliation_generation(page.get("index_generation"))
+    next_end_offset = page.get("next_index_end_offset")
+    try:
+        index_size = int(page.get("index_size") or 0)
+        end_offset = int(next_end_offset)
+    except (TypeError, ValueError):
+        return None
+    if index_size <= 0 or generation is None or int(generation.get("size") or 0) != index_size:
+        return None
+    return {
+        "index_size": index_size,
+        "generation": generation,
+        "end_offset": max(0, min(index_size, end_offset)),
+    }
+
+
+def _terminal_anchor_reconciliation_cursors_equal(left: dict | None, right: dict | None) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    return (
+        int(left.get("index_size") or 0) == int(right.get("index_size") or 0)
+        and int(left.get("end_offset") or 0) == int(right.get("end_offset") or 0)
+        and _terminal_anchor_reconciliation_generation(left.get("generation"))
+        == _terminal_anchor_reconciliation_generation(right.get("generation"))
+    )
+
+
+def _terminal_anchor_reconciliation_cursors_match(left: dict | None, right: dict | None) -> bool:
+    if left is None and right is None:
+        return True
+    return _terminal_anchor_reconciliation_cursors_equal(left, right)
+
+
+def _terminal_anchor_reconciliation_cursor_publish_allowed(
+    current: dict | None,
+    expected: dict | None,
+    candidate: dict | None,
+) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    if _terminal_anchor_reconciliation_cursors_match(current, expected):
+        return True
+    if not isinstance(current, dict):
+        return False
+    current_generation = _terminal_anchor_reconciliation_generation(current.get("generation"))
+    candidate_generation = _terminal_anchor_reconciliation_generation(candidate.get("generation"))
+    if current_generation != candidate_generation:
+        return False
+    try:
+        current_size = int(current.get("index_size") or 0)
+        candidate_size = int(candidate.get("index_size") or 0)
+        current_end = int(current.get("end_offset") or 0)
+        candidate_end = int(candidate.get("end_offset") or 0)
+    except (TypeError, ValueError):
+        return False
+    return candidate_size == current_size and candidate_end <= current_end
+
+
+def _terminal_anchor_reconciliation_set_cursor(
+    progress: dict,
+    *,
+    index_size: int,
+    index_generation: object,
+    end_offset: int | None,
+) -> bool:
+    if not isinstance(progress, dict) or int(index_size) <= 0 or end_offset is None:
+        return False
+    generation = _terminal_anchor_reconciliation_generation(index_generation)
+    if generation is None:
+        return False
+    bounded_index_size = max(0, int(index_size))
+    if int(generation.get("size") or 0) != bounded_index_size:
+        return False
+    bounded_end_offset = max(0, min(int(index_size), int(end_offset)))
+    existing = progress.get("index_cursor")
+    if isinstance(existing, dict):
+        next_cursor = {
+            "index_size": bounded_index_size,
+            "generation": generation,
+            "end_offset": bounded_end_offset,
+        }
+        existing_generation = _terminal_anchor_reconciliation_generation(existing.get("generation"))
+        if (
+            existing_generation == generation
+            and int(existing.get("index_size") or 0) == bounded_index_size
+            and bounded_end_offset > int(existing.get("end_offset") or 0)
+        ):
+            return False
+        if _terminal_anchor_reconciliation_cursors_equal(existing, next_cursor):
+            return False
+    cursor = {
+        "index_size": bounded_index_size,
+        "generation": generation,
+        "end_offset": bounded_end_offset,
+        "updated_at": time.time(),
+    }
+    progress["index_cursor"] = cursor
+    return True
+
+
+def _record_terminal_anchor_scene_non_materializable(
+    progress: dict,
+    session_id: str,
+    run_id: str,
+    stream_id: str,
+    reason: str,
+) -> bool:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    recent = progress.setdefault("recent_stream_ids", [])
+    if not isinstance(recent, list):
+        recent = []
+    recent_ids = [str(item or "").strip() for item in recent if str(item or "").strip()]
+    if stream_id in recent_ids:
+        return False
+    recent_ids.append(stream_id)
+    progress["recent_stream_ids"] = recent_ids[-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+    progress["last_non_materializable"] = {
+        "version": "terminal_disposition_v1",
+        "kind": "consumed_non_materializable",
+        "reason": str(reason or "non_materializable_terminal").strip(),
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "updated_at": time.time(),
+    }
+    return True
+
+
+def _terminal_anchor_reconciliation_mark_stream_processed(progress: dict, stream_id: str) -> bool:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    recent = progress.setdefault("recent_stream_ids", [])
+    if not isinstance(recent, list):
+        recent = []
+    recent_ids = [str(item or "").strip() for item in recent if str(item or "").strip()]
+    if stream_id in recent_ids:
+        return False
+    recent_ids.append(stream_id)
+    progress["recent_stream_ids"] = recent_ids[-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+    return True
+
+
+def _terminal_anchor_scene_target_session_id(snapshot: dict, fallback_session_id: str) -> str:
+    target = snapshot.get("terminal_message_target") if isinstance(snapshot, dict) else None
+    if not isinstance(target, dict) or target.get("version") != "terminal_message_target_v1":
+        return str(fallback_session_id or "").strip()
+    return str(target.get("session_id") or fallback_session_id or "").strip()
+
+
+def _save_terminal_anchor_scene_to_target_session(
+    origin_session_id: str,
+    target_session_id: str,
+    stream_id: str,
+    snapshot: dict,
+) -> tuple[str, str | None]:
+    origin_session_id = str(origin_session_id or "").strip()
+    target_session_id = str(target_session_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    if not origin_session_id or not target_session_id or not stream_id:
+        return "non_materializable", "terminal_target_session_missing"
+    try:
+        target_session = get_session(target_session_id, metadata_only=False)
+        target_session = _ensure_full_session_before_mutation(target_session_id, target_session)
+    except Exception:
+        logger.debug(
+            "Failed to load terminal journal target session %s for origin %s",
+            target_session_id,
+            origin_session_id,
+            exc_info=True,
+        )
+        return "retry", "terminal_target_session_missing"
+    with _get_session_agent_lock(target_session_id):
+        if not _terminal_replay_binding_matches_session(
+            target_session,
+            origin_session_id,
+            stream_id,
+            stream_id,
+            target_session_id,
+        ):
+            return "non_materializable", "terminal_target_binding_mismatch"
+        target_messages = getattr(target_session, "messages", None)
+        message_index = _terminal_anchor_scene_message_index(
+            target_messages,
+            snapshot,
+            expected_session_id=target_session_id,
+        )
+        if message_index is None or not isinstance(target_messages, list):
+            return "non_materializable", "terminal_target_not_found"
+        message = target_messages[message_index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            return "non_materializable", "terminal_target_not_assistant"
+        records = dict(_anchor_scene_records(target_session))
+        original_records = dict(records)
+        if _anchor_scene_record_exists_for_stream(records, stream_id):
+            return "already_materialized", None
+        if _anchor_scene_record_exists_for_message(records, message, message_index):
+            return "already_materialized", None
+        scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot.get("anchor_activity_scene"), dict) else None
+        rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return "non_materializable", "terminal_snapshot_no_activity_rows"
+        completed_scene = _complete_hydrated_anchor_scene(
+            target_messages,
+            scene,
+            message_index,
+            message_offset=0,
+            tool_calls=getattr(target_session, "tool_calls", None),
+            stream_id=stream_id,
+        )
+        if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
+            return "non_materializable", "terminal_completed_scene_empty"
+        ref = _assistant_anchor_scene_message_ref(message)
+        records[ref or f"index:{message_index}"] = {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": message_index,
+            "message_ref": ref,
+            "stream_id": stream_id,
+            "scene": completed_scene,
+            "updated_at": time.time(),
+        }
+        if len(records) > 256:
+            ordered = sorted(
+                records.items(),
+                key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+            )
+            records = dict(ordered[-256:])
+        target_session.anchor_activity_scenes = records
+        try:
+            target_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            target_session.anchor_activity_scenes = original_records
+            logger.debug(
+                "Failed to persist terminal journal target scene for session %s",
+                target_session_id,
+                exc_info=True,
+            )
+            return "retry", "terminal_target_scene_save_failed"
+    return "materialized", None
+
+
+def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, handler=None) -> bool:
+    """Persist a settled Anchor scene when the browser stream owner detached before terminal."""
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not sid or not isinstance(messages, list) or not messages:
+        return False
+    active_stream_ids = _active_stream_ids()
+    with _get_session_agent_lock(sid):
+        skip_stream_ids = {
+            str(record.get("stream_id") or "").strip()
+            for record in dict(_anchor_scene_records(session)).values()
+            if isinstance(record, dict) and str(record.get("stream_id") or "").strip()
+        }
+        progress = _terminal_anchor_reconciliation_progress(session)
+        skip_stream_ids.update(_terminal_anchor_reconciliation_stream_ids(session))
+        index_cursor = _terminal_anchor_reconciliation_cursor(progress)
+
+    pages: list[dict] = []
+    page_cursor = index_cursor
+    page_skip_stream_ids = set(skip_stream_ids)
+    for _page_idx in range(_TERMINAL_ANCHOR_RECONCILIATION_MAX_PAGES):
+        page = terminal_run_summary_page_for_session(
+            sid,
+            limit=64,
+            max_candidates=64,
+            skip_run_ids=page_skip_stream_ids,
+            barrier_run_ids=active_stream_ids,
+            index_cursor=page_cursor,
+        )
+        summaries = page.get("summaries") if isinstance(page, dict) else None
+        if isinstance(page, dict):
+            page["_input_index_cursor"] = page_cursor
+            pages.append(page)
+        if isinstance(summaries, list):
+            page_skip_stream_ids.update(
+                str((summary or {}).get("run_id") or (summary or {}).get("stream_id") or "").strip()
+                for summary in summaries
+                if isinstance(summary, dict)
+            )
+        next_cursor = _terminal_anchor_reconciliation_page_cursor(page)
+        if not isinstance(summaries, list) or not summaries:
+            if next_cursor is None or _terminal_anchor_reconciliation_cursors_equal(page_cursor, next_cursor):
+                break
+        if next_cursor is None or _terminal_anchor_reconciliation_cursors_equal(page_cursor, next_cursor):
+            break
+        page_cursor = next_cursor
+        if int(next_cursor.get("end_offset") or 0) <= 0:
+            break
+    if pages and not any(page.get("summaries") for page in pages) and not any(
+        int(page.get("index_size") or 0) for page in pages
+    ):
+        fallback_summaries = terminal_run_summaries_for_session(
+            sid,
+            limit=64,
+            max_candidates=64,
+            skip_run_ids=set(skip_stream_ids).union(active_stream_ids),
+        )
+        if fallback_summaries:
+            pages = [
+                {
+                    "summaries": fallback_summaries,
+                    "index_size": 0,
+                    "index_generation": None,
+                    "next_index_end_offset": None,
+                    "exhausted": True,
+                }
+            ]
+    if not pages:
+        return False
+
+    compaction_cursor: dict | None = None
+    materialized_changed = False
+    with _get_session_agent_lock(sid):
+        records = dict(_anchor_scene_records(session))
+        progress = _terminal_anchor_reconciliation_progress(session)
+        changed = False
+        for page in pages:
+            index_size = int(page.get("index_size") or 0)
+            next_end_offset = page.get("next_index_end_offset")
+            summaries = page.get("summaries") if isinstance(page.get("summaries"), list) else []
+            candidate_cursor = _terminal_anchor_reconciliation_page_cursor(page)
+            current_cursor = _terminal_anchor_reconciliation_cursor(progress)
+            expected_cursor = page.get("_input_index_cursor") if isinstance(page.get("_input_index_cursor"), dict) else None
+            page_can_advance_cursor = True
+            progress_streams = _terminal_anchor_reconciliation_stream_ids(session)
+            for summary in summaries:
+                stream_id = str(summary.get("run_id") or summary.get("stream_id") or "").strip()
+                if not stream_id or stream_id in active_stream_ids:
+                    continue
+                if _anchor_scene_record_exists_for_stream(records, stream_id):
+                    continue
+                if stream_id in progress_streams:
+                    continue
+                snapshot = _run_journal_live_snapshot(
+                    stream_id,
+                    handler=handler,
+                    settled=True,
+                    summary=summary,
+                    return_incomplete=True,
+                )
+                if _is_run_journal_incomplete_snapshot(snapshot):
+                    page_can_advance_cursor = False
+                    break
+                if not isinstance(snapshot, dict):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "invalid_terminal_journal_snapshot",
+                    ):
+                        changed = True
+                    continue
+                disposition = _terminal_anchor_scene_non_materializable_disposition(snapshot)
+                if disposition is not None:
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        str(disposition.get("reason") or "non_materializable_terminal"),
+                    ):
+                        changed = True
+                    continue
+                if not isinstance(snapshot.get("terminal_message_target"), dict):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "missing_terminal_target",
+                    ):
+                        changed = True
+                    continue
+                target_session_id = _terminal_anchor_scene_target_session_id(snapshot, sid)
+                if target_session_id and target_session_id != sid:
+                    target_status, target_reason = _save_terminal_anchor_scene_to_target_session(
+                        sid,
+                        target_session_id,
+                        stream_id,
+                        snapshot,
+                    )
+                    if target_status in {"materialized", "already_materialized"}:
+                        if _terminal_anchor_reconciliation_mark_stream_processed(progress, stream_id):
+                            progress_streams.add(stream_id)
+                            changed = True
+                        continue
+                    if target_status == "retry":
+                        page_can_advance_cursor = False
+                        break
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        target_reason or "terminal_target_not_found",
+                    ):
+                        changed = True
+                    continue
+                scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+                rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+                if not isinstance(rows, list) or not rows:
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_snapshot_no_activity_rows",
+                    ):
+                        changed = True
+                    continue
+                message_index = _terminal_anchor_scene_message_index(messages, snapshot)
+                if message_index is None or not (0 <= message_index < len(messages)):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_target_not_found",
+                    ):
+                        changed = True
+                    continue
+                message = messages[message_index]
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_target_not_assistant",
+                    ):
+                        changed = True
+                    continue
+                if _anchor_scene_record_exists_for_message(records, message, message_index):
+                    continue
+                completed_scene = _complete_hydrated_anchor_scene(
+                    messages,
+                    scene,
+                    message_index,
+                    message_offset=0,
+                    tool_calls=getattr(session, "tool_calls", None),
+                    stream_id=stream_id,
+                )
+                if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        "terminal_completed_scene_empty",
+                    ):
+                        changed = True
+                    continue
+                ref = _assistant_anchor_scene_message_ref(message)
+                records[ref or f"index:{message_index}"] = {
+                    "version": "anchor_activity_scene_record_v1",
+                    "message_index": message_index,
+                    "message_ref": ref,
+                    "stream_id": stream_id,
+                    "scene": completed_scene,
+                    "updated_at": time.time(),
+                }
+                changed = True
+            if not page_can_advance_cursor:
+                break
+            if _terminal_anchor_reconciliation_cursor_publish_allowed(
+                current_cursor,
+                expected_cursor,
+                candidate_cursor,
+            ):
+                if _terminal_anchor_reconciliation_set_cursor(
+                    progress,
+                    index_size=index_size,
+                    index_generation=page.get("index_generation"),
+                    end_offset=next_end_offset,
+                ):
+                    changed = True
+        materialized_changed = changed
+        if changed:
+            if len(records) > 256:
+                ordered = sorted(
+                    records.items(),
+                    key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+                )
+                records = dict(ordered[-256:])
+            session.anchor_activity_scenes = records
+            session.terminal_anchor_reconciliation = progress
+            session.save(touch_updated_at=False, skip_index=True)
+        compaction_cursor = _terminal_anchor_reconciliation_cursor(progress)
+    compacted = False
+    if compaction_cursor is not None:
+        compacted = compact_terminal_run_index_for_session(sid, index_cursor=compaction_cursor)
+    return materialized_changed or compacted
 
 
 def _handle_session_anchor_scene(handler, body):
@@ -9627,7 +11043,6 @@ from api.workspace import (
     list_workspace_suggestions,
     read_file_content,
     read_authorized_escape_file_content,
-    safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
     open_anchored_fd,
@@ -9658,6 +11073,7 @@ from api.streaming import (
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+    _session_payload_with_full_messages,
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
@@ -9665,12 +11081,18 @@ from api.streaming import (
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    _terminal_payload_lineage_valid,
+    _terminal_payload_session_persisted,
+    TERMINAL_RUN_INDEX_AUTHORITY_VERSION,
     bound_run_journal_snapshot_args,
+    compact_terminal_run_index_for_session,
     find_run_summary,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
+    terminal_run_summary_page_for_session,
+    terminal_run_summaries_for_session,
 )
 from api.todo_state import attach_todo_state
 from api.providers import (
@@ -12743,6 +14165,7 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                _materialize_terminal_anchor_scene_from_run_journal(s, _all_msgs, handler=handler)
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -17164,6 +18587,257 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
+_TERMINAL_REPLAY_HYDRATION_FAILED = object()
+
+
+def _compact_terminal_session_requires_hydration(session_payload: dict) -> bool:
+    if not isinstance(session_payload, dict):
+        return False
+    if isinstance(session_payload.get("messages"), list):
+        return False
+    for key in (
+        "messages_omitted",
+        "tool_calls_omitted",
+        "runtime_journal_snapshot_omitted",
+    ):
+        if isinstance(session_payload.get(key), dict):
+            return True
+    return False
+
+
+def _terminal_replay_target_from_payload(
+    payload: dict,
+    payload_session_id: str,
+    run_id: str,
+    stream_id: str,
+) -> dict | None:
+    raw_target = payload.get("terminal_message_target")
+    if not isinstance(raw_target, dict):
+        return None
+    if raw_target.get("version") != "terminal_message_target_v1":
+        return None
+    raw_message_index = raw_target.get("message_index")
+    if not isinstance(raw_message_index, int) or isinstance(raw_message_index, bool) or raw_message_index < 0:
+        return None
+    target_session_id = str(raw_target.get("session_id") or "").strip()
+    target_run_id = str(raw_target.get("run_id") or "").strip()
+    target_stream_id = str(raw_target.get("stream_id") or "").strip()
+    target_message_ref = _normalize_anchor_scene_message_ref(raw_target.get("message_ref") or "")
+    if (
+        target_session_id != payload_session_id
+        or target_run_id != str(run_id or "").strip()
+        or target_stream_id != str(stream_id or "").strip()
+        or not target_message_ref
+    ):
+        return None
+    return {
+        "session_id": target_session_id,
+        "run_id": target_run_id,
+        "stream_id": target_stream_id,
+        "message_index": raw_message_index,
+        "message_ref": target_message_ref,
+    }
+
+
+def _terminal_replay_target_matches_session(session, target: dict) -> bool:
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list):
+        return False
+    message_index = target.get("message_index")
+    if not isinstance(message_index, int) or message_index < 0 or message_index >= len(messages):
+        return False
+    message = messages[message_index]
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    return _assistant_anchor_scene_message_ref(message) == target.get("message_ref")
+
+
+def _terminal_replay_binding_matches_session(
+    session,
+    origin_session_id: str,
+    run_id: str,
+    stream_id: str,
+    target_session_id: str,
+) -> bool:
+    origin_session_id = str(origin_session_id or "").strip()
+    run_id = str(run_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    target_session_id = str(target_session_id or "").strip()
+    if not origin_session_id or not run_id or not stream_id or not target_session_id:
+        return False
+    if target_session_id == origin_session_id:
+        return True
+    return (
+        str(getattr(session, "terminal_replay_origin_session_id", "") or "").strip()
+        == origin_session_id
+        and str(getattr(session, "terminal_replay_run_id", "") or "").strip() == run_id
+        and str(getattr(session, "terminal_replay_stream_id", "") or "").strip() == stream_id
+    )
+
+
+def _terminal_recovery_control_from_payload(
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+    payload: dict,
+    session_payload: dict,
+) -> dict | None:
+    if not isinstance(payload, dict) or not isinstance(session_payload, dict):
+        return None
+    raw = payload.get("terminal_recovery_control")
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("version") != "terminal_recovery_control_v1":
+        return None
+    authority_session_id = str(raw.get("session_id") or "").strip()
+    target_run_id = str(raw.get("run_id") or "").strip()
+    target_stream_id = str(raw.get("stream_id") or "").strip()
+    if (
+        authority_session_id != str(session_id or "").strip()
+        or target_run_id != str(run_id or "").strip()
+        or target_stream_id != str(stream_id or "").strip()
+    ):
+        return None
+    raw_target_session_id = _terminal_payload_target_session_id_from_authority(
+        raw,
+        authority_session_id,
+    )
+    if raw_target_session_id is None:
+        return None
+    target_session_id = _terminal_payload_authorized_target_session_id(
+        payload,
+        session_payload,
+        authority_session_id,
+        raw_target_session_id,
+    )
+    if target_session_id is None:
+        return None
+    control = {
+        "version": "terminal_recovery_control_v1",
+        "reason": str(raw.get("reason") or "").strip(),
+        "session_id": authority_session_id,
+        "run_id": target_run_id,
+        "stream_id": target_stream_id,
+        "terminal_state": str(raw.get("terminal_state") or "").strip(),
+    }
+    if target_session_id != authority_session_id:
+        control["target_session_id"] = target_session_id
+        control["continuation_session_id"] = target_session_id
+    return control
+
+
+def _hydrate_replayed_terminal_payload(session_id: str, run_id: str, payload):
+    if not isinstance(payload, dict):
+        return payload
+    session_payload = payload.get("session")
+    if not isinstance(session_payload, dict):
+        return payload
+    if isinstance(session_payload.get("messages"), list):
+        return payload
+    hydration_required = _compact_terminal_session_requires_hydration(session_payload)
+    payload_session_id = str(session_payload.get("session_id") or session_id or "").strip()
+    if not payload_session_id:
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_session_persisted(payload, session_payload):
+        if hydration_required:
+            recovery_control = _terminal_recovery_control_from_payload(
+                session_id,
+                run_id,
+                run_id,
+                payload,
+                session_payload,
+            )
+            terminal_disposition = _terminal_anchor_scene_disposition_from_payload(
+                session_id,
+                run_id,
+                run_id,
+                payload,
+            )
+            if recovery_control is not None and terminal_disposition is not None:
+                recovered = dict(payload)
+                recovered["terminal_recovery_control"] = recovery_control
+                recovered["terminal_disposition"] = terminal_disposition
+                return recovered
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    target = _terminal_replay_target_from_payload(payload, payload_session_id, run_id, run_id)
+    if target is None:
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        payload_session_id,
+        payload,
+        session_payload,
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    try:
+        session = get_session(payload_session_id, metadata_only=False)
+    except Exception:
+        logger.debug(
+            "Failed to hydrate compact terminal journal payload for session %s",
+            payload_session_id,
+            exc_info=True,
+        )
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if session is None:
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        payload_session_id,
+        payload,
+        session_payload,
+        persisted_parent_session_id=getattr(session, "parent_session_id", None),
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_binding_matches_session(
+        session,
+        session_id,
+        run_id,
+        run_id,
+        payload_session_id,
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_target_matches_session(session, target):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    try:
+        hydrated = redact_session_data(
+            _session_payload_with_full_messages(
+                session,
+                tool_calls=getattr(session, "tool_calls", None),
+            )
+        )
+    except Exception:
+        logger.debug(
+            "Failed to hydrate compact terminal journal payload for session %s",
+            payload_session_id,
+            exc_info=True,
+        )
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not isinstance(hydrated, dict):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_payload_lineage_valid(
+        session_id,
+        str(hydrated.get("session_id") or "").strip(),
+        payload,
+        hydrated,
+        persisted_parent_session_id=getattr(session, "parent_session_id", None),
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_binding_matches_session(
+        session,
+        session_id,
+        run_id,
+        run_id,
+        str(hydrated.get("session_id") or "").strip(),
+    ):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    if not _terminal_replay_target_matches_session(session, target):
+        return _TERMINAL_REPLAY_HYDRATION_FAILED if hydration_required else payload
+    merged = dict(payload)
+    merged["session"] = hydrated
+    merged["session_id"] = payload_session_id
+    return merged
+
+
 def _replay_run_journal(
     handler,
     stream_id: str,
@@ -17175,22 +18849,36 @@ def _replay_run_journal(
     summary = find_run_summary(stream_id)
     if not summary:
         return False
-    journal = read_run_events(
-        str(summary.get("session_id") or ""),
+    session_id = str(summary.get("session_id") or "")
+    journal = _read_run_journal_until_complete(
+        session_id,
         stream_id,
         after_seq=after_seq,
         max_seq=max_seq,
     )
+    if not _run_journal_page_complete(journal):
+        return False
+    replay_frames = []
     for entry in journal.get("events") or []:
+        if not isinstance(entry, dict):
+            continue
+        event_name = entry.get("event") or entry.get("type") or "message"
+        payload = entry.get("payload")
+        if entry.get("terminal"):
+            payload = _hydrate_replayed_terminal_payload(session_id, stream_id, payload)
+            if payload is _TERMINAL_REPLAY_HYDRATION_FAILED:
+                return False
+        replay_frames.append((event_name, payload, entry.get("event_id")))
+    for event_name, payload, event_id in replay_frames:
         _sse_with_id(
             handler,
-            entry.get("event") or entry.get("type") or "message",
-            entry.get("payload"),
-            entry.get("event_id"),
+            event_name,
+            payload,
+            event_id,
         )
     if include_stale and not summary.get("terminal"):
         stale = stale_interrupted_event(
-            str(summary.get("session_id") or ""),
+            session_id,
             stream_id,
             after_seq=after_seq,
         )
@@ -17234,7 +18922,7 @@ def _run_journal_covers_offline_gap(
         summary = find_run_summary(stream_id)
         if not summary:
             return False
-        journal = read_run_events(
+        journal = _read_run_journal_until_complete(
             str(summary.get("session_id") or ""),
             stream_id,
             after_seq=floor,
@@ -17247,6 +18935,8 @@ def _run_journal_covers_offline_gap(
         return False
     cutoff = int(cutoff_seq)
     seqs = set()
+    if not _run_journal_page_complete(journal):
+        return False
     for entry in journal.get("events") or []:
         try:
             seq = int(entry.get("seq") or 0)

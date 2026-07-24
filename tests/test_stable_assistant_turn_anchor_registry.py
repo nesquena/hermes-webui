@@ -34,7 +34,20 @@ def _event_listener_body(src: str, event_name: str) -> str:
 def _function_body(src: str, name: str) -> str:
     start = src.find(f"function {name}")
     assert start != -1, f"{name} not found"
-    brace = src.find("{", start)
+    params = src.find("(", start)
+    assert params != -1, f"{name} params not found"
+    depth = 0
+    close = -1
+    for idx in range(params, len(src)):
+        if src[idx] == "(":
+            depth += 1
+        elif src[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    assert close != -1, f"{name} params did not close"
+    brace = src.find("{", close)
     assert brace != -1, f"{name} body not found"
     depth = 0
     for idx in range(brace, len(src)):

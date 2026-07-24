@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -757,15 +758,275 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.workspace = str(workspace)
         session.model = model
         session.model_provider = model_provider
+        terminal_session_persisted = False
         try:
             session.save()
+            terminal_session_persisted = True
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
         error_payload["session"] = redact_session_data(
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
-        return error_payload
+        error_payload["terminal_session_persisted"] = terminal_session_persisted
+        if terminal_session_persisted:
+            error_payload["terminal_session_persisted_session_id"] = session.session_id
+    return error_payload
+
+
+def _gateway_anchor_scene_message_ref(message) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or ""))
+            else:
+                parts.append(str(part or ""))
+        content_text = "\n".join(parts)
+    else:
+        content_text = str(content or "")
+    payload = {
+        "role": str(message.get("role") or ""),
+        "content": " ".join(content_text.split()),
+        "timestamp": message.get("_ts") or message.get("timestamp") or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _gateway_terminal_message_target_from_session_payload(
+    session_id: str,
+    stream_id: str,
+    session_payload: dict,
+) -> dict | None:
+    if not isinstance(session_payload, dict):
+        return None
+    target_session_id = str(session_payload.get("session_id") or "").strip()
+    if target_session_id != str(session_id or "").strip():
+        return None
+    messages = (
+        session_payload.get("messages")
+        if isinstance(session_payload.get("messages"), list)
+        else []
+    )
+    message_count = session_payload.get("message_count")
+    if not isinstance(message_count, int) or isinstance(message_count, bool) or message_count <= 0:
+        return None
+    message_index = message_count - 1
+    if message_index < 0 or message_index >= len(messages):
+        return None
+    message = messages[message_index]
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    message_ref = _gateway_anchor_scene_message_ref(message)
+    if not message_ref:
+        return None
+    run_id = str(stream_id or "").strip()
+    if not run_id:
+        return None
+    return {
+        "version": "terminal_message_target_v1",
+        "session_id": target_session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "message_index": message_index,
+        "message_ref": message_ref,
+    }
+
+
+def _mark_gateway_terminal_session_persisted(payload: dict, session_id: str) -> dict:
+    if not isinstance(payload, dict) or not isinstance(payload.get("session"), dict):
+        return payload
+    if payload.get("terminal_session_persisted") is False:
+        return payload
+    session_payload = payload["session"]
+    persisted_session_id = str(session_payload.get("session_id") or session_id or "").strip()
+    if not persisted_session_id:
+        return payload
+    payload = dict(payload)
+    payload["session_id"] = persisted_session_id
+    payload["terminal_session_persisted"] = True
+    payload["terminal_session_persisted_session_id"] = persisted_session_id
+    return payload
+
+
+def _settle_gateway_terminal_payload(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    error_payload,
+):
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        return _settle_gateway_terminal_payload_locked(
+            session,
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            error_payload,
+        )
+
+
+def _settle_gateway_terminal_payload_locked(
+    session,
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    error_payload,
+):
+    from api.streaming import (
+        _cancelled_turn_content,
+        _materialize_pending_user_turn_before_error,
+        _session_payload_with_full_messages,
+        _snapshot_and_append_partial_on_error,
+    )
+
+    payload = dict(error_payload) if isinstance(error_payload, dict) else {}
+    if not _stream_writeback_is_current(session, stream_id):
+        return None
+    turn_duration_seconds = 0.0
+    try:
+        pending_ts = getattr(session, "pending_started_at", None)
+        if pending_ts:
+            turn_duration_seconds = max(0.0, time.time() - float(pending_ts))
+    except Exception:
+        pass
+    _materialize_pending_user_turn_before_error(session)
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.pending_user_source = None
+    try:
+        _snapshot_and_append_partial_on_error(session, stream_id)
+    except Exception:
+        logger.debug("Failed to snapshot gateway partials on terminal payload", exc_info=True)
+    error_type = str(payload.get("type") or "").strip().lower()
+    label = str(payload.get("label") or "").strip()
+    if not label:
+        label = "Task cancelled" if error_type in {"cancelled", "canceled"} else "Gateway request failed"
+    message = str(payload.get("message") or label).strip()
+    hint = str(payload.get("hint") or "").strip()
+    if error_type in {"cancelled", "canceled"}:
+        content = _cancelled_turn_content(message)
+    else:
+        content = f"**{label}:** {message}" + (f"\n\n*{hint}*" if hint else "")
+    error_message = {
+        "role": "assistant",
+        "content": content,
+        "timestamp": int(time.time()),
+        "_error": True,
+        "_turnDuration": round(turn_duration_seconds, 3),
+    }
+    if payload.get("details"):
+        error_message["provider_details"] = payload["details"]
+    if error_type in {"cancelled", "canceled"}:
+        error_message["provider_details"] = message
+        error_message["provider_details_label"] = "Cancellation details"
+    elif error_type == "interrupted":
+        error_message["provider_details_label"] = "Interruption details"
+    if not isinstance(session.messages, list):
+        session.messages = []
+    session.messages.append(error_message)
+    session.workspace = str(workspace)
+    session.model = model
+    session.model_provider = model_provider
+    terminal_session_persisted = False
+    try:
+        session.save()
+        terminal_session_persisted = True
+    except Exception:
+        logger.debug("Failed to persist gateway terminal payload settlement", exc_info=True)
+    session_payload = redact_session_data(
+        _session_payload_with_full_messages(session, tool_calls=[])
+    )
+    payload["session"] = session_payload
+    payload["session_id"] = session.session_id
+    payload["terminal_session_persisted"] = terminal_session_persisted
+    if terminal_session_persisted:
+        payload["terminal_session_persisted_session_id"] = session.session_id
+    terminal_target = _gateway_terminal_message_target_from_session_payload(
+        session_id,
+        stream_id,
+        session_payload,
+    )
+    if terminal_target:
+        payload["terminal_message_target"] = terminal_target
+    return payload
+
+
+def _settle_gateway_terminal_event_payload(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    event,
+    data,
+):
+    if event == "apperror" and isinstance(data, dict):
+        data = data.copy()
+        data.setdefault("session_id", session_id)
+    if event not in {"cancel", "error", "apperror"}:
+        if event == "done" and isinstance(data, dict) and isinstance(data.get("session"), dict):
+            payload = dict(data)
+            payload = _mark_gateway_terminal_session_persisted(payload, session_id)
+            payload.setdefault(
+                "terminal_message_target",
+                _gateway_terminal_message_target_from_session_payload(
+                    session_id,
+                    stream_id,
+                    payload["session"],
+                ),
+            )
+            if payload.get("terminal_message_target") is None:
+                payload.pop("terminal_message_target", None)
+            return payload
+        return data
+    payload = data if isinstance(data, dict) else {}
+    if isinstance(payload.get("session"), dict):
+        payload = dict(payload)
+        payload = _mark_gateway_terminal_session_persisted(payload, session_id)
+        payload.setdefault(
+            "terminal_message_target",
+            _gateway_terminal_message_target_from_session_payload(
+                session_id,
+                stream_id,
+                payload["session"],
+            ),
+        )
+        if payload.get("terminal_message_target") is None:
+            payload.pop("terminal_message_target", None)
+        return payload
+    if isinstance(payload.get("terminal_disposition"), dict):
+        return payload
+    if event == "cancel":
+        payload = dict(payload)
+        payload.setdefault("label", "Task cancelled")
+        payload.setdefault("type", "cancelled")
+        payload.setdefault("message", "Cancelled by user")
+    try:
+        settled_payload = _settle_gateway_terminal_payload(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            payload,
+        )
+    except Exception:
+        logger.debug("Failed to settle gateway terminal payload", exc_info=True)
+        return data
+    return settled_payload if settled_payload is not None else data
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -849,9 +1110,15 @@ def _run_gateway_chat_streaming(
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
-        if event == "apperror" and isinstance(data, dict):
-            data = data.copy()
-            data.setdefault("session_id", session_id)
+        data = _settle_gateway_terminal_event_payload(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            event,
+            data,
+        )
         event_id = None
         if run_journal is not None:
             try:
@@ -1153,6 +1420,7 @@ def _run_gateway_chat_streaming(
                 "hint": "Check that Hermes Gateway API server is running and reachable.",
             })
             return
+        deferred_gateway_event = None
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
@@ -1161,112 +1429,163 @@ def _run_gateway_chat_streaming(
             # before success writeback. Treat it as cancellation so any
             # credential-exhausted process-wakeup pause stays in place.
             if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
-                return
-            now = time.time()
-            # Preserve subsecond ordering for gateway-backed turns. Using an
-            # integer seconds timestamp gives the user and assistant rows the
-            # same sort key; later transcript merges can then fall back to
-            # role/content ordering instead of turn order.
-            assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
-            pending_source = getattr(s, "pending_user_source", None) or "webui"
-            if pending_source != "webui":
-                user_msg["_source"] = pending_source
-            if attachments:
-                user_msg["attachments"] = list(attachments)
-            assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
-            saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
-            if saved_reasoning:
-                assistant_msg["reasoning"] = saved_reasoning
-            previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
-            previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
-            # Stamp stable ids on the two new rows (shared with the display merge
-            # below) so display and model-context copies share an id for the
-            # fork/truncate aligner (#context-message-stable-id).
-            try:
-                from api.streaming import _assign_stable_message_ids
-
-                _assign_stable_message_ids(
-                    [user_msg, assistant_msg],
-                    previous_context,
-                    list(getattr(s, "messages", None) or []),
+                deferred_gateway_event = (
+                    "cancel",
+                    _settle_gateway_terminal_payload_locked(
+                        s,
+                        session_id,
+                        stream_id,
+                        workspace,
+                        model,
+                        model_provider,
+                        {
+                            "label": "Task cancelled",
+                            "type": "cancelled",
+                            "message": "Cancelled by user",
+                        },
+                    ) or {"message": "Cancelled by user"},
                 )
-            except Exception:
-                logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
-            try:
-                from api.streaming import _is_context_compression_marker
+            else:
+                now = time.time()
+                # Preserve subsecond ordering for gateway-backed turns. Using an
+                # integer seconds timestamp gives the user and assistant rows the
+                # same sort key; later transcript merges can then fall back to
+                # role/content ordering instead of turn order.
+                assistant_ts = now + 0.000001
+                user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
+                pending_source = getattr(s, "pending_user_source", None) or "webui"
+                if pending_source != "webui":
+                    user_msg["_source"] = pending_source
+                if attachments:
+                    user_msg["attachments"] = list(attachments)
+                assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+                saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
+                if saved_reasoning:
+                    assistant_msg["reasoning"] = saved_reasoning
+                previous_messages = list(getattr(s, "messages", None) or [])
+                previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+                previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
+                # Stamp stable ids on the two new rows (shared with the display merge
+                # below) so display and model-context copies share an id for the
+                # fork/truncate aligner (#context-message-stable-id).
+                try:
+                    from api.streaming import _assign_stable_message_ids
 
-                display_context = [
-                    msg
-                    for msg in previous_context
-                    if not _is_context_compression_marker(msg)
-                ]
-            except Exception:
-                logger.debug("Failed to filter gateway display context markers", exc_info=True)
-                display_context = previous_context
-            display = merge_session_messages_append_only(
-                previous_messages,
-                display_context,
-            )
-            try:
-                from api.streaming import _merge_display_messages_after_agent_result
+                    _assign_stable_message_ids(
+                        [user_msg, assistant_msg],
+                        previous_context,
+                        list(getattr(s, "messages", None) or []),
+                    )
+                except Exception:
+                    logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
+                s.context_messages = previous_context + [user_msg, assistant_msg]
+                try:
+                    from api.streaming import _is_context_compression_marker
 
-                s.messages = _merge_display_messages_after_agent_result(
-                    display,
-                    previous_context,
-                    s.context_messages,
-                    str(msg_text or ""),
-                    source=pending_source,
+                    display_context = [
+                        msg
+                        for msg in previous_context
+                        if not _is_context_compression_marker(msg)
+                    ]
+                except Exception:
+                    logger.debug("Failed to filter gateway display context markers", exc_info=True)
+                    display_context = previous_context
+                display = merge_session_messages_append_only(
+                    previous_messages,
+                    display_context,
                 )
-            except Exception:
-                logger.debug("Failed to merge gateway display transcript", exc_info=True)
-                # Avoid duplicating the eager-save checkpointed user message.
-                if display:
-                    latest = display[-1]
-                    if isinstance(latest, dict) and latest.get("role") == "user":
-                        latest_text = " ".join(str(latest.get("content") or "").split())
-                        msg_norm = " ".join(str(msg_text or "").split())
-                        if latest_text == msg_norm:
-                            display = display[:-1]
-                s.messages = display + [user_msg, assistant_msg]
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = None
-            s.pending_started_at = None
-            s.pending_user_source = None
-            s.workspace = str(workspace)
-            s.model = model
-            s.model_provider = model_provider
+                try:
+                    from api.streaming import _merge_display_messages_after_agent_result
 
-            def _restore_cancelled_success_writeback():
-                if pending_source == "process_wakeup":
-                    s.context_messages = previous_context
-                    s.messages = previous_messages
-                    s.process_wakeup_pause = dict(previous_process_wakeup_pause)
-                elif previous_process_wakeup_pause:
-                    s.process_wakeup_pause = dict(previous_process_wakeup_pause)
+                    s.messages = _merge_display_messages_after_agent_result(
+                        display,
+                        previous_context,
+                        s.context_messages,
+                        str(msg_text or ""),
+                        source=pending_source,
+                    )
+                except Exception:
+                    logger.debug("Failed to merge gateway display transcript", exc_info=True)
+                    # Avoid duplicating the eager-save checkpointed user message.
+                    if display:
+                        latest = display[-1]
+                        if isinstance(latest, dict) and latest.get("role") == "user":
+                            latest_text = " ".join(str(latest.get("content") or "").split())
+                            msg_norm = " ".join(str(msg_text or "").split())
+                            if latest_text == msg_norm:
+                                display = display[:-1]
+                    s.messages = display + [user_msg, assistant_msg]
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = None
+                s.pending_started_at = None
+                s.pending_user_source = None
+                s.workspace = str(workspace)
+                s.model = model
+                s.model_provider = model_provider
+
+                def _restore_cancelled_success_writeback():
+                    if pending_source == "process_wakeup":
+                        s.context_messages = previous_context
+                        s.messages = previous_messages
+                        s.process_wakeup_pause = dict(previous_process_wakeup_pause)
+                        s.save()
+                        return (
+                            "cancel",
+                            {
+                                "label": "Task cancelled",
+                                "type": "cancelled",
+                                "message": "Cancelled by user",
+                                "session_id": session_id,
+                                "terminal_disposition": {
+                                    "version": "terminal_disposition_v1",
+                                    "kind": "consumed_non_materializable",
+                                    "reason": "process_wakeup_success_cancel_rollback",
+                                    "session_id": session_id,
+                                    "run_id": stream_id,
+                                    "stream_id": stream_id,
+                                },
+                            },
+                        )
+                    if previous_process_wakeup_pause:
+                        s.process_wakeup_pause = dict(previous_process_wakeup_pause)
+                    else:
+                        clear_process_wakeup_pause(s, reason="run_completed")
+                    s.save()
+                    from api.streaming import _session_payload_with_full_messages
+
+                    return (
+                        "cancel",
+                        {
+                            "label": "Task cancelled",
+                            "type": "cancelled",
+                            "message": "Cancelled by user",
+                            "session_id": session_id,
+                            "session": redact_session_data(
+                                _session_payload_with_full_messages(s, tool_calls=[])
+                            ),
+                        },
+                    )
+
+                # Recheck immediately before clearing the pause; Stop can arrive
+                # while the success transcript is being assembled.
+                if cancel_event.is_set():
+                    deferred_gateway_event = _restore_cancelled_success_writeback()
                 else:
                     clear_process_wakeup_pause(s, reason="run_completed")
-                s.save()
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
-
-            # Recheck immediately before clearing the pause; Stop can arrive
-            # while the success transcript is being assembled.
-            if cancel_event.is_set():
-                _restore_cancelled_success_writeback()
-                return
-            clear_process_wakeup_pause(s, reason="run_completed")
-            if cancel_event.is_set():
-                _restore_cancelled_success_writeback()
-                return
-            s.save()
-            if cancel_event.is_set():
-                _restore_cancelled_success_writeback()
-                return
-            success_writeback_committed = True
+                    if cancel_event.is_set():
+                        deferred_gateway_event = _restore_cancelled_success_writeback()
+                    else:
+                        s.save()
+                        if cancel_event.is_set():
+                            deferred_gateway_event = _restore_cancelled_success_writeback()
+                        else:
+                            success_writeback_committed = True
+        if deferred_gateway_event is not None:
+            put_gateway_event(*deferred_gateway_event)
+            return
+        if not success_writeback_committed:
+            return
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
             from api.profiles import get_hermes_home_for_profile

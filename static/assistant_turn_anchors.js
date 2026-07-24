@@ -392,7 +392,11 @@
     const sessionId=_cleanString(_own(event,'session_id')||_payloadSessionId||_own(ctx,'session_id'));
     const turnId=_cleanString(_own(event,'turn_id')||_payloadTurnId||_own(ctx,'turn_id'));
     const streamId=_cleanString(_own(event,'stream_id')||_payloadStreamId||_own(ctx,'stream_id'))||null;
-    const localId=_localIdForSourceEvent(sourceType, {...ctx,seq}, payload);
+    const localId=_localIdForSourceEvent(sourceType, {
+      ...ctx,
+      seq,
+      local_id:_own(event,'local_id'),
+    }, payload);
     const anchorEvent={
       event_id:eventId||null,
       local_id:localId,

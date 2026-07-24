@@ -82,6 +82,16 @@ function _isSessionCurrentPane(sid) {
   return true;
 }
 
+function _streamDoneWouldOverwriteNewerPane(activeSid, streamId){
+  if(!_isSessionCurrentPane(activeSid)) return false;
+  const expectedStreamId=String(streamId||'');
+  const activeStreamId=String(S&&S.activeStreamId||'');
+  if(activeStreamId&&activeStreamId!==expectedStreamId) return true;
+  const inflight=INFLIGHT&&INFLIGHT[activeSid];
+  const inflightStreamId=String(inflight&&inflight.streamId||'');
+  return !!(inflightStreamId&&inflightStreamId!==expectedStreamId);
+}
+
 function _isSessionActivelyViewed(sid) {
   if(!_isSessionCurrentPane(sid)) return false;
   if(!_isDocumentVisibleAndFocused()) return false;
@@ -2070,6 +2080,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return;
   }
+  const _streamOwnerToken=(()=>{
+    const sessionId=String(activeSid||'');
+    const tokenStreamId=String(streamId||'');
+    const nextGeneration=Number((typeof window!=='undefined'&&window._liveStreamOwnerGeneration)||0)+1;
+    const token={sessionId,streamId:tokenStreamId,generation:nextGeneration};
+    if(typeof window!=='undefined'){
+      window._liveStreamOwnerGeneration=nextGeneration;
+      if(!window._liveStreamOwnerTokens||typeof window._liveStreamOwnerTokens!=='object'){
+        window._liveStreamOwnerTokens={};
+      }
+      window._liveStreamOwnerTokens[sessionId]=token;
+    }
+    return token;
+  })();
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
@@ -2112,7 +2136,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     : '';
   assistantText = _lastLiveAssistant ? _lastLiveAssistant : '';
   reasoningText=_lastLiveReasoning ? _lastLiveReasoning : '';
-  let liveReasoningText = reasoningText;
+  // The durable value above is the whole-turn aggregate. After reattachment,
+  // new reasoning belongs to a fresh Anchor segment; seeding its live buffer
+  // with the aggregate would repeat every restored Thinking row in that card.
+  let liveReasoningText = reconnecting ? '' : reasoningText;
+  let _liveReasoningSegmentSeq=0;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
@@ -2150,6 +2178,61 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _streamOwnerTokenStillCurrent(){
+    if(!_streamOwnerToken||!_streamOwnerToken.sessionId||!_streamOwnerToken.streamId) return false;
+    if(typeof window==='undefined') return true;
+    const tokenStore=window._liveStreamOwnerTokens;
+    const current=tokenStore&&tokenStore[_streamOwnerToken.sessionId];
+    if(!current) return false;
+    return current.streamId===_streamOwnerToken.streamId&&current.generation===_streamOwnerToken.generation;
+  }
+  function _completionOwnerStillCurrent(doneData=null){
+    if(!_streamOwnerTokenStillCurrent()) return false;
+    const currentSid=String(S&&S.session&&S.session.session_id||'');
+    const inflight=INFLIGHT&&INFLIGHT[activeSid];
+    const inflightStreamId=String(inflight&&inflight.streamId||'');
+    if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return false;
+    if(currentSid===activeSid){
+      const activeStreamId=String(S&&S.activeStreamId||'');
+      if(activeStreamId&&activeStreamId!==String(streamId||'')) return false;
+      return true;
+    }
+    const payload=doneData&&typeof doneData==='object'?doneData:{};
+    const completedSession=payload.session&&typeof payload.session==='object'?payload.session:{};
+    const continuationSid=String(
+      payload.new_session_id||
+      payload.continuation_session_id||
+      completedSession.session_id||
+      ''
+    );
+    const originSid=String(
+      payload.old_session_id||
+      completedSession.parent_session_id||
+      activeSid||
+      ''
+    );
+    if(currentSid&&currentSid!==activeSid){
+      if(continuationSid===currentSid&&originSid===activeSid){
+        const activeStreamId=String(S&&S.activeStreamId||'');
+        if(activeStreamId&&activeStreamId!==String(streamId||'')) return false;
+        const currentInflight=INFLIGHT&&INFLIGHT[currentSid];
+        const currentInflightStreamId=String(currentInflight&&currentInflight.streamId||'');
+        if(currentInflightStreamId&&currentInflightStreamId!==String(streamId||'')) return false;
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+  function _activePaneStreamOwnerStillCurrent(){
+    if(!_completionOwnerStillCurrent()) return false;
+    if(!_isSessionCurrentPane(activeSid)) return false;
+    if(S.activeStreamId&&S.activeStreamId!==streamId) return false;
+    const inflight=INFLIGHT&&INFLIGHT[activeSid];
+    const inflightStreamId=String(inflight&&inflight.streamId||'');
+    if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return false;
+    return true;
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
@@ -2163,27 +2246,56 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
   function _clearActivePaneInflightIfOwner(){
-    if(_isActiveSession()) clearInflight();
+    if(_activePaneStreamOwnerStillCurrent()) clearInflight();
   }
   function _approvalBelongsToOwner(){
-    return _approvalSessionId===activeSid||(!_approvalSessionId&&_isActiveSession());
+    return _activePaneStreamOwnerStillCurrent()&&(_approvalSessionId===activeSid||(!_approvalSessionId&&_isActiveSession()));
   }
   function _clarifyBelongsToOwner(){
-    return _clarifySessionId===activeSid||(!_clarifySessionId&&_isActiveSession());
+    return _activePaneStreamOwnerStillCurrent()&&(_clarifySessionId===activeSid||(!_clarifySessionId&&_isActiveSession()));
+  }
+  function _deleteApprovalPendingForOwner(){
+    if(typeof _approvalPendingBySession!=='undefined'&&
+      _approvalPendingBySession&&
+      typeof _approvalPendingBySession.delete==='function'
+    ){
+      _approvalPendingBySession.delete(activeSid);
+      return true;
+    }
+    return false;
+  }
+  function _deleteClarifyPendingForOwner(){
+    if(typeof _clarifyPendingBySession!=='undefined'&&
+      _clarifyPendingBySession&&
+      typeof _clarifyPendingBySession.delete==='function'
+    ){
+      _clarifyPendingBySession.delete(activeSid);
+      return true;
+    }
+    return false;
   }
   function _clearApprovalForOwner(){
-    _clearApprovalPendingForSession(activeSid);
-    if(!_approvalBelongsToOwner()) return;
+    const options=arguments[0]||{};
+    const allowPaneMutation=!(options&&options.pane===false);
+    if(allowPaneMutation) _clearApprovalPendingForSession(activeSid);
+    else if(!_deleteApprovalPendingForOwner()) _clearApprovalPendingForSession(activeSid,{sync:false});
+    if(!allowPaneMutation||!_approvalBelongsToOwner()) return;
     stopApprovalPolling();
     hideApprovalCard(true);
   }
-  function _clearClarifyForOwner(reason){
-    _clearClarifyPendingForSession(activeSid);
-    if(!_clarifyBelongsToOwner()) return;
+  function _clearClarifyForOwner(reason, options={}){
+    const allowPaneMutation=!(options&&options.pane===false);
+    if(allowPaneMutation) _clearClarifyPendingForSession(activeSid);
+    else if(!_deleteClarifyPendingForOwner()) _clearClarifyPendingForSession(activeSid,{sync:false});
+    if(!allowPaneMutation||!_clarifyBelongsToOwner()) return;
     stopClarifyPolling();
     hideClarifyCard(true, reason||'terminal');
   }
   function _clearOwnerInflightState(){
+    if(!_streamOwnerTokenStillCurrent()) return;
+    const inflight=INFLIGHT&&INFLIGHT[activeSid];
+    const inflightStreamId=String(inflight&&inflight.streamId||'');
+    if(inflightStreamId&&inflightStreamId!==String(streamId||'')) return;
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
@@ -2244,11 +2356,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _setActivePaneIdleIfOwner(){
-    if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
-      setBusy(false);
-      setComposerStatus('');
-      if(typeof setStatus==='function') setStatus('');
-    }
+    const activePaneLoadingElsewhere=typeof _loadingSessionId!=='undefined'&&
+      _loadingSessionId&&
+      (!S.session||_loadingSessionId!==S.session.session_id);
+    const activePaneCanIdle=!activePaneLoadingElsewhere&&(!S.session||!INFLIGHT[S.session.session_id]);
+    if(!_activePaneStreamOwnerStillCurrent()&&!activePaneCanIdle) return;
+    setBusy(false);
+    setComposerStatus('');
+    if(typeof setStatus==='function') setStatus('');
+  }
+  function _markStreamJustFinishedForOwner(){
+    if(typeof window==='undefined'||!_activePaneStreamOwnerStillCurrent()) return;
+    const ownerKey=[
+      String(activeSid||''),
+      String(streamId||''),
+      String(_streamOwnerToken&&_streamOwnerToken.generation||''),
+    ].join(':');
+    window._streamJustFinished=true;
+    window._streamJustFinishedOwner=ownerKey;
+    setTimeout(()=>{
+      if(typeof window==='undefined') return;
+      if(window._streamJustFinishedOwner===ownerKey){
+        window._streamJustFinished=false;
+        try{delete window._streamJustFinishedOwner;}catch(_){window._streamJustFinishedOwner=undefined;}
+      }
+    }, 5000);
   }
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
@@ -2387,10 +2519,59 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _liveThinkingText(){
     return String(liveReasoningText||'').trim() || 'Thinking…';
   }
+  function _positiveLiveSegmentSeq(value){
+    const seq=Number(value);
+    return Number.isFinite(seq)&&seq>0?Math.floor(seq):0;
+  }
+  function _liveLocalIdSegmentSeq(value){
+    const raw=String(value||'');
+    if(!raw.startsWith('live-reasoning:')&&!raw.startsWith('live-prose:')) return 0;
+    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):'';
+    return _positiveLiveSegmentSeq(tail);
+  }
+  function _anchorActivityMaxSegmentSeq(){
+    const events=_anchorActivityEvents();
+    if(!events) return 0;
+    let maxSeq=0;
+    const visit=(value)=>{
+      const seq=_positiveLiveSegmentSeq(value);
+      if(seq>maxSeq) maxSeq=seq;
+    };
+    for(const event of events){
+      if(!event||typeof event!=='object') continue;
+      visit(event.activitySegmentSeq);
+      visit(event.activity_segment_seq);
+      visit(event.segmentSeq);
+      visit(event.segment_seq);
+      visit(_liveLocalIdSegmentSeq(event.local_id));
+      visit(_liveLocalIdSegmentSeq(event.row_id));
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      visit(payload.activitySegmentSeq);
+      visit(payload.activity_segment_seq);
+      visit(payload.segmentSeq);
+      visit(payload.segment_seq);
+      const group=(event.group&&typeof event.group==='object')?event.group:{};
+      visit(group.activitySegmentSeq);
+      visit(group.activity_segment_seq);
+      visit(group.segmentSeq);
+      visit(group.segment_seq);
+      const identity=(event.identity&&typeof event.identity==='object')?event.identity:{};
+      visit(identity.activitySegmentSeq);
+      visit(identity.activity_segment_seq);
+      visit(identity.segmentSeq);
+      visit(identity.segment_seq);
+      visit(_liveLocalIdSegmentSeq(identity.local_id));
+    }
+    return maxSeq;
+  }
   function _liveThinkingPlacement(){
     const activeSeq=Number(_assistantSegmentSeq||0);
-    const nextSeq=Number(_currentLiveSegmentSeq||0)+1;
-    const segmentSeq=(!assistantRow||_freshSegment||!activeSeq)?nextSeq:activeSeq;
+    const reasoningSeq=_positiveLiveSegmentSeq(_liveReasoningSegmentSeq);
+    const restoredAnchorSeq=_anchorActivityMaxSegmentSeq();
+    const currentSeq=Number(_currentLiveSegmentSeq||0);
+    const nextSeq=Math.max(Number.isFinite(currentSeq)?currentSeq:0,restoredAnchorSeq)+1;
+    let segmentSeq=(!assistantRow||_freshSegment||!activeSeq)?nextSeq:activeSeq;
+    if(reasoningSeq>0&&String(liveReasoningText||'').trim()) segmentSeq=reasoningSeq;
     return {
       activityKey:S.activeStreamId?'live:'+S.activeStreamId:null,
       segmentSeq,
@@ -3336,6 +3517,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const text=_anchorSceneMessageText(message);
       const contentRows=_anchorSceneRowsFromContentParts(message,idx,{isFinalMessage:idx===lastAsstIndex});
       const hasOrderedContentRows=Array.isArray(contentRows)&&contentRows.length>0;
+      const hasOrderedContentThinking=hasOrderedContentRows&&contentRows.some(row=>row&&row.role==='thinking');
       const contentToolRows=[];
       const usedContentToolRows=new Set();
       const idFlexibleContentToolRows=new Set();
@@ -3352,7 +3534,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
       }
       const reasoning=_anchorSceneMessageReasoningText(message);
-      if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
+      if(!hasOrderedContentThinking&&_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
         pool.push({..._anchorSceneThinkingRow(reasoning,0,idx),_phase:0,_encounter:encounter++});
       }
       const messageTools=[];
@@ -3482,12 +3664,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
-  function _anchorSceneSettleLiveRunningRow(row, hasSettledThinking){
+  function _anchorSceneSettleLiveRunningRow(row, dropLiveThinking){
     if(!row||typeof row!=='object') return row;
     if(row.role!=='thinking'&&row.role!=='prose'&&row.role!=='tool') return row;
+    const hasLiveIdentity=_anchorSceneRowHasLiveIdentity(row);
+    if(row.role==='thinking'&&dropLiveThinking&&hasLiveIdentity) return null;
     if(String(row.status||'').toLowerCase()!=='running') return row;
-    if(!_anchorSceneRowHasLiveIdentity(row)) return row;
-    if(row.role==='thinking'&&hasSettledThinking) return null;
+    if(!hasLiveIdentity) return row;
     const sealed={...row,status:'completed'};
     if(row.payload&&typeof row.payload==='object'){
       sealed.payload={...row.payload,status:'completed'};
@@ -3521,6 +3704,47 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
+  function _anchorSceneFinalAnswerHintFromScene(scene){
+    if(!scene||typeof scene!=='object') return '';
+    const explicit=typeof scene.final_answer==='string'?scene.final_answer:'';
+    if(_anchorSceneCleanText(explicit)) return explicit;
+    return '';
+  }
+  function _anchorSceneFinalAnswerHintFromTranscript(messageText, scene){
+    const raw=String(messageText||'').trim();
+    if(!raw||!scene||typeof scene!=='object') return '';
+    const rows=Array.isArray(scene.activity_rows)?scene.activity_rows:[];
+    let lastToolIndex=-1;
+    rows.forEach((row,idx)=>{ if(row&&row.role==='tool') lastToolIndex=idx; });
+    if(lastToolIndex<0) return '';
+    const prefixes=[];
+    rows.forEach((row,idx)=>{
+      if(idx>lastToolIndex||!row||row.role!=='prose'||row.kind!=='process_prose') return;
+      if(String(row.source_event_type||'')!=='token') return;
+      if(!String(row.local_id||'').startsWith('live-prose:')) return;
+      const text=String(row.text||'').trim();
+      if(text) prefixes.push(text);
+    });
+    if(!prefixes.length) return '';
+    let tail=raw;
+    let consumed=false;
+    prefixes.forEach((prefix)=>{
+      if(tail.startsWith(prefix)){
+        tail=tail.slice(prefix.length).trim();
+        consumed=true;
+      }
+    });
+    if(consumed&&_anchorSceneCleanText(tail)) return tail;
+    prefixes.slice().sort((a,b)=>b.length-a.length).some((prefix)=>{
+      if(!raw.startsWith(prefix)) return false;
+      const candidate=raw.slice(prefix.length).trim();
+      if(!_anchorSceneCleanText(candidate)) return false;
+      tail=candidate;
+      consumed=true;
+      return true;
+    });
+    return consumed?_anchorSceneCleanText(tail)&&tail||'':'';
+  }
   function _anchorSceneTurnDurationForSettlement(lastAsst, base){
     if(lastAsst&&lastAsst._turnDuration!==undefined&&lastAsst._turnDuration!==null) return lastAsst._turnDuration;
     if(base&&base.turn_duration!==undefined&&base.turn_duration!==null) return base.turn_duration;
@@ -3549,7 +3773,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return undefined;
   }
-  function _completeSettledAnchorSceneForTurn(messages, lastAsstIndex, projectedScene){
+  function _completeSettledAnchorSceneForTurn(messages, lastAsstIndex, projectedScene, options={}){
     if(!Array.isArray(messages)||lastAsstIndex<0) return projectedScene;
     const lastAsst=messages[lastAsstIndex];
     if(!lastAsst||lastAsst.role!=='assistant') return projectedScene;
@@ -3562,10 +3786,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
     const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
+    const rawFinalAnswerHint=typeof options.finalAnswer==='string'?options.finalAnswer:'';
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
-    const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
-      ? messageFinalAnswer
-      : (typeof base.final_answer==='string'?base.final_answer:'');
+    const rawSceneFinalAnswerHint=_anchorSceneFinalAnswerHintFromScene(base);
+    const sceneFinalAnswerHint=sceneMode==='transparent_stream'
+      ? rawSceneFinalAnswerHint
+      : (_anchorSceneFinalAnswerHintFromTranscript(rawSceneFinalAnswerHint,base)||rawSceneFinalAnswerHint);
+    const finalAnswerHint=sceneFinalAnswerHint;
+    const optionFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(rawFinalAnswerHint,base)||rawFinalAnswerHint;
+    const transcriptFinalAnswer=_anchorSceneFinalAnswerHintFromTranscript(messageFinalAnswer,base)||messageFinalAnswer;
+    const baseFinalAnswer=typeof base.final_answer==='string'?base.final_answer:'';
+    const finalAnswer=_anchorSceneCleanText(finalAnswerHint)
+      ? finalAnswerHint
+      : (_anchorSceneCleanText(optionFinalAnswer)
+        ? optionFinalAnswer
+        : (_anchorSceneCleanText(transcriptFinalAnswer)
+          ? transcriptFinalAnswer
+          : baseFinalAnswer));
     const finalKey=_anchorSceneTextKey(finalAnswer);
     const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true});
     const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);
@@ -3573,6 +3810,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
+    const sceneHasActivityRows=projectedRows.some(row=>row&&row.role&&row.role!=='terminal');
+    const projectedReasoningKey=_anchorSceneTextKey(projectedRows
+      .filter(row=>row&&row.role==='thinking'&&_anchorSceneCleanText(row.text))
+      .map(row=>row.text).join(''));
+    const settledReasoningParts=[];
+    for(const bucket of messageRows.values()){
+      for(const row of (Array.isArray(bucket)?bucket:[])){
+        if(row&&row.role==='thinking'&&_anchorSceneCleanText(row.text)) settledReasoningParts.push(row.text);
+      }
+    }
+    const settledReasoningKey=_anchorSceneTextKey(settledReasoningParts.join(''));
+    const preferProjectedThinking=!!projectedReasoningKey&&(
+      !settledReasoningKey||projectedReasoningKey===settledReasoningKey
+    );
+    const dropProjectedThinking=hasSettledThinking&&!preferProjectedThinking;
     const orderedRows=[];
     for(const row of projectedRows){
       if(row&&row.role==='terminal') continue;
@@ -3580,7 +3832,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
       const bucket=messageRows.get(idx)||[];
-      for(const row of bucket) orderedRows.push(row);
+      for(const row of bucket){
+        // The transcript stores one aggregate reasoning string. Once the live
+        // Anchor already owns ordered reasoning segments, that aggregate is a
+        // fallback rather than a replacement for those segment identities.
+        if(preferProjectedThinking&&row&&row.role==='thinking') continue;
+        if(idx===lastAsstIndex&&sceneHasActivityRows&&_anchorSceneCleanText(finalAnswer)&&row&&row.role==='prose'&&String(row.source_event_type||'')==='settled_message') continue;
+        orderedRows.push(row);
+      }
     }
     for(const row of projectedRows){
       if(row&&row.role==='terminal') orderedRows.push(row);
@@ -3593,17 +3852,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // prefix snapshot then survives into the persisted scene and renders as a
     // duplicate of the answer's beginning. A live-prose row belongs to the
     // final segment iff no PROJECTED tool row follows it; pre-tool narration
-    // that happens to prefix the final answer stays protected.
+    // that happens to overlap the final answer stays protected.
     const lastProjectedToolIndex=projectedRows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
     const finalSegmentLiveProseRows=new WeakSet();
     projectedRows.forEach((row,idx)=>{
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
-    const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
+    const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&(finalKey.startsWith(textKey)||finalKey.endsWith(textKey));
     const pushRow=(row)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
-      row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      row=_anchorSceneSettleLiveRunningRow(row,dropProjectedThinking);
       if(!row||typeof row!=='object') return;
       const textKey=_anchorSceneTextKey(row.text);
       if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
@@ -3642,8 +3901,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return scene;
   }
   let _persistAnchorSceneWarned=false;
-  function _anchorSceneMessageOffsetForPersist(){
-    const raw=(typeof _oldestIdx!=='undefined')?_oldestIdx:0;
+  function _anchorSceneMessageOffsetForPersist(messageOffsetOverride){
+    const raw=(messageOffsetOverride!==undefined&&messageOffsetOverride!==null)
+      ? messageOffsetOverride
+      : ((typeof _oldestIdx!=='undefined')?_oldestIdx:0);
     const offset=Number(raw);
     return Number.isFinite(offset)&&offset>0?Math.floor(offset):0;
   }
@@ -3653,10 +3914,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Number.isFinite(idx)||idx<0) return messageIndex;
     return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
   }
-  function _persistSettledAnchorScene(message, scene, messageIndex){
+  function _persistSettledAnchorScene(message, scene, messageIndex, options={}){
     if(!activeSid||!message||!scene||typeof api!=='function') return;
     try{
-      const messageOffset=_anchorSceneMessageOffsetForPersist();
+      const messageOffset=_anchorSceneMessageOffsetForPersist(options.messageOffset);
       api('/api/session/anchor-scene',{
         method:'POST',
         timeoutMs:8000,
@@ -3714,7 +3975,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
     );
   }
-  function _attachProjectedAnchorSceneToLastAssistant(messages){
+  function _attachProjectedAnchorSceneToLastAssistant(messages, options={}){
+    const attachOptions=(typeof options==='object'&&options)?options:{};
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
     let lastAsstIndex=-1;
@@ -3728,15 +3990,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene,attachOptions);
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
+      const shouldPersistTerminalLifecycle=attachOptions.persistTerminalLifecycle===true&&!!(
+        scene.terminal_state||
+        (scene.lifecycle&&scene.lifecycle.terminal_state)
+      );
       const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
-      if(!shouldPersistScene) return false;
+      if(!shouldPersistScene&&!shouldPersistTerminalLifecycle) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
-      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
+      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, attachOptions);
       return hasWorklogRows;
     }
     return false;
@@ -3879,6 +4145,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
     const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
+    if(Number.isFinite(segmentSeq)&&segmentSeq>0) _liveReasoningSegmentSeq=segmentSeq;
     if(options&&typeof options==='object'){
       options.anchorReasoningLocalId=localId;
       options.segmentSeq=segmentSeq;
@@ -3924,25 +4191,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _stripAnchorReasoningEcho(visible){
     const events=_anchorActivityEvents();
     if(!events||!visible) return false;
-    for(let i=events.length-1;i>=0;i-=1){
+    const reasoning=[];
+    for(let i=0;i<events.length;i+=1){
       const event=events[i];
       if(!event||event.source_event_type!=='reasoning') continue;
       const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
       const rawText=String(payload.text||payload.reasoning||payload.thinking||'');
-      const stripped=_stripCompactEchoSuffix(rawText, visible);
-      if(!stripped.removed) continue;
-      const nextText=String(stripped.text||'').trim();
-      if(nextText){
-        _replaceAnchorActivityEventByLocalId(event.local_id,'reasoning',{
+      reasoning.push({index:i,event,text:rawText});
+    }
+    const combined=reasoning.map(item=>item.text).join('');
+    const stripped=_stripCompactEchoSuffix(combined, visible);
+    if(!stripped.removed) return false;
+    let remaining=String(stripped.text||'').length;
+    const remove=[];
+    for(const item of reasoning){
+      if(remaining<=0){
+        remove.push(item.index);
+        continue;
+      }
+      const nextText=item.text.slice(0,remaining);
+      remaining-=item.text.length;
+      if(nextText.trim()){
+        _replaceAnchorActivityEventByLocalId(item.event.local_id,'reasoning',{
           payload:{text:nextText},
         });
       }else{
-        events.splice(i,1);
+        remove.push(item.index);
       }
-      _renderAnchorLiveScene();
-      return true;
     }
-    return false;
+    remove.sort((a,b)=>b-a).forEach(index=>events.splice(index,1));
+    _renderAnchorLiveScene();
+    return true;
   }
   function _removeLiveReasoningEchoRows(visible){
     const turn=$('liveAssistantTurn');
@@ -3984,6 +4263,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText=live.text;
       removed=true;
     }
+    if(!String(liveReasoningText||'').trim()) _liveReasoningSegmentSeq=0;
     const anchorRemoved=_stripAnchorReasoningEcho(visible);
     const domRemoved=_removeLiveReasoningEchoRows(visible);
     if(removed) syncInflightAssistantMessage();
@@ -4902,11 +5182,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ? parsed.displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
   }
-  function _drainStreamFadeBeforeDone(onDone){
+  function _drainStreamFadeBeforeDone(onDone, options){
+    options=options||{};
+    const ownerStillCurrent=typeof options.ownerStillCurrent==='function'
+      ? options.ownerStillCurrent
+      : _activePaneStreamOwnerStillCurrent;
+    const onStale=typeof options.onStale==='function'?options.onStale:null;
     const drainStartedAt=performance.now();
     let forcedDone=false;
+    let finishInvoked=false;
+    const finish=()=>{
+      if(finishInvoked) return;
+      finishInvoked=true;
+      onDone();
+    };
+    const stale=()=>{
+      if(finishInvoked) return;
+      finishInvoked=true;
+      if(onStale) onStale();
+    };
     const step=()=>{
-      if(!assistantBody){onDone();return;}
+      if(!ownerStillCurrent()){stale();return;}
+      if(!assistantBody){finish();return;}
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
       const anchorProcessText=_streamFadeDomText||target;
@@ -4919,7 +5216,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Let the last released words visibly finish their stagger + fade before
         // the final renderMessages() DOM replacement removes the live spans.
         const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
+        setTimeout(()=>{
+          if(!ownerStillCurrent()){stale();return;}
+          finish();
+        }, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
         return;
       }
       // Final SSE `done` means the canonical completed session is available.
@@ -4928,10 +5228,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
         forcedDone=true;
         if(_smdParser) _smdEndParser();
-        onDone();
+        finish();
         return;
       }
-      setTimeout(()=>requestAnimationFrame(step), 33);
+      setTimeout(()=>{
+        if(!ownerStillCurrent()){stale();return;}
+        requestAnimationFrame(()=>{
+          if(!ownerStillCurrent()){stale();return;}
+          step();
+        });
+      }, 33);
     };
     step();
   }
@@ -4970,6 +5276,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantBody=null;
     segmentStart=assistantText.length;
     _freshSegment=true;
+    _liveReasoningSegmentSeq=0;
     _smdEndParser();
     _resetStreamFadeState();
   }
@@ -5127,6 +5434,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       segmentSeq:Number.isFinite(segmentSeq)&&segmentSeq>0?segmentSeq:undefined,
       burstId:Number.isFinite(burst)?burst:0,
     };
+  }
+
+  function _sealReasoningOnlySegmentBeforeTool(){
+    if(assistantRow||!String(liveReasoningText||'').trim()) return false;
+    const segmentSeq=_coerceLiveToolCallSeq(_liveThinkingPlacement().segmentSeq);
+    if(segmentSeq===undefined) return false;
+    _currentLiveSegmentSeq=Math.max(Number(_currentLiveSegmentSeq)||0,segmentSeq);
+    _assistantSegmentSeq=_currentLiveSegmentSeq;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight) inflight.currentLiveSegmentSeq=_currentLiveSegmentSeq;
+    return true;
   }
 
   function upsertLiveToolCall(d, phase){
@@ -5406,6 +5724,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(reasoningEcho) _stripLiveReasoningEcho(visible);
       liveReasoningText='';
+      _liveReasoningSegmentSeq=0;
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
           recordActivityBoundary();
@@ -5507,6 +5826,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
+      _sealReasoningOnlySegmentBeforeTool();
       const tc=upsertLiveToolCall(d,'start');
       if(!tc) return;
       const pendingDisplayTextBeforeTool=segmentStart===0
@@ -5521,6 +5841,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // tool cards. Close the current live card before appending a tool row.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       liveReasoningText='';
+      _liveReasoningSegmentSeq=0;
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       const pendingDisplayText=segmentStart===0
         ? (_parseStreamState().displayText||'')
@@ -5543,6 +5864,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
+      _sealReasoningOnlySegmentBeforeTool();
       const tc=upsertLiveToolCall(d,'complete');
       if(!tc) return;
       tc.is_error=!!d.is_error;
@@ -5767,37 +6089,55 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
-      const _finishDone=()=>{
-        // Bug A fix: cancel any pending rAF and mark stream finalized before
-        // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
-        // can reintroduce a stale thinking card or duplicate content.
-        _streamFinalized=true;
+      const _teardownStaleDoneOwner=()=>{
         _cancelAnimationFramePendingStreamRender();
         _streamFadeCleanupReduceMotionListener();
-        if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-        // Finalize smd parser — flushes any remaining buffered markdown state
-        // and runs Prism + copy buttons on the live segment before the DOM is replaced
-        if(assistantBody){
-          const _finBody=assistantBody;
-          _smdEndParser();
-          requestAnimationFrame(()=>{
-            if(typeof highlightCode==='function') highlightCode(_finBody);
-            if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
-            if(typeof renderKatexBlocks==='function') renderKatexBlocks();
-          });
-        } else {
-          _smdEndParser();
+        _scheduleAnchorRegistryCleanup(120000);
+        _closeSource(source);
+      };
+      const _finishDone=()=>{
+        if(!_completionOwnerStillCurrent(_doneData)||_streamDoneWouldOverwriteNewerPane(activeSid,streamId)){
+          _teardownStaleDoneOwner();
+          return;
         }
         const d=_doneData;
-        _flushReasoningToAnchor();
-        _applyToAnchor('done',{
-          status:d.status||'completed',
-          usage:d.usage||null,
-          created_at:d.created_at||null,
-        },_doneEvent);
-        _scheduleAnchorRegistryCleanup();
-        _clearAnchorProseIncrementalNode();
         const isActiveSession=_isSessionCurrentPane(activeSid);
+        const _applyDoneToAnchor=(options={})=>{
+          _applyToAnchor('done',{
+            status:d.status||'completed',
+            usage:d.usage||null,
+            created_at:d.created_at||null,
+          },_doneEvent,null,options);
+        };
+        if(isActiveSession){
+          // Bug A fix: cancel any pending rAF and mark stream finalized before
+          // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
+          // can reintroduce a stale thinking card or duplicate content.
+          _streamFinalized=true;
+          _cancelAnimationFramePendingStreamRender();
+          _streamFadeCleanupReduceMotionListener();
+          if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+          // Finalize smd parser — flushes any remaining buffered markdown state
+          // and runs Prism + copy buttons on the live segment before the DOM is replaced
+          if(assistantBody){
+            const _finBody=assistantBody;
+            _smdEndParser();
+            requestAnimationFrame(()=>{
+              if(!_activePaneStreamOwnerStillCurrent()) return;
+              if(typeof highlightCode==='function') highlightCode(_finBody);
+              if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
+              if(typeof renderKatexBlocks==='function') renderKatexBlocks();
+            });
+          } else {
+            _smdEndParser();
+          }
+          _flushReasoningToAnchor();
+          _applyDoneToAnchor();
+          _scheduleAnchorRegistryCleanup();
+          _clearAnchorProseIncrementalNode();
+        } else {
+          _applyDoneToAnchor({render:false});
+        }
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
@@ -5820,8 +6160,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
-        _clearApprovalForOwner();
-        _clearClarifyForOwner('terminal');
+        if(isActiveSession){
+          _clearApprovalForOwner();
+          _clearClarifyForOwner('terminal');
+        }else{
+          _clearApprovalForOwner({pane:false});
+          _clearClarifyForOwner('terminal',{pane:false});
+        }
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
@@ -5830,6 +6175,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.activeStreamId=null;
         }
         let lastAsst=null;
+        // A session switch starts by changing _loadingSessionId while the old
+        // pane and its chat EventSource can still own the finishing stream. Do
+        // not mutate that transitioning pane, but do settle and persist THIS
+        // closure's Anchor scene against the completed payload. Otherwise the
+        // final transcript survives the switch while its Worklog disappears.
+        if(!isActiveSession&&Array.isArray(completedSession.messages)){
+          const completedMessages=completedSession.messages;
+          const completedLastAsst=[...completedMessages].reverse().find(m=>m&&m.role==='assistant')||null;
+          if(reasoningText&&completedLastAsst&&!completedLastAsst.reasoning) completedLastAsst.reasoning=reasoningText;
+          if(completedLastAsst&&typeof completedLastAsst.content==='string'&&completedLastAsst.content){
+            const split=_splitThinkFromContent(completedLastAsst.content,completedLastAsst.reasoning);
+            if(split.content!==completedLastAsst.content){
+              completedLastAsst.content=split.content;
+              if(split.reasoning) completedLastAsst.reasoning=split.reasoning;
+            }
+          }
+          if(completedLastAsst&&d.usage&&typeof d.usage.duration_seconds==='number'){
+            completedLastAsst._turnDuration=d.usage.duration_seconds;
+          }
+          _attachProjectedAnchorSceneToLastAssistant(completedMessages,{
+            messageOffset:completedSession._messages_offset||0,
+            finalAnswer:_stripXmlToolCalls(assistantText.slice(segmentStart)),
+            persistTerminalLifecycle:true,
+          });
+        }
         if(isActiveSession){
           // Capture previous session totals BEFORE overwriting S.session with the new
           // cumulative values from the done event. prevIn/prevOut are the totals as of
@@ -5962,8 +6332,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
           // force-reloading immediately after "done" — the event already
           // delivered the final messages and tool calls.
-          if(typeof window!=='undefined') window._streamJustFinished=true;
-          setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
+          _markStreamJustFinishedForOwner();
           // Expand render window to cover all messages so the done render
           // doesn't hide Activity behind a tiny window (winSize=50).
           if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
@@ -5997,11 +6366,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
           else renderMessages({preserveScroll:true});
+          window._removeIdleLiveAssistantTurn?.(activeSid,streamId);
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
-          if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          if(typeof autoReadLastAssistant==='function') setTimeout(()=>{
+            if(_activePaneStreamOwnerStillCurrent()) autoReadLastAssistant();
+          }, 300);
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
@@ -6033,10 +6405,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        if(!isActiveSession) _teardownStaleDoneOwner();
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
-        _drainStreamFadeBeforeDone(_finishDone);
+        _drainStreamFadeBeforeDone(_finishDone,{
+          ownerStillCurrent:()=>_activePaneStreamOwnerStillCurrent(),
+          onStale:_finishDone,
+        });
         return;
       }
       _finishDone();
@@ -7059,9 +7435,10 @@ function _rememberApprovalPending(pending, pendingCount) {
 }
 
 function _clearApprovalPendingForSession(sid) {
+  const options=arguments[1]||{};
   if (sid) {
     _approvalPendingBySession.delete(sid);
-    if (typeof syncTopbar === 'function') syncTopbar();
+    if (!(options&&options.sync===false) && typeof syncTopbar === 'function') syncTopbar();
   }
 }
 
@@ -7878,9 +8255,10 @@ function _rememberClarifyPending(pending) {
 }
 
 function _clearClarifyPendingForSession(sid) {
+  const options=arguments[1]||{};
   if (sid) {
     _clarifyPendingBySession.delete(sid);
-    if (typeof syncTopbar === 'function') syncTopbar();
+    if (!(options&&options.sync===false) && typeof syncTopbar === 'function') syncTopbar();
   }
 }
 

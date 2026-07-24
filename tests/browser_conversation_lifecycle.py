@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Public browser gate for the normal + terminal-error lifecycle.
+"""Public browser gate for the conversation lifecycle proof matrix.
 
 This test boots the real WebUI server with isolated state, drives the real chat
 composer in Chromium, and supplies deterministic runtime events through the
 existing Hermes Gateway Runs API. It proves that one assistant turn keeps the
-same semantic activity across live streaming, settlement, and a hard reload.
+same semantic activity across live streaming, terminal errors, session
+reattachment, settlement, detached completion, and a hard reload.
 """
 
 from __future__ import annotations
@@ -22,24 +23,35 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 PROMPT = "Exercise the public conversation lifecycle gate."
+SEED_PROMPT = "Create an idle session for the lifecycle switch gate."
 REASONING_TEXT = "Checking the persistent assistant turn."
+SECOND_REASONING_TEXT = "Verifying the tool result before continuing."
+THIRD_REASONING_TEXT = "Confirming the no-prose tool boundary."
+CONTINUATION_REASONING_TEXT = "Continuing after the session reattach boundary."
+PROCESS_TEXT = "Inspecting the fixture before the tool call. "
 FINAL_TEXT = "Lifecycle gate final answer."
-FINAL_ACK_TEXT = "Lifecycle"
 FINAL_PREFIX = "Lifecycle gate "
 FINAL_SUFFIX = "final answer."
+FINAL_ACK_TEXT = "Lifecycle"
+SEED_FINAL_TEXT = "Idle session ready."
 TERMINAL_PROCESS_TEXT = "Lifecycle terminal process check"
 TERMINAL_ERROR_TEXT = "Lifecycle gate encountered a terminal-side error."
-SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
+SECOND_TOOL_NAME = "terminal"
+SECOND_TOOL_ID = "lifecycle-tool-2"
+SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+ERROR_SCENARIOS = {"terminal-error", "detached-terminal-error"}
+DETACHED_SCENARIOS = {"detached-terminal", "detached-terminal-error"}
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+BROKEN_REASONING_LOCAL_ID = "broken-runtime-reasoning-id"
 
 
 def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
@@ -204,6 +216,67 @@ def _anchor_projection_snapshot(page) -> dict:
     )
 
 
+def _lifecycle_client_snapshot(page) -> dict:
+    return page.evaluate(
+        """() => {
+          const registries = window._liveAnchorRegistries;
+          const anchorApi = window.HermesAssistantTurnAnchors;
+          const registryScenes = [];
+          if (registries && typeof registries.entries === 'function') {
+            for (const [streamId, registry] of registries.entries()) {
+              let scene = null;
+              try {
+                scene = anchorApi && typeof anchorApi.projectAssistantTurnAnchorActivityScene === 'function'
+                  ? anchorApi.projectAssistantTurnAnchorActivityScene(registry, {mode: 'compact_worklog'})
+                  : null;
+              } catch (error) {
+                scene = {error: String(error)};
+              }
+              const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
+              registryScenes.push({
+                streamId,
+                rowCount: rows.length,
+                rows: rows.map(row => ({
+                  role: row && row.role || null,
+                  source: row && row.source_event_type || null,
+                  localId: row && row.local_id || null,
+                  status: row && row.status || null,
+                })),
+              });
+            }
+          }
+          const sessionId = typeof S !== 'undefined' && S.session && S.session.session_id || null;
+          const loadingSessionId = typeof _loadingSessionId !== 'undefined' ? _loadingSessionId : null;
+          const inflight = typeof INFLIGHT === 'object' && INFLIGHT ? INFLIGHT : {};
+          const messages = typeof S !== 'undefined' && Array.isArray(S.messages) ? S.messages : [];
+          return {
+            sessionId,
+            loadingSessionId,
+            currentPane: typeof _isSessionCurrentPane === 'function' && sessionId
+              ? _isSessionCurrentPane(sessionId)
+              : null,
+            busy: Boolean(typeof S !== 'undefined' && S.busy),
+            activeStreamId: typeof S !== 'undefined' && S.activeStreamId || null,
+            registryScenes,
+            inflight: Object.entries(inflight).map(([sid, value]) => ({
+              sessionId: sid,
+              streamId: value && value.streamId || null,
+              reattach: Boolean(value && value.reattach),
+              anchorRowCount: Array.isArray(
+                value && value.anchorActivityScene && value.anchorActivityScene.activity_rows
+              ) ? value.anchorActivityScene.activity_rows.length : 0,
+            })),
+            messages: messages.map(message => ({
+              role: message && message.role || null,
+              live: Boolean(message && message._live),
+              anchorStreamId: message && message._anchor_stream_id || null,
+              hasAnchorScene: Boolean(message && message._anchor_activity_scene),
+            })),
+          };
+        }"""
+    )
+
+
 def _wait_for_live_anchor_projection(page) -> dict:
     try:
         page.wait_for_function(
@@ -238,6 +311,36 @@ def _wait_for_live_anchor_projection(page) -> dict:
             f"{_anchor_projection_snapshot(page)!r}"
         ) from exc
     return _anchor_projection_snapshot(page)
+
+
+def _wait_for_runtime_scene(
+    base_url: str,
+    session_id: str,
+    expected_reasoning_ids: list[str],
+    timeout: float = 10.0,
+) -> dict:
+    deadline = time.time() + timeout
+    url = f"{base_url}/api/session?session_id={session_id}&messages=0&resolve_model=0"
+    last_scene = None
+    while time.time() < deadline:
+        try:
+            payload = _get_json(url)
+        except (json.JSONDecodeError, TimeoutError, urllib.error.URLError, OSError):
+            time.sleep(0.2)
+            continue
+        session = payload.get("session") if isinstance(payload, dict) else None
+        snapshot = session.get("runtime_journal_snapshot") if isinstance(session, dict) else None
+        scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+        last_scene = scene
+        rows = scene.get("activity_rows", []) if isinstance(scene, dict) else []
+        reasoning_ids = [row.get("local_id") for row in rows if row.get("role") == "thinking"]
+        if reasoning_ids == expected_reasoning_ids:
+            return scene
+        time.sleep(0.2)
+    raise AssertionError(
+        "runtime journal scene did not expose the expected reasoning identities; "
+        f"expected={expected_reasoning_ids!r}, scene={last_scene!r}"
+    )
 
 
 def _terminate_process(proc: subprocess.Popen | None) -> None:
@@ -287,13 +390,15 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
 class DeterministicGateway:
     """A localhost-only Gateway Runs server with test-controlled phase gates."""
 
-    def __init__(self, scenario: str) -> None:
-        self.scenario = scenario
+    def __init__(self) -> None:
         self.activity_ready = threading.Event()
         self.release_settle = threading.Event()
+        self.continuation_ready = threading.Event()
+        self.release_final_prefix = threading.Event()
         self.final_prefix_ready = threading.Event()
         self.release_terminal = threading.Event()
         self.request_body = None
+        self.request_bodies = []
         self.emitted_events = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -339,6 +444,23 @@ class DeterministicGateway:
                         }
                     })
                     return
+                if request_path == "/v1/runs/lifecycle-seed-run/events":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self._event("message.delta", {
+                        "event": "message.delta",
+                        "delta": SEED_FINAL_TEXT,
+                    })
+                    self._event("run.completed", {
+                        "event": "run.completed",
+                        "usage": {"input_tokens": 8, "output_tokens": 4},
+                    })
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
                 if request_path != "/v1/runs/lifecycle-run-1/events":
                     self._json({"error": "not found"}, status=404)
                     return
@@ -352,11 +474,15 @@ class DeterministicGateway:
                         "event": "reasoning.available",
                         "text": REASONING_TEXT,
                     })
-                    if owner.scenario == "terminal-error":
+                    if SCENARIO in ERROR_SCENARIOS:
                         self._event("message.delta", {
                             "event": "message.delta",
                             "delta": TERMINAL_PROCESS_TEXT,
                         })
+                    self._event("message.delta", {
+                        "event": "message.delta",
+                        "delta": PROCESS_TEXT,
+                    })
                     self._event("tool.started", {
                         "event": "tool.started",
                         "tool": TOOL_NAME,
@@ -371,10 +497,40 @@ class DeterministicGateway:
                         "status": "completed",
                         "preview": "README fixture read",
                     })
+                    self._event("reasoning.available", {
+                        "event": "reasoning.available",
+                        "text": SECOND_REASONING_TEXT,
+                    })
+                    self._event("tool.started", {
+                        "event": "tool.started",
+                        "tool": SECOND_TOOL_NAME,
+                        "tool_call_id": SECOND_TOOL_ID,
+                        "status": "running",
+                        "args": {"command": "git status --short"},
+                    })
+                    self._event("tool.completed", {
+                        "event": "tool.completed",
+                        "tool": SECOND_TOOL_NAME,
+                        "tool_call_id": SECOND_TOOL_ID,
+                        "status": "completed",
+                        "preview": "clean fixture",
+                    })
+                    self._event("reasoning.available", {
+                        "event": "reasoning.available",
+                        "text": THIRD_REASONING_TEXT,
+                    })
                     owner.activity_ready.set()
                     if not owner.release_settle.wait(timeout=30):
                         return
-                    if owner.scenario == "terminal-error":
+                    if SCENARIO == "session-reattach":
+                        self._event("reasoning.available", {
+                            "event": "reasoning.available",
+                            "text": CONTINUATION_REASONING_TEXT,
+                        })
+                        owner.continuation_ready.set()
+                    if not owner.release_final_prefix.wait(timeout=30):
+                        return
+                    if SCENARIO in ERROR_SCENARIOS:
                         owner.final_prefix_ready.set()
                         if not owner.release_terminal.wait(timeout=30):
                             return
@@ -382,22 +538,24 @@ class DeterministicGateway:
                             "event": "run.failed",
                             "error": TERMINAL_ERROR_TEXT,
                         })
-                    else:
-                        self._event("message.delta", {
-                            "event": "message.delta",
-                            "delta": FINAL_PREFIX,
-                        })
-                        owner.final_prefix_ready.set()
-                        if not owner.release_terminal.wait(timeout=30):
-                            return
-                        self._event("message.delta", {
-                            "event": "message.delta",
-                            "delta": FINAL_SUFFIX,
-                        })
-                        self._event("run.completed", {
-                            "event": "run.completed",
-                            "usage": {"input_tokens": 12, "output_tokens": 5},
-                        })
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        return
+                    self._event("message.delta", {
+                        "event": "message.delta",
+                        "delta": FINAL_PREFIX,
+                    })
+                    owner.final_prefix_ready.set()
+                    if not owner.release_terminal.wait(timeout=30):
+                        return
+                    self._event("message.delta", {
+                        "event": "message.delta",
+                        "delta": FINAL_SUFFIX,
+                    })
+                    self._event("run.completed", {
+                        "event": "run.completed",
+                        "usage": {"input_tokens": 12, "output_tokens": 5},
+                    })
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
@@ -408,8 +566,16 @@ class DeterministicGateway:
                     self._json({"error": "not found"}, status=404)
                     return
                 length = int(self.headers.get("Content-Length", "0"))
-                owner.request_body = json.loads(self.rfile.read(length) or b"{}")
-                self._json({"run_id": "lifecycle-run-1"})
+                request_body = json.loads(self.rfile.read(length) or b"{}")
+                owner.request_body = request_body
+                owner.request_bodies.append(request_body)
+                prompt = request_body.get("input")
+                if prompt == SEED_PROMPT:
+                    self._json({"run_id": "lifecycle-seed-run"})
+                elif prompt == PROMPT:
+                    self._json({"run_id": "lifecycle-run-1"})
+                else:
+                    self._json({"error": "unexpected deterministic prompt"}, status=400)
 
         return Handler
 
@@ -418,6 +584,7 @@ class DeterministicGateway:
 
     def close(self) -> None:
         self.release_settle.set()
+        self.release_final_prefix.set()
         self.release_terminal.set()
         self._server.shutdown()
         self._server.server_close()
@@ -446,10 +613,15 @@ def _capture_anchor_scene_requests(page):
     def on_request(request):
         if "/api/session/anchor-scene" not in request.url:
             return
+        try:
+            payload = request.post_data_json
+        except Exception:
+            payload = request.post_data
         events.append({
             "type": "request",
             "method": request.method,
             "url": request.url,
+            "payload": payload,
         })
 
     def on_response(response):
@@ -500,6 +672,9 @@ def _activity_snapshot(page) -> dict:
             .map(el => el.innerText.trim()).filter(Boolean) : [];
           return {
             live: Boolean(document.querySelector('#liveAssistantTurn')),
+            turnIdentity: {
+              streamId: turn ? turn.getAttribute('data-anchor-stream-id') || '' : '',
+            },
             clientState: {
               busy: Boolean(typeof S !== 'undefined' && S.busy),
               activeStreamId: (typeof S !== 'undefined' && S.activeStreamId) || null,
@@ -513,6 +688,9 @@ def _activity_snapshot(page) -> dict:
               settled: group.getAttribute('data-anchor-settled-scene-owner'),
               classes: group.className,
               deferred: group.getAttribute('data-worklog-rows-deferred'),
+              activityKey: group.getAttribute('data-tool-worklog-key') || '',
+              streamId: group.getAttribute('data-anchor-stream-id') || '',
+              turnStartedAt: group.getAttribute('data-turn-started-at') || '',
               expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
@@ -520,6 +698,9 @@ def _activity_snapshot(page) -> dict:
               role: row.getAttribute('data-anchor-row-role'),
               source: row.getAttribute('data-anchor-source-event-type'),
               status: row.getAttribute('data-anchor-row-status'),
+              rowId: row.getAttribute('data-anchor-row-id') || '',
+              localId: row.getAttribute('data-anchor-local-id') || '',
+              streamId: row.getAttribute('data-anchor-stream-id') || '',
               tool: row.getAttribute('data-tool-name'),
               text: row.innerText.trim(),
               classes: row.className,
@@ -584,10 +765,6 @@ def _is_terminal_process_row_text(text: str) -> bool:
     )
 
 
-def _tool_rows(snapshot: dict) -> list[dict]:
-    return [row for row in snapshot["rows"] if row["role"] == "tool"]
-
-
 def _is_terminal_row_error(row: dict) -> bool:
     status = (row.get("status") or "").strip()
     if status in {"error", "failed"}:
@@ -595,7 +772,7 @@ def _is_terminal_row_error(row: dict) -> bool:
     if status and status not in {"", "done"}:
         return False
     row_text = (row.get("text") or "").lower()
-    row_classes = (row.get("classes") or "")
+    row_classes = row.get("classes") or ""
     return (
         "error" in row_text
         or "warning" in row_classes
@@ -603,57 +780,90 @@ def _is_terminal_row_error(row: dict) -> bool:
     )
 
 
-def _assert_no_running_tool_rows(rows: list[dict]) -> None:
-    running = [
-        row
-        for row in rows
-        if (
-            row.get("status") == "running"
-            or ("tool-card-running" in row.get("classes", ""))
-        )
-    ]
-    assert not running, rows
+def _assert_process_row_present(snapshot: dict) -> list[dict]:
+    rows = _process_rows(snapshot)
+    assert len(rows) == 1, snapshot
+    assert all(_is_terminal_process_row_text(row["text"]) for row in rows), snapshot
+    assert all(TERMINAL_PROCESS_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
+    return rows
 
 
-def _assert_live_activity(snapshot: dict) -> None:
+def _assert_live_activity(snapshot: dict, *, reasoning_count: int = 3) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
     roles = [row["role"] for row in snapshot["rows"]]
-    assert roles.count("thinking") == 1, snapshot
-    assert roles.count("tool") == 1, snapshot
-    tool_rows = _tool_rows(snapshot)
-    assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
-    _assert_no_running_tool_rows(tool_rows)
+    assert roles.count("thinking") == reasoning_count, snapshot
+    assert roles.count("tool") == 2, snapshot
+    tool_rows = [row for row in snapshot["rows"] if row["role"] == "tool"]
+    assert [row["tool"] for row in tool_rows] == [TOOL_NAME, SECOND_TOOL_NAME], snapshot
+    assert all("tool-card-running" not in row["classes"] for row in tool_rows), snapshot
     assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    assert any(SECOND_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    assert any(THIRD_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    expected_order = [
+        "thinking",
+        "tool",
+        "thinking",
+        "tool",
+        "thinking",
+    ]
+    if reasoning_count == 4:
+        assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+        expected_order.append("thinking")
+    assert [row["role"] for row in snapshot["rows"] if row["role"] in {"thinking", "tool"}] == expected_order, snapshot
     assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
     assert any(character.isdigit() for character in snapshot["summary"][0]["label"]), snapshot
 
 
-def _assert_settled(snapshot: dict, scenario: str) -> None:
+def _assert_settled(snapshot: dict, *, reasoning_count: int, scenario: str) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
     roles = [row["role"] for row in snapshot["rows"]]
-    assert "thinking" in roles and "tool" in roles, snapshot
-    tool_rows = _tool_rows(snapshot)
-    assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
-    _assert_no_running_tool_rows(tool_rows)
+    assert roles.count("thinking") == reasoning_count and roles.count("tool") == 2, snapshot
+    tool_rows = [row for row in snapshot["rows"] if row["role"] == "tool"]
+    assert [row["tool"] for row in tool_rows] == [TOOL_NAME, SECOND_TOOL_NAME], snapshot
+    assert all("tool-card-running" not in row["classes"] for row in tool_rows), snapshot
     assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
-    if scenario == "terminal-error":
-        assert "terminal" in roles, snapshot
-        terminal_rows = _terminal_rows(snapshot)
-        assert terminal_rows, snapshot
-        assert all(_is_terminal_row_error(row) for row in terminal_rows), snapshot
+    assert any(THIRD_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    if reasoning_count == 4:
+        assert any(CONTINUATION_REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    if scenario in ERROR_SCENARIOS:
+        if scenario == "terminal-error":
+            assert "terminal" in roles, snapshot
+            terminal_rows = _terminal_rows(snapshot)
+            assert terminal_rows, snapshot
+            assert all(_is_terminal_row_error(row) for row in terminal_rows), snapshot
         assert snapshot["assistantMessage"] is not None, snapshot
         turn_duration = snapshot["assistantMessage"].get("turnDuration")
         assert isinstance(turn_duration, (int, float)) and turn_duration > 0, snapshot
         assert snapshot["assistantMessage"]["hasError"] is True, snapshot
-        assert snapshot["assistantMessage"]["anchorTerminalState"] in {"error", "failed"}, snapshot
+        assert snapshot["assistantMessage"]["anchorTerminalState"] in {"error", "failed", "errored"}, snapshot
         assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
         assert sum(TERMINAL_ERROR_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
         assert TERMINAL_ERROR_TEXT in snapshot["transcript"], snapshot
     else:
         assert sum(FINAL_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
         assert snapshot["transcript"].count(FINAL_TEXT) == 1, snapshot
+
+
+def _semantic_activity(snapshot: dict, *, include_identity: bool = False) -> list[dict]:
+    """Canonical user-visible activity in renderer order."""
+    semantic = []
+    for row in snapshot["rows"]:
+        if row["role"] == "thinking":
+            text = " ".join(row["text"].split())
+            if text.startswith("Thinking "):
+                text = text[len("Thinking ") :]
+            entry = {"role": "thinking", "text": text}
+        elif row["role"] == "tool":
+            entry = {"role": "tool", "tool": row["tool"]}
+        else:
+            continue
+        if include_identity:
+            entry["rowId"] = row["rowId"]
+            entry["localId"] = row["localId"]
+        semantic.append(entry)
+    return semantic
 
 
 def _parse_json_payload(raw: str | bytes | None) -> dict:
@@ -672,29 +882,91 @@ def _parse_json_payload(raw: str | bytes | None) -> dict:
     return payload
 
 
-def _assert_process_row_present(snapshot: dict) -> list[dict]:
-    rows = _process_rows(snapshot)
-    assert len(rows) == 1, snapshot
-    assert all(_is_terminal_process_row_text(row["text"]) for row in rows), snapshot
-    assert all(TERMINAL_PROCESS_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
-    return rows
+def _assert_same_live_turn(before: dict, after: dict) -> None:
+    _assert_live_activity(after)
+    assert _semantic_activity(after) == _semantic_activity(before), {
+        "before": _semantic_activity(before),
+        "after": _semantic_activity(after),
+    }
+    assert after["clientState"]["activeStreamId"] == before["clientState"]["activeStreamId"], {
+        "before": before["clientState"],
+        "after": after["clientState"],
+    }
+    assert after["turnIdentity"]["streamId"] == before["turnIdentity"]["streamId"], {
+        "before": before["turnIdentity"],
+        "after": after["turnIdentity"],
+    }
+    before_group = before["summary"][0]
+    after_group = after["summary"][0]
+    for key in ("activityKey", "streamId", "turnStartedAt"):
+        assert after_group[key] == before_group[key], {"key": key, "before": before_group, "after": after_group}
+    # ``rowId`` includes the row's current projection index. Reattachment may
+    # legitimately rebuild that projection, while ``localId`` is the durable
+    # source-event identity that must survive the rebuild.
+    before_rows = [(row["role"], row["localId"]) for row in before["rows"]]
+    after_rows = [(row["role"], row["localId"]) for row in after["rows"]]
+    assert after_rows == before_rows, {"before": before_rows, "after": after_rows}
 
 
-def _semantic_activity(snapshot: dict) -> list[dict]:
-    """Canonical user-visible activity, independent of renderer row ordering."""
-    semantic = []
-    for row in snapshot["rows"]:
-        if row["role"] == "thinking":
-            text = " ".join(row["text"].split())
-            if text.startswith("Thinking "):
-                text = text[len("Thinking ") :]
-            semantic.append({"role": "thinking", "text": text})
-        elif row["role"] == "tool":
-            semantic.append({"role": "tool", "tool": row["tool"]})
-    return sorted(semantic, key=lambda item: json.dumps(item, sort_keys=True))
+def _assert_live_continuation(before: dict, after: dict) -> None:
+    _assert_live_activity(after, reasoning_count=4)
+    before_semantic = _semantic_activity(before)
+    after_semantic = _semantic_activity(after)
+    assert after_semantic[:-1] == before_semantic, {
+        "before": before_semantic,
+        "after": after_semantic,
+    }
+    assert {key: after_semantic[-1][key] for key in ("role", "text")} == {
+        "role": "thinking",
+        "text": CONTINUATION_REASONING_TEXT,
+    }, after_semantic
+    stream_id = before["clientState"]["activeStreamId"]
+    assert after["rows"][-1]["localId"] == f"live-reasoning:{stream_id}:4", after
+
+
+def _replace_runtime_reasoning_identity(route, session_id: str, bite_hits: list[str]) -> None:
+    parsed = urlsplit(route.request.url)
+    query = parse_qs(parsed.query)
+    is_target = (
+        route.request.method == "GET"
+        and parsed.path == "/api/session"
+        and query.get("session_id") == [session_id]
+        and query.get("messages") == ["0"]
+        and query.get("resolve_model") == ["0"]
+    )
+    if not is_target:
+        route.continue_()
+        return
+    response = route.fetch()
+    payload = response.json()
+    session = payload.get("session") if isinstance(payload, dict) else None
+    snapshot = session.get("runtime_journal_snapshot") if isinstance(session, dict) else None
+    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+    rows = scene.get("activity_rows", []) if isinstance(scene, dict) else []
+    reasoning = next((row for row in rows if row.get("role") == "thinking"), None)
+    if isinstance(reasoning, dict):
+        reasoning["local_id"] = BROKEN_REASONING_LOCAL_ID
+        reasoning["row_id"] = BROKEN_REASONING_LOCAL_ID
+        identity = reasoning.get("identity")
+        if isinstance(identity, dict):
+            identity["local_id"] = BROKEN_REASONING_LOCAL_ID
+        bite_hits.append(route.request.url)
+    route.fulfill(status=response.status, content_type="application/json", body=json.dumps(payload))
 
 
 def main() -> int:
+    if SCENARIO not in {"normal", "terminal-error", "session-reattach", *DETACHED_SCENARIOS}:
+        print(f"SETUP FAIL: unsupported LIFECYCLE_SCENARIO={SCENARIO!r}", file=sys.stderr)
+        return 2
+    if TEST_BITE not in {"", "drop-anchor-persistence", "drop-terminal-anchor-row", "replace-runtime-reasoning-id"}:
+        print(f"SETUP FAIL: unsupported LIFECYCLE_TEST_BITE={TEST_BITE!r}", file=sys.stderr)
+        return 2
+    if TEST_BITE == "drop-terminal-anchor-row" and SCENARIO not in ERROR_SCENARIOS:
+        print("SETUP FAIL: drop-terminal-anchor-row requires terminal-error", file=sys.stderr)
+        return 2
+    if TEST_BITE == "replace-runtime-reasoning-id" and SCENARIO != "session-reattach":
+        print("SETUP FAIL: replace-runtime-reasoning-id requires session-reattach", file=sys.stderr)
+        return 2
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -710,24 +982,7 @@ def main() -> int:
         tempfile.mkdtemp(prefix="hermes-lifecycle-artifacts-")
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    scenario = SCENARIO
-    if scenario not in {"normal", "terminal-error"}:
-        raise ValueError(
-            f"Unsupported LIFECYCLE_SCENARIO {scenario!r}; "
-            "expected 'normal' or 'terminal-error'"
-        )
-    if TEST_BITE not in {"", "drop-anchor-persistence", "drop-terminal-anchor-row"}:
-        raise ValueError(
-            f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
-            "expected one of '', 'drop-anchor-persistence', 'drop-terminal-anchor-row'"
-        )
-    if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
-        raise ValueError(
-            "drop-terminal-anchor-row is only valid for "
-            "LIFECYCLE_SCENARIO=terminal-error"
-        )
-
-    gateway = DeterministicGateway(scenario)
+    gateway = DeterministicGateway()
     gateway.start()
 
     agent_dir = state_dir / "no-agent"
@@ -773,6 +1028,7 @@ def main() -> int:
     page = None
     errors = []
     anchor_scene_requests = []
+    pre_terminal_client_snapshot = None
     try:
         proc, log, log_path, base_url = _start_webui_server(repo_root, env, artifact_dir)
         playwright = sync_playwright().start()
@@ -783,46 +1039,65 @@ def main() -> int:
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
         anchor_scene_requests = _capture_anchor_scene_requests(page)
-        if TEST_BITE:
+        bite_hits = []
+        if TEST_BITE == "drop-anchor-persistence":
+            page.route(
+                "**/api/session/anchor-scene",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body='{"ok":true}',
+                ),
+            )
+        elif TEST_BITE == "drop-terminal-anchor-row":
             def _route_anchor_scene(route):
-                if TEST_BITE == "drop-anchor-persistence":
-                    route.fulfill(
-                        status=200,
-                        content_type="application/json",
-                        body='{"ok":true}',
-                    )
-                    return
-                if TEST_BITE == "drop-terminal-anchor-row":
-                    raw_payload = _safe_request_post_data(route.request)
-                    payload = _parse_json_payload(raw_payload)
-                    if isinstance(payload, dict):
-                        scene = payload.get("scene")
-                        if isinstance(scene, dict):
-                            rows = scene.get("activity_rows")
-                            if isinstance(rows, list):
-                                kept = [
-                                    row for row in rows
-                                    if not (isinstance(row, dict) and row.get("role") == "terminal")
-                                ]
-                                if len(kept) != len(rows):
-                                    mutated = dict(payload)
-                                    updated_scene = dict(scene)
-                                    updated_scene["activity_rows"] = kept
-                                    mutated["scene"] = updated_scene
-                                    response = route.fetch(post_data=json.dumps(mutated))
-                                    route.fulfill(response=response)
-                                    return
-                    response = route.fetch()
-                    route.fulfill(response=response)
-                    return
+                raw_payload = _safe_request_post_data(route.request)
+                payload = _parse_json_payload(raw_payload)
+                scene = payload.get("scene") if isinstance(payload, dict) else None
+                rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+                if isinstance(rows, list):
+                    kept = [
+                        row for row in rows
+                        if not (isinstance(row, dict) and row.get("role") == "terminal")
+                    ]
+                    if len(kept) != len(rows):
+                        mutated = dict(payload)
+                        updated_scene = dict(scene)
+                        updated_scene["activity_rows"] = kept
+                        mutated["scene"] = updated_scene
+                        response = route.fetch(post_data=json.dumps(mutated))
+                        route.fulfill(response=response)
+                        return
                 response = route.fetch()
                 route.fulfill(response=response)
-                return
 
             page.route("**/api/session/anchor-scene", _route_anchor_scene)
         errors = _capture_page_errors(page)
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
+        seed_session_id = None
+        if SCENARIO in {"session-reattach", *DETACHED_SCENARIOS}:
+            page.locator("#msg").fill(SEED_PROMPT)
+            page.locator("#btnSend").click()
+            page.wait_for_function(
+                "text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId && "
+                "(document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg=SEED_FINAL_TEXT,
+                timeout=15000,
+            )
+            seed_session_id = page.evaluate("S.session && S.session.session_id")
+            assert seed_session_id, "seed session id missing after settlement"
+            page.wait_for_selector(
+                f'.session-item[data-sid="{seed_session_id}"]',
+                state="visible",
+                timeout=10000,
+            )
+            page.locator("#btnNewChat").click()
+            page.wait_for_function(
+                "sid => S.session && S.session.session_id && S.session.session_id !== sid && !S.busy",
+                arg=seed_session_id,
+                timeout=15000,
+            )
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
@@ -832,53 +1107,208 @@ def main() -> int:
                 f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}"
             )
         page.wait_for_function(
-            """({reasoning, tool}) => {
+            """({reasoning, secondReasoning, thirdReasoning, tool, secondTool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
               const text = turn.innerText || '';
-              return text.includes(reasoning) &&
-                Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));
+              const thinkingRows = turn.querySelectorAll('[data-anchor-row-role="thinking"]');
+              return text.includes(reasoning) && text.includes(secondReasoning) &&
+                text.includes(thirdReasoning) && thinkingRows.length === 3 &&
+                Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`)) &&
+                Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${secondTool}"]`));
             }""",
-            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            arg={
+                "reasoning": REASONING_TEXT,
+                "secondReasoning": SECOND_REASONING_TEXT,
+                "thirdReasoning": THIRD_REASONING_TEXT,
+                "tool": TOOL_NAME,
+                "secondTool": SECOND_TOOL_NAME,
+            },
             timeout=10000,
         )
         live_snapshot = _activity_snapshot(page)
         _assert_live_activity(live_snapshot)
-        if scenario == "terminal-error":
+        if SCENARIO in ERROR_SCENARIOS:
             _assert_process_row_present(live_snapshot)
-            print("OK  live activity: terminal-error run keeps reasoning + completed tool")
+            print("OK  live activity: terminal-error run keeps process + reasoning + completed tool activity")
         else:
-            print("OK  live activity: one Anchor worklog with reasoning + completed tool")
+            print("OK  live activity: one Anchor worklog with reasoning + completed tool activity")
         _wait_for_live_anchor_projection(page)
+        active_session_id = live_snapshot["clientState"]["sessionId"]
+        active_stream_id = live_snapshot["clientState"]["activeStreamId"]
+        assert active_session_id and active_stream_id, live_snapshot
+
+        if SCENARIO == "session-reattach":
+            expected_reasoning_ids = [
+                f"live-reasoning:{active_stream_id}:1",
+                f"live-reasoning:{active_stream_id}:2",
+                f"live-reasoning:{active_stream_id}:3",
+            ]
+            _wait_for_runtime_scene(base_url, active_session_id, expected_reasoning_ids)
+            page.wait_for_selector(
+                f'.session-item[data-sid="{active_session_id}"].streaming',
+                state="visible",
+                timeout=10000,
+            )
+            page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
+            page.wait_for_function(
+                "({sid, text}) => S.session && S.session.session_id === sid && !S.busy && "
+                "!S.activeStreamId && !document.querySelector('#liveAssistantTurn') && "
+                "(document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg={"sid": seed_session_id, "text": SEED_FINAL_TEXT},
+                timeout=15000,
+            )
+            print("OK  session switch: idle session replaces the active live turn")
+            page.evaluate(
+                """({sid, stream}) => {
+                  if (typeof INFLIGHT === 'object' && INFLIGHT) delete INFLIGHT[sid];
+                  if (typeof clearInflightState === 'function') clearInflightState(sid);
+                  if (window._liveAnchorRegistries) window._liveAnchorRegistries.delete(stream);
+                }""",
+                {"sid": active_session_id, "stream": active_stream_id},
+            )
+            if TEST_BITE == "replace-runtime-reasoning-id":
+                page.route(
+                    "**/api/session*",
+                    lambda route: _replace_runtime_reasoning_identity(route, active_session_id, bite_hits),
+                )
+            page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
+            page.wait_for_function(
+                "({sid, stream, reasoning, secondReasoning, thirdReasoning, tool, secondTool}) => {"
+                "  const turn = document.querySelector('#liveAssistantTurn');"
+                "  return S.session && S.session.session_id === sid && S.busy === true && "
+                "    S.activeStreamId === stream && turn && "
+                "    turn.getAttribute('data-anchor-stream-id') === stream && "
+                "    (turn.innerText || '').includes(reasoning) && "
+                "    (turn.innerText || '').includes(secondReasoning) && "
+                "    (turn.innerText || '').includes(thirdReasoning) && "
+                "    turn.querySelectorAll('[data-anchor-row-role=\"thinking\"]').length === 3 && "
+                "    Boolean(turn.querySelector(`[data-anchor-row-role=\"tool\"][data-tool-name=\"${tool}\"]`)) && "
+                "    Boolean(turn.querySelector(`[data-anchor-row-role=\"tool\"][data-tool-name=\"${secondTool}\"]`));"
+                "}",
+                arg={
+                    "sid": active_session_id,
+                    "stream": active_stream_id,
+                    "reasoning": REASONING_TEXT,
+                    "secondReasoning": SECOND_REASONING_TEXT,
+                    "thirdReasoning": THIRD_REASONING_TEXT,
+                    "tool": TOOL_NAME,
+                    "secondTool": SECOND_TOOL_NAME,
+                },
+                timeout=15000,
+            )
+            if TEST_BITE == "replace-runtime-reasoning-id":
+                page.unroute("**/api/session*")
+                assert len(bite_hits) == 1, bite_hits
+            reattached_snapshot = _activity_snapshot(page)
+            _assert_same_live_turn(live_snapshot, reattached_snapshot)
+            live_snapshot = reattached_snapshot
+            print("OK  session reattach: same stream and Anchor activity resume without duplication")
 
         gateway.release_settle.set()
-        if not gateway.final_prefix_ready.wait(timeout=10):
-            raise AssertionError("mock Gateway did not emit the final-answer prefix")
-        if scenario == "normal":
+        if SCENARIO == "session-reattach":
+            if not gateway.continuation_ready.wait(timeout=10):
+                raise AssertionError("mock Gateway did not emit the post-reattach reasoning continuation")
             page.wait_for_function(
                 """text => {
                   const turn = document.querySelector('#liveAssistantTurn');
-                  return Boolean(turn) && turn.innerText.includes(text);
+                  return turn && (turn.innerText || '').includes(text) &&
+                    turn.querySelectorAll('[data-anchor-row-role="thinking"]').length === 4;
+                }""",
+                arg=CONTINUATION_REASONING_TEXT,
+                timeout=10000,
+            )
+            continued_snapshot = _activity_snapshot(page)
+            _assert_live_continuation(live_snapshot, continued_snapshot)
+            live_snapshot = continued_snapshot
+            print("OK  live continuation: post-reattach reasoning appends with a new Anchor identity")
+        gateway.release_final_prefix.set()
+        if not gateway.final_prefix_ready.wait(timeout=10):
+            raise AssertionError("mock Gateway did not emit the final-answer prefix")
+        terminal_text = TERMINAL_ERROR_TEXT if SCENARIO in ERROR_SCENARIOS else FINAL_TEXT
+        if SCENARIO in {"normal", "session-reattach"}:
+            page.wait_for_function(
+                """text => {
+                  const turn = document.querySelector('#liveAssistantTurn');
+                  return turn && (turn.innerText || '').includes(text);
                 }""",
                 arg=FINAL_ACK_TEXT,
                 timeout=10000,
             )
+        if SCENARIO == "session-reattach":
+            page.evaluate(
+                """() => {
+                  const originalSave = _saveComposerDraftNow;
+                  let releaseSave;
+                  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+                  window.__releaseLifecycleDraftSave = releaseSave;
+                  _saveComposerDraftNow = async (...args) => {
+                    await saveGate;
+                    return originalSave(...args);
+                  };
+                }"""
+            )
+            page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
+            page.wait_for_function(
+                "({loadingSid, activeSid}) => _loadingSessionId === loadingSid && "
+                "S.session && S.session.session_id === activeSid && S.activeStreamId",
+                arg={"loadingSid": seed_session_id, "activeSid": active_session_id},
+                timeout=10000,
+            )
+            pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
             gateway.release_terminal.set()
             page.wait_for_function(
-                """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
-                  ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",
-                arg=FINAL_TEXT,
+                "sid => S.session && S.session.session_id === sid && S.busy === false",
+                arg=active_session_id,
+                timeout=10000,
+            )
+            page.evaluate("window.__releaseLifecycleDraftSave()")
+            page.wait_for_function(
+                "sid => S.session && S.session.session_id === sid && !S.busy && !S.activeStreamId",
+                arg=seed_session_id,
                 timeout=15000,
             )
+            page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
+        elif SCENARIO in DETACHED_SCENARIOS:
+            assert seed_session_id, "seed session id missing for detached-terminal scenario"
+            page.locator(f'.session-item[data-sid="{seed_session_id}"]').click()
+            page.wait_for_function(
+                "({seedSid, activeSid}) => {"
+                "  const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS : {};"
+                "  return S.session && S.session.session_id === seedSid && !S.busy && !S.activeStreamId && "
+                "    !document.querySelector('#liveAssistantTurn') && !live[activeSid] && "
+                "    typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[activeSid] && "
+                "    INFLIGHT[activeSid].reattach === true;"
+                "}",
+                arg={"seedSid": seed_session_id, "activeSid": active_session_id},
+                timeout=15000,
+            )
+            print("OK  session switch: old chat EventSource detached after ordinary switch")
+            pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
+            gateway.release_terminal.set()
+            scene = _wait_for_persisted_scene(
+                base_url,
+                active_session_id,
+                anchor_scene_requests=anchor_scene_requests,
+            )
+            assert scene.get("version") == "activity_scene_v1", scene
+            assert page.evaluate(
+                "({seedSid, finalText}) => S.session && S.session.session_id === seedSid && "
+                "!S.busy && !S.activeStreamId && "
+                "!((document.querySelector('#msgInner') || {}).innerText || '').includes(finalText)",
+                {"seedSid": seed_session_id, "finalText": terminal_text},
+            )
+            page.locator(f'.session-item[data-sid="{active_session_id}"]').click()
         else:
+            pre_terminal_client_snapshot = _lifecycle_client_snapshot(page)
             gateway.release_terminal.set()
-            page.wait_for_function(
-                """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
-                  !document.querySelector('#liveAssistantTurn') &&
-                  ((document.querySelector('#msgInner') || {}).innerText||'').includes(text)""",
-                arg=TERMINAL_ERROR_TEXT,
-                timeout=15000,
-            )
+        page.wait_for_function(
+            """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
+              !document.querySelector('#liveAssistantTurn') &&
+              (document.querySelector('#msgInner') || {}).innerText?.includes(text)""",
+            arg=terminal_text,
+            timeout=15000,
+        )
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
         if TEST_BITE == "drop-terminal-anchor-row":
@@ -893,23 +1323,11 @@ def main() -> int:
                 row.get("role") for row in scene_rows
                 if isinstance(row, dict)
             ]
-            assert any(
-                isinstance(row, dict) and row.get("role") == "prose"
-                for row in scene_rows
-            ), scene
-            assert any(
-                isinstance(row, dict) and row.get("role") == "thinking"
-                for row in scene_rows
-            ), scene
-            assert any(
-                isinstance(row, dict) and row.get("role") == "tool"
-                for row in scene_rows
-            ), scene
+            assert any(isinstance(row, dict) and row.get("role") == "prose" for row in scene_rows), scene
+            assert any(isinstance(row, dict) and row.get("role") == "thinking" for row in scene_rows), scene
+            assert any(isinstance(row, dict) and row.get("role") == "tool" for row in scene_rows), scene
             assert all(
-                not (
-                    isinstance(row, dict)
-                    and row.get("role") == "terminal"
-                )
+                not (isinstance(row, dict) and row.get("role") == "terminal")
                 for row in scene_rows
             ), scene
             print(
@@ -926,29 +1344,17 @@ def main() -> int:
                 row.get("role") for row in persisted_rows
                 if isinstance(row, dict)
             ]
-            assert any(
-                isinstance(row, dict) and row.get("role") == "thinking"
-                for row in persisted_rows
-            ), {
+            assert any(isinstance(row, dict) and row.get("role") == "thinking" for row in persisted_rows), {
                 "persisted_rows": persisted_rows,
             }
-            assert any(
-                isinstance(row, dict) and row.get("role") == "prose"
-                for row in persisted_rows
-            ), {
+            assert any(isinstance(row, dict) and row.get("role") == "prose" for row in persisted_rows), {
                 "persisted_rows": persisted_rows,
             }
-            assert any(
-                isinstance(row, dict) and row.get("role") == "tool"
-                for row in persisted_rows
-            ), {
+            assert any(isinstance(row, dict) and row.get("role") == "tool" for row in persisted_rows), {
                 "persisted_rows": persisted_rows,
             }
             assert all(
-                not (
-                    isinstance(row, dict)
-                    and row.get("role") == "terminal"
-                )
+                not (isinstance(row, dict) and row.get("role") == "terminal")
                 for row in persisted_rows
             ), {
                 "persisted_rows": persisted_rows,
@@ -964,7 +1370,7 @@ def main() -> int:
                 anchor_scene_requests=anchor_scene_requests,
             )
             assert scene.get("version") == "activity_scene_v1", scene
-            if scenario == "terminal-error":
+            if SCENARIO == "terminal-error":
                 scene_rows = scene.get("activity_rows") or []
                 assert any(
                     isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
@@ -975,22 +1381,25 @@ def main() -> int:
             timeout=10000,
         )
         settled_snapshot = _activity_snapshot(page)
-        _assert_settled(settled_snapshot, scenario)
-        if scenario == "terminal-error":
+        settled_reasoning_count = 4 if SCENARIO == "session-reattach" else 3
+        _assert_settled(settled_snapshot, reasoning_count=settled_reasoning_count, scenario=SCENARIO)
+        if SCENARIO in ERROR_SCENARIOS:
             _assert_process_row_present(settled_snapshot)
         assert _semantic_activity(settled_snapshot) == _semantic_activity(live_snapshot), {
             "live": _semantic_activity(live_snapshot),
             "settled": _semantic_activity(settled_snapshot),
         }
-        if scenario == "terminal-error":
+        if SCENARIO == "terminal-error":
             print("OK  settled: terminal row and same activity survived terminal settlement")
+        elif SCENARIO in ERROR_SCENARIOS:
+            print("OK  settled: detached terminal error and same activity survived settlement")
         else:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
         page.wait_for_function(
             "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-            arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
+            arg=terminal_text,
             timeout=15000,
         )
         _expand_settled_worklog(page)
@@ -999,14 +1408,21 @@ def main() -> int:
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)
-        _assert_settled(reloaded_snapshot, scenario)
-        if scenario == "terminal-error":
+        _assert_settled(reloaded_snapshot, reasoning_count=settled_reasoning_count, scenario=SCENARIO)
+        if SCENARIO in ERROR_SCENARIOS:
             _assert_process_row_present(reloaded_snapshot)
         assert _semantic_activity(reloaded_snapshot) == _semantic_activity(settled_snapshot), {
             "settled": _semantic_activity(settled_snapshot),
             "reloaded": _semantic_activity(reloaded_snapshot),
         }
-        if scenario == "terminal-error":
+        assert _semantic_activity(reloaded_snapshot, include_identity=True) == _semantic_activity(
+            settled_snapshot,
+            include_identity=True,
+        ), {
+            "settled": _semantic_activity(settled_snapshot, include_identity=True),
+            "reloaded": _semantic_activity(reloaded_snapshot, include_identity=True),
+        }
+        if SCENARIO in ERROR_SCENARIOS:
             settled_terminal = _terminal_rows(settled_snapshot)
             reloaded_terminal = _terminal_rows(reloaded_snapshot)
             settled_process = _process_rows(settled_snapshot)
@@ -1019,17 +1435,24 @@ def main() -> int:
                 "settled_process": settled_process,
                 "reloaded_process": reloaded_process,
             }
-            assert len(settled_terminal) == len(reloaded_terminal) == 1, {
-                "settled_terminal": settled_terminal,
-                "reloaded_terminal": reloaded_terminal,
-            }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
-                "settled_terminal": settled_terminal[0],
-                "reloaded_terminal": reloaded_terminal[0],
-            }
+            if SCENARIO == "terminal-error":
+                assert len(settled_terminal) == len(reloaded_terminal) == 1, {
+                    "settled_terminal": settled_terminal,
+                    "reloaded_terminal": reloaded_terminal,
+                }
+                assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
+                    "settled_terminal": settled_terminal[0],
+                    "reloaded_terminal": reloaded_terminal[0],
+                }
         print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
-        assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
+        expected_inputs = (
+            [SEED_PROMPT, PROMPT]
+            if SCENARIO in {"session-reattach", *DETACHED_SCENARIOS}
+            else [PROMPT]
+        )
+        actual_inputs = [request.get("input") for request in gateway.request_bodies]
+        assert actual_inputs == expected_inputs, actual_inputs
         if errors:
             raise AssertionError(f"unexpected browser errors: {errors!r}")
         context.close()
@@ -1045,10 +1468,12 @@ def main() -> int:
                 page.screenshot(path=str(artifact_dir / "failure.png"), full_page=True)
                 (artifact_dir / "snapshot.json").write_text(
                     json.dumps({
-                        "scenario": scenario,
+                        "scenario": SCENARIO,
                         "test_bite": TEST_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
+                        "pre_terminal_client": pre_terminal_client_snapshot,
+                        "post_failure_client": _lifecycle_client_snapshot(page),
                         "anchor_projection": _anchor_projection_snapshot(page),
                         "gateway_events": gateway.emitted_events,
                         "dom": _activity_snapshot(page),

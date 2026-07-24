@@ -315,12 +315,13 @@ process.stdout.write(JSON.stringify({{appendResult: appendResult === undefined, 
 
 
 def test_chat_activity_display_mode_settled_hide_all_scene_persists_without_worklog():
-    start = MESSAGES_JS.index("function _attachProjectedAnchorSceneToLastAssistant(messages){")
+    start = MESSAGES_JS.index("function _attachProjectedAnchorSceneToLastAssistant")
     end = MESSAGES_JS.index("function _upsertAnchorProcessProse", start)
     block = MESSAGES_JS[start:end]
-    persist_index = block.index("_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);")
+    persist_index = block.index("_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, attachOptions);")
     return_index = block.index("return hasWorklogRows;")
 
+    assert "const attachOptions=(typeof options==='object'&&options)?options:{};" in block
     assert "const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);" in block
     assert "const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);" in block
     assert (

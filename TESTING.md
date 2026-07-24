@@ -95,12 +95,18 @@ that breaks the page for everyone).
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
 multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,
-while a localhost-only fixture supplies reasoning, tool, process, and final/error
-events through the existing Hermes Gateway Runs API. The gate now covers both
-normal and terminal-error proof-matrix rows, asserting semantic activity during
-live streaming, after settlement, and after hard reload, including
-transcript-backed `activity_scene_v1` persistence and zero unexpected browser
-errors. It uses isolated temporary state and no provider credentials.
+while a localhost-only fixture supplies reasoning, tool, process, final, and
+terminal-error events through the existing Hermes Gateway Runs API. The gate now
+covers normal, terminal-error, active session reattach, and detached terminal
+proof rows, asserting semantic activity during live streaming, after settlement,
+and after hard reload, including transcript-backed `activity_scene_v1`
+persistence and zero unexpected browser errors. The reattach row leaves an active
+session through the real sidebar and returns to prove that the same stream ID,
+timer origin, and ordered multi-segment Anchor rows reattach without duplication
+or loss. The detached-terminal row performs an unblocked normal switch, confirms
+the old chat EventSource is detached, releases terminal completion while another
+session is active, and verifies settled/hard-reload parity without active-pane
+mutation. The scenarios use isolated temporary state and no provider credentials.
 
 ```bash
 pip install -r requirements.txt playwright
@@ -109,8 +115,17 @@ python -m playwright install --with-deps chromium
 # Normal-path deterministic conversation lifecycle gate.
 python tests/browser_conversation_lifecycle.py
 
-# Terminal-error lifecycle gate (new row in the proof matrix).
-LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
+# Terminal-error lifecycle gate.
+LIFECYCLE_SCENARIO=terminal-error \
+  python tests/browser_conversation_lifecycle.py
+
+# Active session reattach lifecycle gate.
+LIFECYCLE_SCENARIO=session-reattach \
+  python tests/browser_conversation_lifecycle.py
+
+# Detached terminal completion after ordinary switch detachment.
+LIFECYCLE_SCENARIO=detached-terminal \
+  python tests/browser_conversation_lifecycle.py
 ```
 
 To certify that the gate catches its target failure, the test owns an opt-in
@@ -120,19 +135,31 @@ must fail at the hard-reload boundary:
 ```bash
 LIFECYCLE_TEST_BITE=drop-anchor-persistence \
   python tests/browser_conversation_lifecycle.py
+```
 
-# Terminal-state-specific mutation bite: remove terminal row from persisted scene
-# so hard reload cannot recover terminal status.
+The terminal-error scenario has a mutation that removes the terminal row from
+the persisted scene. It must fail at the hard-reload boundary:
+
+```bash
 LIFECYCLE_SCENARIO=terminal-error \
 LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
   python tests/browser_conversation_lifecycle.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs both current
-proof rows (`normal` and `terminal-error`) and stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+The reattach scenario has a separate mutation that changes the first reasoning
+identity in the server runtime snapshot. It must fail at the reattach boundary:
+
+```bash
+LIFECYCLE_SCENARIO=session-reattach \
+LIFECYCLE_TEST_BITE=replace-runtime-reasoning-id \
+  python tests/browser_conversation_lifecycle.py
+```
+
+The dedicated `Conversation lifecycle (informational)` workflow runs the current
+proof rows (`normal`, `terminal-error`, `session-reattach`, and
+`detached-terminal`) and stays non-blocking while the public matrix expands. The
+maintainer's private QA harness remains broader; later public slices will add
+cancellation, compression, and broader reconnect/replay recovery.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present

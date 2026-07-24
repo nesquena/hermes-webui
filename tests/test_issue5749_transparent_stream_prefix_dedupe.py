@@ -107,6 +107,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
 function _anchorSceneActiveMode() {{ return 'transparent_stream'; }}
@@ -212,6 +214,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
 function _anchorSceneActiveMode() {{ return 'transparent_stream'; }}
@@ -295,6 +299,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
 function _anchorSceneActiveMode() {{ return 'transparent_stream'; }}
@@ -732,6 +738,8 @@ eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromScene'));
+eval(extractFunc('_anchorSceneFinalAnswerHintFromTranscript'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
 function _anchorSceneActiveMode() {{ return 'transparent_stream'; }}

@@ -35,7 +35,20 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 def _function_body(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.index(marker)
-    brace = src.index("{", start)
+    params = src.index("(", start)
+    depth = 0
+    close = -1
+    for idx in range(params, len(src)):
+        ch = src[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    assert close != -1, f"{name} params did not close"
+    brace = src.index("{", close)
     depth = 0
     for idx in range(brace, len(src)):
         ch = src[idx]
@@ -52,7 +65,20 @@ def _extract(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.index(marker)
     body = _function_body(src, name)
-    sig = src[start : src.index("{", start)]
+    params = src.index("(", start)
+    depth = 0
+    close = -1
+    for idx in range(params, len(src)):
+        ch = src[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    assert close != -1, f"{name} params did not close"
+    sig = src[start : src.index("{", close)]
     return f"{sig}{{{body}}}"
 
 
