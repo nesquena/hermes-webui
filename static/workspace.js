@@ -259,28 +259,31 @@ function _workspaceRouteForPath(path, kind, opts={}){
 }
 
 function _workspaceRouteForPathRel(path, kind, opts={}){
-  const asScalar = (value) => typeof value === 'string' ? value.trim() : '';
-  const candidateOwner = opts && opts.owner;
-  const owner = (() => {
-    const sessionId = asScalar(candidateOwner && candidateOwner.session_id)
-      || asScalar(S && S.session && S.session.session_id);
-    if(!sessionId) return null;
-    const workspaceRoot = asScalar(
-      candidateOwner && candidateOwner.workspace_root !== undefined
-        ? candidateOwner.workspace_root
-        : (S && S.session && S.session.workspace),
-    );
-    return {
-      session_id: sessionId,
-      workspace_root: workspaceRoot ? workspaceRoot.replace(/\/+$/,'') : '',
+  const ownerScalar = typeof _artifactScalarString === 'function'
+    ? _artifactScalarString
+    : (value) => (typeof value === 'string' ? value.trim() : '');
+  const resolveOwner = typeof _artifactOwnerFromOptions === 'function'
+    ? _artifactOwnerFromOptions
+    : (candidate) => {
+      const owner = candidate && typeof candidate === 'object' ? candidate.owner : null;
+      const ownerSessionId = ownerScalar(owner && owner.session_id)
+        || ownerScalar(candidate && candidate.session_id)
+        || ownerScalar(S && S.session && S.session.session_id);
+      if(!ownerSessionId) return null;
+      const explicitRoot = ownerScalar(owner && owner.workspace_root);
+      const sessionRoot = ownerScalar(S && S.session && S.session.workspace);
+      return {
+        session_id: ownerSessionId,
+        workspace_root: (explicitRoot || sessionRoot || '').replace(/\/+$/,''),
+      };
     };
-  })();
+  const owner = resolveOwner(opts);
   if(!owner) return '';
   const normalizedPath = _normalizeWorkspaceRelPath(path);
   const ownerSessionId = owner.session_id;
   const activeSessionId = S.session ? S.session.session_id : null;
-  const activeWorkspaceRoot = asScalar(S.session && S.session.workspace).replace(/\/+$/,'');
-  const ownerWorkspaceRoot = owner.workspace_root;
+  const activeWorkspaceRoot = ownerScalar(S.session && S.session && S.session.workspace).replace(/\/+$/,'');
+  const ownerWorkspaceRoot = ownerScalar(owner.workspace_root);
   const workspaceRootsMatch = !ownerWorkspaceRoot && !activeWorkspaceRoot
     ? true
     : ownerWorkspaceRoot === activeWorkspaceRoot;
@@ -529,8 +532,11 @@ function _artifactCandidatesFromText(text){
 
 function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
+  const artifactScalarString = typeof _artifactScalarString === 'function'
+    ? _artifactScalarString
+    : (value) => (typeof value === 'string' ? value.trim() : '');
   const normalizeToolName = (value) => {
-    const name = typeof value === 'string' ? value.trim() : '';
+    const name = artifactScalarString(value);
     if(typeof _artifactToolName === 'function'){
       try{
         return _artifactToolName(value);
@@ -1189,7 +1195,29 @@ function _prismLanguageForPath(path){
 }
 
 async function openFile(path, opts={}){
-  const owner = _artifactOwnerFromOptions(opts);
+  const resolveOwner = typeof _artifactOwnerFromOptions === 'function'
+    ? _artifactOwnerFromOptions
+    : (candidate) => {
+      const owner = candidate && typeof candidate === 'object' ? candidate.owner : null;
+      const sessionId = (() => {
+        const candidateSession = candidate && (
+          (candidate.owner && candidate.owner.session_id) ||
+          candidate.session_id
+        );
+        if(typeof candidateSession === 'string' || typeof candidateSession === 'number'){
+          const id = String(candidateSession).trim();
+          if(id) return id;
+        }
+        const session = S && S.session && (S.session.session_id || S.session.session_id);
+        return typeof session === 'string' || typeof session === 'number' ? String(session).trim() : '';
+      })();
+      if(!sessionId) return null;
+      return {
+        session_id: sessionId,
+        workspace_root: '',
+      };
+    };
+  const owner = resolveOwner(opts);
   if(!path || typeof path !== 'string' || !owner) return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
