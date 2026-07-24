@@ -83,14 +83,15 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     )
     scene = {
         "artifacts": [
-            {"payload": {"path": "output/report.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-1"}},
-            {"payload": {"path": "./output/report.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-2"}},
-            {"payload": {"path": "output/old-workspace.md", "workspace_root": "/workspace-a"}},
-            {"payload": {"path": "/workspace/output/absolute.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-3"}},
-            {"payload": {"path": "../escape.md", "workspace_root": "/workspace"}},
-            {"payload": {"path": "output\\windows.md", "workspace_root": "/workspace"}},
-            {"payload": {"path": "C:/outside/windows.md", "workspace_root": "/workspace"}},
-            {"payload": {"path": "output/unbound.md"}},
+            {"type":"artifact_reference","payload": {"path": "output/report.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-1"}},
+            {"type":"artifact_reference","payload": {"path": "./output/report.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-2"}},
+            {"type":"artifact_reference","payload": {"path": "output/old-workspace.md", "workspace_root": "/workspace-a"}},
+            {"type":"artifact_reference","payload": {"path": "/workspace/output/absolute.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-3"}},
+            {"type":"artifact_reference","payload": {"path": "../escape.md", "workspace_root": "/workspace"}},
+            {"type":"artifact_reference","payload": {"path": "output\\windows.md", "workspace_root": "/workspace"}},
+            {"type":"artifact_reference","payload": {"path": "C:/outside/windows.md", "workspace_root": "/workspace"}},
+            {"type":"artifact_reference","payload": {"path": "output/unbound.md"}},
+            {"type":"wrong_type","payload": {"path":"output/untyped.md","workspace_root":"/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-4"}},
         ]
     }
     output = _run_node(
@@ -106,6 +107,7 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
         "session_id": "sid-owner",
         "tool_name": "write_file",
         "tool_call_id": "call-1",
+        "type": "artifact_reference",
         "owner": {
             "session_id": "sid-owner",
             "workspace_root": "/workspace",
@@ -130,7 +132,7 @@ def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fa
         "const S={session:{workspace:'/workspace',session_id:'sid-owner'},messages:[{role:'assistant',content:'final'}]};\n"
         + helpers
         + "\nconsole.log(JSON.stringify(_turnArtifactEntriesForMessage({"
-        + "_anchor_activity_scene:{artifacts:[{payload:{path:'output/large-worklog.md',workspace_root:'/workspace',session_id:'sid-owner',tool_name:'patch',tool_call_id:'call-2'}}]}},0)));"
+        + "_anchor_activity_scene:{artifacts:[{type:'artifact_reference',payload:{path:'output/large-worklog.md',workspace_root:'/workspace',session_id:'sid-owner',tool_name:'patch',tool_call_id:'call-2'}}]}},0)));"
     )
     assert output == [{
         "path": "output/large-worklog.md",
@@ -138,6 +140,7 @@ def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fa
         "session_id": "sid-owner",
         "tool_name": "patch",
         "tool_call_id": "call-2",
+        "type": "artifact_reference",
         "owner": {
             "session_id": "sid-owner",
             "workspace_root": "/workspace",
@@ -281,7 +284,11 @@ def test_paginated_session_response_keeps_paired_landed_turn_artifacts():
         {"role": "assistant", "content": "final answer"},
     ]
 
-    paths_by_final_index = routes._final_turn_artifact_paths(messages, workspace_root="/workspace")
+    paths_by_final_index = routes._final_turn_artifact_paths(
+        messages,
+        workspace_root="/workspace",
+        session_id="sid-work",
+    )
     window, offset = routes._message_window_for_display(messages, msg_limit=1)
     hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(window, paths_by_final_index, message_offset=offset)
 
@@ -295,6 +302,7 @@ def test_paginated_session_response_keeps_paired_landed_turn_artifacts():
                 "workspace_root": "/workspace",
                 "tool_call_id": "call-1",
                 "tool_name": "patch",
+                "session_id": "sid-work",
                 "source": "transcript_replay",
             },
         }
@@ -370,21 +378,59 @@ def test_replay_rejects_failed_unpaired_duplicate_and_mismatched_writes():
         {"role": "assistant", "content": "final"},
     ]
 
-    assert routes._final_turn_artifact_paths(messages, workspace_root="/workspace") == {
+    assert routes._final_turn_artifact_paths(
+        messages,
+        workspace_root="/workspace",
+        session_id="sid-default",
+    ) == {
         10: [
             {
                 "path": "output/report.md",
                 "workspace_root": "/workspace",
                 "tool_call_id": "call-patch",
                 "tool_name": "patch",
+                "session_id": "sid-default",
             },
             {
                 "path": "output/result-field.md",
                 "workspace_root": "/workspace",
                 "tool_call_id": "call-result",
                 "tool_name": "write_file",
+                "session_id": "sid-default",
             }
         ]
+    }
+
+
+def test_final_turn_artifact_projection_keeps_session_id_for_replay():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "write the report"},
+        {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {"name": "patch"}}]},
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "patch",
+            "content": json.dumps({"success": True, "files_modified": ["/workspace/output/report.md"]}),
+        },
+        {"role": "assistant", "content": "final"},
+    ]
+
+    assert routes._final_turn_artifact_paths(
+        messages,
+        workspace_root="/workspace",
+        session_id="sid-projection",
+    ) == {
+        3: [
+            {
+                "path": "output/report.md",
+                "workspace_root": "/workspace",
+                "tool_call_id": "call-1",
+                "tool_name": "patch",
+                "session_id": "sid-projection",
+            }
+        ],
     }
 
 

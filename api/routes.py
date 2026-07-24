@@ -8688,7 +8688,9 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
-def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str) -> list[dict]:
+def _turn_artifact_descriptors_from_tool_result(
+    message, *, workspace_root: str, session_id: str | None = None
+) -> list[dict]:
     """Return only paired, canonical landed mutations from one tool row."""
     if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
         return []
@@ -8711,6 +8713,7 @@ def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str)
             candidate,
             workspace_root=workspace_root,
             tool_call_id=tool_call_id,
+            session_id=session_id,
         )
         if descriptors:
             return descriptors
@@ -8746,7 +8749,12 @@ def _declared_turn_tool_calls(messages) -> dict[str, str]:
     return {call_id: name for call_id, name in declarations.items() if call_id not in invalid}
 
 
-def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, list[dict]]:
+def _final_turn_artifact_paths(
+    messages,
+    *,
+    workspace_root: str,
+    session_id: str | None = None,
+) -> dict[int, list[dict]]:
     """Return paired, landed artifact descriptors keyed by final answer index."""
     source = list(messages or [])
     paths_by_final_index = {}
@@ -8820,7 +8828,11 @@ def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, li
                 invalid_result_ids.add(tool_call_id)
                 continue
             seen_result_ids.add(tool_call_id)
-            descriptors_for_call = _turn_artifact_descriptors_from_tool_result(message, workspace_root=workspace_root)
+            descriptors_for_call = _turn_artifact_descriptors_from_tool_result(
+                message,
+                workspace_root=workspace_root,
+                session_id=session_id,
+            )
             if descriptors_for_call:
                 descriptors_by_id[tool_call_id] = descriptors_for_call
                 result_order.append(tool_call_id)
@@ -12980,6 +12992,7 @@ def handle_get(handler, parsed) -> bool:
                 _final_turn_artifacts = _final_turn_artifact_paths(
                     _all_msgs,
                     workspace_root=str(getattr(s, "workspace", "") or ""),
+                    session_id=getattr(s, "session_id", None) or "",
                 )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
