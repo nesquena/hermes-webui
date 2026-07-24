@@ -266,25 +266,35 @@ def test_static_catalog_injects_default_into_active_named_custom_group():
 
 
 @pytest.mark.parametrize(
-    ("configured_provider", "canonical_provider"),
+    ("configured_provider", "default_model", "canonical_provider", "owned_model"),
     [
-        ("CLIPpoxy", "clippoxy"),
-        ("CLIP_poxy", "clip-poxy"),
+        ("CLIPpoxy", "my-model", "clippoxy", "my-model"),
+        ("CLIP_poxy", "my-model", "clip-poxy", "my-model"),
+        ("CLIP_poxy", "@CLIP_poxy:my-model", "clip-poxy", "my-model"),
+        ("CLIP_poxy", "CLIP_poxy/my-model", "clip-poxy", "my-model"),
+        (
+            "CLIP_poxy",
+            "@CLIP_poxy:my-model:free",
+            "clip-poxy",
+            "my-model:free",
+        ),
     ],
 )
 def test_static_catalog_canonicalizes_active_provider_ownership(
     configured_provider,
+    default_model,
     canonical_provider,
+    owned_model,
 ):
     """Active ownership uses the same canonical provider ID as its group."""
     cfg.cfg = {
         "model": {
             "provider": configured_provider,
-            "default": "my-model",
+            "default": default_model,
         },
         "providers": {
             configured_provider: {
-                "models": ["my-model", "another-model"],
+                "models": [owned_model, "another-model"],
             },
         },
         "fallback_providers": [
@@ -306,7 +316,7 @@ def test_static_catalog_canonicalizes_active_provider_ownership(
     assert len(owned_groups) == 1
     assert not any(group["provider"] == "Default" for group in catalog["groups"])
     assert [model["id"] for model in owned_groups[0]["models"]] == [
-        "my-model",
+        owned_model,
         "another-model",
     ]
 

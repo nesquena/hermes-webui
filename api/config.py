@@ -5498,13 +5498,27 @@ def _static_models_catalog_without_live_probes() -> dict:
         def _provider_model_identity(model_id: object, provider_id: object) -> str:
             """Strip only this group's routing prefix, preserving vendor paths."""
             raw = str(model_id or "").strip()
-            pid = str(provider_id or "").strip()
+            pid = _canonicalise_provider_id(provider_id)
             if not raw or not pid:
                 return raw
-            raw_lower = raw.lower()
-            for prefix in (f"@{pid.lower()}:", f"{pid.lower()}/"):
-                if raw_lower.startswith(prefix):
-                    return raw[len(prefix):]
+
+            parsed_hint = _parse_provider_qualified_model_id(raw)
+            if parsed_hint is not None:
+                model_remainder, provider_hint = parsed_hint
+                if (
+                    model_remainder
+                    and _canonicalise_provider_id(provider_hint) == pid
+                ):
+                    return model_remainder
+                return raw
+
+            if "/" in raw:
+                provider_candidate, model_remainder = raw.split("/", 1)
+                if (
+                    model_remainder
+                    and _canonicalise_provider_id(provider_candidate) == pid
+                ):
+                    return model_remainder
             return raw
 
         if target_provider_id:
