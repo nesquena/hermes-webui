@@ -11339,7 +11339,11 @@ function _transparentToolDetailHtml(tc, status){
   // duration meta when present. (Trifecta finding V6 — reduce redundancy.)
   const meta=[];
   if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
-  const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  // `preview` describes the invocation (for execute_code it can be the Python
+  // source itself); it is not tool stdout. Only explicit result-bearing fields
+  // belong in the Output tab. Falling back to preview makes blocked/interrupted
+  // calls falsely present their input as output.
+  const output=String((tc&&(tc.snippet||tc.result||tc.output))||'').trim();
   const argHtml=[...meta,...argEntries].map(([k,v])=>{
     let sv=typeof v==='string'?v:JSON.stringify(v,null,2);
     // Redact secret-bearing arg values before rendering the transparent Full
@@ -11348,7 +11352,7 @@ function _transparentToolDetailHtml(tc, status){
     if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
     return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
   }).join('');
-  return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
+  return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${output?`<div class="tool-card-result"><pre>${esc(output)}</pre></div>`:''}</div>`;
 }
 function _syncTransparentEventControls(turn){
   if(!turn||!isTransparentStream()) return;
@@ -16011,7 +16015,7 @@ function renderMessages(options){
       persisted.forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
         const ptid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
-        const psnip=tc.snippet||tc.result||tc.output||tc.preview||'';
+        const psnip=tc.snippet||tc.result||tc.output||'';
         if(ptid&&psnip&&!transparentPersistedSnippetByTid[ptid]) transparentPersistedSnippetByTid[ptid]=String(psnip);
       });
     }catch(e){}
@@ -16540,7 +16544,7 @@ function renderMessages(options){
       persisted.forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
         const ptid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
-        const psnip=tc.snippet||tc.result||tc.output||tc.preview||'';
+        const psnip=tc.snippet||tc.result||tc.output||'';
         if(ptid&&psnip&&!persistedSnippetByTid[ptid]) persistedSnippetByTid[ptid]=String(psnip);
       });
     }catch(e){}
@@ -16633,7 +16637,7 @@ function renderMessages(options){
         }
         const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-        const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||persistedSnippetByTid[tid]||'';
+        const resultSnippet=resultsByTid[tid]||tc.snippet||tc.result||tc.output||persistedSnippetByTid[tid]||'';
         const argsSnap=_toolArgsSnapshot(args);
         derived.push(copyLiveToolMetadata({
           name,
@@ -16675,7 +16679,7 @@ function renderMessages(options){
           const args=tc.args||{};
           const tid=tc.id||tc.call_id||tc.tool_call_id||tc.tid||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-          const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
+          const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||'');
           const argsSnap=_toolArgsSnapshot(args,4);
           derived.push(copyLiveToolMetadata({
             name,
