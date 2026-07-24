@@ -3282,9 +3282,15 @@ def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url
     if provider_lower in builtin_providers or provider_canonical in builtin_providers:
         return True
 
-    # Provider can be omitted for an implicit MiniMax configuration.  Its
-    # canonical endpoint still makes this an effective, known route.
-    if host == 'api.minimaxi.com' or host.endswith('.minimaxi.com'):
+    # Provider can be omitted for an implicit MiniMax configuration. Its
+    # canonical China or global endpoint still makes this an effective, known
+    # route.
+    if (
+        host == 'api.minimaxi.com'
+        or host.endswith('.minimaxi.com')
+        or host == 'api.minimax.io'
+        or host.endswith('.minimax.io')
+    ):
         return True
     return False
 

@@ -23,6 +23,8 @@ class TestAuxReasoningExtraRouteContract:
         ) is True
         assert _route_accepts_reasoning_extra('lmstudio', 'qwen3-8b', 'http://localhost:1234/v1') is True
         assert _route_accepts_reasoning_extra('', 'minimax-m2', 'https://api.minimaxi.com/v1') is True
+        assert _route_accepts_reasoning_extra('', 'MiniMax-M3', 'https://api.minimax.io/v1') is True
+        assert _route_accepts_reasoning_extra('', 'MiniMax-M3', 'https://edge.api.minimax.io/v1') is True
 
     def test_builtin_routes_are_resolved_when_url_is_implicit(self):
         assert _route_accepts_reasoning_extra('deepseek', 'deepseek-reasoner', '') is True
@@ -221,6 +223,36 @@ class TestAuxReasoningExtraRouteContract:
             'custom:unconfigured', None, 'https://api.minimaxi.com/v1',
         )
         assert request['extra_body'] is None
+
+    def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
+        """The canonical global MiniMax endpoint must not inherit the main route."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': '',
+            'model': 'MiniMax-M3',
+            'base_url': 'https://api.minimax.io/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'openai',
+                'default': 'gpt-main',
+                'base_url': 'https://api.openai.com/v1',
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            None, 'MiniMax-M3', 'https://api.minimax.io/v1',
+        )
+        assert request['extra_body'] == {
+            'reasoning': {'enabled': False},
+            'reasoning_split': True,
+        }
 
     @pytest.mark.parametrize(
         ('main_provider', 'main_model', 'main_base_url'),
