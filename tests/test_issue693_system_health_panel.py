@@ -1219,6 +1219,7 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
     monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
     monkeypatch.setattr(profiles, "_active_profile", "default")
+    monkeypatch.setattr(profiles, "_deleted_profile_home_tombstones", {})
 
     def _row(name: str, home: pathlib.Path) -> dict:
         return {
@@ -1239,6 +1240,9 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     def fake_create_profile(name, **_kwargs):
         home = custom_root / name
         home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            f"webui:\n  sessions_cache_max: {caps[name]}\n", encoding="utf-8"
+        )
         catalog[name] = _row(name, home)
 
     def fake_delete_profile(name, **_kwargs):
@@ -1249,18 +1253,6 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     def fake_list_profiles():
         return [copy.deepcopy(row) for row in catalog.values()]
 
-    def fake_get_profile_runtime_env(home, profile_name=None):
-        if profile_name is not None:
-            profiles._remember_profile_home(profile_name, home)
-            generation = config.observe_sessions_cap_sources(home, (caps[profile_name], 1), None)
-            config.publish_sessions_cap_snapshot(
-                home,
-                {"webui": {"sessions_cache_max": caps[profile_name]}},
-                generation=generation,
-                owner="profile",
-            )
-        return {}
-
     _install_fake_hermes_cli_profiles(
         monkeypatch,
         create_profile=fake_create_profile,
@@ -1268,7 +1260,6 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
         seed_profile_skills=lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(profiles, "list_profiles_api", fake_list_profiles)
-    monkeypatch.setattr(profiles, "get_profile_runtime_env", fake_get_profile_runtime_env)
 
     created = profiles.create_profile_api("work")
     home = custom_root / "work"
@@ -1295,6 +1286,9 @@ def test_successful_delete_and_recreate_update_diagnostics_observation(monkeypat
     assert config.try_get_sessions_cap_snapshot(home)[1] is False
     assert config._sessions_cap_generations[conventional_key][2] > conventional_generation
     assert config.try_get_sessions_cap_snapshot(conventional_home)[1] is False
+    profiles.get_profile_runtime_env(home, "work")
+    assert profiles.get_cached_profile_home_for_diagnostics("work") is None
+    assert config.try_get_sessions_cap_snapshot(home)[1] is False
 
     caps["work"] = 202
     profiles.create_profile_api("work")
@@ -1431,14 +1425,21 @@ def test_named_session_streaming_setup_publishes_profile_cap(monkeypatch, tmp_pa
     from api import profiles
     from api import streaming
 
-    home = tmp_path / "physical-work"
-    home.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "profiles").mkdir()
+    home = root / "custom" / "work"
+    home.mkdir(parents=True)
     (home / "config.yaml").write_text(
         "webui:\n  sessions_cache_max: 731\n", encoding="utf-8"
     )
     monkeypatch.setattr(config, "_sessions_cap_snapshots", __import__("collections").OrderedDict())
     monkeypatch.setattr(config, "_sessions_cap_generations", {})
-    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: home)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_profile_home_snapshot", {"default": root})
+    monkeypatch.setattr(profiles, "_deleted_profile_home_tombstones", {})
+    profiles._remember_profile_home("work", home)
 
     class _Meter:
         def begin_session(self, _stream_id):
@@ -1499,8 +1500,9 @@ def test_named_session_streaming_setup_publishes_profile_cap(monkeypatch, tmp_pa
 
     assert setup == {"home": str(home), "has_profile": True, "name": home.resolve()}
     assert config.try_get_sessions_cap_snapshot(home) == (731, True)
+    assert config.try_get_sessions_cap_snapshot(root / "profiles" / "work")[1] is False
 
-    monkeypatch.setattr(profiles, "_profile_home_snapshot", {})
+    monkeypatch.setattr(profiles, "_profile_home_snapshot", {"default": root})
     monkeypatch.setattr(config, "_sessions_cap_snapshots", __import__("collections").OrderedDict())
     monkeypatch.setattr(config, "_sessions_cap_generations", {})
     session.profile = "   "

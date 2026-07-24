@@ -389,6 +389,7 @@ _root_profile_name_cache_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
 _profile_home_snapshot: dict[str, Path] = {'default': _DEFAULT_HERMES_HOME}
 _profile_home_snapshot_version = 0
+_deleted_profile_home_tombstones: dict[str, set[Path]] = {}
 _profile_identity_mutation_lock = threading.Lock()
 _profile_identity_mutation_active = False
 _PROFILE_HOME_SNAPSHOT_MAX = 64
@@ -398,12 +399,17 @@ def _canonical_profile_home(home: Path | str) -> Path:
     return Path(home).expanduser().resolve()
 
 
-def _remember_profile_home(name: str, home: Path) -> None:
+def _remember_profile_home(name: str, home: Path, *, clear_deleted: bool = False) -> None:
     global _profile_home_snapshot, _profile_home_snapshot_version
     if not name or not _PROFILE_ID_RE.fullmatch(name):
         return
     canonical_home = _canonical_profile_home(home)
     with _root_profile_name_cache_lock:
+        deleted_homes = _deleted_profile_home_tombstones.get(name, set())
+        if canonical_home in deleted_homes and not clear_deleted:
+            return
+        if clear_deleted:
+            _deleted_profile_home_tombstones.pop(name, None)
         snapshot = dict(_profile_home_snapshot)
         for alias, alias_home in tuple(snapshot.items()):
             if alias != 'default' and alias != name and alias_home == canonical_home:
@@ -429,6 +435,33 @@ def _forget_profile_home(name: str, home: Path) -> None:
         snapshot.pop(name, None)
         _profile_home_snapshot = snapshot
         _profile_home_snapshot_version += 1
+
+
+def _mark_profile_home_deleted(name: str, *homes: Path) -> None:
+    if not name or not _PROFILE_ID_RE.fullmatch(name):
+        return
+    canonical_homes = {
+        _canonical_profile_home(home)
+        for home in homes
+        if home is not None
+    }
+    if not canonical_homes:
+        return
+    with _root_profile_name_cache_lock:
+        _deleted_profile_home_tombstones[name] = canonical_homes
+
+
+def _profile_runtime_observation_is_current(name: str, home: Path) -> bool:
+    if not name or not _PROFILE_ID_RE.fullmatch(name):
+        return False
+    canonical_home = _canonical_profile_home(home)
+    if not canonical_home.exists():
+        return False
+    with _root_profile_name_cache_lock:
+        deleted_homes = set(_deleted_profile_home_tombstones.get(name, set()))
+    if canonical_home in deleted_homes:
+        return False
+    return True
 
 
 def _publish_profile_home_snapshot(infos, expected_version: int | None = None) -> None:
@@ -459,6 +492,8 @@ def _publish_profile_home_snapshot(infos, expected_version: int | None = None) -
     with _root_profile_name_cache_lock:
         if (expected_version is not None and expected_version != _profile_home_snapshot_version) or _profile_identity_mutation_active:
             return
+        for name, _home in entries:
+            _deleted_profile_home_tombstones.pop(name, None)
         _profile_home_snapshot = snapshot
         _profile_home_snapshot_version += 1
 
@@ -981,10 +1016,8 @@ def get_profile_runtime_env(home: Path, profile_name: str | None = None) -> dict
     apply the selected profile's terminal config and ``.env`` for the duration
     of that run.
     """
-    home = Path(home).expanduser()
+    home = _canonical_profile_home(home)
     env: dict[str, str] = {}
-    if profile_name:
-        _remember_profile_home(profile_name, home)
 
     try:
         import yaml as _yaml
@@ -1052,9 +1085,17 @@ def get_profile_runtime_env(home: Path, profile_name: str | None = None) -> dict
                 else:
                     _config._clear_thread_env()
         if profile_name:
-            _config.publish_sessions_cap_snapshot(
-                home, expanded, generation=generation, owner="profile",
-            )
+            published = False
+            if _profile_runtime_observation_is_current(profile_name, home):
+                _remember_profile_home(profile_name, home)
+                if _profile_runtime_observation_is_current(profile_name, home):
+                    _config.publish_sessions_cap_snapshot(
+                        home, expanded, generation=generation, owner="profile",
+                    )
+                    published = True
+            if published and not _profile_runtime_observation_is_current(profile_name, home):
+                _forget_profile_home(profile_name, home)
+                _config.invalidate_sessions_cap_snapshot(home)
     except Exception:
         logger.debug("Failed to publish session cap observation", exc_info=True)
     return env
@@ -1765,7 +1806,7 @@ def init_profile_state() -> None:
     else:
         _active_profile = _read_active_profile_file()
         home = get_active_hermes_home()
-    _remember_profile_home(_active_profile, home)
+    _remember_profile_home(_active_profile, home, clear_deleted=True)
     _set_hermes_home(home)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
@@ -1827,7 +1868,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
-    _remember_profile_home(name, home)
+    _remember_profile_home(name, home, clear_deleted=True)
 
     with _profile_lock:
         _SKILLS_STATS_CACHE.clear()
@@ -1849,7 +1890,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         reload_config()
     else:
         _get_profile_runtime_env_for_caller(home, name)
-        _remember_profile_home(name, home)
+        _remember_profile_home(name, home, clear_deleted=True)
 
     # Return profile-specific defaults so frontend can apply them.
     # For process_wide=False (per-client switch), read the target profile's
@@ -1924,7 +1965,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             default_workspace = str(Path.home())
 
     profile_rows = list_profiles_api()
-    _remember_profile_home(name, home)
+    _remember_profile_home(name, home, clear_deleted=True)
     return {
         'profiles': profile_rows,
         'active': name,
@@ -2804,7 +2845,7 @@ def create_profile_api(name: str, clone_from: str = None,
         _config.invalidate_sessions_cap_snapshot(profile_path)
     except Exception:
         logger.debug("Failed to invalidate created profile cap", exc_info=True)
-    _remember_profile_home(name, profile_path)
+    _remember_profile_home(name, profile_path, clear_deleted=True)
     try:
         _get_profile_runtime_env_for_caller(profile_path, name)
     except Exception:
@@ -2877,6 +2918,7 @@ def delete_profile_api(name: str) -> dict:
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
+    _mark_profile_home_deleted(name, profile_home, conventional_profile_home)
     _forget_profile_home(name, profile_home)
     try:
         from api import config as _config

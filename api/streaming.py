@@ -7627,13 +7627,16 @@ def _run_agent_streaming(
                 patch_skill_home_modules,
                 restore_skill_home_modules,
                 snapshot_skill_home_modules,
+                get_cached_profile_home_for_diagnostics,
                 get_hermes_home_for_profile,
                 _get_profile_runtime_env_for_caller,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
             )
             _streaming_profile_name = str(getattr(s, 'profile', '') or '').strip() or None
-            _profile_home_path = get_hermes_home_for_profile(_streaming_profile_name)
+            _profile_home_path = get_cached_profile_home_for_diagnostics(_streaming_profile_name)
+            if _profile_home_path is None:
+                _profile_home_path = get_hermes_home_for_profile(_streaming_profile_name)
             _profile_home = str(_profile_home_path)
             _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = _get_profile_runtime_env_for_caller(
