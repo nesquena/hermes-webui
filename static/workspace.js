@@ -259,11 +259,13 @@ function _workspaceRouteForPath(path, kind, opts={}){
 }
 
 function _workspaceRouteForPathRel(path, kind, opts={}){
-  if(!S.session) return '';
+  const owner=opts&&opts.owner&&typeof opts.owner==='object'?opts.owner:null;
+  const session=owner||S.session;
+  if(!session) return '';
   const normalizedPath = _normalizeWorkspaceRelPath(path);
-  const grant = _workspaceEscapeGrantForPath(normalizedPath);
-  const sessionId = encodeURIComponent(S.session.session_id);
-  const params = new URLSearchParams({session_id:S.session.session_id, path:normalizedPath || '.'});
+  const grant = owner?null:_workspaceEscapeGrantForPath(normalizedPath);
+  const sessionId = encodeURIComponent(session.session_id);
+  const params = new URLSearchParams({session_id:session.session_id, path:normalizedPath || '.'});
   if(grant){
     params.set('token', grant.token);
     if(kind === 'raw' && opts.download) params.set('download', '1');
@@ -491,19 +493,23 @@ function _artifactCandidatesFromToolCall(tc){
 // by this turn.
 function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
+  if(typeof tc.name!=='string') return [];
   const name=String(tc.name||'').replace(/^functions\./,'');
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
-  const eventToolCallId=String(tc.tid||tc.id||tc.tool_call_id||'').trim();
+  const rawEventToolCallId=tc.tid!==undefined?tc.tid:(tc.id!==undefined?tc.id:tc.tool_call_id);
+  if(typeof rawEventToolCallId!=='string') return [];
+  const eventToolCallId=rawEventToolCallId.trim();
   if(!eventToolCallId) return [];
   const seen=new Set();
   const out=[];
   for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
     if(!artifact||typeof artifact!=='object') continue;
+    if([artifact.path,artifact.workspace_root,artifact.tool_call_id,artifact.session_id,artifact.tool_name].some(value=>typeof value!=='string')) continue;
     const path=_normalizeArtifactPath(artifact.path);
-    const workspaceRoot=String(artifact.workspace_root||'').replace(/\/+$/,'');
-    const toolCallId=String(artifact.tool_call_id||'').trim();
-    const sessionId=String(artifact.session_id||'').trim();
-    const toolName=String(artifact.tool_name||'').replace(/^functions\./,'');
+    const workspaceRoot=artifact.workspace_root.replace(/\/+$/,'');
+    const toolCallId=artifact.tool_call_id.trim();
+    const sessionId=artifact.session_id.trim();
+    const toolName=artifact.tool_name.replace(/^functions\./,'');
     const key=`${workspaceRoot}\u0000${path}`;
     if(!path||!workspaceRoot||!sessionId||toolCallId!==eventToolCallId||toolName!==name||seen.has(key)) continue;
     seen.add(key);
@@ -648,10 +654,13 @@ async function _workspacePathExists(path, sessionId){
 async function openArtifactPath(path){
   const isDescriptor=path&&typeof path==='object';
   const descriptor=isDescriptor?path:{path};
+  if(isDescriptor&&[descriptor.path,descriptor.session_id,descriptor.workspace_root,descriptor.tool_name,descriptor.tool_call_id].some(value=>typeof value!=='string')) return;
   const expectedSession=S.session&&String(S.session.session_id||'');
   const expectedWorkspace=S.session&&String(S.session.workspace||'').replace(/\/+$/,'');
-  const sessionId=String(isDescriptor?descriptor.session_id:expectedSession||'').trim();
-  const workspaceRoot=String(isDescriptor?descriptor.workspace_root:expectedWorkspace||'').replace(/\/+$/,'');
+  const sessionId=isDescriptor&&typeof descriptor.session_id==='string'
+    ? descriptor.session_id.trim() : (isDescriptor?'':expectedSession||'').trim();
+  const workspaceRoot=isDescriptor&&typeof descriptor.workspace_root==='string'
+    ? descriptor.workspace_root.replace(/\/+$/,'') : (isDescriptor?'':expectedWorkspace||'').replace(/\/+$/,'');
   if(!descriptor.path||!sessionId||!workspaceRoot||sessionId!==expectedSession||workspaceRoot!==expectedWorkspace) return;
   // Artifact links are an explicit request to inspect a file. A closed
   // workspace panel must expand before openFile paints the preview, otherwise
@@ -679,7 +688,8 @@ async function openArtifactPath(path){
     setStatus(t('file_open_failed'));
     return;
   }
-  openFile(rel);
+    if(isDescriptor) await openFile(rel,{owner:{session_id:sessionId,workspace:workspaceRoot}});
+    else await openFile(rel);
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -1118,6 +1128,12 @@ function _prismLanguageForPath(path){
 
 async function openFile(path, opts={}){
   if(!S.session)return;
+  const owner=opts&&opts.owner&&typeof opts.owner==='object'
+    ? {session_id:String(opts.owner.session_id||''),workspace:String(opts.owner.workspace||'').replace(/\/+$/,'')}
+    : {session_id:String(S.session.session_id||''),workspace:String(S.session.workspace||'').replace(/\/+$/,'')};
+  const ownerIsCurrent=()=>!!(S.session&&String(S.session.session_id||'')===owner.session_id&&String(S.session.workspace||'').replace(/\/+$/,'')===owner.workspace);
+  if(!owner.session_id||!owner.workspace||!ownerIsCurrent()) return;
+  const routeOpts={...opts,owner};
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
@@ -1125,7 +1141,7 @@ async function openFile(path, opts={}){
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
-    downloadFile(path);
+    downloadFile(path, owner);
     return;
   }
 
@@ -1143,14 +1159,14 @@ async function openFile(path, opts={}){
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
-    const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', routeOpts) + cacheBust;
     $('previewImg').alt=path;
     $('previewImg').src=url;
     $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts,inline:true}) + cacheBust;
     const wrap=$('previewMediaWrap');
     if(wrap){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
@@ -1160,7 +1176,7 @@ async function openFile(path, opts={}){
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts,inline:true}) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
       frame.src=''; // clear first to avoid stale content
@@ -1177,7 +1193,8 @@ async function openFile(path, opts={}){
       // file switch could re-render the previous file's cached content.
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
-        : await api(_workspaceRouteForPath(path, 'read'));
+        : await api(_workspaceRouteForPath(path, 'read', routeOpts));
+      if(!ownerIsCurrent()) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1188,7 +1205,7 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){if(ownerIsCurrent()) setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1199,7 +1216,7 @@ async function openFile(path, opts={}){
     // or reading other origin data. If a stricter mode is needed, remove
     // allow-scripts (or add sandbox="") to disable all JS execution.
     showPreview('html');
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts,inline:true}) + cacheBust;
     const iframe=$('previewHtmlIframe');
     if(iframe){
       iframe.src=''; // clear first to avoid stale content
@@ -1207,23 +1224,26 @@ async function openFile(path, opts={}){
     }
   } else if(ext==='.csv'){
     try{
-      const data=await api(_workspaceRouteForPath(path, 'read'));
+      const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
+      if(!ownerIsCurrent()) return;
       if(data.binary){
-        downloadFile(path);
+        downloadFile(path, owner);
         return;
       }
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
+      if(!ownerIsCurrent()) return;
       downloadFile(path);
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
-      const data=await api(_workspaceRouteForPath(path, 'read'));
+      const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
+      if(!ownerIsCurrent()) return;
       if(data.binary){
         // Server flagged this as binary content
-        downloadFile(path);
+        downloadFile(path, owner);
         return;
       }
       if(data.preview_kind==='office'){
@@ -1235,7 +1255,8 @@ async function openFile(path, opts={}){
         _previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';
       }
       renderCodePreviewContent(path, data.content);
-  }catch(e){
+    }catch(e){
+      if(!ownerIsCurrent()) return;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
@@ -1243,15 +1264,16 @@ async function openFile(path, opts={}){
         return;
       }
       // If it's a 400/too-large error, offer download instead
-      downloadFile(path);
+      downloadFile(path, owner);
     }
   }
 }
 
-function downloadFile(path){
-  if(!S.session)return;
+function downloadFile(path, owner=null){
+  const session=owner||S.session;
+  if(!session)return;
   // Trigger browser download via the raw file endpoint with content-disposition attachment
-  const url=_workspaceRouteForPath(path, 'raw', {download:true});
+  const url=_workspaceRouteForPath(path, 'raw', {download:true,owner});
   const filename=path.split('/').pop();
   const a=document.createElement('a');
   a.href=url;a.download=filename;

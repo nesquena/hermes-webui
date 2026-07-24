@@ -30,6 +30,9 @@ def test_turn_artifact_references_require_server_landed_descriptors():
         + "turnArtifactReferencesFromToolCall({name:'write_file',output:'```diff\\n+++ output/inferred.md\\n```'}),"
         + "turnArtifactReferencesFromToolCall({name:'patch',tid:'call-2',artifacts:[{path:'output/report.md',workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-2',tool_name:'patch'},{path:'output/notes.md',workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-2',tool_name:'patch'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/rejected.md']})})"
+        + ",turnArtifactReferencesFromToolCall({name:'write_file',tid:7,artifacts:[]})"
+        + ",turnArtifactReferencesFromToolCall({name:'write_file',tid:'call-3',artifacts:[{path:7,workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-3',tool_name:'write_file'}]})"
+        + ",turnArtifactReferencesFromToolCall({name:'write_file',tid:'call-4',artifacts:[{path:'output/numeric.md',workspace_root:'/workspace',session_id:4,tool_call_id:'call-4',tool_name:'write_file'}]})"
         + "]));"
     )
     assert output == [
@@ -62,6 +65,9 @@ def test_turn_artifact_references_require_server_landed_descriptors():
             },
         ],
         [],
+        [],
+        [],
+        [],
     ]
 
 
@@ -81,6 +87,7 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
             {"payload": {"path": "output\\windows.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
             {"payload": {"path": "C:/outside/windows.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
             {"payload": {"path": "output/unbound.md"}},
+            {"payload": {"path": 7, "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-7"}},
         ]
     }
     output = _run_node(
@@ -100,6 +107,7 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     assert "openArtifactPath(entry)" in ui
     assert "return _turnArtifactEntriesFromScene(message&&message._anchor_activity_scene);" in ui
     assert "_turn_artifacts" not in ui
+    assert "typeof path!=='string'||typeof workspaceRoot!=='string'" in ui
 
 
 def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fallback():
@@ -139,12 +147,13 @@ def test_replay_merges_missing_artifact_into_existing_anchor_scene():
         messages,
         {
             0: [
-                {"path": "output/report.md", "workspace_root": "/workspace"},
-                {
-                    "path": "output/large-worklog.md",
-                    "workspace_root": "/workspace",
-                    "tool_call_id": "call-2",
-                    "tool_name": "patch",
+                    {"path": "output/report.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_call_id": "call-1", "tool_name": "write_file"},
+                    {
+                        "path": "output/large-worklog.md",
+                        "workspace_root": "/workspace",
+                        "session_id": "sid-1",
+                        "tool_call_id": "call-2",
+                        "tool_name": "patch",
                 },
             ]
         },
@@ -155,13 +164,21 @@ def test_replay_merges_missing_artifact_into_existing_anchor_scene():
     assert scene["artifacts"] == [
         {
             "type": "artifact_reference",
-            "payload": {"path": "output/report.md", "workspace_root": "/workspace"},
+            "payload": {
+                "path": "output/report.md",
+                "workspace_root": "/workspace",
+                "session_id": "sid-1",
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "source": "transcript_replay",
+            },
         },
         {
             "type": "artifact_reference",
             "payload": {
                 "path": "output/large-worklog.md",
                 "workspace_root": "/workspace",
+                "session_id": "sid-1",
                 "tool_call_id": "call-2",
                 "tool_name": "patch",
                 "source": "transcript_replay",
@@ -405,3 +422,6 @@ def test_artifact_open_expands_a_closed_workspace_preview_before_loading_file():
     body = workspace[start:end]
     assert "ensureWorkspacePreviewVisible()" in body
     assert body.index("ensureWorkspacePreviewVisible()") < body.index("openFile(rel);")
+    assert "owner:{session_id:sessionId,workspace:workspaceRoot}" in body
+    assert "await openFile(rel" in body
+    assert "ownerIsCurrent()" in workspace

@@ -8827,14 +8827,24 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
         scene = message.get("_anchor_activity_scene")
         next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message)
         artifacts = list(next_scene.get("artifacts") or [])
-        seen = {
-            (
-                str((artifact.get("payload") or {}).get("workspace_root") or ""),
-                str((artifact.get("payload") or {}).get("path") or ""),
-            )
-            for artifact in artifacts
-            if isinstance(artifact, dict)
-        }
+        seen = set()
+        legacy_indexes = {}
+        for artifact_index, artifact in enumerate(artifacts):
+            payload = artifact.get("payload") if isinstance(artifact, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            key = (payload.get("workspace_root"), payload.get("path"))
+            if (
+                isinstance(payload.get("path"), str)
+                and isinstance(payload.get("workspace_root"), str)
+                and isinstance(payload.get("session_id"), str)
+                and isinstance(payload.get("tool_name"), str)
+                and isinstance(payload.get("tool_call_id"), str)
+                and normalize_tool_name(payload["tool_name"]) in {"write_file", "patch"}
+            ):
+                seen.add(key)
+            elif isinstance(payload.get("path"), str) and isinstance(payload.get("workspace_root"), str):
+                legacy_indexes.setdefault(key, artifact_index)
         for descriptor in descriptors:
             if not isinstance(descriptor, dict):
                 continue
@@ -8842,6 +8852,13 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             workspace_root = str(descriptor.get("workspace_root") or "")
             key = (workspace_root, path)
             if not path or key in seen:
+                continue
+            if key in legacy_indexes:
+                artifacts[legacy_indexes[key]] = {
+                    "type": "artifact_reference",
+                    "payload": {**descriptor, "source": "transcript_replay"},
+                }
+                seen.add(key)
                 continue
             seen.add(key)
             artifacts.append({"type": "artifact_reference", "payload": {**descriptor, "source": "transcript_replay"}})

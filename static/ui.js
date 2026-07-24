@@ -13615,6 +13615,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
 }
 function _turnArtifactWorkspacePath(path, workspaceRoot){
+  if(typeof path!=='string'||typeof workspaceRoot!=='string') return '';
   let value=String(path||'').trim().replace(/^(?:\.\/)+/,'');
   if(!value||value.length>512||value.includes('://')||/[\\\0]/.test(value)||/^[A-Za-z]:/.test(value)) return '';
   const workspace=String(S&&S.session&&S.session.workspace||'').replace(/\/+$/,'');
@@ -13629,14 +13630,15 @@ function _turnArtifactEntriesFromScene(scene){
   const entries=[];
   for(const artifact of artifacts){
     const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
-    const toolName=String(payload.tool_name||'').replace(/^functions\./,'');
-    const toolCallId=String(payload.tool_call_id||'').trim();
-    const sessionId=String(payload.session_id||'').trim();
+    if([payload.path,payload.workspace_root,payload.tool_name,payload.tool_call_id,payload.session_id].some(value=>typeof value!=='string')) continue;
+    const toolName=payload.tool_name.replace(/^functions\./,'');
+    const toolCallId=payload.tool_call_id.trim();
+    const sessionId=payload.session_id.trim();
     if(!['write_file','patch'].includes(toolName)||!toolCallId||!sessionId) continue;
     const path=_turnArtifactWorkspacePath(payload.path,payload.workspace_root);
     if(!path||seen.has(path)) continue;
     seen.add(path);
-    entries.push({path,workspace_root:String(payload.workspace_root||'').replace(/\/+$/,''),session_id:sessionId,tool_name:toolName,tool_call_id:toolCallId});
+    entries.push({path,workspace_root:payload.workspace_root.replace(/\/+$/,''),session_id:sessionId,tool_name:toolName,tool_call_id:toolCallId});
   }
   return entries;
 }
