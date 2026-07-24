@@ -344,9 +344,19 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
-            assert "prune_session_from_index(sid)" in delete_block, \
-                f"{label} session/delete must prune SESSION_INDEX_FILE"
+            clear_idx = max(
+                text.find("if parsed.path == '/api/session/clear':", delete_idx),
+                text.find('if parsed.path == "/api/session/clear":', delete_idx),
+            )
+            assert clear_idx > delete_idx, f"{label} session/delete handler boundary not found"
+            delete_block = text[delete_idx:clear_idx]
+            lock_idx = delete_block.find("with get_composer_draft_lock(sid):")
+            draft_delete_idx = delete_block.find("delete_composer_draft_sidecar(sid)")
+            prune_idx = delete_block.find("prune_session_from_index(sid)")
+            assert -1 not in (lock_idx, draft_delete_idx, prune_idx), \
+                f"{label} session/delete must lock drafts, remove the sidecar, and prune SESSION_INDEX_FILE"
+            assert lock_idx < draft_delete_idx < prune_idx, \
+                f"{label} session/delete must prune only after draft-locked sidecar cleanup"
             return
     assert False, "session/delete handler not found in server.py or api/routes.py"
 
