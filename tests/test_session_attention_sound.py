@@ -383,6 +383,7 @@ Object.defineProperty(global, 'navigator', {{value: {{serviceWorker: {{
 {functions}
 _deliverAttentionNotification('target','approval',1,'Waiting for permission decision','Build');
 S.session.session_id = 'target';
+document.hidden = false;  // switching back = the tab became visible (gate follow-up #1: hidden+active now DELIVERS)
 releaseRegistration({{active: true, showNotification: () => {{ shown.push('service-worker'); return Promise.resolve(); }}}});
 setTimeout(() => console.log(JSON.stringify({{
   shown, delivered: _hasAttentionNotificationKey('target','approval',1),

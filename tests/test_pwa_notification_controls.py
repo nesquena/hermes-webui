@@ -55,7 +55,11 @@ def test_notification_payload_uses_completion_session_when_provided():
         (approval_handler, "approval", "Approval required", "d.description||'Tool approval needed'"),
         (clarify_handler, "clarify", "Clarification needed", "d.question||'Tool clarification needed'"),
     ):
-        assert "if(!S.session||S.session.session_id!==activeSid){" in handler
+        # Gate follow-up #1: the SSE handlers call the delivery seam
+        # UNCONDITIONALLY now -- the active/visible gate lives inside
+        # _showPwaNotification, so a selected session in a hidden tab still
+        # gets its browser notification. The old caller-side guard is gone.
+        assert "if(!S.session||S.session.session_id!==activeSid){" not in handler
         assert f"_deliverAttentionNotification(activeSid,'{kind}',1,'{title}',{body})" in handler
 
 

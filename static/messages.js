@@ -5621,9 +5621,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      if(!S.session||S.session.session_id!==activeSid){
-        _deliverAttentionNotification(activeSid,'approval',1,'Approval required',d.description||'Tool approval needed');
-      }
+      // Unconditional (gate follow-up #1): the visibility/active gate lives
+      // in the delivery path itself now -- a SELECTED session in a hidden
+      // tab is exactly when a browser notification is needed. Shared-key
+      // dedup keeps the sidebar path from double-alerting.
+      _deliverAttentionNotification(activeSid,'approval',1,'Approval required',d.description||'Tool approval needed');
     });
 
     source.addEventListener('clarify',e=>{
@@ -5631,9 +5633,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      if(!S.session||S.session.session_id!==activeSid){
-        _deliverAttentionNotification(activeSid,'clarify',1,'Clarification needed',d.question||'Tool clarification needed');
-      }
+      _deliverAttentionNotification(activeSid,'clarify',1,'Clarification needed',d.question||'Tool clarification needed');
     });
 
     source.addEventListener('state_saved',e=>{
@@ -8619,29 +8619,41 @@ function _deliverAttentionNotification(sid,kind,count,title,body){
     ?window._attentionNotificationRetryKeys:new Map();
   window._attentionNotificationPendingKeys=pending;
   window._attentionNotificationRetryKeys=retry;
-  if(pending.get(safeSid)===key) return false;
+  const priorPending=pending.get(safeSid);
+  if(priorPending&&priorPending.key===key) return false;
   const priorRetry=retry.get(safeSid);
   const priorRetryKey=typeof priorRetry==='string'?priorRetry:(priorRetry&&priorRetry.key);
   const priorRetryAttempts=typeof priorRetry==='string'?1:Math.max(0,Number(priorRetry&&priorRetry.attempts)||0);
   if(priorRetryKey===key&&priorRetryAttempts>=2&&!_attentionRetryEligible(safeSid,kind,count)) return false;
-  pending.set(safeSid,key);
+  // Gate follow-up #2: ownership is a unique GENERATION, not the reusable
+  // sid:kind:count text. An A->B->A sequence gives the second A a new
+  // generation; the first A's late callbacks compare unequal and become
+  // no-ops instead of marking the new attempt delivered / eating its retry.
+  window._attentionNotificationGenSeq=(Number(window._attentionNotificationGenSeq)||0)+1;
+  const gen=window._attentionNotificationGenSeq;
+  pending.set(safeSid,{key,gen});
   if(priorRetryKey===key) retry.delete(safeSid);
+  const ownsClaim=()=>{
+    const cur=pending.get(safeSid);
+    return !!cur&&cur.gen===gen;
+  };
   const release=()=>{
-    if(pending.get(safeSid)===key) pending.delete(safeSid);
+    if(ownsClaim()) pending.delete(safeSid);
   };
   const delivered=()=>{
-    if(pending.get(safeSid)!==key) return;
+    if(!ownsClaim()) return;
     release();
     _markAttentionNotificationKey(safeSid,kind,count);
   };
   const failed=()=>{
-    if(pending.get(safeSid)!==key) return;
+    if(!ownsClaim()) return;
     release();
     retry.set(safeSid,{key,attempts:priorRetryKey===key?priorRetryAttempts+1:1,lastFailedAt:Date.now()});
   };
   try{
     return sendBrowserNotification(title,body,{
-      sid:safeSid,onlyIfInactive:true,onDelivered:delivered,onFailed:failed
+      sid:safeSid,onlyIfInactive:true,onDelivered:delivered,onFailed:failed,
+      shouldDeliver:ownsClaim
     });
   }catch(_){
     failed();
@@ -8686,7 +8698,16 @@ function _notificationOptions(body,options={}){
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  const mayDeliver=()=>!(options.onlyIfInactive&&S&&S.session&&S.session.session_id===options.sid);
+  const pageHidden=()=>{try{return !!(typeof document!=='undefined'&&document.hidden);}catch(_){return false;}};
+  // Gate follow-up #1: "active session" must not suppress delivery while the
+  // page is BACKGROUNDED -- that is exactly when the user needs the alert.
+  // Gate follow-up #2: a token-backed shouldDeliver runs immediately before
+  // display, so attention that was cleared/replaced after this delivery was
+  // scheduled can never surface late.
+  const mayDeliver=()=>{
+    if(typeof options.shouldDeliver==='function'&&!options.shouldDeliver()) return false;
+    return !(options.onlyIfInactive&&!pageHidden()&&S&&S.session&&S.session.session_id===options.sid);
+  };
   const direct=()=>{
     if(!mayDeliver()){
       throw new Error('attention session is active');

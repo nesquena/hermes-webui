@@ -5753,14 +5753,22 @@ function _refreshSessionListAfterSidebarResume(reason){
   void refreshSessionList(reason, {force:true});
 }
 
+let _hiddenAttentionPollTick = 0;
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
-    // Skip while the tab is hidden: this poll fetches /api/sessions and rebuilds
-    // the sidebar, work the user cannot see. The visibilitychange handler below
-    // brings the list current the moment the tab is shown again, so no update is
-    // lost — the background tab just stops burning network + DOM churn.
-    if(typeof document !== 'undefined' && document.hidden) return;
+    // While the tab is hidden this poll normally pauses (the user cannot see
+    // the sidebar; visibilitychange refreshes on return). But when browser
+    // notifications are enabled, attention that APPEARS while hidden must
+    // still be discovered (gate follow-up #1) -- so keep a reduced-cadence
+    // observation path alive (every 3rd tick) instead of going fully dark.
+    if(typeof document !== 'undefined' && document.hidden){
+      if(!window._notificationsEnabled) return;
+      _hiddenAttentionPollTick = (Number(_hiddenAttentionPollTick)||0) + 1;
+      if(_hiddenAttentionPollTick % 3 !== 0) return;
+    } else {
+      _hiddenAttentionPollTick = 0;
+    }
     void renderSessionList({deferWhileInteracting:true});
   }, _streamingPollMs);
   if(typeof document !== 'undefined' && !_streamingPollVisibilityHandler){
