@@ -259,13 +259,17 @@ function _workspaceRouteForPath(path, kind, opts={}){
 }
 
 function _workspaceRouteForPathRel(path, kind, opts={}){
-  const owner=opts&&opts.owner&&typeof opts.owner==='object'?opts.owner:null;
-  const session=owner||S.session;
-  if(!session) return '';
+  const owner = _artifactOwnerFromOptions(opts);
+  if(!owner) return '';
   const normalizedPath = _normalizeWorkspaceRelPath(path);
-  const grant = owner?null:_workspaceEscapeGrantForPath(normalizedPath);
-  const sessionId = encodeURIComponent(session.session_id);
-  const params = new URLSearchParams({session_id:session.session_id, path:normalizedPath || '.'});
+  const ownerSessionId = owner.session_id;
+  const activeSessionId = S.session ? S.session.session_id : null;
+  const activeWorkspaceRoot = _artifactScalarString(S.session && S.session.workspace).replace(/\/+$/,'');
+  const grant = ownerSessionId && ownerSessionId === activeSessionId && owner.workspace_root === activeWorkspaceRoot
+    ? _workspaceEscapeGrantForPath(normalizedPath)
+    : null;
+  const sessionId = encodeURIComponent(ownerSessionId);
+  const params = new URLSearchParams({session_id:ownerSessionId, path:normalizedPath || '.'});
   if(grant){
     params.set('token', grant.token);
     if(kind === 'raw' && opts.download) params.set('download', '1');
@@ -426,8 +430,8 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
 function _normalizeArtifactPath(path){
-  if(!path) return '';
-  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(typeof path!=='string' || !path) return '';
+  path = path.trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
   if(!path || path.length > 240 || path.includes('://')) return '';
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
   // tool arg recorded as "./foo.md" or "~/foo.md" compare equal for mutation
@@ -438,6 +442,45 @@ function _normalizeArtifactPath(path){
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
   if(!/[./]/.test(path)) return '';
   return path;
+}
+
+function _artifactScalarString(value){
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function _artifactToolName(value){
+  const name = _artifactScalarString(value);
+  return name ? name.replace(/^functions\./,'') : '';
+}
+
+function _artifactOwnerFromCurrentSession(){
+  if(!S.session || !S.session.session_id) return null;
+  const workspaceRoot = _artifactScalarString(S.session.workspace);
+  if(!workspaceRoot) return null;
+  return {
+    session_id: String(S.session.session_id),
+    workspace_root: workspaceRoot.replace(/\/+$/,''),
+  };
+}
+
+function _artifactOwnerFromContext(owner){
+  if(!owner || typeof owner !== 'object') return null;
+  const sessionId = _artifactScalarString(owner.session_id);
+  const workspaceRoot = _artifactScalarString(owner.workspace_root);
+  if(!sessionId || !workspaceRoot) return null;
+  return {
+    session_id: sessionId,
+    workspace_root: workspaceRoot.replace(/\/+$/,''),
+  };
+}
+
+function _artifactOwnerFromOptions(opts){
+  return _artifactOwnerFromContext(opts && opts.owner) || _artifactOwnerFromCurrentSession();
+}
+
+function _artifactOwnerMatchesSession(owner){
+  const active = _artifactOwnerFromCurrentSession();
+  return !!(owner && active && owner.session_id === active.session_id && owner.workspace_root === active.workspace_root);
 }
 
 function _artifactCandidatesFromText(text){
@@ -464,7 +507,7 @@ function _artifactCandidatesFromText(text){
 
 function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
-  const name = String(tc.name || '').replace(/^functions\./,'');
+  const name = _artifactToolName(tc.name);
   const args = tc.arguments || tc.args || tc.input || {};
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
@@ -493,27 +536,21 @@ function _artifactCandidatesFromToolCall(tc){
 // by this turn.
 function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
-  if(typeof tc.name!=='string') return [];
-  const name=String(tc.name||'').replace(/^functions\./,'');
+  const name=_artifactToolName(tc.name);
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
-  const rawEventToolCallId=tc.tid!==undefined?tc.tid:(tc.id!==undefined?tc.id:tc.tool_call_id);
-  if(typeof rawEventToolCallId!=='string') return [];
-  const eventToolCallId=rawEventToolCallId.trim();
-  if(!eventToolCallId) return [];
   const seen=new Set();
   const out=[];
   for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
     if(!artifact||typeof artifact!=='object') continue;
-    if([artifact.path,artifact.workspace_root,artifact.tool_call_id,artifact.session_id,artifact.tool_name].some(value=>typeof value!=='string')) continue;
+    if(typeof artifact.path !== 'string' || typeof artifact.workspace_root !== 'string') continue;
     const path=_normalizeArtifactPath(artifact.path);
     const workspaceRoot=artifact.workspace_root.replace(/\/+$/,'');
-    const toolCallId=artifact.tool_call_id.trim();
-    const sessionId=artifact.session_id.trim();
-    const toolName=artifact.tool_name.replace(/^functions\./,'');
+    const toolCallId=_artifactScalarString(artifact.tool_call_id);
+    const toolName=_artifactToolName(artifact.tool_name);
     const key=`${workspaceRoot}\u0000${path}`;
-    if(!path||!workspaceRoot||!sessionId||toolCallId!==eventToolCallId||toolName!==name||seen.has(key)) continue;
+    if(!path||!workspaceRoot||!toolCallId||toolName!==name||seen.has(key)) continue;
     seen.add(key);
-    out.push({path,workspace_root:workspaceRoot,session_id:sessionId,tool_call_id:toolCallId,tool_name:toolName});
+    out.push({path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName});
   }
   return out;
 }
@@ -641,35 +678,31 @@ function renderSessionArtifacts(){
   }).join('');
 }
 
-async function _workspacePathExists(path, sessionId){
-  if(!sessionId||!path) return false;
+async function _workspacePathExists(path, opts={}){
+  const owner = _artifactOwnerFromOptions(opts);
+  if(!owner||!path) return false;
   const parts=String(path).split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dir)}`);
+  const route = _workspaceRouteForPathRel(dir,'list',{owner});
+  if(!route) return false;
+  const data=await api(route);
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
 async function openArtifactPath(path){
-  const isDescriptor=path&&typeof path==='object';
-  const descriptor=isDescriptor?path:{path};
-  if(isDescriptor&&[descriptor.path,descriptor.session_id,descriptor.workspace_root,descriptor.tool_name,descriptor.tool_call_id].some(value=>typeof value!=='string')) return;
-  const expectedSession=S.session&&String(S.session.session_id||'');
-  const expectedWorkspace=S.session&&String(S.session.workspace||'').replace(/\/+$/,'');
-  const sessionId=isDescriptor&&typeof descriptor.session_id==='string'
-    ? descriptor.session_id.trim() : (isDescriptor?'':expectedSession||'').trim();
-  const workspaceRoot=isDescriptor&&typeof descriptor.workspace_root==='string'
-    ? descriptor.workspace_root.replace(/\/+$/,'') : (isDescriptor?'':expectedWorkspace||'').replace(/\/+$/,'');
-  if(!descriptor.path||!sessionId||!workspaceRoot||sessionId!==expectedSession||workspaceRoot!==expectedWorkspace) return;
+  if(!path || typeof path !== 'string') return;
+  const owner = _artifactOwnerFromCurrentSession();
+  if(!owner) return;
   // Artifact links are an explicit request to inspect a file. A closed
   // workspace panel must expand before openFile paints the preview, otherwise
   // the file is selected behind an invisible right-hand column.
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   switchWorkspacePanelTab('files');
-  let rel = String(descriptor.path).replace(/^~\//,'').replace(/^\.\/+/,'');
+  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = workspaceRoot;
+  const ws = owner.workspace_root;
   if(ws){
     const normWs = ws.replace(/\/+$/,'') + '/';
     if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
@@ -677,19 +710,15 @@ async function openArtifactPath(path){
   }
   if(!rel) rel = '.';
   try{
-    if(!(await _workspacePathExists(rel, sessionId))){
+    if(!(await _workspacePathExists(rel,{owner}))){
       setStatus(t('file_open_failed'));
-      return;
-    }
-    if(!S.session||String(S.session.session_id||'')!==sessionId||String(S.session.workspace||'').replace(/\/+$/,'')!==workspaceRoot){
       return;
     }
   }catch(_){
     setStatus(t('file_open_failed'));
     return;
   }
-    if(isDescriptor) await openFile(rel,{owner:{session_id:sessionId,workspace:workspaceRoot}});
-    else await openFile(rel);
+  await openFile(rel,{owner});
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -1127,21 +1156,17 @@ function _prismLanguageForPath(path){
 }
 
 async function openFile(path, opts={}){
-  if(!S.session)return;
-  const owner=opts&&opts.owner&&typeof opts.owner==='object'
-    ? {session_id:String(opts.owner.session_id||''),workspace:String(opts.owner.workspace||'').replace(/\/+$/,'')}
-    : {session_id:String(S.session.session_id||''),workspace:String(S.session.workspace||'').replace(/\/+$/,'')};
-  const ownerIsCurrent=()=>!!(S.session&&String(S.session.session_id||'')===owner.session_id&&String(S.session.workspace||'').replace(/\/+$/,'')===owner.workspace);
-  if(!owner.session_id||!owner.workspace||!ownerIsCurrent()) return;
-  const routeOpts={...opts,owner};
+  const owner = _artifactOwnerFromOptions(opts);
+  if(!path || typeof path !== 'string' || !owner) return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
+  const routeOpts={...opts, owner};
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
-    downloadFile(path, owner);
+    downloadFile(path, routeOpts);
     return;
   }
 
@@ -1166,7 +1191,7 @@ async function openFile(path, opts={}){
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
-    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts,inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
     const wrap=$('previewMediaWrap');
     if(wrap){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
@@ -1176,7 +1201,7 @@ async function openFile(path, opts={}){
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
-    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts,inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
       frame.src=''; // clear first to avoid stale content
@@ -1194,7 +1219,7 @@ async function openFile(path, opts={}){
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
         : await api(_workspaceRouteForPath(path, 'read', routeOpts));
-      if(!ownerIsCurrent()) return;
+      if(!_artifactOwnerMatchesSession(owner)) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1205,7 +1230,10 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){if(ownerIsCurrent()) setStatus(t('file_open_failed'));}
+    }catch(e){
+      if(!_artifactOwnerMatchesSession(owner)) return;
+      setStatus(t('file_open_failed'));
+    }
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1216,7 +1244,7 @@ async function openFile(path, opts={}){
     // or reading other origin data. If a stricter mode is needed, remove
     // allow-scripts (or add sandbox="") to disable all JS execution.
     showPreview('html');
-    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts,inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
     const iframe=$('previewHtmlIframe');
     if(iframe){
       iframe.src=''; // clear first to avoid stale content
@@ -1225,25 +1253,25 @@ async function openFile(path, opts={}){
   } else if(ext==='.csv'){
     try{
       const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
-      if(!ownerIsCurrent()) return;
+      if(!_artifactOwnerMatchesSession(owner)) return;
       if(data.binary){
-        downloadFile(path, owner);
+        downloadFile(path, routeOpts);
         return;
       }
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      if(!ownerIsCurrent()) return;
-      downloadFile(path);
+      if(!_artifactOwnerMatchesSession(owner)) return;
+      downloadFile(path, routeOpts);
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
-      if(!ownerIsCurrent()) return;
+      if(!_artifactOwnerMatchesSession(owner)) return;
       if(data.binary){
         // Server flagged this as binary content
-        downloadFile(path, owner);
+        downloadFile(path, routeOpts);
         return;
       }
       if(data.preview_kind==='office'){
@@ -1255,8 +1283,8 @@ async function openFile(path, opts={}){
         _previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';
       }
       renderCodePreviewContent(path, data.content);
-    }catch(e){
-      if(!ownerIsCurrent()) return;
+  }catch(e){
+      if(!_artifactOwnerMatchesSession(owner)) return;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
@@ -1264,16 +1292,16 @@ async function openFile(path, opts={}){
         return;
       }
       // If it's a 400/too-large error, offer download instead
-      downloadFile(path, owner);
+      downloadFile(path, routeOpts);
     }
   }
 }
 
-function downloadFile(path, owner=null){
-  const session=owner||S.session;
-  if(!session)return;
+function downloadFile(path, opts={}){
+  const owner = _artifactOwnerFromOptions(opts);
+  if(!path || typeof path !== 'string' || !owner) return;
   // Trigger browser download via the raw file endpoint with content-disposition attachment
-  const url=_workspaceRouteForPath(path, 'raw', {download:true,owner});
+  const url=_workspaceRouteForPath(path, 'raw', {...opts, owner, download:true});
   const filename=path.split('/').pop();
   const a=document.createElement('a');
   a.href=url;a.download=filename;

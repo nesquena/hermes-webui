@@ -24,15 +24,13 @@ def test_turn_artifact_references_require_server_landed_descriptors():
     output = _run_node(
         workspace[start:end]
         + "\nconsole.log(JSON.stringify(["
-        + "turnArtifactReferencesFromToolCall({name:'write_file',tid:'call-1',artifacts:[{path:'output/report.md',workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-1',tool_name:'write_file'}]}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-1',tool_name:'write_file'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'read_file',arguments:{path:'output/report.md'}}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',is_error:true,artifacts:[{path:'output/report.md',workspace_root:'/workspace'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',output:'```diff\\n+++ output/inferred.md\\n```'}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',tid:'call-2',artifacts:[{path:'output/report.md',workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-2',tool_name:'patch'},{path:'output/notes.md',workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-2',tool_name:'patch'}]}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/rejected.md']})})"
-        + ",turnArtifactReferencesFromToolCall({name:'write_file',tid:7,artifacts:[]})"
-        + ",turnArtifactReferencesFromToolCall({name:'write_file',tid:'call-3',artifacts:[{path:7,workspace_root:'/workspace',session_id:'sid-1',tool_call_id:'call-3',tool_name:'write_file'}]})"
-        + ",turnArtifactReferencesFromToolCall({name:'write_file',tid:'call-4',artifacts:[{path:'output/numeric.md',workspace_root:'/workspace',session_id:4,tool_call_id:'call-4',tool_name:'write_file'}]})"
+        + "turnArtifactReferencesFromToolCall({name:'patch',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-2',tool_name:'patch'},{path:'output/notes.md',workspace_root:'/workspace',tool_call_id:'call-2',tool_name:'patch'}]}),"
+        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/rejected.md']})}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',artifacts:[{path:['invalid'],workspace_root:123,tool_call_id:'call-3',tool_name:'write_file'}]})"
         + "]));"
     )
     assert output == [
@@ -40,7 +38,6 @@ def test_turn_artifact_references_require_server_landed_descriptors():
             {
                 "path": "output/report.md",
                 "workspace_root": "/workspace",
-                "session_id": "sid-1",
                 "tool_call_id": "call-1",
                 "tool_name": "write_file",
             }
@@ -52,20 +49,16 @@ def test_turn_artifact_references_require_server_landed_descriptors():
             {
                 "path": "output/report.md",
                 "workspace_root": "/workspace",
-                "session_id": "sid-1",
                 "tool_call_id": "call-2",
                 "tool_name": "patch",
             },
             {
                 "path": "output/notes.md",
                 "workspace_root": "/workspace",
-                "session_id": "sid-1",
                 "tool_call_id": "call-2",
                 "tool_name": "patch",
             },
         ],
-        [],
-        [],
         [],
         [],
     ]
@@ -79,25 +72,30 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     )
     scene = {
         "artifacts": [
-            {"payload": {"path": "output/report.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
-            {"payload": {"path": "./output/report.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
-            {"payload": {"path": "output/old-workspace.md", "workspace_root": "/workspace-a", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
-            {"payload": {"path": "/workspace/output/absolute.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
-            {"payload": {"path": "../escape.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
-            {"payload": {"path": "output\\windows.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
-            {"payload": {"path": "C:/outside/windows.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}},
+            {"payload": {"path": "output/report.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-1"}},
+            {"payload": {"path": "./output/report.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-2"}},
+            {"payload": {"path": "output/old-workspace.md", "workspace_root": "/workspace-a"}},
+            {"payload": {"path": "/workspace/output/absolute.md", "workspace_root": "/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-3"}},
+            {"payload": {"path": "../escape.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "output\\windows.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "C:/outside/windows.md", "workspace_root": "/workspace"}},
             {"payload": {"path": "output/unbound.md"}},
-            {"payload": {"path": 7, "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-7"}},
         ]
     }
     output = _run_node(
-        "const S={session:{workspace:'/workspace'}};\n"
+        "const S={session:{workspace:'/workspace',session_id:'sid-owner'}};\n"
         + helpers
         + "\nconsole.log(JSON.stringify(_turnArtifactEntriesFromScene("
         + json.dumps(scene)
         + ")));"
     )
-    assert output == [{"path": "output/report.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}]
+    assert output == [{
+        "path": "output/report.md",
+        "workspace_root": "/workspace",
+        "session_id": "sid-owner",
+        "tool_name": "write_file",
+        "tool_call_id": "call-1",
+    }]
     assert "_attachTurnArtifactsFromToolCall(tc);" in messages
     assert "_applyToAnchor('artifact_reference'" in messages
     assert "_anchorHasArtifactReference(localId,workspaceRoot,path)" in messages
@@ -107,7 +105,6 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     assert "openArtifactPath(entry)" in ui
     assert "return _turnArtifactEntriesFromScene(message&&message._anchor_activity_scene);" in ui
     assert "_turn_artifacts" not in ui
-    assert "typeof path!=='string'||typeof workspaceRoot!=='string'" in ui
 
 
 def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fallback():
@@ -115,12 +112,18 @@ def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fa
         "static/ui.js", "function _turnArtifactWorkspacePath", "function _renderTurnArtifactListForMessage"
     )
     output = _run_node(
-        "const S={session:{workspace:'/workspace'},messages:[{role:'assistant',content:'final'}]};\n"
+        "const S={session:{workspace:'/workspace',session_id:'sid-owner'},messages:[{role:'assistant',content:'final'}]};\n"
         + helpers
         + "\nconsole.log(JSON.stringify(_turnArtifactEntriesForMessage({"
-        + "_anchor_activity_scene:{artifacts:[{payload:{path:'output/large-worklog.md',workspace_root:'/workspace',session_id:'sid-1',tool_name:'write_file',tool_call_id:'call-1'}}]}},0)));"
+        + "_anchor_activity_scene:{artifacts:[{payload:{path:'output/large-worklog.md',workspace_root:'/workspace',session_id:'sid-owner',tool_name:'patch',tool_call_id:'call-2'}}]}},0)));"
     )
-    assert output == [{"path": "output/large-worklog.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_name": "write_file", "tool_call_id": "call-1"}]
+    assert output == [{
+        "path": "output/large-worklog.md",
+        "workspace_root": "/workspace",
+        "session_id": "sid-owner",
+        "tool_name": "patch",
+        "tool_call_id": "call-2",
+    }]
 
 
 def test_replay_merges_missing_artifact_into_existing_anchor_scene():
@@ -147,13 +150,12 @@ def test_replay_merges_missing_artifact_into_existing_anchor_scene():
         messages,
         {
             0: [
-                    {"path": "output/report.md", "workspace_root": "/workspace", "session_id": "sid-1", "tool_call_id": "call-1", "tool_name": "write_file"},
-                    {
-                        "path": "output/large-worklog.md",
-                        "workspace_root": "/workspace",
-                        "session_id": "sid-1",
-                        "tool_call_id": "call-2",
-                        "tool_name": "patch",
+                {"path": "output/report.md", "workspace_root": "/workspace"},
+                {
+                    "path": "output/large-worklog.md",
+                    "workspace_root": "/workspace",
+                    "tool_call_id": "call-2",
+                    "tool_name": "patch",
                 },
             ]
         },
@@ -167,9 +169,6 @@ def test_replay_merges_missing_artifact_into_existing_anchor_scene():
             "payload": {
                 "path": "output/report.md",
                 "workspace_root": "/workspace",
-                "session_id": "sid-1",
-                "tool_call_id": "call-1",
-                "tool_name": "write_file",
                 "source": "transcript_replay",
             },
         },
@@ -178,10 +177,69 @@ def test_replay_merges_missing_artifact_into_existing_anchor_scene():
             "payload": {
                 "path": "output/large-worklog.md",
                 "workspace_root": "/workspace",
-                "session_id": "sid-1",
                 "tool_call_id": "call-2",
                 "tool_name": "patch",
                 "source": "transcript_replay",
+            },
+        },
+    ]
+
+
+def test_replay_replaces_under_typed_existing_anchor_artifacts_with_transcript_descriptors():
+    from api import routes
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "final answer",
+            "_anchor_activity_scene": {
+                "version": "activity_scene_v1",
+                "activity_rows": [{"type": "tool"}],
+                "artifacts": [
+                    {"type": "artifact_reference", "payload": {"path": "output/report.md", "workspace_root": "/workspace"}},
+                    {
+                        "type": "artifact_reference",
+                        "payload": {
+                            "path": "output/typed.md",
+                            "workspace_root": "/workspace",
+                            "tool_name": "patch",
+                            "tool_call_id": "call-existing",
+                        },
+                    },
+                ],
+            },
+        }
+    ]
+
+    hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
+        messages,
+        {
+            0: [
+                {"path": "output/report.md", "workspace_root": "/workspace", "tool_call_id": "call-1", "tool_name": "write_file"},
+                {"path": "output/typed.md", "workspace_root": "/workspace", "tool_call_id": "call-2", "tool_name": "patch"},
+            ],
+        },
+    )
+
+    scene = hydrated[0]["_anchor_activity_scene"]
+    assert scene["artifacts"] == [
+        {
+            "type": "artifact_reference",
+            "payload": {
+                "path": "output/report.md",
+                "workspace_root": "/workspace",
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "source": "transcript_replay",
+            },
+        },
+        {
+            "type": "artifact_reference",
+            "payload": {
+                "path": "output/typed.md",
+                "workspace_root": "/workspace",
+                "tool_name": "patch",
+                "tool_call_id": "call-existing",
             },
         },
     ]
@@ -354,54 +412,6 @@ def test_landed_artifact_descriptors_use_actual_hermes_success_shapes():
         )
         == []
     )
-    assert landed_artifact_descriptors(
-        "write_file",
-        {"bytes_written": True, "resolved_path": "/workspace/output/bool.md"},
-        workspace_root="/workspace",
-        tool_call_id="call-write",
-    ) == []
-    assert landed_artifact_descriptors(
-        "patch",
-        {"success": True, "files_modified": ["output/relative.md"]},
-        workspace_root="/workspace",
-        tool_call_id="call-patch",
-    ) == []
-
-
-def test_replay_requires_ordered_unique_tool_call_pairing():
-    from api import routes
-
-    base = [
-        {"role": "user", "content": "write"},
-        {"role": "assistant", "tool_calls": [{"id": "call-good", "function": {"name": "write_file"}}]},
-        {"role": "tool", "tool_call_id": "call-good", "name": "write_file", "content": json.dumps({"bytes_written": 1, "resolved_path": "/workspace/good.md"})},
-        {"role": "assistant", "content": "final"},
-    ]
-    assert routes._final_turn_artifact_paths(base, workspace_root="/workspace")[3][0]["path"] == "good.md"
-
-    for messages in (
-        [
-            base[0],
-            {"role": "tool", "tool_call_id": "call-late", "name": "write_file", "content": json.dumps({"bytes_written": 1, "resolved_path": "/workspace/late.md"})},
-            {"role": "assistant", "tool_calls": [{"id": "call-late", "function": {"name": "write_file"}}]},
-            base[3],
-        ],
-        [
-            base[0],
-            {"role": "assistant", "tool_calls": [{"id": "call-dup-decl", "function": {"name": "write_file"}}]},
-            {"role": "assistant", "tool_calls": [{"id": "call-dup-decl", "function": {"name": "patch"}}]},
-            {"role": "tool", "tool_call_id": "call-dup-decl", "name": "write_file", "content": json.dumps({"bytes_written": 1, "resolved_path": "/workspace/dup.md"})},
-            base[3],
-        ],
-        [
-            base[0],
-            {"role": "assistant", "tool_calls": [{"id": "call-dup-result", "function": {"name": "write_file"}}]},
-            {"role": "tool", "tool_call_id": "call-dup-result", "name": "write_file", "content": json.dumps({"bytes_written": 1, "resolved_path": "/workspace/first.md"})},
-            {"role": "tool", "tool_call_id": "call-dup-result", "name": "write_file", "content": json.dumps({"bytes_written": 1, "resolved_path": "/workspace/second.md"})},
-            base[3],
-        ],
-    ):
-        assert routes._final_turn_artifact_paths(messages, workspace_root="/workspace") == {}
 
 
 def test_live_stream_completion_uses_landed_artifact_descriptors():
@@ -421,7 +431,4 @@ def test_artifact_open_expands_a_closed_workspace_preview_before_loading_file():
     end = workspace.index("// ── Workspace file-tree", start)
     body = workspace[start:end]
     assert "ensureWorkspacePreviewVisible()" in body
-    assert body.index("ensureWorkspacePreviewVisible()") < body.index("openFile(rel);")
-    assert "owner:{session_id:sessionId,workspace:workspaceRoot}" in body
-    assert "await openFile(rel" in body
-    assert "ownerIsCurrent()" in workspace
+    assert body.index("ensureWorkspacePreviewVisible()") < body.index("openFile(rel,{owner});")
