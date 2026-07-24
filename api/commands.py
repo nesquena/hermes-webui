@@ -74,8 +74,15 @@ def _parse_slash_command(command: str) -> tuple[str, str]:
     return cmd_base, cmd_parts[1] if len(cmd_parts) > 1 else ""
 
 
-def _bundle_profile_context(purpose: str):
-    """Resolve the active-profile env wrapper used by bundle APIs."""
+def _active_profile_context(purpose: str):
+    """Resolve the active-profile env wrapper used by the command APIs.
+
+    Every command handler that reaches into Hermes runtime state (memory store,
+    session DB, kanban, curator, …) must run under the *requesting browser's*
+    profile. Without this the handler resolves the process-default profile's
+    store instead — `/memory pending|approve|reject` would then act on the wrong
+    profile's pending writes.
+    """
 
     try:
         from api.profiles import profile_env_for_active_request
@@ -178,7 +185,7 @@ def list_command_bundles() -> list[dict[str, Any]]:
         return []
 
     try:
-        with _bundle_profile_context("/api/commands/bundles"):
+        with _active_profile_context("/api/commands/bundles"):
             bundles = _list_bundles() or []
     except Exception:
         logger.warning("Failed to list skill bundles", exc_info=True)
@@ -213,7 +220,7 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
         raise RuntimeError("Skill bundle runtime unavailable") from exc
 
     try:
-        with _bundle_profile_context("/api/commands/bundles/resolve"):
+        with _active_profile_context("/api/commands/bundles/resolve"):
             bundle_key = resolve_bundle_command_key(bundle_name)
             if bundle_key is None:
                 raise KeyError(bundle_name)
@@ -242,12 +249,26 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
 
 
 def execute_agent_command(command: str) -> str | dict[str, Any]:
-    """Execute a narrow allowlist of WebUI-safe agent-side runtime commands."""
+    """Execute a narrow allowlist of WebUI-safe agent-side runtime commands.
+
+    The dispatch runs under the requesting browser's profile scope. These
+    handlers delegate into Hermes helpers that resolve state from process env /
+    ``get_hermes_home()``, so without the wrapper `/memory pending|approve|reject`,
+    `/sessions`, `/kanban` and friends would act on the process-default profile
+    instead of the profile the request came from.
+    """
 
     canonical, arg_string = _parse_agent_command(command)
     if canonical not in _ALLOWED_AGENT_COMMANDS:
         raise KeyError(canonical)
 
+    with _active_profile_context("/api/commands/exec"):
+        return _dispatch_agent_command(canonical, command, arg_string)
+
+
+def _dispatch_agent_command(
+    canonical: str, command: str, arg_string: str
+) -> str | dict[str, Any]:
     if canonical == 'reload-mcp':
         return _run_reload_mcp_command()
     if canonical == 'reload-skills':
@@ -608,7 +629,12 @@ def _run_memory_command(command: str) -> str:
     # every CLI session under the same HERMES_HOME — a persistent cross-boundary
     # mutation. Block that toggle; `pending`/`approve`/`reject` act on in-session
     # pending writes and stay allowed, and bare `approval`/`mode` just report status.
-    if args and args[0] in {"approval", "mode"} and len(args) > 1:
+    #
+    # Normalize case BEFORE the guard: handle_pending_subcommand() dispatches on
+    # `args[0].lower()`, so a case-sensitive guard here would let `/memory Mode on`
+    # or `/memory APPROVAL off` reach the config writer.
+    subcommand = args[0].strip().lower() if args else ""
+    if subcommand in {"approval", "mode"} and len(args) > 1:
         raise RuntimeError(
             "`/memory approval|mode on|off` is not available from the WebUI — it changes "
             "write-approval in the shared Hermes config, affecting every CLI session under "
@@ -700,9 +726,12 @@ def _run_profile_command() -> str:
 
 
 def _run_agents_command() -> str:
+    # The Agent's registry exposes `list_sessions()`; there is no `list_processes()`.
+    # Calling the wrong name raised an AttributeError that this `except` swallowed,
+    # so /agents and /tasks always rendered the empty fallback.
     try:
         from tools.process_registry import process_registry
-        processes = process_registry.list_processes()
+        processes = process_registry.list_sessions()
     except Exception:
         logger.warning("Agents/process registry unavailable", exc_info=True)
         return "No background agents or tracked processes are currently visible."
@@ -710,9 +739,12 @@ def _run_agents_command() -> str:
         return "No background agents or tracked processes are currently running."
     lines = [f"Tracked processes ({len(processes)}):"]
     for proc in processes[:20]:
-        pid = proc.get("pid") or proc.get("process_id") or "?"
-        status = proc.get("status") or proc.get("state") or "unknown"
-        label = proc.get("label") or proc.get("command") or proc.get("name") or "process"
+        pid = proc.get("pid") or "?"
+        status = proc.get("status") or "unknown"
+        exit_code = proc.get("exit_code")
+        if status == "exited" and exit_code is not None:
+            status = f"exited ({exit_code})"
+        label = proc.get("command") or proc.get("session_id") or "process"
         lines.append(f"- {label} — {status} (pid {pid})")
     if len(processes) > 20:
         lines.append(f"… {len(processes) - 20} more")

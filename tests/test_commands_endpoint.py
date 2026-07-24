@@ -755,6 +755,283 @@ def test_memory_command_blocks_shared_config_approval_toggle(monkeypatch):
     assert ["pending"] in seen and ["approval"] in seen and ["mode"] in seen
 
 
+def _install_case_folding_write_approval(monkeypatch, writes):
+    """Install a `handle_pending_subcommand` with the REAL dispatch semantics.
+
+    `hermes_cli/write_approval_commands.handle_pending_subcommand` does
+    ``sub = args[0].lower()`` before matching ``{"approval", "mode"}``, so a
+    case-sensitive guard in the WebUI lets mixed case through to `set_mode_fn`,
+    which writes ``memory.write_approval`` into the SHARED Hermes config.
+    """
+    import sys
+    import types
+
+    def handle_pending_subcommand(mem, args, memory_store=None, set_mode_fn=None):
+        if not args:
+            return "state"
+        sub = args[0].lower()
+        rest = args[1:]
+        if sub in {"approval", "mode"}:
+            if not rest:
+                return "state"
+            arg = rest[0].strip().lower()
+            if arg in {"on", "true", "yes", "1", "enable", "enabled"}:
+                set_mode_fn(True)
+                return "enabled"
+            if arg in {"off", "false", "no", "0", "disable", "disabled"}:
+                set_mode_fn(False)
+                return "disabled"
+            return "usage"
+        return "mem-ok"
+
+    wac = types.ModuleType("hermes_cli.write_approval_commands")
+    wac.handle_pending_subcommand = handle_pending_subcommand
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", wac)
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    wa = types.ModuleType("tools.write_approval")
+    wa.MEMORY = "MEMORY"
+    monkeypatch.setitem(sys.modules, "tools.write_approval", wa)
+    mt = types.ModuleType("tools.memory_tool")
+    mt.load_on_disk_store = lambda: {}
+    monkeypatch.setitem(sys.modules, "tools.memory_tool", mt)
+
+    cfg = types.ModuleType("hermes_cli.config")
+    cfg.set_config_value = lambda key, value: writes.append((key, value))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", cfg)
+
+
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "/memory approval on",
+        "/memory approval off",
+        "/memory mode on",
+        "/memory mode off",
+        # The downstream handler lowercases args[0]; a case-sensitive guard in
+        # the WebUI would let every row below reach `set_config_value`.
+        "/memory Mode on",
+        "/memory MODE off",
+        "/memory Approval on",
+        "/memory APPROVAL off",
+        "/memory ApPrOvAl enable",
+        "/memory MoDe disabled",
+    ],
+)
+def test_memory_approval_toggle_is_blocked_case_insensitively(monkeypatch, blocked):
+    """No casing of `/memory approval|mode <value>` may write the shared config."""
+    from api import commands
+
+    writes: list[tuple[str, str]] = []
+    _install_case_folding_write_approval(monkeypatch, writes)
+
+    with pytest.raises(RuntimeError, match="not available from the WebUI"):
+        commands._run_memory_command(blocked)
+
+    assert writes == [], f"{blocked!r} reached the shared-config writer: {writes}"
+
+
+def test_memory_status_and_pending_still_pass_through_in_any_case(monkeypatch):
+    """Read-only subcommands must stay usable, including mixed case."""
+    from api import commands
+
+    writes: list[tuple[str, str]] = []
+    _install_case_folding_write_approval(monkeypatch, writes)
+
+    # Bare approval/mode report status; they carry no value token to apply.
+    assert commands._run_memory_command("/memory Approval") == "state"
+    assert commands._run_memory_command("/memory MODE") == "state"
+    assert commands._run_memory_command("/memory Pending") == "mem-ok"
+    assert commands._run_memory_command("/memory Approve 1") == "mem-ok"
+    assert writes == []
+
+
+def test_commands_exec_runs_under_the_requesting_profile(monkeypatch):
+    """`/api/commands/exec` handlers must see the requesting browser's profile.
+
+    The handlers delegate into Hermes helpers that resolve state from process
+    env / `get_hermes_home()`. Without the active-request profile scope,
+    `/memory pending|approve|reject` acts on the process-default profile's
+    store instead of the requesting profile's.
+    """
+    import contextlib
+    import os
+    import sys
+    import types
+
+    from api import commands
+
+    active = {"profile": "default"}
+    homes = {
+        "default": "/home/u/.hermes",
+        "research": "/home/u/.hermes/profiles/research",
+        "work": "/home/u/.hermes/profiles/work",
+    }
+    purposes: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_scope(purpose="active request", logger_override=None):
+        purposes.append(purpose)
+        previous = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = homes[active["profile"]]
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = previous
+
+    profiles_mod = types.ModuleType("api.profiles")
+    profiles_mod.profile_env_for_active_request = fake_scope
+    monkeypatch.setitem(sys.modules, "api.profiles", profiles_mod)
+
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        commands,
+        "_run_memory_command",
+        lambda command: seen.append(os.environ.get("HERMES_HOME")) or "ok",
+    )
+
+    outside = os.environ.get("HERMES_HOME")
+
+    active["profile"] = "research"
+    assert commands.execute_agent_command("/memory pending") == "ok"
+    active["profile"] = "work"
+    assert commands.execute_agent_command("/memory pending") == "ok"
+
+    assert seen == [homes["research"], homes["work"]], (
+        "handlers did not observe the requesting profile's Hermes home"
+    )
+    assert purposes == ["/api/commands/exec", "/api/commands/exec"]
+    assert os.environ.get("HERMES_HOME") == outside, "profile scope leaked past the call"
+
+
+def test_commands_exec_scope_is_released_when_a_handler_raises(monkeypatch):
+    """A failing handler must not strand the profile env of the failed request."""
+    import contextlib
+    import os
+    import sys
+    import types
+
+    from api import commands
+
+    @contextlib.contextmanager
+    def fake_scope(purpose="active request", logger_override=None):
+        previous = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = "/scoped/home"
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = previous
+
+    profiles_mod = types.ModuleType("api.profiles")
+    profiles_mod.profile_env_for_active_request = fake_scope
+    monkeypatch.setitem(sys.modules, "api.profiles", profiles_mod)
+
+    def boom(_command):
+        raise RuntimeError("Memory command failed")
+
+    monkeypatch.setattr(commands, "_run_memory_command", boom)
+
+    outside = os.environ.get("HERMES_HOME")
+    with pytest.raises(RuntimeError, match="Memory command failed"):
+        commands.execute_agent_command("/memory pending")
+    assert os.environ.get("HERMES_HOME") == outside
+
+
+def test_agents_command_renders_the_real_process_registry(monkeypatch):
+    """`/agents` (and its `/tasks` alias) must read `list_sessions()`.
+
+    The registry has no `list_processes()`; calling it raised an AttributeError
+    that the handler's `except Exception` swallowed, so the command always
+    rendered the "nothing running" fallback even with live processes.
+    """
+    import sys
+    import types
+
+    from api import commands
+
+    registry = types.SimpleNamespace(
+        list_sessions=lambda: [
+            {
+                "session_id": "s-1",
+                "command": "npm run dev",
+                "pid": 4242,
+                "status": "running",
+                "uptime_seconds": 12,
+            },
+            {
+                "session_id": "s-2",
+                "command": "pytest -q",
+                "pid": 4243,
+                "status": "exited",
+                "exit_code": 1,
+            },
+        ]
+    )
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = registry
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+
+    out = commands._run_agents_command()
+
+    assert "Tracked processes (2):" in out
+    assert "npm run dev — running (pid 4242)" in out
+    assert "pytest -q — exited (1) (pid 4243)" in out
+    assert "currently running" not in out
+
+
+def test_agents_command_reports_an_empty_registry_as_nothing_running(monkeypatch):
+    import sys
+    import types
+
+    from api import commands
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = types.SimpleNamespace(list_sessions=lambda: [])
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+
+    assert commands._run_agents_command() == (
+        "No background agents or tracked processes are currently running."
+    )
+
+
+def test_agents_command_does_not_call_the_nonexistent_list_processes(monkeypatch):
+    """Guard against regressing to an API the Agent registry never exposed."""
+    import sys
+    import types
+
+    from api import commands
+
+    class Registry:
+        def list_sessions(self):
+            return [{"session_id": "s-1", "command": "sleep 1", "pid": 7, "status": "running"}]
+
+        def __getattr__(self, name):  # pragma: no cover - only hit on regression
+            raise AssertionError(f"handler reached for absent registry attribute {name!r}")
+
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    pr = types.ModuleType("tools.process_registry")
+    pr.process_registry = Registry()
+    monkeypatch.setitem(sys.modules, "tools.process_registry", pr)
+
+    assert "sleep 1 — running (pid 7)" in commands._run_agents_command()
+
+
 def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
     """Safe non-CLI agent commands should be accepted by the executor allowlist."""
     from api import commands
