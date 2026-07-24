@@ -829,10 +829,9 @@ def test_side_effect_owner_survives_scene_settlement_and_reload():
     settled_scene = hydrated[1]["_anchor_activity_scene"]
 
     assert settled_scene["artifacts"] == scene["artifacts"]
-    assert settled_scene["artifacts"][0]["payload"] == {
-        "kind": "workspace_file",
-        "path": "answer.txt",
-    }
+    artifact_payload = settled_scene["artifacts"][0]["payload"]
+    assert artifact_payload["kind"] == "workspace_file"
+    assert artifact_payload["path"] == "answer.txt"
     assert settled_scene["side_effects"] == scene["side_effects"]
     assert settled_scene["side_effects"][0]["source_event_type"] == "state_saved"
     assert settled_scene["side_effects"][0]["payload"] == {

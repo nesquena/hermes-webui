@@ -2767,6 +2767,62 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const cursor=Number(_runJournalReplayAfterSeq&&_runJournalReplayAfterSeq());
     return (Number.isFinite(cursor)?cursor:0)+_anchorLocalSeq;
   }
+  function _anchorHasArtifactReference(localId, workspaceRoot, path){
+    const artifacts=_anchorRegistry&&_anchorRegistry.anchor&&_anchorRegistry.anchor.artifacts;
+    return Array.isArray(artifacts)&&artifacts.some(event=>
+      event&&event.source_event_type==='artifact_reference'&&(
+        event.local_id===localId ||
+        (
+          typeof workspaceRoot==='string'
+          && typeof path==='string'
+          && event.payload&&event.payload.workspace_root===workspaceRoot
+          && event.payload.path===path
+        )
+      )
+    );
+  }
+  function _attachTurnArtifactsFromToolCall(tc){
+    if(!tc||tc.is_error||typeof turnArtifactReferencesFromToolCall!=='function') return;
+    const toolCallId = typeof tc.tool_call_id === 'string'
+      ? tc.tool_call_id.trim()
+      : typeof tc.tid === 'string'
+        ? tc.tid.trim()
+        : typeof tc.id === 'string'
+          ? tc.id.trim()
+          : '';
+    const artifactSessionId = (
+      typeof tc.session_id === 'string'
+        ? tc.session_id.trim()
+        : typeof activeSid === 'string'
+          ? activeSid
+          : ''
+    );
+    if(!toolCallId) return;
+    for(const [index,artifact] of turnArtifactReferencesFromToolCall(tc).entries()){
+      const artifactObj = artifact && typeof artifact === 'object' ? artifact : null;
+      const path = typeof artifactObj.path === 'string' ? artifactObj.path.trim() : '';
+      const workspaceRoot = typeof artifactObj.workspace_root === 'string' ? artifactObj.workspace_root.trim() : '';
+      const artifactCallId = typeof artifactObj.tool_call_id === 'string' ? artifactObj.tool_call_id.trim() : '';
+      if(!artifactCallId || artifactCallId!==toolCallId) continue;
+      if(!path) continue;
+      const localId=`artifact:${toolCallId}:${index}:${workspaceRoot}:${path}`;
+      if(_anchorHasArtifactReference(localId,workspaceRoot,path)) continue;
+      // A distinct anchor event must not reuse the tool_complete SSE event id.
+      _applyToAnchor('artifact_reference',{
+        local_id:localId,
+        seq:_nextAnchorLocalSeq(),
+        path,
+        workspace_root:workspaceRoot,
+        session_id:(
+          typeof artifactObj.session_id === 'string'
+            ? artifactObj.session_id.trim()
+            : artifactSessionId
+        ),
+        tool_name: typeof artifactObj.tool_name === 'string' ? artifactObj.tool_name.trim() : String(tc.name||'tool'),
+        tool_call_id:artifactCallId,
+      },null,null,{render:false});
+    }
+  }
   function _anchorSegmentSeq(){
     const seq=Number(_assistantSegmentSeq||_currentLiveSegmentSeq||0);
     return Number.isFinite(seq)&&seq>0?seq:1;
@@ -5211,6 +5267,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(d.args!==undefined) tc.args=d.args;
     if(d.snippet!==undefined) tc.snippet=d.snippet;
+    if(Array.isArray(d.artifacts)) tc.artifacts=d.artifacts;
     tc._liveToolCallSignature = _toolCallSignature(tc,tc.activityBurstId,tc.activitySegmentSeq);
     tc.activityBurstId = Number.isFinite(Number(tc.activityBurstId))
       ? Number(tc.activityBurstId)
@@ -5236,6 +5293,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.done=true;
       if(typeof d.is_error==='boolean') tc.is_error=d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
+      if(Array.isArray(d.artifacts)) tc.artifacts=d.artifacts;
       if(tc.started_at===undefined||tc.started_at===null) tc.started_at=Date.now()/1000;
       if(!tc.tid) tc.tid=explicitTid||_liveToolTid(d,tc.activityBurstId,tc.activitySegmentSeq);
     } else {
@@ -5551,6 +5609,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
       if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true});
       _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
+      _attachTurnArtifactsFromToolCall(tc);
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;

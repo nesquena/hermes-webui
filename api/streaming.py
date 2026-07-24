@@ -54,6 +54,7 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.turn_artifacts import landed_artifact_descriptors, tool_result_is_error
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
@@ -7113,6 +7114,7 @@ def _run_agent_streaming(
     a streaming answer without persisting to the parent session.
     """
     _turn_route_model = model
+    _turn_workspace_root = str(Path(workspace).expanduser().resolve())
     _turn_route_provider = model_provider
     q = STREAMS.get(stream_id)
     if q is None:
@@ -8368,13 +8370,21 @@ def _run_agent_streaming(
                                     shared_tc['snippet'] = result_snippet
                                     break
                         _checkpoint_activity[0] += 1
+                        landed_artifacts = landed_artifact_descriptors(
+                            name,
+                            function_result,
+                            workspace_root=_turn_workspace_root,
+                            tool_call_id=tool_call_id,
+                            session_id=session_id,
+                        )
                         put('tool_complete', {
                             'event_type': 'tool.completed',
                             'name': name,
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
+                            'is_error': tool_result_is_error(function_result),
+                            'artifacts': landed_artifacts,
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can

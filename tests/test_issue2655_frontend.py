@@ -18,7 +18,7 @@ def test_workspace_artifacts_tab_collects_session_files_and_previews_them():
     assert "function renderSessionArtifacts()" in WORKSPACE_JS
     assert "function scheduleRenderSessionArtifacts()" in WORKSPACE_JS
     assert "function openArtifactPath(path)" in WORKSPACE_JS
-    assert "openFile(rel);" in WORKSPACE_JS
+    assert "openFile(rel,{owner});" in WORKSPACE_JS
     assert "Prose mentions" in WORKSPACE_JS
     assert "/(?:created|wrote|updated|edited|saved|modified)" not in WORKSPACE_JS
     assert "panel.dataset.activeTab = _workspacePanelActiveTab" in WORKSPACE_JS

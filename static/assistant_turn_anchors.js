@@ -1040,6 +1040,44 @@
       .map((event,index)=>_activitySceneRow(event,index,mode));
     const lifecycle=_copyObject(anchor.lifecycle);
     const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
+    const projectArtifactEvent = (event) => {
+      const normalized=_copyObject(event)||{};
+      const sourceEventType=_cleanString(_own(event,'source_event_type'));
+      const canonicalType=_cleanString(_own(event,'type')) || sourceEventType;
+      if(sourceEventType!=='artifact_reference' && canonicalType!=='artifact_reference'){
+        return Object.freeze({
+          ..._copyObject(normalized),
+          payload:Object.freeze(_copyObject(_own(event,'payload'))),
+        });
+      }
+      const payload=_copyObject(_own(event,'payload'));
+      const toolCallId=_cleanString(_own(payload,'tool_call_id'));
+      const toolName=_cleanString(_own(payload,'tool_name'));
+      const workspaceRoot=_cleanString(_own(payload,'workspace_root')).replace(/\/+$/,'');
+      const path=_cleanString(_own(payload,'path'));
+      const sourceSessionId=_cleanString(_own(event,'session_id'));
+      const canonicalPayload={
+        ..._copyObject(payload),
+        tool_call_id: toolCallId || _cleanString(_own(event,'tool_call_id')),
+        tool_name: toolName || _cleanString(_own(event,'tool_name')),
+        path: path || _cleanString(_own(event,'path')),
+        workspace_root: workspaceRoot || _cleanString(_own(event,'workspace_root')),
+      };
+      if(sourceSessionId){
+        canonicalPayload.session_id = sourceSessionId;
+        if(!canonicalPayload.owner){
+          canonicalPayload.owner={
+            session_id: sourceSessionId,
+            workspace_root: canonicalPayload.workspace_root,
+          };
+        }
+      }
+      return Object.freeze({
+        ..._copyObject(normalized),
+        type: canonicalType || 'artifact_reference',
+        payload:Object.freeze(canonicalPayload),
+      });
+    };
     return Object.freeze({
       version:'activity_scene_v1',
       mode,
@@ -1049,10 +1087,7 @@
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
       terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
       activity_rows:Object.freeze(rows),
-      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(event=>Object.freeze({
-        ..._copyObject(event),
-        payload:Object.freeze(_copyObject(_own(event,'payload'))),
-      }))),
+      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(projectArtifactEvent)),
       side_effects:Object.freeze((Array.isArray(anchor.side_effects)?anchor.side_effects:[]).map(event=>Object.freeze({
         ..._copyObject(event),
         payload:Object.freeze(_copyObject(_own(event,'payload'))),

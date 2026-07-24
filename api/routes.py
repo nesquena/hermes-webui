@@ -60,7 +60,9 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.process_event_utils import stamp_message_source
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.turn_artifacts import landed_artifact_descriptors, normalize_tool_name, tool_result_is_error
 
 logger = logging.getLogger(__name__)
 
@@ -8686,6 +8688,371 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
+def _turn_artifact_descriptors_from_tool_result(
+    message,
+    *,
+    workspace_root: str,
+    session_id: str = "",
+) -> list[dict]:
+    """Return only paired, canonical landed mutations from one tool row."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
+        return []
+    if message.get("is_error") is True:
+        return []
+    name = normalize_tool_name(message.get("name") or message.get("tool_name"))
+    tool_call_id = str(message.get("tool_call_id") or "").strip()
+    if not tool_call_id:
+        return []
+    result_candidates = [
+        candidate
+        for candidate in (message.get("content"), message.get("result"), message.get("output"))
+        if candidate
+    ]
+    if any(tool_result_is_error(candidate) for candidate in result_candidates):
+        return []
+    for candidate in result_candidates:
+        descriptors = landed_artifact_descriptors(
+            name,
+            candidate,
+            workspace_root=workspace_root,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+        )
+        if descriptors:
+            return descriptors
+    return []
+
+
+def _declared_turn_tool_calls(messages) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    invalid: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
+            continue
+        for call in list(message.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            raw_call_id = call.get("id") or call.get("tool_call_id")
+            if not isinstance(raw_call_id, str):
+                continue
+            call_id = raw_call_id.strip()
+            raw_name = call.get("name")
+            if not raw_name and isinstance(call.get("function"), dict):
+                raw_name = call["function"].get("name")
+            if not isinstance(raw_name, str):
+                continue
+            name = normalize_tool_name(raw_name)
+            if not call_id or not name:
+                continue
+            if call_id in declarations or call_id in invalid:
+                invalid.add(call_id)
+                declarations.pop(call_id, None)
+                continue
+            declarations[call_id] = name
+    return {call_id: name for call_id, name in declarations.items() if call_id not in invalid}
+
+
+def _final_turn_artifact_paths(
+    messages,
+    *,
+    workspace_root: str,
+    session_id: str = "",
+) -> dict[int, list[dict]]:
+    """Return paired, landed artifact descriptors keyed by final answer index."""
+    source = list(messages or [])
+    paths_by_final_index = {}
+    replay_session_id = str(session_id or "").strip()
+
+    def _invalidate_call(
+        call_id: str,
+        *,
+        invalid_calls: set[str],
+        declared_calls: dict[str, str],
+        descriptors_by_id: dict[str, list[dict]],
+        result_order: list[str],
+    ) -> None:
+        if not call_id:
+            return
+        invalid_calls.add(call_id)
+        declared_calls.pop(call_id, None)
+        descriptors_by_id.pop(call_id, None)
+        if call_id in result_order:
+            result_order.remove(call_id)
+
+    user_indexes = [idx for idx, message in enumerate(source) if isinstance(message, dict) and message.get("role") == "user"]
+    for position, turn_start in enumerate(user_indexes):
+        turn_end = user_indexes[position + 1] if position + 1 < len(user_indexes) else len(source)
+        final_idx = next(
+            (
+                idx
+                for idx in range(turn_end - 1, turn_start, -1)
+                if isinstance(source[idx], dict)
+                and source[idx].get("role") == "assistant"
+                and str(source[idx].get("content") or "").strip()
+            ),
+            None,
+        )
+        if final_idx is None:
+            continue
+        declared_calls: dict[str, str] = {}
+        observed_declarations: set[str] = set()
+        invalid_calls: set[str] = set()
+        descriptors_by_id: dict[str, list[dict]] = {}
+        result_order: list[str] = []
+        consumed_calls: set[str] = set()
+
+        turn_messages = source[turn_start + 1 : final_idx]
+        for message in turn_messages:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").lower() == "assistant":
+                for call in list(message.get("tool_calls") or []):
+                    if not isinstance(call, dict):
+                        continue
+                    raw_call_id = call.get("id") or call.get("tool_call_id")
+                    if not isinstance(raw_call_id, str):
+                        continue
+                    call_id = raw_call_id.strip()
+                    if not call_id:
+                        continue
+                    if call_id in observed_declarations:
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
+                        continue
+                    observed_declarations.add(call_id)
+                    if call_id in invalid_calls:
+                        continue
+                    raw_name = call.get("name")
+                    if not raw_name and isinstance(call.get("function"), dict):
+                        raw_name = call["function"].get("name")
+                    if not isinstance(raw_name, str):
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
+                        continue
+                    name = normalize_tool_name(raw_name)
+                    if not name:
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
+                        continue
+                    declared_calls[call_id] = name
+                continue
+            if message.get("role") != "tool":
+                continue
+            raw_tool_call_id = message.get("tool_call_id")
+            if not isinstance(raw_tool_call_id, str):
+                continue
+            tool_call_id = raw_tool_call_id.strip()
+            if not tool_call_id or tool_call_id in invalid_calls:
+                invalid_calls.add(tool_call_id)
+                continue
+            if tool_call_id not in declared_calls:
+                invalid_calls.add(tool_call_id)
+                continue
+            tool_name = normalize_tool_name(message.get("name") or message.get("tool_name"))
+            if not tool_name or tool_name != declared_calls[tool_call_id]:
+                _invalidate_call(
+                    tool_call_id,
+                    invalid_calls=invalid_calls,
+                    declared_calls=declared_calls,
+                    descriptors_by_id=descriptors_by_id,
+                    result_order=result_order,
+                )
+                continue
+            if tool_call_id in consumed_calls:
+                _invalidate_call(
+                    tool_call_id,
+                    invalid_calls=invalid_calls,
+                    declared_calls=declared_calls,
+                    descriptors_by_id=descriptors_by_id,
+                    result_order=result_order,
+                )
+                continue
+            consumed_calls.add(tool_call_id)
+            descriptors_for_call = _turn_artifact_descriptors_from_tool_result(
+                message,
+                workspace_root=workspace_root,
+                session_id=replay_session_id,
+            )
+            if not descriptors_for_call:
+                _invalidate_call(
+                    tool_call_id,
+                    invalid_calls=invalid_calls,
+                    declared_calls=declared_calls,
+                    descriptors_by_id=descriptors_by_id,
+                    result_order=result_order,
+                )
+                continue
+            if tool_call_id in invalid_calls:
+                continue
+            descriptors_by_id[tool_call_id] = descriptors_for_call
+            result_order.append(tool_call_id)
+        descriptors = []
+        seen = set()
+        for result_id in result_order:
+            if result_id in invalid_calls:
+                continue
+            for descriptor in descriptors_by_id.get(result_id, []):
+                key = (descriptor["workspace_root"], descriptor["path"])
+                if key not in seen:
+                    seen.add(key)
+                    descriptors.append(descriptor)
+        if descriptors:
+            paths_by_final_index[final_idx] = descriptors
+    return paths_by_final_index
+
+
+def _artifact_only_anchor_scene(message) -> dict:
+    """Build the smallest activity_scene_v1 projection for replayed artifact evidence."""
+    return {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {"source_message_refs": [_assistant_anchor_scene_message_ref(message)]},
+        "lifecycle": {},
+        "final_answer": _anchor_scene_message_text(message),
+        "final_message_ref": _assistant_anchor_scene_message_ref(message),
+        "terminal_state": None,
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+    }
+
+
+def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_index, *, message_offset=0) -> list:
+    """Merge transcript-derived artifact evidence into the existing Anchor projection."""
+    if not isinstance(messages, list) or not isinstance(paths_by_final_index, dict):
+        return messages
+
+    def _strict_artifact_reference(payload: dict, event_type: str | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        workspace_root = payload.get("workspace_root")
+        path = payload.get("path")
+        tool_name = payload.get("tool_name")
+        tool_call_id = payload.get("tool_call_id")
+        session_id = payload.get("session_id")
+        if not isinstance(event_type, str) or event_type != "artifact_reference":
+            return False
+        if not (
+            isinstance(workspace_root, str)
+            and workspace_root.strip()
+            and isinstance(path, str)
+            and path.strip()
+            and isinstance(tool_name, str)
+            and tool_name.strip()
+            and isinstance(tool_call_id, str)
+            and tool_call_id.strip()
+            and isinstance(session_id, str)
+            and session_id.strip()
+        ):
+            return False
+        return True
+
+    out = list(messages)
+    for local_idx, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        descriptors = paths_by_final_index.get(int(message_offset or 0) + local_idx)
+        if not descriptors:
+            continue
+        scene = message.get("_anchor_activity_scene")
+        next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message)
+        artifacts = list(next_scene.get("artifacts") or [])
+        seen = set()
+        seen_to_first_index = {}
+        for idx, artifact in enumerate(artifacts):
+            if not isinstance(artifact, dict):
+                continue
+            payload = artifact.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            payload_workspace_root = payload.get("workspace_root")
+            payload_path = payload.get("path")
+            if not isinstance(payload_workspace_root, str) or not isinstance(payload_path, str):
+                continue
+            key = (payload_workspace_root, payload_path)
+            if not key[0] or not key[1]:
+                continue
+            seen_to_first_index.setdefault(key, idx)
+            seen.add(key)
+        for descriptor in descriptors:
+            if not isinstance(descriptor, dict):
+                continue
+            path = descriptor.get("path")
+            workspace_root = descriptor.get("workspace_root")
+            if not isinstance(path, str) or not isinstance(workspace_root, str):
+                continue
+            path = path.strip()
+            workspace_root = workspace_root.strip()
+            key = (workspace_root, path)
+            if not path or not workspace_root:
+                continue
+            if key in seen:
+                existing_index = seen_to_first_index.get(key)
+                if existing_index is not None and existing_index < len(artifacts):
+                    existing = artifacts[existing_index]
+                    existing_payload = existing.get("payload") if isinstance(existing, dict) else None
+                    existing_is_renderable = _strict_artifact_reference(
+                        existing_payload if isinstance(existing_payload, dict) else None,
+                        existing.get("type") if isinstance(existing, dict) else None,
+                    )
+                    replay_session_id = descriptor.get("session_id")
+                    replay_is_renderable = _strict_artifact_reference(descriptor, "artifact_reference")
+                    replay_has_tool_identity = (
+                        isinstance(descriptor, dict)
+                        and isinstance(descriptor.get("tool_name"), str)
+                        and descriptor.get("tool_name").strip()
+                        and isinstance(descriptor.get("tool_call_id"), str)
+                        and descriptor.get("tool_call_id").strip()
+                    )
+                    existing_session_id = (
+                        existing_payload.get("session_id")
+                        if isinstance(existing_payload, dict)
+                        else None
+                    )
+                    if (
+                        not existing_is_renderable
+                        or not isinstance(replay_session_id, str)
+                        or existing_session_id != replay_session_id
+                    ):
+                        if replay_has_tool_identity and replay_is_renderable:
+                            artifacts[existing_index] = {
+                                "type": "artifact_reference",
+                                "payload": {**descriptor, "source": "transcript_replay"},
+                            }
+                        else:
+                            artifacts[existing_index] = {
+                                "type": "artifact_reference",
+                                "payload": {
+                                    **(existing_payload if isinstance(existing_payload, dict) else {}),
+                                    "source": "transcript_replay",
+                                },
+                            }
+                seen.add(key)
+                continue
+            seen.add(key)
+            artifacts.append({"type": "artifact_reference", "payload": {**descriptor, "source": "transcript_replay"}})
+        next_scene["artifacts"] = artifacts
+        next_message = dict(message)
+        next_message["_anchor_activity_scene"] = next_scene
+        out[local_idx] = next_message
+    return out
+
+
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -12737,6 +13104,11 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
+                _final_turn_artifacts = _final_turn_artifact_paths(
+                    _all_msgs,
+                    workspace_root=str(getattr(s, "workspace", "") or ""),
+                    session_id=str(getattr(s, "session_id", "") or ""),
+                )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
                     msg_limit=msg_limit,
@@ -12750,6 +13122,11 @@ def handle_get(handler, parsed) -> bool:
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
                     tool_calls=getattr(s, "tool_calls", None),
+                )
+                _truncated_msgs = _attach_replayed_turn_artifacts_to_anchor_scenes(
+                    _truncated_msgs,
+                    _final_turn_artifacts,
+                    message_offset=_messages_offset,
                 )
             else:
                 _truncated_msgs = []
@@ -20887,8 +21264,6 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
-    from api.process_event_utils import stamp_message_source
-
     stamp_message_source(user_msg, source)
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = int(started_at)
