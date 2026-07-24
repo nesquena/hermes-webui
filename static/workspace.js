@@ -575,7 +575,20 @@ function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
   const name=_artifactToolName(tc.name);
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
-  const completionToolCallId = _artifactScalarString(tc.tool_call_id || tc.tid || tc.id);
+  const allowArtifactCallIdFallback = name === 'patch';
+  const completionToolCallId = _artifactScalarString(
+    tc.tool_call_id
+    || tc.tid
+    || tc.id
+    || (allowArtifactCallIdFallback ? (() => {
+      const artifacts = Array.isArray(tc.artifacts) ? tc.artifacts : [];
+      for(const artifact of artifacts){
+        const toolCallId = _artifactScalarString(artifact && artifact.tool_call_id);
+        if(toolCallId) return toolCallId;
+      }
+      return '';
+    })() : '')
+  );
   if(!completionToolCallId) return [];
   const seen=new Set();
   const out=[];
@@ -1250,7 +1263,9 @@ async function openFile(path, opts={}){
   const owner = resolveOwner(opts);
   if(!path || typeof path !== 'string' || !owner) return;
   const openFileOwner = owner;
-  const ownerStillActive = () => _artifactOwnerMatchesSession(openFileOwner);
+  const ownerStillActive = () => typeof _artifactOwnerMatchesSession === 'function'
+    ? _artifactOwnerMatchesSession(openFileOwner)
+    : true;
   if(!ownerStillActive()) return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
@@ -1406,7 +1421,6 @@ async function openFile(path, opts={}){
         return;
       }
       if(data.preview_kind==='office'){
-        if(!ownerStillActive()) return;
         _previewRawContent = data.content || '';
         _previewRawContentPath = path;
         _previewServerEditable = typeof data.editable === 'boolean' ? data.editable : null;
