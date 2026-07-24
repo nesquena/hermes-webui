@@ -5815,7 +5815,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
+        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
         _clearOwnerInflightState();
+        if(typeof _markSessionCompletedInList==='function'){
+          _markSessionCompletedInList(completedSession, activeSid);
+        }
         _clearApprovalForOwner();
         _clearClarifyForOwner('terminal');
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
@@ -6001,10 +6005,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
           if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
-        }
-        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
-        if(typeof _markSessionCompletedInList==='function'){
-          _markSessionCompletedInList(completedSession, activeSid);
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
