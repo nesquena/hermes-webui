@@ -152,6 +152,45 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     assert "_turn_artifacts" not in ui
 
 
+def test_turn_artifact_entries_accept_top_level_session_id_fallback():
+    helpers = _function_source(
+        "static/ui.js", "function _turnArtifactWorkspacePath", "function _renderTurnArtifactListForMessage"
+    )
+    scene = {
+        "artifacts": [
+            {
+                "type": "artifact_reference",
+                "session_id": "sid-owner",
+                "payload": {
+                    "path": "output/backup-report.md",
+                    "workspace_root": "/workspace",
+                    "tool_name": "write_file",
+                    "tool_call_id": "call-1",
+                },
+            }
+        ]
+    }
+    output = _run_node(
+        "const S={session:{workspace:'/workspace',session_id:'sid-owner'}};\n"
+        + helpers
+        + "\nconsole.log(JSON.stringify(_turnArtifactEntriesFromScene("
+        + json.dumps(scene)
+        + ")));"
+    )
+    assert output == [{
+        "path": "output/backup-report.md",
+        "workspace_root": "/workspace",
+        "session_id": "sid-owner",
+        "tool_name": "write_file",
+        "tool_call_id": "call-1",
+        "type": "artifact_reference",
+        "owner": {
+            "session_id": "sid-owner",
+            "workspace_root": "/workspace",
+        },
+    }]
+
+
 def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fallback():
     helpers = _function_source(
         "static/ui.js", "function _turnArtifactWorkspacePath", "function _renderTurnArtifactListForMessage"
@@ -426,6 +465,90 @@ def test_replay_rejects_failed_unpaired_duplicate_and_mismatched_writes():
                 "tool_name": "write_file",
                 "session_id": "sid-default",
             }
+        ]
+    }
+
+
+def test_final_turn_artifact_paths_treats_ambiguous_call_sequences_as_invalid():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "write"},
+        {"role": "assistant", "content": "prepare"},
+        {
+            "role": "tool",
+            "tool_call_id": "call-pre",
+            "name": "write_file",
+            "content": json.dumps({"bytes_written": 1, "resolved_path": "/workspace/output/predecl.md"}),
+        },
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call-missing", "function": {}},
+                {"id": "call-dupe", "function": {"name": "write_file"}},
+                {"id": "call-dupe", "function": {"name": "write_file"}},
+                {"id": "call-mismatch", "function": {"name": "write_file"}},
+                {"id": "call-dupres", "function": {"name": "write_file"}},
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-missing",
+            "name": "write_file",
+            "content": json.dumps({"bytes_written": 2, "resolved_path": "/workspace/output/missing.md"}),
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-dupe",
+            "name": "write_file",
+            "content": json.dumps({"bytes_written": 3, "resolved_path": "/workspace/output/dupe-first.md"}),
+        },
+        {"role": "assistant", "content": "middle"},
+        {
+            "role": "tool",
+            "tool_call_id": "call-dupres",
+            "name": "write_file",
+            "content": json.dumps({"bytes_written": 4, "resolved_path": "/workspace/output/dupres-first.md"}),
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-dupres",
+            "name": "write_file",
+            "content": json.dumps({"bytes_written": 5, "resolved_path": "/workspace/output/dupres-second.md"}),
+        },
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "call-mismatch", "function": {"name": "patch"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-mismatch",
+            "name": "patch",
+            "content": json.dumps({"success": True, "files_modified": ["/workspace/output/mismatch.md"]}),
+        },
+        {"role": "assistant", "tool_calls": [{"id": "call-valid", "function": {"name": "write_file"}}]},
+        {
+            "role": "tool",
+            "tool_call_id": "call-valid",
+            "name": "write_file",
+            "content": json.dumps({"bytes_written": 6, "resolved_path": "/workspace/output/valid.md"}),
+        },
+        {"role": "assistant", "content": "final"},
+    ]
+
+    assert routes._final_turn_artifact_paths(
+        messages,
+        workspace_root="/workspace",
+        session_id="sid-ambiguous",
+    ) == {
+        13: [
+            {
+                "path": "output/valid.md",
+                "workspace_root": "/workspace",
+                "tool_call_id": "call-valid",
+                "tool_name": "write_file",
+                "session_id": "sid-ambiguous",
+            },
         ]
     }
 
