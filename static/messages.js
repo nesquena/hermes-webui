@@ -5816,9 +5816,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         _clearOwnerInflightState();
-        if(typeof _markSessionCompletedInList==='function'){
-          _markSessionCompletedInList(completedSession, activeSid);
-        }
         _clearApprovalForOwner();
         _clearClarifyForOwner('terminal');
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
@@ -5849,7 +5846,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
-          if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
             window._compressionUi&&window._compressionUi.automatic&&
@@ -6005,6 +6001,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
           if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+        }
+        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
+        if(typeof _markSessionCompletedInList==='function'){
+          _markSessionCompletedInList(completedSession, activeSid);
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
