@@ -66,7 +66,11 @@ def landed_artifact_descriptors(tool_name, result_value, *, workspace_root: str,
     elif name == "patch":
         if result.get("success") is not True:
             return []
-        candidates = list(result.get("files_modified") or []) + list(result.get("files_created") or [])
+        modified = result.get("files_modified")
+        created = result.get("files_created")
+        candidates = (modified if isinstance(modified, list) else []) + (
+            created if isinstance(created, list) else []
+        )
 
     descriptors = []
     seen = set()
@@ -77,10 +81,12 @@ def landed_artifact_descriptors(tool_name, result_value, *, workspace_root: str,
         if not path or path in seen:
             continue
         seen.add(path)
-        descriptors.append({
-            "path": path,
-            "workspace_root": str(Path(root).expanduser().resolve()),
-            "tool_call_id": call_id,
-            "tool_name": name,
-        })
+        descriptors.append(
+            {
+                "path": path,
+                "workspace_root": str(Path(root).expanduser().resolve()),
+                "tool_call_id": call_id,
+                "tool_name": name,
+            }
+        )
     return descriptors

@@ -61,7 +61,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
-from api.turn_artifacts import landed_artifact_descriptors, normalize_tool_name
+from api.turn_artifacts import landed_artifact_descriptors, normalize_tool_name, tool_result_is_error
 
 logger = logging.getLogger(__name__)
 
@@ -8697,10 +8697,23 @@ def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str)
     tool_call_id = str(message.get("tool_call_id") or "").strip()
     if not tool_call_id:
         return []
-    result = message.get("content", message.get("result", message.get("output")))
-    return landed_artifact_descriptors(
-        name, result, workspace_root=workspace_root, tool_call_id=tool_call_id
-    )
+    result_candidates = [
+        candidate
+        for candidate in (message.get("content"), message.get("result"), message.get("output"))
+        if candidate
+    ]
+    if any(tool_result_is_error(candidate) for candidate in result_candidates):
+        return []
+    for candidate in result_candidates:
+        descriptors = landed_artifact_descriptors(
+            name,
+            candidate,
+            workspace_root=workspace_root,
+            tool_call_id=tool_call_id,
+        )
+        if descriptors:
+            return descriptors
+    return []
 
 
 def _declared_turn_tool_calls(messages) -> dict[str, str]:
@@ -8760,7 +8773,7 @@ def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, li
     return paths_by_final_index
 
 
-def _artifact_only_anchor_scene(message, paths) -> dict:
+def _artifact_only_anchor_scene(message) -> dict:
     """Build the smallest activity_scene_v1 projection for replayed artifact evidence."""
     return {
         "version": "activity_scene_v1",
@@ -8784,11 +8797,11 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
     for local_idx, message in enumerate(messages):
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
-        paths = paths_by_final_index.get(int(message_offset or 0) + local_idx)
-        if not paths:
+        descriptors = paths_by_final_index.get(int(message_offset or 0) + local_idx)
+        if not descriptors:
             continue
         scene = message.get("_anchor_activity_scene")
-        next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message, paths)
+        next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message)
         artifacts = list(next_scene.get("artifacts") or [])
         seen = {
             (
@@ -8798,7 +8811,7 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             for artifact in artifacts
             if isinstance(artifact, dict)
         }
-        for descriptor in paths:
+        for descriptor in descriptors:
             if not isinstance(descriptor, dict):
                 continue
             path = str(descriptor.get("path") or "")
@@ -12867,7 +12880,8 @@ def handle_get(handler, parsed) -> bool:
                 _summary_last_message_at = None
             if load_messages:
                 _final_turn_artifacts = _final_turn_artifact_paths(
-                    _all_msgs, workspace_root=str(getattr(s, "workspace", "") or "")
+                    _all_msgs,
+                    workspace_root=str(getattr(s, "workspace", "") or ""),
                 )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,

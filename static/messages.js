@@ -2767,10 +2767,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const cursor=Number(_runJournalReplayAfterSeq&&_runJournalReplayAfterSeq());
     return (Number.isFinite(cursor)?cursor:0)+_anchorLocalSeq;
   }
-  function _anchorHasArtifactReference(localId){
+  function _anchorHasArtifactReference(localId, workspaceRoot, path){
     const artifacts=_anchorRegistry&&_anchorRegistry.anchor&&_anchorRegistry.anchor.artifacts;
     return Array.isArray(artifacts)&&artifacts.some(event=>
-      event&&event.source_event_type==='artifact_reference'&&event.local_id===localId
+      event&&event.source_event_type==='artifact_reference'&&(
+        event.local_id===localId ||
+        (
+          String(event.payload&&event.payload.workspace_root||'')===String(workspaceRoot||'') &&
+          String(event.payload&&event.payload.path||'')===String(path||'')
+        )
+      )
     );
   }
   function _attachTurnArtifactsFromToolCall(tc){
@@ -2781,7 +2787,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const workspaceRoot=String(artifact&&artifact.workspace_root||'').trim();
       if(!path) continue;
       const localId=`artifact:${toolId}:${index}:${workspaceRoot}:${path}`;
-      if(_anchorHasArtifactReference(localId)) continue;
+      if(_anchorHasArtifactReference(localId,workspaceRoot,path)) continue;
       // A distinct anchor event must not reuse the tool_complete SSE event id.
       _applyToAnchor('artifact_reference',{
         local_id:localId,
@@ -5237,6 +5243,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(d.args!==undefined) tc.args=d.args;
     if(d.snippet!==undefined) tc.snippet=d.snippet;
+    if(Array.isArray(d.artifacts)) tc.artifacts=d.artifacts;
     tc._liveToolCallSignature = _toolCallSignature(tc,tc.activityBurstId,tc.activitySegmentSeq);
     tc.activityBurstId = Number.isFinite(Number(tc.activityBurstId))
       ? Number(tc.activityBurstId)
