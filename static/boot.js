@@ -2328,7 +2328,7 @@ window._isImeEnter=_isImeEnter;
 // strongest signal browsers expose for "there is a real keyboard /
 // trackpad in the picture too". Skip the mobile default in that case.
 function _hasFinePointerCoexisting(){
-  try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
+  try{ return matchMedia('(any-pointer:fine)').matches&&matchMedia('(any-hover:hover)').matches; }catch(_){ return false; }
 }
 function _isNumpadEnter(e){
   return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
