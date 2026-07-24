@@ -155,14 +155,16 @@ def test_docker_md_documents_isolation_model():
     )
 
 
-# ── 5: docker_init.bash stages agent source to a writable build dir ─────────
+# ── 5: docker_init.bash stages agent source for editable install ─────────────
 #
 # The :ro mount fixed in PR #2470 broke a second, less obvious surface:
 # `uv pip install "$_agent_src[all]"` invokes setuptools' egg_info build step,
 # which touches `hermes_agent.egg-info/` *inside the source tree* even under
 # PEP 517 build isolation. On a `:ro` mount this returns `EROFS` and (under
 # `set -e`) kills container startup. The fix: copy the source tree into a
-# writable tmpfs build dir, run the install against THAT, then clean up.
+# writable persistent directory (/app/hermes-agent-src) and run an editable
+# install against it. The staged copy shares the venv's lifecycle — both
+# survive restarts and are lost together on container recreation.
 #
 # This was caught the first time the Docker smoke gate ran on its own PR — a
 # real regression that 5800+ source-level pytests had no way to surface
@@ -311,4 +313,86 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
         "inside one branch means the other copy path skips it and the "
         ":ro mount perm leak returns."
     )
+
+
+# ── 6: docker_init.bash editable install with persistent staging ─────────────
+#
+# The upstream hermes-agent setup.py build guard blocks bdist_wheel outside Nix
+# builds. The WebUI uses an editable install (`uv pip install -e`) to bypass
+# this. The staged source lives at /app/hermes-agent-src (persistent, same
+# lifecycle as the venv) so the editable .pth link remains valid across
+# container restarts without sentinel files or state machines.
+
+
+def test_docker_init_uses_editable_install():
+    """docker_init.bash must use `uv pip install -e` (editable) for the
+    hermes-agent staged source. The upstream setup.py build guard blocks
+    bdist_wheel outside Nix builds. Editable installs use build_editable
+    which bypasses the guard entirely."""
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    install_lines = [
+        line for line in src.splitlines()
+        if "uv pip install" in line and "[all]" in line
+    ]
+    assert install_lines, "expected a `uv pip install ...[all]` line in docker_init.bash"
+    for line in install_lines:
+        assert re.search(r"uv\s+pip\s+install\s+-e\b", line), (
+            "docker_init.bash must use editable install (`uv pip install -e`) "
+            "for hermes-agent. The upstream setup.py build guard blocks "
+            "bdist_wheel outside Nix builds, causing container startup failure. "
+            f"Offending line: {line!r}"
+        )
+
+
+def test_docker_init_stages_to_persistent_path():
+    """The staged source must live under /app/ (persistent storage), not /tmp/
+    (ephemeral). An editable install records the staged path in a .pth file —
+    if the path is on tmpfs, a container restart or tmpfs flush breaks imports.
+    Placing it alongside the venv gives both the same lifecycle."""
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_line = [
+        line for line in src.splitlines()
+        if "_stage_src=" in line and "=" in line and "#" not in line.split("=")[0]
+    ]
+    assert stage_line, "expected a _stage_src= assignment in docker_init.bash"
+    for line in stage_line:
+        assert "/tmp" not in line, (
+            "docker_init.bash stages the editable source under /tmp/ which is "
+            "ephemeral. The editable .pth link will dangle after tmpfs flush "
+            "or container recreation. Stage under /app/ for persistence. "
+            f"Offending line: {line!r}"
+        )
+        assert "/app/" in line, (
+            "docker_init.bash must stage the editable source under /app/ "
+            "(persistent, same lifecycle as the venv). "
+            f"Offending line: {line!r}"
+        )
+
+
+def test_docker_init_retains_staged_source_after_editable_install():
+    """An editable install records the staged source path in a .pth file.
+    Removing the source tree after install breaks imports at runtime.
+    Ensure no `rm -rf "$_stage_src"` appears after the install line."""
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_idx = src.index("_stage_src=")
+    install_idx = src.index("uv pip install", stage_idx)
+
+    # Everything after the install line
+    post_install = src[install_idx:]
+
+    # Find lines that delete the staged source after install
+    post_install_lines = post_install.splitlines()
+    for i, line in enumerate(post_install_lines):
+        stripped = line.strip()
+        if re.search(r"rm\s+-rf\s+.*\$_stage_src", stripped):
+            if i > 0:  # line 0 is the install line itself
+                assert False, (
+                    "docker_init.bash must NOT delete $_stage_src after an "
+                    "editable install. The .pth link points to the staged "
+                    "source; deleting it breaks imports at runtime. "
+                    f"Offending line: {stripped!r}"
+                )
 
