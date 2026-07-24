@@ -6880,6 +6880,65 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
+function _delegatedChildRuntimeMeta(child){
+  const rawState=String(child&&child.runtime_state||'').toLowerCase();
+  const state=rawState==='waiting'||rawState==='running'||rawState==='completed'||rawState==='failed'||rawState==='cancelled'
+    ? rawState
+    : 'unknown';
+  const reason=String(child&&child.runtime_reason||'').toLowerCase();
+  const labelKey='session_child_runtime_'+state;
+  const fallback=state==='waiting'
+    ? 'Waiting'
+    : state==='running'
+      ? 'Running'
+      : state==='completed'
+        ? 'Done'
+        : state==='failed'
+          ? 'Failed'
+          : state==='cancelled'
+            ? 'Canceled'
+            : 'Unknown';
+  const label=typeof t==='function' ? t(labelKey) : fallback;
+  let tooltip=label;
+  if(state==='waiting'&&reason==='approval') tooltip=typeof t==='function' ? t('session_attention_approval_title') : 'Waiting for permission decision';
+  else if(state==='waiting'&&reason==='clarify') tooltip=typeof t==='function' ? t('session_attention_clarify_title') : 'Waiting for your answer';
+  return {state,reason,label,tooltip};
+}
+
+function _renderDelegatedChildRuntimeBadge(child){
+  const meta=_delegatedChildRuntimeMeta(child);
+  const badge=document.createElement('span');
+  badge.className='session-child-runtime-badge session-child-runtime-badge-'+meta.state;
+  badge.dataset.runtimeState=meta.state;
+  if(meta.reason) badge.dataset.runtimeReason=meta.reason;
+  badge.textContent=meta.label;
+  if(meta.tooltip){
+    badge.classList.add('has-tooltip');
+    badge.setAttribute('data-tooltip',meta.tooltip);
+    badge.setAttribute('aria-label',meta.tooltip);
+    badge.title=meta.tooltip;
+  }
+  return badge;
+}
+
+function _renderGenericDelegatedChildRow(child, activeSidForSidebar, openChildSession, childLabelFor){
+  const row=document.createElement('button');
+  row.type='button';
+  row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+  row.dataset.sid=child.session_id;
+  row.title='Open child session';
+  const label=document.createElement('span');
+  label.className='session-child-session-label';
+  label.textContent=childLabelFor(child);
+  row.appendChild(label);
+  row.appendChild(_renderDelegatedChildRuntimeBadge(child));
+  row.onclick=async(e)=>{
+    e.stopPropagation();
+    await openChildSession(child);
+  };
+  return row;
+}
+
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
   const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
@@ -8456,16 +8515,7 @@ function renderSessionListFromCache(){
           childList.appendChild(row);
           continue;
         }
-        const row=document.createElement('button');
-        row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.textContent=childLabelFor(child);
-        row.title='Open child session';
-        row.onclick=async(e)=>{
-          e.stopPropagation();
-          await openChildSession(child);
-        };
-        childList.appendChild(row);
+        childList.appendChild(_renderGenericDelegatedChildRow(child, activeSidForSidebar, openChildSession, childLabelFor));
       }
       sessionText.appendChild(childList);
     }

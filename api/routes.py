@@ -9775,6 +9775,55 @@ def _session_attention_summary(session_id: str) -> dict | None:
     return None
 
 
+_SIDEBAR_CHILD_RUNTIME_STATES = {"waiting", "running", "completed", "failed", "cancelled", "unknown"}
+
+
+def _normalize_sidebar_child_runtime_reason(reason) -> str | None:
+    raw = _safe_first(reason)
+    if not raw:
+        return None
+    text = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    if not text:
+        return None
+    if text in {"approval", "clarify", "completed", "cancelled", "unknown"}:
+        return text
+    if any(token in text for token in ("cancel", "abort", "interrupt", "stopped_by_user", "user_stop")):
+        return "cancelled"
+    if "tool_limit" in text:
+        return "tool_limit"
+    if any(token in text for token in ("fail", "error", "exception", "timeout")):
+        return "error"
+    if any(token in text for token in ("complete", "success", "finished", "done")):
+        return "completed"
+    return "ended"
+
+
+def _sidebar_child_runtime_fields(session: dict, *, attention: dict | None = None) -> tuple[str, str | None]:
+    attention_kind = _safe_first((attention or {}).get("kind"))
+    if attention_kind in {"approval", "clarify"}:
+        return "waiting", attention_kind
+    if session.get("is_streaming") is True or session.get("active_stream_id"):
+        return "running", "live"
+    runtime_reason = _normalize_sidebar_child_runtime_reason(session.get("end_reason"))
+    has_terminal_evidence = bool(session.get("ended_at")) or bool(runtime_reason)
+    if not has_terminal_evidence:
+        return "unknown", None
+    if runtime_reason == "cancelled":
+        return "cancelled", runtime_reason
+    if runtime_reason == "unknown":
+        return "unknown", runtime_reason
+    if runtime_reason in {None, "completed"}:
+        return "completed", "completed"
+    return "failed", runtime_reason
+
+
+def _sidebar_session_has_child_runtime(session: dict) -> bool:
+    return bool(
+        _safe_first(session.get("parent_session_id"))
+        or _safe_first(session.get("relationship_type"))
+    )
+
+
 _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "session_id",
     "title",
@@ -9819,6 +9868,8 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "parent_title",
     "parent_source",
     "relationship_type",
+    "runtime_state",
+    "runtime_reason",
     "pre_compression_snapshot",
     "_lineage_root_id",
     "_lineage_tip_id",
@@ -9858,7 +9909,15 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
     _redact_sidebar_title_fields(item, redact_enabled)
-    item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+    attention = _session_attention_summary(str(item.get("session_id") or ""))
+    item["attention"] = attention
+    if _sidebar_session_has_child_runtime(session):
+        runtime_state, runtime_reason = _sidebar_child_runtime_fields(session, attention=attention)
+        item["runtime_state"] = runtime_state if runtime_state in _SIDEBAR_CHILD_RUNTIME_STATES else "unknown"
+        item["runtime_reason"] = runtime_reason
+    else:
+        item["runtime_state"] = None
+        item["runtime_reason"] = None
     return item
 
 
