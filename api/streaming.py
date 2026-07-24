@@ -46,6 +46,9 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
+    _PROVIDER_MODELS,
+    _PROVIDER_DISPLAY,
+    _resolve_provider_alias,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -3226,21 +3229,20 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
-def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
-    """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
+def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    """Whether an auxiliary title route can receive reasoning suppression.
 
-    Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
-    suppress thinking on reasoning-capable models (#2083). But OpenAI Chat
-    Completions (and Azure OpenAI) reject unknown top-level params with a 400, so
-    that inject silently fails the title call and falls back to a low-quality
-    heuristic title (#4161). Skip the inject for those routes.
-
-    OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
-    are reasoning-capable but reject a reasoning *disable* — title gen only needs
-    reasoning off, so skip the inject for them too rather than risk the same 400.
+    Known built-in routes are resolved even when their URL is implicit, and keep
+    ``extra_body={"reasoning": {"enabled": False}}`` so title generation does
+    not spend its budget on hidden reasoning.  The known reject set (OpenAI,
+    Azure/Azure AI Foundry, and OpenRouter Anthropic) is excluded.  A route is
+    otherwise fail-safe: an unknown provider backed by a custom URL is omitted
+    until it has an explicit compatibility classification.
     """
     provider_lower = str(provider or '').strip().lower()
     model_lower = str(model or '').strip().lower()
+    if not model_lower:
+        return False
     # Hostname-based match (not substring) so a proxy URL that merely *contains*
     # one of these strings in a path segment isn't mis-classified.
     host = ''
@@ -3250,22 +3252,226 @@ def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url
     except Exception:
         host = ''
     if host == 'api.openai.com' or host.endswith('.openai.azure.com'):
-        return True
+        return False
     # Azure AI Foundry chat-completions hosts (also reject the reasoning param).
     if host.endswith('.services.ai.azure.com') or host.endswith('.cognitiveservices.azure.com'):
-        return True
+        return False
     if provider_lower in ('openai', 'openai-api', 'openai-codex'):
-        return True
+        return False
     if (
         provider_lower in ('azure', 'azure-foundry', 'azure-ai-foundry', 'azure-ai')
         or provider_lower.startswith('azure/')
         or provider_lower.startswith('azure-')
     ):
-        return True
-    if (host == 'openrouter.ai' or host.endswith('.openrouter.ai')) and model_lower.startswith('anthropic/'):
+        return False
+    if (
+        provider_lower == 'openrouter'
+        or host == 'openrouter.ai'
+        or host.endswith('.openrouter.ai')
+    ) and model_lower.startswith('anthropic/'):
         # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
+        return False
+
+    # Provider IDs from the built-in catalog resolve their endpoint in the
+    # client.  Do not mistake an implicit URL for an unresolved custom route.
+    builtin_providers = set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY)
+    provider_canonical = str(_resolve_provider_alias(provider_lower) or '').strip().lower()
+    # Some catalog entries intentionally use their user-facing ID (notably
+    # ``x-ai`` and ``ollama``), while aliases such as ``google-gemini`` resolve
+    # to their canonical catalog ID.  Both names describe a known route.
+    if provider_lower in builtin_providers or provider_canonical in builtin_providers:
+        return True
+
+    # Provider can be omitted for an implicit MiniMax configuration. Its
+    # canonical China or global endpoint still makes this an effective, known
+    # route.
+    if (
+        host == 'api.minimaxi.com'
+        or host.endswith('.minimaxi.com')
+        or host == 'api.minimax.io'
+        or host.endswith('.minimax.io')
+    ):
         return True
     return False
+
+
+def _safe_aux_route_for_log(base_url: str = '') -> str:
+    """Return a route diagnostic without URL userinfo, query, or fragment."""
+    raw = str(base_url or '').strip()
+    if not raw:
+        return '<implicit>'
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(raw)
+        if not parsed.scheme or not parsed.hostname:
+            return '<unparseable>'
+        host = parsed.hostname
+        if ':' in host and not host.startswith('['):
+            host = f'[{host}]'
+        try:
+            if parsed.port is not None:
+                host = f'{host}:{parsed.port}'
+        except ValueError:
+            return '<unparseable>'
+        return urlunsplit((parsed.scheme, host, parsed.path, '', ''))
+    except Exception:
+        return '<unparseable>'
+
+
+def _redact_urls_for_log(text: str) -> str:
+    """Remove credentials carried by any HTTP(S) URL in exception text."""
+    # Scrub before parsing. Exception renderers can wrap URLs in delimiters or
+    # preserve whitespace in userinfo, either of which can defeat a conventional
+    # URL match before its credentials are removed.
+    redacted = re.sub(
+        r"(?i)(https?://)[^@\r\n]*@",
+        r"\1<redacted>@",
+        str(text or ''),
+    )
+    redacted = re.sub(
+        # Values can be quoted/bracketed or contain spaces. Stop only at the
+        # next query field, a fragment, or a newline.
+        r"(?i)([?&]\s*(?:api_key|token|key|secret)\s*=\s*)[^&#\r\n]*",
+        r"\1<redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        # Do not let punctuation which commonly wraps an exception value bound
+        # this match.  _safe_aux_route_for_log drops a trailing delimiter along
+        # with any URL credentials it encounters.
+        r"https?://[^\s'\"<>{}]+",
+        lambda match: _safe_aux_route_for_log(match.group(0)),
+        redacted,
+    )
+    # Exception text is not guaranteed to contain a URL that parses cleanly:
+    # clients can quote, delimit, or otherwise mangle it.  Scrub the complete
+    # rendered message as a final defense, rather than trusting URL parsing.
+    redacted = re.sub(
+        r"(?i)(https?://)[^@\r\n]*@",
+        r"\1<redacted>@",
+        redacted,
+    )
+    redacted = re.sub(
+        # Also cover a userinfo fragment which an exception formatter has
+        # separated from its scheme (for example, ``)user:secret@host``),
+        # including delimiters and whitespace around its components.
+        r"(?i)(?<![\w/])[^@:\r\n]{1,128}?\s*:\s*[^@\r\n]{1,128}?@",
+        "<redacted>@",
+        redacted,
+    )
+    return re.sub(
+        r"(?i)([?&]\s*(?:api_key|token|key|secret)\s*=\s*)[^&#\r\n]*",
+        r"\1<redacted>",
+        redacted,
+    )
+
+
+def _log_aux_title_failure(message: str, base_url: str, provider: str, model: str) -> None:
+    """Log auxiliary failure context without exposing URL-carried credentials."""
+    rendered = '%s (route=%s provider=%s model=%s)\n%s' % (
+        message,
+        _safe_aux_route_for_log(base_url),
+        provider,
+        model,
+        _redact_urls_for_log(traceback.format_exc()),
+    )
+    # Run the forced scrub over *all* fields, including the route diagnostic,
+    # because callers and tracebacks may contain delimiter-wrapped URLs.
+    logger.error('%s', _redact_urls_for_log(rendered))
+
+
+def _aux_default_model_for_provider(provider: str) -> str:
+    """Return the Agent's authoritative auxiliary default for *provider*.
+
+    The Agent owns these defaults because they are provider-profile data, not
+    WebUI picker/catalog data.  In particular, the first entry in
+    ``_PROVIDER_MODELS`` is a display choice and can differ from the cheap
+    auxiliary model that the Agent will actually request.  An empty result is
+    meaningful (for example, a provider whose valid model set is account
+    dependent) and must remain empty rather than falling back to the main
+    route.
+    """
+    try:
+        from agent.auxiliary_client import _get_aux_model_for_provider
+
+        return str(_get_aux_model_for_provider(provider) or '').strip()
+    except Exception:
+        # Version-skewed/missing Agent installs must not make WebUI invent a
+        # model from its display catalog or the main route.
+        return ''
+
+
+def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
+    """Resolve the one auxiliary title route used for requests and compatibility.
+
+    Only implicit, auto/local, and picker routes inherit resolver output.  A
+    configured explicit route is itself the request contract: it must never be
+    filled with the main route's model or endpoint.  In particular, a base URL
+    is sufficient to make a route explicit even if its model is blank.
+    """
+    supplied_provider = str(provider or '').strip()
+    supplied_model = str(model or '').strip()
+    supplied_base_url = str(base_url or '').strip()
+    provider_lower = supplied_provider.lower()
+    implicit_route = provider_lower in {'', 'auto', 'local'}
+    picker_route = supplied_model.startswith('@')
+
+    if supplied_base_url and not picker_route:
+        # A base URL is an explicit Agent-custom endpoint contract even when
+        # its provider and model are blank.  Running an unqualified model
+        # through the main-model resolver here would substitute the main
+        # provider/model (for example OpenAI/gpt-main) and silently send title
+        # traffic to the wrong route.  Blank-provider base-URL-only routes and
+        # the legacy ``local`` spelling are both OpenAI-compatible custom
+        # endpoints; make that explicit for the Agent instead of borrowing the
+        # main route.  A configured blank provider with an explicit model keeps
+        # its historical Agent-custom (None) provider contract.
+        if (
+            provider_lower == 'local'
+            or (provider_lower in {'', 'auto'} and not supplied_model)
+        ):
+            return 'custom', supplied_model, supplied_base_url
+        if supplied_model:
+            return supplied_provider, supplied_model, supplied_base_url
+
+        # An explicit provider with a blank model still belongs to that
+        # provider, even when it uses a custom endpoint. Let the explicit
+        # provider route below obtain the Agent-owned auxiliary default.
+
+    if not implicit_route and not picker_route:
+        if supplied_model:
+            # Preserve explicit model IDs (including :free/:thinking suffixes)
+            # and the supplied endpoint exactly as configured.
+            return supplied_provider, supplied_model, supplied_base_url
+        own_default = _aux_default_model_for_provider(supplied_provider)
+        if not own_default:
+            # An unresolved explicit route must fail closed rather than borrow
+            # a model from the main chat route.
+            return supplied_provider, '', supplied_base_url
+        # Keep this exact Agent-selected model for both the request and the
+        # compatibility gate below.  Re-resolving through the WebUI picker can
+        # replace it with a main-route or display-catalog model.
+        return supplied_provider, own_default, supplied_base_url
+
+    effective_model = supplied_model
+    if not effective_model:
+        try:
+            model_cfg = get_config().get('model', {})
+            if isinstance(model_cfg, dict):
+                effective_model = str(model_cfg.get('default') or model_cfg.get('name') or '').strip()
+        except Exception:
+            pass
+    try:
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(effective_model)
+        return (
+            str(resolved_provider or supplied_provider),
+            str(resolved_model or effective_model),
+            supplied_base_url or str(resolved_base_url or ''),
+        )
+    except Exception:
+        # A failed resolution is deliberately treated as unknown by the gate.
+        return supplied_provider, supplied_model, supplied_base_url
 
 
 def _get_aux_title_config() -> dict:
@@ -3434,26 +3640,18 @@ def generate_title_raw_via_aux(
         provider = ''
     model = model or configured.get('model', '') or ''
     base_url = base_url or configured.get('base_url', '') or ''
-    try:
-        from api.profiles import _split_webui_provider_model_value
-
-        normalized_model, normalized_provider = _split_webui_provider_model_value(
-            model or None,
-            provider or None,
-        )
-        model = normalized_model or ''
-        provider = normalized_provider or ''
-    except ValueError:
-        pass
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
-    base_max_tokens = _title_completion_budget(provider, model, base_url)
+    provider, model, base_url = _effective_aux_title_route(
+        provider, model, base_url,
+    )
     reasoning_extra = {}
-    if not _route_rejects_reasoning_extra(provider, model, base_url):
+    if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
-    if _is_minimax_route(provider, model, base_url):
-        reasoning_extra["reasoning_split"] = True
+        if _is_minimax_route(provider, model, base_url):
+            reasoning_extra["reasoning_split"] = True
+    base_max_tokens = _title_completion_budget(provider, model, base_url)
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
@@ -3484,9 +3682,14 @@ def generate_title_raw_via_aux(
                     last_status = empty_status or 'llm_empty_aux'
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
-            except Exception as e:
+            except Exception:
                 last_status = 'llm_error_aux'
-                logger.debug("Aux title generation attempt %s failed: %s", idx + 1, e)
+                _log_aux_title_failure(
+                    f'Aux title generation attempt {idx + 1} failed',
+                    base_url,
+                    provider,
+                    model,
+                )
             # If the model just burned its budget on hidden reasoning, retrying
             # the next prompt against the same model produces the same shape.
             # Short-circuit to the local fallback path (#2083).
@@ -3497,8 +3700,8 @@ def generate_title_raw_via_aux(
                 )
                 break
         return None, last_status
-    except Exception as e:
-        logger.debug("Aux title generation failed: %s", e)
+    except Exception:
+        _log_aux_title_failure('Aux title generation failed', base_url, provider, model)
         return None, 'llm_error_aux'
 
 
