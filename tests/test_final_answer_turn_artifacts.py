@@ -68,6 +68,7 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     assert output == [{"path": "output/report.md"}, {"path": "output/absolute.md"}]
     assert "_attachTurnArtifactsFromToolCall(tc);" in messages
     assert "_applyToAnchor('artifact_reference'" in messages
+    assert "if(typeof _renderTurnArtifactListForMessage==='function')" in ui
     assert "_renderTurnArtifactListForMessage(msg, seg, rawIdx);" in ui
     assert "openArtifactPath(entry.path)" in ui
     assert "return _turnArtifactEntriesFromScene(message&&message._anchor_activity_scene);" in ui
