@@ -2773,20 +2773,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       event&&event.source_event_type==='artifact_reference'&&(
         event.local_id===localId ||
         (
-          String(event.payload&&event.payload.workspace_root||'')===String(workspaceRoot||'') &&
-          String(event.payload&&event.payload.path||'')===String(path||'')
+          typeof workspaceRoot==='string'
+          && typeof path==='string'
+          && event.payload&&event.payload.workspace_root===workspaceRoot
+          && event.payload.path===path
         )
       )
     );
   }
   function _attachTurnArtifactsFromToolCall(tc){
     if(!tc||tc.is_error||typeof turnArtifactReferencesFromToolCall!=='function') return;
-    const toolId=String(tc.tid||tc.id||tc.tool_call_id||'tool');
+    const toolCallId = typeof tc.tool_call_id === 'string'
+      ? tc.tool_call_id.trim()
+      : typeof tc.tid === 'string'
+        ? tc.tid.trim()
+        : typeof tc.id === 'string'
+          ? tc.id.trim()
+          : '';
+    if(!toolCallId) return;
     for(const [index,artifact] of turnArtifactReferencesFromToolCall(tc).entries()){
-      const path=String(artifact&&artifact.path||'').trim();
-      const workspaceRoot=String(artifact&&artifact.workspace_root||'').trim();
+      const artifactObj = artifact && typeof artifact === 'object' ? artifact : null;
+      const path = typeof artifactObj.path === 'string' ? artifactObj.path.trim() : '';
+      const workspaceRoot = typeof artifactObj.workspace_root === 'string' ? artifactObj.workspace_root.trim() : '';
+      const artifactCallId = typeof artifactObj.tool_call_id === 'string' ? artifactObj.tool_call_id.trim() : '';
+      if(!artifactCallId || artifactCallId!==toolCallId) continue;
       if(!path) continue;
-      const localId=`artifact:${toolId}:${index}:${workspaceRoot}:${path}`;
+      const localId=`artifact:${toolCallId}:${index}:${workspaceRoot}:${path}`;
       if(_anchorHasArtifactReference(localId,workspaceRoot,path)) continue;
       // A distinct anchor event must not reuse the tool_complete SSE event id.
       _applyToAnchor('artifact_reference',{
@@ -2794,9 +2806,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:_nextAnchorLocalSeq(),
         path,
         workspace_root:workspaceRoot,
-        session_id:String(artifact.session_id||'').trim(),
-        tool_name:String(artifact.tool_name||tc.name||'tool'),
-        tool_call_id:String(artifact.tool_call_id||'').trim(),
+        session_id:typeof artifactObj.session_id === 'string' ? artifactObj.session_id.trim() : '',
+        tool_name: typeof artifactObj.tool_name === 'string' ? artifactObj.tool_name.trim() : String(tc.name||'tool'),
+        tool_call_id:artifactCallId,
       },null,null,{render:false});
     }
   }

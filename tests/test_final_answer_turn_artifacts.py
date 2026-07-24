@@ -24,11 +24,13 @@ def test_turn_artifact_references_require_server_landed_descriptors():
     output = _run_node(
         workspace[start:end]
         + "\nconsole.log(JSON.stringify(["
-        + "turnArtifactReferencesFromToolCall({name:'write_file',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-1',tool_name:'write_file'}]}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',tool_call_id:'call-1',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-1',tool_name:'write_file'},{path:'output/mismatch.md',workspace_root:'/workspace',tool_call_id:'call-1',tool_name:'read_file'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'read_file',arguments:{path:'output/report.md'}}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',artifacts:[{path:'output/missing-id.md',workspace_root:'/workspace',tool_call_id:'call-missing',tool_name:'write_file'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',is_error:true,artifacts:[{path:'output/report.md',workspace_root:'/workspace'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',output:'```diff\\n+++ output/inferred.md\\n```'}),"
         + "turnArtifactReferencesFromToolCall({name:'patch',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-2',tool_name:'patch'},{path:'output/notes.md',workspace_root:'/workspace',tool_call_id:'call-2',tool_name:'patch'}]}),"
+        + "turnArtifactReferencesFromToolCall({name:'patch',tid:'tid-1',artifacts:[{path:'output/tid.md',workspace_root:'/workspace',tool_call_id:'tid-1',tool_name:'patch'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/rejected.md']})}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',artifacts:[{path:['invalid'],workspace_root:123,tool_call_id:'call-3',tool_name:'write_file'}]})"
         + "]));"
@@ -45,6 +47,7 @@ def test_turn_artifact_references_require_server_landed_descriptors():
         [],
         [],
         [],
+        [],
         [
             {
                 "path": "output/report.md",
@@ -56,6 +59,12 @@ def test_turn_artifact_references_require_server_landed_descriptors():
                 "path": "output/notes.md",
                 "workspace_root": "/workspace",
                 "tool_call_id": "call-2",
+                "tool_name": "patch",
+            },
+            {
+                "path": "output/tid.md",
+                "workspace_root": "/workspace",
+                "tool_call_id": "tid-1",
                 "tool_name": "patch",
             },
         ],
@@ -95,6 +104,10 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
         "session_id": "sid-owner",
         "tool_name": "write_file",
         "tool_call_id": "call-1",
+        "owner": {
+            "session_id": "sid-owner",
+            "workspace_root": "/workspace",
+        },
     }]
     assert "_attachTurnArtifactsFromToolCall(tc);" in messages
     assert "_applyToAnchor('artifact_reference'" in messages
@@ -123,6 +136,10 @@ def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fa
         "session_id": "sid-owner",
         "tool_name": "patch",
         "tool_call_id": "call-2",
+        "owner": {
+            "session_id": "sid-owner",
+            "workspace_root": "/workspace",
+        },
     }]
 
 

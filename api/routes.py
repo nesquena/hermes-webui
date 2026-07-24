@@ -8718,19 +8718,32 @@ def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str)
 
 
 def _declared_turn_tool_calls(messages) -> dict[str, str]:
-    declared = {}
+    declarations: dict[str, str] = {}
+    invalid: set[str] = set()
     for message in messages:
         if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
             continue
         for call in list(message.get("tool_calls") or []):
             if not isinstance(call, dict):
                 continue
-            call_id = str(call.get("id") or call.get("tool_call_id") or "").strip()
-            function = call.get("function") if isinstance(call.get("function"), dict) else {}
-            name = normalize_tool_name(call.get("name") or function.get("name"))
-            if call_id and name and call_id not in declared:
-                declared[call_id] = name
-    return declared
+            raw_call_id = call.get("id") or call.get("tool_call_id")
+            if not isinstance(raw_call_id, str):
+                continue
+            call_id = raw_call_id.strip()
+            raw_name = call.get("name")
+            if not raw_name and isinstance(call.get("function"), dict):
+                raw_name = call["function"].get("name")
+            if not isinstance(raw_name, str):
+                continue
+            name = normalize_tool_name(raw_name)
+            if not call_id or not name:
+                continue
+            if call_id in declarations or call_id in invalid:
+                invalid.add(call_id)
+                declarations.pop(call_id, None)
+                continue
+            declarations[call_id] = name
+    return {call_id: name for call_id, name in declarations.items() if call_id not in invalid}
 
 
 def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, list[dict]]:
@@ -8752,25 +8765,78 @@ def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, li
         )
         if final_idx is None:
             continue
-        descriptors = []
+        descriptors_by_id = {}
         seen = set()
+        result_order = []
+        seen_result_ids = set()
+        declared_calls: dict[str, str] = {}
+        invalid_calls: set[str] = set()
+        invalid_result_ids = set()
         turn_messages = source[turn_start + 1 : final_idx]
-        declared_calls = _declared_turn_tool_calls(turn_messages)
-        consumed_calls = set()
         for message in turn_messages:
-            tool_call_id = str(message.get("tool_call_id") or "").strip() if isinstance(message, dict) else ""
-            tool_name = normalize_tool_name(message.get("name") or message.get("tool_name")) if isinstance(message, dict) else ""
-            if not tool_call_id or tool_call_id in consumed_calls or declared_calls.get(tool_call_id) != tool_name:
+            if not isinstance(message, dict):
                 continue
-            consumed_calls.add(tool_call_id)
-            for descriptor in _turn_artifact_descriptors_from_tool_result(message, workspace_root=workspace_root):
+            if str(message.get("role") or "").lower() == "assistant":
+                for call in list(message.get("tool_calls") or []):
+                    if not isinstance(call, dict):
+                        continue
+                    raw_call_id = call.get("id") or call.get("tool_call_id")
+                    if not isinstance(raw_call_id, str):
+                        continue
+                    call_id = raw_call_id.strip()
+                    if not call_id:
+                        continue
+                    raw_name = call.get("name")
+                    if not raw_name and isinstance(call.get("function"), dict):
+                        raw_name = call["function"].get("name")
+                    if not isinstance(raw_name, str):
+                        continue
+                    name = normalize_tool_name(raw_name)
+                    if not name:
+                        continue
+                    if call_id in declared_calls or call_id in invalid_calls:
+                        invalid_calls.add(call_id)
+                        declared_calls.pop(call_id, None)
+                        continue
+                    declared_calls[call_id] = name
+                continue
+            if message.get("role") != "tool":
+                continue
+            raw_tool_call_id = message.get("tool_call_id")
+            if not isinstance(raw_tool_call_id, str):
+                continue
+            tool_call_id = raw_tool_call_id.strip()
+            if (
+                not tool_call_id
+                or tool_call_id in invalid_calls
+                or tool_call_id not in declared_calls
+            ):
+                continue
+            tool_name = normalize_tool_name(message.get("name") or message.get("tool_name"))
+            if not tool_name or tool_name != declared_calls[tool_call_id]:
+                invalid_result_ids.add(tool_call_id)
+                continue
+            if tool_call_id in seen_result_ids:
+                invalid_result_ids.add(tool_call_id)
+                continue
+            seen_result_ids.add(tool_call_id)
+            descriptors_for_call = _turn_artifact_descriptors_from_tool_result(message, workspace_root=workspace_root)
+            if descriptors_for_call:
+                descriptors_by_id[tool_call_id] = descriptors_for_call
+                result_order.append(tool_call_id)
+            else:
+                invalid_result_ids.add(tool_call_id)
+        descriptors = []
+        for result_id in result_order:
+            if result_id in invalid_calls or result_id in invalid_result_ids:
+                continue
+            for descriptor in descriptors_by_id.get(result_id, []):
                 key = (descriptor["workspace_root"], descriptor["path"])
                 if key not in seen:
                     seen.add(key)
                     descriptors.append(descriptor)
-        if not descriptors:
-            continue
-        paths_by_final_index[final_idx] = descriptors
+        if descriptors:
+            paths_by_final_index[final_idx] = descriptors
     return paths_by_final_index
 
 
@@ -8812,7 +8878,11 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             payload = artifact.get("payload")
             if not isinstance(payload, dict):
                 continue
-            key = (str(payload.get("workspace_root") or ""), str(payload.get("path") or ""))
+            payload_workspace_root = payload.get("workspace_root")
+            payload_path = payload.get("path")
+            if not isinstance(payload_workspace_root, str) or not isinstance(payload_path, str):
+                continue
+            key = (payload_workspace_root, payload_path)
             if not key[0] or not key[1]:
                 continue
             seen.add(key)
@@ -8821,8 +8891,12 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
         for descriptor in descriptors:
             if not isinstance(descriptor, dict):
                 continue
-            path = str(descriptor.get("path") or "")
-            workspace_root = str(descriptor.get("workspace_root") or "")
+            path = descriptor.get("path")
+            workspace_root = descriptor.get("workspace_root")
+            if not isinstance(path, str) or not isinstance(workspace_root, str):
+                continue
+            path = path.strip()
+            workspace_root = workspace_root.strip()
             key = (workspace_root, path)
             if not path or not workspace_root:
                 continue
@@ -8831,9 +8905,13 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
                     existing_index = seen_to_first_index[key]
                     existing = artifacts[existing_index] if existing_index < len(artifacts) else None
                     existing_payload = existing.get("payload") if isinstance(existing, dict) else None
-                    existing_tool_name = str((existing_payload or {}).get("tool_name") or "").strip()
-                    existing_tool_call_id = str((existing_payload or {}).get("tool_call_id") or "").strip()
-                    if not (existing_tool_name and existing_tool_call_id):
+                    if not isinstance(existing_payload, dict):
+                        continue
+                    existing_tool_name = existing_payload.get("tool_name")
+                    existing_tool_call_id = existing_payload.get("tool_call_id")
+                    if not (isinstance(existing_tool_name, str) and existing_tool_name.strip()) or not (
+                        isinstance(existing_tool_call_id, str) and existing_tool_call_id.strip()
+                    ):
                         artifacts[existing_index] = {
                             "type": "artifact_reference",
                             "payload": {**descriptor, "source": "transcript_replay"},

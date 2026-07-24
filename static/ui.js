@@ -13628,17 +13628,35 @@ function _turnArtifactEntriesFromScene(scene){
   const artifacts=scene&&Array.isArray(scene.artifacts)?scene.artifacts:[];
   const seen=new Set();
   const entries=[];
+  const currentSessionId = S&&S.session&&typeof S.session.session_id==='string' ? S.session.session_id : '';
   for(const artifact of artifacts){
     const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
-    if([payload.path,payload.workspace_root,payload.tool_name,payload.tool_call_id,payload.session_id].some(value=>typeof value!=='string')) continue;
+    if(
+      typeof payload.path!=='string'
+      || typeof payload.workspace_root!=='string'
+      || typeof payload.tool_name!=='string'
+      || typeof payload.tool_call_id!=='string'
+      || typeof payload.session_id!=='string'
+    ) continue;
     const toolName=payload.tool_name.replace(/^functions\./,'');
     const toolCallId=payload.tool_call_id.trim();
     const sessionId=payload.session_id.trim();
-    if(!['write_file','patch'].includes(toolName)||!toolCallId||!sessionId) continue;
+    if(sessionId!==currentSessionId) continue;
+    if(!['write_file','patch'].includes(toolName)||!toolCallId) continue;
     const path=_turnArtifactWorkspacePath(payload.path,payload.workspace_root);
     if(!path||seen.has(path)) continue;
     seen.add(path);
-    entries.push({path,workspace_root:payload.workspace_root.replace(/\/+$/,''),session_id:sessionId,tool_name:toolName,tool_call_id:toolCallId});
+    entries.push({
+      path,
+      workspace_root: payload.workspace_root.replace(/\/+$/,''),
+      session_id: sessionId,
+      tool_name: toolName,
+      tool_call_id: toolCallId,
+      owner: {
+        session_id: sessionId,
+        workspace_root: payload.workspace_root.replace(/\/+$/,''),
+      },
+    });
   }
   return entries;
 }

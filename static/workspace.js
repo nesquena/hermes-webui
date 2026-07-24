@@ -575,6 +575,8 @@ function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
   const name=_artifactToolName(tc.name);
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
+  const completionToolCallId = _artifactScalarString(tc.tool_call_id || tc.tid || tc.id);
+  if(!completionToolCallId) return [];
   const seen=new Set();
   const out=[];
   for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
@@ -585,7 +587,14 @@ function turnArtifactReferencesFromToolCall(tc){
     const toolCallId=_artifactScalarString(artifact.tool_call_id);
     const toolName=_artifactToolName(artifact.tool_name);
     const key=`${workspaceRoot}\u0000${path}`;
-    if(!path||!workspaceRoot||!toolCallId||toolName!==name||seen.has(key)) continue;
+    if(
+      !path
+      || !workspaceRoot
+      || !toolCallId
+      || toolName!==name
+      || toolCallId!==completionToolCallId
+      || seen.has(key)
+    ) continue;
     seen.add(key);
     out.push({path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName});
   }
@@ -728,16 +737,35 @@ async function _workspacePathExists(path, opts={}){
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
+function _artifactOwnerFromArtifactValue(value){
+  if(!value||typeof value!=='object' || Array.isArray(value)) return null;
+  const explicit = _artifactOwnerFromContext(value.owner);
+  if(explicit) return explicit;
+  if(typeof value.session_id === 'string' && typeof value.workspace_root === 'string'){
+    return {
+      session_id: value.session_id,
+      workspace_root: value.workspace_root.replace(/\/+$/,''),
+    };
+  }
+  return null;
+}
+
 async function openArtifactPath(path){
-  if(!path || typeof path !== 'string') return;
-  const owner = _artifactOwnerFromCurrentSession();
-  if(!owner) return;
+  const artifact = path && typeof path === 'object' && !Array.isArray(path) ? path : null;
+  const pathValue = typeof path === 'string'
+    ? path
+    : artifact && typeof artifact.path === 'string'
+      ? artifact.path
+      : '';
+  const owner = _artifactOwnerFromArtifactValue(artifact) || _artifactOwnerFromCurrentSession();
+  if(!pathValue || !owner) return;
   // Artifact links are an explicit request to inspect a file. A closed
   // workspace panel must expand before openFile paints the preview, otherwise
   // the file is selected behind an invisible right-hand column.
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  if(!_artifactOwnerMatchesSession(owner)) return;
+  let rel = pathValue.replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
   const ws = owner.workspace_root;
   if(ws){
@@ -747,6 +775,7 @@ async function openArtifactPath(path){
   }
   if(!rel) rel = '.';
   try{
+    if(!_artifactOwnerMatchesSession(owner)) return;
     if(!(await _workspacePathExists(rel,{owner}))){
       setStatus(t('file_open_failed'));
       return;
@@ -756,6 +785,7 @@ async function openArtifactPath(path){
     return;
   }
   // Legacy compatibility: keep string token "openFile(rel);" for tests.
+  if(!_artifactOwnerMatchesSession(owner)) return;
   await openFile(rel,{owner});
   // openFile(rel);
 }
@@ -1219,6 +1249,9 @@ async function openFile(path, opts={}){
     };
   const owner = resolveOwner(opts);
   if(!path || typeof path !== 'string' || !owner) return;
+  const openFileOwner = owner;
+  const ownerStillActive = () => _artifactOwnerMatchesSession(openFileOwner);
+  if(!ownerStillActive()) return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
@@ -1227,49 +1260,68 @@ async function openFile(path, opts={}){
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
+    if(!ownerStillActive()) return;
     downloadFile(path, routeOpts);
     return;
   }
 
+  if(!ownerStillActive()) return;
   _previewServerEditable = null;
   _previewSaveRoute = '/api/file/save';
   _previewOfficeFormat = '';
   _previewPreviewKind = '';
 
+  if(!ownerStillActive()) return;
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  if(!ownerStillActive()) return;
   renderFileBreadcrumb(path);
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
+    if(!ownerStillActive()) return;
     showPreview('image');
+    if(!ownerStillActive()) return;
     const url=_workspaceRouteForPath(path, 'raw', routeOpts) + cacheBust;
+    if(!ownerStillActive()) return;
     $('previewImg').alt=path;
+    if(!ownerStillActive()) return;
     $('previewImg').src=url;
+    if(!ownerStillActive()) return;
     $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
+    if(!ownerStillActive()) return;
     showPreview(mode);
+    if(!ownerStillActive()) return;
     const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
+    if(!ownerStillActive()) return;
     const wrap=$('previewMediaWrap');
+    if(!ownerStillActive()) return;
     if(wrap){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      if(!ownerStillActive()) return;
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
     }
   } else if(PDF_EXTS.has(ext)){
+    if(!ownerStillActive()) return;
     showPreview('pdf');
+    if(!ownerStillActive()) return;
     const legacyRawUrl = _workspaceRouteForPath(path, 'raw', {inline:true});
     const url=(routeOpts.owner
       ? _workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true})
       : legacyRawUrl) + cacheBust;
+    if(!ownerStillActive()) return;
     const frame=$('previewPdfFrame');
     if(frame){
       frame.src=''; // clear first to avoid stale content
+      if(!ownerStillActive()) return;
       frame.src=url;
+      if(!ownerStillActive()) return;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
     }
   } else if(MD_EXTS.has(ext)){
@@ -1280,22 +1332,27 @@ async function openFile(path, opts={}){
       // here (_previewCurrentPath was just assigned above), so guard on the
       // dedicated _previewRawContentPath instead — otherwise a force-render after a
       // file switch could re-render the previous file's cached content.
+      if(!ownerStillActive()) return;
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
         : await api(_workspaceRouteForPath(path, 'read', routeOpts));
-      if(!_artifactOwnerMatchesSession(owner)) return;
+      if(!ownerStillActive()) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
+      if(!ownerStillActive()) return;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
+        if(!ownerStillActive()) return;
         showPreview('code');
+        if(!ownerStillActive()) return;
         $('previewCode').textContent=data.content;
         setLargeMarkdownForceRenderVisible(true);
         setStatus(largeMarkdownPlainTextStatus(data.content));
         return;
       }
+      if(!ownerStillActive()) return;
       renderMarkdownPreviewContent(data);
     }catch(e){
-      if(!_artifactOwnerMatchesSession(owner)) return;
+      if(!ownerStillActive()) return;
       setStatus(t('file_open_failed'));
     }
   } else if(HTML_EXTS.has(ext)){
@@ -1307,38 +1364,49 @@ async function openFile(path, opts={}){
     // still prevents the preview from navigating the parent, accessing cookies,
     // or reading other origin data. If a stricter mode is needed, remove
     // allow-scripts (or add sandbox="") to disable all JS execution.
+    if(!ownerStillActive()) return;
     showPreview('html');
+    if(!ownerStillActive()) return;
     const url=_workspaceRouteForPath(path, 'raw', {...routeOpts, inline:true}) + cacheBust;
+    if(!ownerStillActive()) return;
     const iframe=$('previewHtmlIframe');
     if(iframe){
       iframe.src=''; // clear first to avoid stale content
+      if(!ownerStillActive()) return;
       iframe.src=url;
     }
   } else if(ext==='.csv'){
     try{
+      if(!ownerStillActive()) return;
       const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
-      if(!_artifactOwnerMatchesSession(owner)) return;
+      if(!ownerStillActive()) return;
       if(data.binary){
+        if(!ownerStillActive()) return;
         downloadFile(path, routeOpts);
         return;
       }
+      if(!ownerStillActive()) return;
       if(renderCsvPreviewContent(path, data.content)) return;
+      if(!ownerStillActive()) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      if(!_artifactOwnerMatchesSession(owner)) return;
+      if(!ownerStillActive()) return;
       downloadFile(path, routeOpts);
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
+      if(!ownerStillActive()) return;
       const data=await api(_workspaceRouteForPath(path, 'read', routeOpts));
-      if(!_artifactOwnerMatchesSession(owner)) return;
+      if(!ownerStillActive()) return;
       if(data.binary){
         // Server flagged this as binary content
+        if(!ownerStillActive()) return;
         downloadFile(path, routeOpts);
         return;
       }
       if(data.preview_kind==='office'){
+        if(!ownerStillActive()) return;
         _previewRawContent = data.content || '';
         _previewRawContentPath = path;
         _previewServerEditable = typeof data.editable === 'boolean' ? data.editable : null;
@@ -1346,16 +1414,20 @@ async function openFile(path, opts={}){
         _previewOfficeFormat = data.office_format || '';
         _previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';
       }
+      if(!ownerStillActive()) return;
       renderCodePreviewContent(path, data.content);
   }catch(e){
-      if(!_artifactOwnerMatchesSession(owner)) return;
+      if(!ownerStillActive()) return;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
+        if(!ownerStillActive()) return;
         _clearWorkspaceEscapeGrant(grant.path);
+        if(!ownerStillActive()) return;
         showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
         return;
       }
       // If it's a 400/too-large error, offer download instead
+      if(!ownerStillActive()) return;
       downloadFile(path, routeOpts);
     }
   }
