@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in strict workspace registration for Add Space (#6424).** Deployments that must keep the agent/file-API trust boundary narrow can set `HERMES_WEBUI_STRICT_WORKSPACE_REGISTRATION=1` so `/api/workspaces/add` only accepts paths under the home directory, the default workspace, or roots listed in `HERMES_WEBUI_ALLOWED_WORKSPACE_ROOTS`. The default remains the existing external-mount registration contract (#953/#991); remote-terminal target paths are unchanged.
+
 ### Changed
 
 - **Background-process completions and watch matches now render as compact, collapsible summary cards.** Routine wakeups no longer fill the transcript with an always-expanded agent-facing prompt: the collapsed row shows the command, exit status or matched watch pattern, and timestamp, while one click reveals the complete command and verbatim output. Failed processes keep a red accent, long watch patterns remain reachable on touch and keyboard when expanded, and unfamiliar future event shapes safely retain the existing raw-notice fallback. Thanks @b3nw. (#6350, #6345)
