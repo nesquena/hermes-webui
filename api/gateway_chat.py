@@ -832,6 +832,22 @@ def _gateway_terminal_message_target_from_session_payload(
     }
 
 
+def _mark_gateway_terminal_session_persisted(payload: dict, session_id: str) -> dict:
+    if not isinstance(payload, dict) or not isinstance(payload.get("session"), dict):
+        return payload
+    if payload.get("terminal_session_persisted") is False:
+        return payload
+    session_payload = payload["session"]
+    persisted_session_id = str(session_payload.get("session_id") or session_id or "").strip()
+    if not persisted_session_id:
+        return payload
+    payload = dict(payload)
+    payload["session_id"] = persisted_session_id
+    payload["terminal_session_persisted"] = True
+    payload["terminal_session_persisted_session_id"] = persisted_session_id
+    return payload
+
+
 def _settle_gateway_terminal_payload(
     session_id,
     stream_id,
@@ -958,6 +974,7 @@ def _settle_gateway_terminal_event_payload(
     if event not in {"cancel", "error", "apperror"}:
         if event == "done" and isinstance(data, dict) and isinstance(data.get("session"), dict):
             payload = dict(data)
+            payload = _mark_gateway_terminal_session_persisted(payload, session_id)
             payload.setdefault(
                 "terminal_message_target",
                 _gateway_terminal_message_target_from_session_payload(
@@ -973,6 +990,7 @@ def _settle_gateway_terminal_event_payload(
     payload = data if isinstance(data, dict) else {}
     if isinstance(payload.get("session"), dict):
         payload = dict(payload)
+        payload = _mark_gateway_terminal_session_persisted(payload, session_id)
         payload.setdefault(
             "terminal_message_target",
             _gateway_terminal_message_target_from_session_payload(

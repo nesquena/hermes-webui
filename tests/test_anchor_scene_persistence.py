@@ -3432,6 +3432,101 @@ def test_terminal_journal_records_overcap_unpersisted_continuation_disposition(
     assert stream_id in progress["recent_stream_ids"]
 
 
+def test_terminal_journal_materializes_continuation_scene_on_validated_target_session(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+    from api.models import Session
+    from api.run_journal import RunJournalWriter
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    origin_session_id = "session-terminal-continuation-origin"
+    continuation_session_id = "session-terminal-continuation-target"
+    stream_id = "stream-terminal-continuation"
+    origin_messages = [
+        {"role": "user", "content": "summarize old work", "timestamp": 1.0},
+        {"role": "assistant", "content": "old compressed work", "_ts": 2.0},
+    ]
+    continuation_messages = [
+        {"role": "user", "content": "continue from compression", "timestamp": 3.0},
+        {
+            "role": "assistant",
+            "content": "continuation final answer",
+            "_ts": 4.0,
+        },
+    ]
+    origin = Session(
+        session_id=origin_session_id,
+        title="Compressed origin",
+        messages=origin_messages,
+        pre_compression_snapshot=True,
+        terminal_anchor_reconciliation={},
+    )
+    continuation = Session(
+        session_id=continuation_session_id,
+        title="Compression continuation",
+        messages=continuation_messages,
+        parent_session_id=origin_session_id,
+        terminal_replay_origin_session_id=origin_session_id,
+        terminal_replay_run_id=stream_id,
+        terminal_replay_stream_id=stream_id,
+        anchor_activity_scenes={},
+    )
+    origin.save(skip_index=True)
+    continuation.save(skip_index=True)
+    writer = RunJournalWriter(origin_session_id, stream_id, session_dir=session_dir)
+    writer.append_sse_event("reasoning", {"text": "checking continuation state"})
+    writer.append_sse_event("token", {"text": continuation_messages[1]["content"]})
+    writer.append_sse_event(
+        "done",
+        {
+            "terminal_session_persisted": True,
+            "terminal_session_persisted_session_id": continuation_session_id,
+            "session_id": continuation_session_id,
+            "old_session_id": origin_session_id,
+            "new_session_id": continuation_session_id,
+            "continuation_session_id": continuation_session_id,
+            "session": continuation.compact()
+            | {
+                "messages": list(continuation_messages),
+                "message_count": len(continuation_messages),
+            },
+        },
+    )
+    origin_for_reconcile = models.get_session(origin_session_id)
+
+    assert routes._materialize_terminal_anchor_scene_from_run_journal(
+        origin_for_reconcile,
+        list(origin_messages),
+    ) is True
+
+    reloaded_origin = models.get_session(origin_session_id)
+    reloaded_continuation = models.get_session(continuation_session_id)
+    assert reloaded_origin.anchor_activity_scenes == {}
+    progress = reloaded_origin.terminal_anchor_reconciliation
+    assert stream_id in progress["recent_stream_ids"]
+    record = next(iter(reloaded_continuation.anchor_activity_scenes.values()))
+    assert record["stream_id"] == stream_id
+    assert record["message_index"] == 1
+    assert record["scene"]["final_answer"] == "continuation final answer"
+    assert _anchor_scene_visible_semantics(record["scene"]) == [
+        {
+            "role": "thinking",
+            "kind": "reasoning",
+            "text": "checking continuation state",
+        }
+    ]
+
+
 def test_terminal_journal_materializer_durably_skips_invalid_batch_and_reaches_older_valid(
     monkeypatch,
 ):

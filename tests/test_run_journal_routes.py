@@ -609,6 +609,135 @@ def test_replay_run_journal_hydrates_compacted_terminal_session(tmp_path, monkey
     assert data["session"]["messages"][1]["content"] == "final answer"
 
 
+def test_gateway_terminal_replay_hydrates_full_persisted_transcripts(tmp_path, monkeypatch):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.run_journal as run_journal
+    import api.routes as routes
+    from api.models import Session
+    from api.streaming import _session_payload_with_full_messages
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    def base_messages(case_name):
+        messages = []
+        for idx in range(6):
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"{case_name} prompt {idx}",
+                    "timestamp": float(idx * 2 + 1),
+                }
+            )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": f"{case_name} answer {idx}",
+                    "_ts": float(idx * 2 + 2),
+                }
+            )
+        return messages
+
+    cases = [
+        ("done", {"usage": {"output_tokens": 3}}),
+        ("cancel", {"message": "Cancelled by user"}),
+        (
+            "apperror",
+            {
+                "label": "Gateway request failed",
+                "type": "gateway_error",
+                "message": "Gateway failed",
+            },
+        ),
+    ]
+    for event_name, raw_payload in cases:
+        session_id = f"session_gateway_persisted_{event_name}"
+        stream_id = f"run_gateway_persisted_{event_name}"
+        session = Session(
+            session_id=session_id,
+            title=f"Gateway {event_name}",
+            messages=base_messages(event_name),
+            active_stream_id=stream_id,
+        )
+        session.save(skip_index=True)
+        if event_name == "done":
+            payload = {
+                **raw_payload,
+                "session": _session_payload_with_full_messages(session, tool_calls=[]),
+            }
+        else:
+            payload = raw_payload
+
+        settled = gateway_chat._settle_gateway_terminal_event_payload(
+            session_id,
+            stream_id,
+            tmp_path,
+            "model-x",
+            "gateway",
+            event_name,
+            payload,
+        )
+        assert settled["terminal_session_persisted"] is True
+        assert settled["terminal_session_persisted_session_id"] == session_id
+        assert len(settled["session"]["messages"]) >= 12
+
+        run_journal.append_run_event(
+            session_id,
+            stream_id,
+            event_name,
+            settled,
+            session_dir=session_dir,
+        )
+        compact = run_journal.read_run_events(session_id, stream_id, session_dir=session_dir)
+        compact_payload = compact["events"][0]["payload"]
+        assert "messages" not in compact_payload["session"]
+        assert compact_payload["session"]["messages_omitted"]["reason"] == "terminal_session_transcript_persisted"
+
+        monkeypatch.setattr(
+            routes,
+            "find_run_summary",
+            lambda candidate_stream_id, _stream_id=stream_id: (
+                run_journal.find_run_summary(_stream_id, session_dir=session_dir)
+                if candidate_stream_id == _stream_id
+                else None
+            ),
+        )
+        monkeypatch.setattr(
+            routes,
+            "read_run_events",
+            lambda candidate_session_id, candidate_run_id, after_seq=None, max_seq=None: (
+                run_journal.read_run_events(
+                    candidate_session_id,
+                    candidate_run_id,
+                    after_seq=after_seq,
+                    max_seq=max_seq,
+                    session_dir=session_dir,
+                )
+            ),
+        )
+        handler = SimpleNamespace(wfile=io.BytesIO())
+
+        assert routes._replay_run_journal(handler, stream_id, 0, include_stale=False) is True
+
+        data_line = next(
+            line
+            for line in handler.wfile.getvalue().decode("utf-8").splitlines()
+            if line.startswith("data: ")
+        )
+        data = json.loads(data_line.removeprefix("data: "))
+        persisted = models.get_session(session_id)
+        assert data["session"]["session_id"] == session_id
+        assert data["session"]["messages"] == persisted.messages
+        assert len(data["session"]["messages"]) == len(persisted.messages)
+        assert data["session"]["messages"][0]["content"] == f"{event_name} prompt 0"
+
+
 def test_replay_run_journal_hydrates_compacted_continuation_terminal_session(tmp_path, monkeypatch):
     import api.models as models
     import api.run_journal as run_journal

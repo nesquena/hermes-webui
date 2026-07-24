@@ -466,6 +466,86 @@ def test_run_journal_rejects_single_over_cap_row_before_json_parse(tmp_path):
     assert journal["malformed"] == [{"line": None, "reason": "replay_limit_bytes"}]
 
 
+def test_run_journal_consumes_legacy_overcap_terminal_row_and_continues(tmp_path):
+    session_id = "session_legacy_overcap_terminal"
+    run_id = "run_legacy_overcap_terminal"
+    path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+    path.parent.mkdir(parents=True)
+    legacy_terminal = {
+        "version": 1,
+        "event_id": f"{run_id}:1",
+        "seq": 1,
+        "run_id": run_id,
+        "session_id": session_id,
+        "event": "done",
+        "type": "done",
+        "created_at": 1.0,
+        "terminal": True,
+        "terminal_state": "completed",
+        "payload": {
+            "session": {
+                "session_id": session_id,
+                "message_count": 2,
+                "messages": [
+                    {"role": "user", "content": "prompt", "timestamp": 1.0},
+                    {
+                        "role": "assistant",
+                        "content": "x" * (run_journal._RUN_EVENTS_MAX_BYTES + 10_000),
+                        "_ts": 2.0,
+                    },
+                ],
+            },
+        },
+    }
+    later_valid = {
+        "version": 1,
+        "event_id": f"{run_id}:2",
+        "seq": 2,
+        "run_id": run_id,
+        "session_id": session_id,
+        "event": "stream_end",
+        "type": "stream_end",
+        "created_at": 3.0,
+        "terminal": True,
+        "terminal_state": "completed",
+        "payload": {"session_id": session_id},
+    }
+    path.write_text(
+        json.dumps(legacy_terminal, ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+        + json.dumps(later_valid, ensure_ascii=False, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    journal = read_run_events(session_id, run_id, session_dir=tmp_path)
+
+    assert journal["complete"] is True
+    assert journal["malformed"] == []
+    assert journal["next_after_seq"] == 2
+    assert [event["seq"] for event in journal["events"]] == [1, 2]
+    recovered_payload = journal["events"][0]["payload"]
+    assert recovered_payload["terminal_session_persisted"] is False
+    assert recovered_payload["session"]["messages_omitted"]["reason"] == "legacy_terminal_payload_too_large"
+    assert recovered_payload["terminal_recovery_control"] == {
+        "version": "terminal_recovery_control_v1",
+        "reason": "legacy_terminal_payload_too_large",
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+        "terminal_state": "completed",
+    }
+    assert recovered_payload["terminal_disposition"] == {
+        "version": "terminal_disposition_v1",
+        "kind": "consumed_non_materializable",
+        "reason": "legacy_terminal_payload_too_large",
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": run_id,
+    }
+    assert journal["events"][1]["event"] == "stream_end"
+
+
 def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
     path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"
     path.parent.mkdir(parents=True)

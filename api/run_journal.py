@@ -62,6 +62,7 @@ _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
 _RUN_EVENTS_MAX_BYTES = 2 * 1024 * 1024
 _RUN_EVENTS_MAX_ROWS = 2048
+_LEGACY_TERMINAL_RECOVERY_MAX_BYTES = 16 * 1024 * 1024
 _TERMINAL_PAYLOAD_MAX_CHARS = 64 * 1024
 _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION = "terminal_session_payload_omitted_v1"
 _TERMINAL_RECOVERY_DELTA_VERSION = "terminal_recovery_delta_v1"
@@ -670,6 +671,97 @@ def _terminal_non_materializable_disposition(
         disposition["target_session_id"] = target_session_id
         disposition["continuation_session_id"] = target_session_id
     return disposition
+
+
+def _legacy_overcap_terminal_event(
+    raw_bytes: bytes,
+    *,
+    session_id: str,
+    run_id: str,
+    expected_seq: int,
+    max_seq: int | None,
+) -> dict | None:
+    if len(raw_bytes) > _LEGACY_TERMINAL_RECOVERY_MAX_BYTES:
+        return None
+    head = raw_bytes[:8192]
+    if b'"terminal":true' not in head and b'"terminal": true' not in head:
+        return None
+    try:
+        parsed = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("version") != 1:
+        return None
+    try:
+        seq = int(parsed.get("seq") or 0)
+    except (TypeError, ValueError):
+        return None
+    if seq != int(expected_seq) or (max_seq is not None and seq > int(max_seq)):
+        return None
+    event_name = str(parsed.get("event") or parsed.get("type") or "").strip()
+    payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
+    terminal_state = str(parsed.get("terminal_state") or "").strip() or (
+        _terminal_state_for_event(event_name, payload) or ""
+    )
+    if (
+        not terminal_state
+        or event_name not in _TERMINAL_SSE_EVENTS
+        or str(parsed.get("event_id") or "").strip() != f"{run_id}:{seq}"
+        or str(parsed.get("run_id") or "").strip() != str(run_id)
+        or str(parsed.get("session_id") or "").strip() != str(session_id)
+    ):
+        return None
+    terminal_session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+    target_session_id = str(
+        terminal_session.get("session_id")
+        or payload.get("session_id")
+        or session_id
+    ).strip()
+    message_count = terminal_session.get("message_count")
+    messages = terminal_session.get("messages")
+    if not isinstance(message_count, int) or isinstance(message_count, bool):
+        message_count = len(messages) if isinstance(messages, list) else 0
+    compact_session = {
+        "session_id": target_session_id or str(session_id),
+        "message_count": int(message_count),
+        "messages_omitted": {
+            "version": _TERMINAL_SESSION_PAYLOAD_OMITTED_VERSION,
+            "reason": "legacy_terminal_payload_too_large",
+            "message_count": int(message_count),
+        },
+        "terminal_recovery_delta": _terminal_recovery_delta_marker(
+            reason="legacy_terminal_payload_too_large",
+            message_count=int(message_count),
+            messages_offset=int(message_count),
+        ),
+    }
+    recovered_payload = {
+        "terminal_session_persisted": False,
+        "session_id": target_session_id or str(session_id),
+        "stream_id": str(run_id),
+        "terminal_state": terminal_state,
+        "session": compact_session,
+        "terminal_recovery_control": _terminal_recovery_control(
+            session_id,
+            run_id,
+            terminal_state,
+            target_session_id=target_session_id or session_id,
+        )
+        | {"reason": "legacy_terminal_payload_too_large"},
+        "terminal_disposition": _terminal_non_materializable_disposition(
+            session_id,
+            run_id,
+            "legacy_terminal_payload_too_large",
+            target_session_id=target_session_id or session_id,
+        ),
+    }
+    recovered = dict(parsed)
+    recovered["event"] = event_name
+    recovered["type"] = event_name
+    recovered["terminal"] = True
+    recovered["terminal_state"] = terminal_state
+    recovered["payload"] = recovered_payload
+    return recovered
 
 
 def _compact_unpersisted_terminal_session_payload(
@@ -1418,6 +1510,19 @@ def read_run_events(
                 and byte_cap is not None
                 and emitted_bytes + len(raw_bytes) > byte_cap
             ):
+                recovered = _legacy_overcap_terminal_event(
+                    raw_bytes,
+                    session_id=str(session_id),
+                    run_id=str(run_id),
+                    expected_seq=expected_seq,
+                    max_seq=ceiling,
+                )
+                if recovered is not None:
+                    events.append(recovered)
+                    emitted_rows += 1
+                    next_after_seq = int(recovered.get("seq") or expected_seq)
+                    expected_seq = next_after_seq + 1
+                    continue
                 limit_reason = "replay_limit_bytes"
                 malformed.append({"line": None, "reason": limit_reason})
                 complete = False
@@ -1463,6 +1568,18 @@ def read_run_events(
                 complete = False
                 break
             if byte_cap is not None and emitted_bytes + len(raw_bytes) > byte_cap:
+                recovered = _legacy_overcap_terminal_event(
+                    raw_bytes,
+                    session_id=str(session_id),
+                    run_id=str(run_id),
+                    expected_seq=seq,
+                    max_seq=ceiling,
+                )
+                if recovered is not None:
+                    events.append(recovered)
+                    emitted_rows += 1
+                    next_after_seq = seq
+                    continue
                 limit_reason = "replay_limit_bytes"
                 malformed.append({"line": None, "reason": limit_reason})
                 complete = False

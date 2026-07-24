@@ -5645,7 +5645,12 @@ def _anchor_scene_record_exists_for_stream(records, stream_id: str) -> bool:
     return False
 
 
-def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
+def _terminal_anchor_scene_message_index(
+    messages,
+    snapshot,
+    *,
+    expected_session_id: str | None = None,
+) -> int | None:
     if not isinstance(messages, list) or not isinstance(snapshot, dict):
         return None
     target = snapshot.get("terminal_message_target")
@@ -5655,7 +5660,7 @@ def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
         return None
     scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot.get("anchor_activity_scene"), dict) else {}
     identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
-    expected_session_id = str(snapshot.get("session_id") or "").strip()
+    expected_target_session_id = str(expected_session_id or snapshot.get("session_id") or "").strip()
     expected_stream_id = str(snapshot.get("stream_id") or "").strip()
     expected_run_id = str(identity.get("run_id") or "").strip()
     target_session_id = str(target.get("session_id") or "").strip()
@@ -5666,7 +5671,7 @@ def _terminal_anchor_scene_message_index(messages, snapshot) -> int | None:
         or not target_stream_id
         or not target_run_id
         or not expected_run_id
-        or target_session_id != expected_session_id
+        or target_session_id != expected_target_session_id
         or target_stream_id != expected_stream_id
         or target_run_id != expected_run_id
     ):
@@ -5978,6 +5983,119 @@ def _record_terminal_anchor_scene_non_materializable(
     return True
 
 
+def _terminal_anchor_reconciliation_mark_stream_processed(progress: dict, stream_id: str) -> bool:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    recent = progress.setdefault("recent_stream_ids", [])
+    if not isinstance(recent, list):
+        recent = []
+    recent_ids = [str(item or "").strip() for item in recent if str(item or "").strip()]
+    if stream_id in recent_ids:
+        return False
+    recent_ids.append(stream_id)
+    progress["recent_stream_ids"] = recent_ids[-_TERMINAL_ANCHOR_RECONCILIATION_RECENT_LIMIT:]
+    return True
+
+
+def _terminal_anchor_scene_target_session_id(snapshot: dict, fallback_session_id: str) -> str:
+    target = snapshot.get("terminal_message_target") if isinstance(snapshot, dict) else None
+    if not isinstance(target, dict) or target.get("version") != "terminal_message_target_v1":
+        return str(fallback_session_id or "").strip()
+    return str(target.get("session_id") or fallback_session_id or "").strip()
+
+
+def _save_terminal_anchor_scene_to_target_session(
+    origin_session_id: str,
+    target_session_id: str,
+    stream_id: str,
+    snapshot: dict,
+) -> tuple[str, str | None]:
+    origin_session_id = str(origin_session_id or "").strip()
+    target_session_id = str(target_session_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    if not origin_session_id or not target_session_id or not stream_id:
+        return "non_materializable", "terminal_target_session_missing"
+    try:
+        target_session = get_session(target_session_id, metadata_only=False)
+        target_session = _ensure_full_session_before_mutation(target_session_id, target_session)
+    except Exception:
+        logger.debug(
+            "Failed to load terminal journal target session %s for origin %s",
+            target_session_id,
+            origin_session_id,
+            exc_info=True,
+        )
+        return "retry", "terminal_target_session_missing"
+    with _get_session_agent_lock(target_session_id):
+        if not _terminal_replay_binding_matches_session(
+            target_session,
+            origin_session_id,
+            stream_id,
+            stream_id,
+            target_session_id,
+        ):
+            return "non_materializable", "terminal_target_binding_mismatch"
+        target_messages = getattr(target_session, "messages", None)
+        message_index = _terminal_anchor_scene_message_index(
+            target_messages,
+            snapshot,
+            expected_session_id=target_session_id,
+        )
+        if message_index is None or not isinstance(target_messages, list):
+            return "non_materializable", "terminal_target_not_found"
+        message = target_messages[message_index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            return "non_materializable", "terminal_target_not_assistant"
+        records = dict(_anchor_scene_records(target_session))
+        original_records = dict(records)
+        if _anchor_scene_record_exists_for_stream(records, stream_id):
+            return "already_materialized", None
+        if _anchor_scene_record_exists_for_message(records, message, message_index):
+            return "already_materialized", None
+        scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot.get("anchor_activity_scene"), dict) else None
+        rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return "non_materializable", "terminal_snapshot_no_activity_rows"
+        completed_scene = _complete_hydrated_anchor_scene(
+            target_messages,
+            scene,
+            message_index,
+            message_offset=0,
+            tool_calls=getattr(target_session, "tool_calls", None),
+            stream_id=stream_id,
+        )
+        if not isinstance(completed_scene, dict) or not completed_scene.get("activity_rows"):
+            return "non_materializable", "terminal_completed_scene_empty"
+        ref = _assistant_anchor_scene_message_ref(message)
+        records[ref or f"index:{message_index}"] = {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": message_index,
+            "message_ref": ref,
+            "stream_id": stream_id,
+            "scene": completed_scene,
+            "updated_at": time.time(),
+        }
+        if len(records) > 256:
+            ordered = sorted(
+                records.items(),
+                key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+            )
+            records = dict(ordered[-256:])
+        target_session.anchor_activity_scenes = records
+        try:
+            target_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            target_session.anchor_activity_scenes = original_records
+            logger.debug(
+                "Failed to persist terminal journal target scene for session %s",
+                target_session_id,
+                exc_info=True,
+            )
+            return "retry", "terminal_target_scene_save_failed"
+    return "materialized", None
+
+
 def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, handler=None) -> bool:
     """Persist a settled Anchor scene when the browser stream owner detached before terminal."""
     sid = str(getattr(session, "session_id", "") or "").strip()
@@ -6108,6 +6226,31 @@ def _materialize_terminal_anchor_scene_from_run_journal(session, messages, *, ha
                         stream_id,
                         stream_id,
                         "missing_terminal_target",
+                    ):
+                        changed = True
+                    continue
+                target_session_id = _terminal_anchor_scene_target_session_id(snapshot, sid)
+                if target_session_id and target_session_id != sid:
+                    target_status, target_reason = _save_terminal_anchor_scene_to_target_session(
+                        sid,
+                        target_session_id,
+                        stream_id,
+                        snapshot,
+                    )
+                    if target_status in {"materialized", "already_materialized"}:
+                        if _terminal_anchor_reconciliation_mark_stream_processed(progress, stream_id):
+                            progress_streams.add(stream_id)
+                            changed = True
+                        continue
+                    if target_status == "retry":
+                        page_can_advance_cursor = False
+                        break
+                    if _record_terminal_anchor_scene_non_materializable(
+                        progress,
+                        sid,
+                        stream_id,
+                        stream_id,
+                        target_reason or "terminal_target_not_found",
                     ):
                         changed = True
                     continue
