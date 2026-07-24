@@ -4948,7 +4948,7 @@ def _moa_merge_slot_extras(new_slots: list[dict], old_slots) -> list[dict]:
 
     new_identities = [_moa_slot_identity(slot) for slot in new_slots]
     merged: list[dict] = []
-    for slot, identity in zip(new_slots, new_identities):
+    for slot, identity in zip(new_slots, new_identities, strict=True):
         candidates = by_identity.get(identity, []) if identity is not None else []
         unambiguous = (
             len(candidates) == 1
