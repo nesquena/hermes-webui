@@ -12404,6 +12404,18 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
+
+    # ── Plugin lifecycle (install/update/remove) -- status is always
+    # readable, even when the write gate is closed or no agent checkout is
+    # available, so the UI can render the disabled/unavailable state with a
+    # clear reason instead of silently hiding the card (mirrors an
+    # /api/ops/status-style allowed:false pattern). ──
+    if parsed.path == "/api/plugins/lifecycle/status":
+        from api.plugin_lifecycle import get_status
+        status = get_status()
+        status["writable"] = _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE")
+        return j(handler, status)
+
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
@@ -14486,6 +14498,89 @@ def handle_post(handler, parsed) -> bool:
             except ValueError as exc:
                 return bad(handler, str(exc), status=400)
         return bad(handler, f"unknown scope: {scope}", status=400)
+
+    # ── Plugin lifecycle (install/update/remove) -- HIGHEST-RISK write
+    # surface in Settings: a successful install pulls arbitrary Python (and
+    # its dependencies) from a Git repo and runs it as part of the agent.
+    # Every action here spawns an isolated `hermes plugins ...` subprocess
+    # (api/plugin_lifecycle.py) rather than importing anything in-process, so
+    # a malicious/broken plugin can never touch the WebUI server's own
+    # memory. Fail-closed gate (HERMES_WEBUI_ALLOW_PLUGIN_WRITE, same
+    # _truthy_env pattern used elsewhere), checked BEFORE the
+    # agent-checkout-availability check so a closed gate always wins. ──
+    _PLUGIN_LIFECYCLE_ACTIONS = {
+        "/api/plugins/lifecycle/install": "install",
+        "/api/plugins/lifecycle/update": "update",
+        "/api/plugins/lifecycle/remove": "remove",
+    }
+    if parsed.path in _PLUGIN_LIFECYCLE_ACTIONS:
+        if not _truthy_env("HERMES_WEBUI_ALLOW_PLUGIN_WRITE"):
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": (
+                        "Plugin install/update/remove is disabled. "
+                        "Set HERMES_WEBUI_ALLOW_PLUGIN_WRITE=1 to enable."
+                    ),
+                    "writable": False,
+                },
+                status=403,
+            )
+
+        from api.plugin_lifecycle import (
+            PluginSourceError,
+            is_available,
+            list_installed_plugins,
+            start_action,
+            validate_plugin_name,
+            validate_source,
+        )
+
+        if not is_available():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Plugin management requires a Hermes agent checkout (no `hermes` CLI found).",
+                    "writable": True,
+                },
+                status=501,
+            )
+
+        action = _PLUGIN_LIFECYCLE_ACTIONS[parsed.path]
+        try:
+            if action == "install":
+                source = validate_source(body.get("source") or "")
+                # Strict JSON booleans: bool("false") is True, so a string
+                # here silently grants destructive force semantics. Reject
+                # anything that isn't a real JSON true/false.
+                force_raw = body.get("force", False)
+                if not isinstance(force_raw, bool):
+                    return bad(handler, "'force' must be a JSON boolean", 400)
+                enable_raw = body.get("enable")
+                if enable_raw is not None and not isinstance(enable_raw, bool):
+                    return bad(handler, "'enable' must be a JSON boolean", 400)
+                started, status = start_action(
+                    "install", source, force=force_raw, enable=enable_raw
+                )
+            else:
+                try:
+                    installed = list_installed_plugins()
+                except RuntimeError as exc:
+                    return bad(handler, str(exc), status=500)
+                try:
+                    name = validate_plugin_name(body.get("name") or "", installed)
+                except LookupError as exc:
+                    return bad(handler, str(exc), status=404)
+                started, status = start_action(action, name)
+        except PluginSourceError as exc:
+            return bad(handler, str(exc), status=400)
+
+        status["writable"] = True
+        if not started:
+            status["error"] = "Another plugin action is already running."
+        return j(handler, status, status=200 if started else 409)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":
