@@ -9785,17 +9785,15 @@ def _normalize_sidebar_child_runtime_reason(reason) -> str | None:
     text = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
     if not text:
         return None
-    if text in {"approval", "clarify", "completed", "cancelled", "unknown"}:
+    if text in {"completed", "cancelled", "unknown"}:
         return text
-    if any(token in text for token in ("cancel", "abort", "interrupt", "stopped_by_user", "user_stop")):
+    if text in {"cancel", "abort", "aborted", "interrupt", "interrupted", "stopped_by_user", "user_stop"}:
         return "cancelled"
     if "tool_limit" in text:
         return "tool_limit"
-    if any(token in text for token in ("fail", "error", "exception", "timeout")):
+    if text in {"failed", "fail", "error", "exception", "timeout"}:
         return "error"
-    if any(token in text for token in ("complete", "success", "finished", "done")):
-        return "completed"
-    return "ended"
+    return "unknown"
 
 
 def _sidebar_child_runtime_fields(session: dict, *, attention: dict | None = None) -> tuple[str, str | None]:
