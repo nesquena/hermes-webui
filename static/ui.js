@@ -18238,8 +18238,8 @@ function _findLiveAssistantAnchorForSegment(inner, segmentSeq){
   return _findPreviousVisibleLiveAssistant(inner, exact) || _findLatestVisibleLiveAssistant(inner) || exact;
 }
 
-function clearLiveToolCards(options){
-  const preserveDom=!!(options&&options.preserveDom);
+function clearLiveToolCards(){
+  const preserveDom=!!(arguments[0]&&arguments[0].preserveDom);
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   if(!preserveDom){
     const inner=_assistantTurnBlocks($('liveAssistantTurn'));

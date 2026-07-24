@@ -5815,7 +5815,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
-        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
         _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
@@ -5850,6 +5849,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
+          if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
             window._compressionUi&&window._compressionUi.automatic&&
@@ -5953,7 +5953,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _transient:true,
             });
           }
-          // Keep the rendered live Worklog in place until renderMessages() swaps
+          // Keep the rendered live Worklog in place until the settled transcript swaps
           // it for the settled anchor scene. Removing it first exposes an empty
           // transcript frame on large sessions.
           clearLiveToolCards({preserveDom:true});
