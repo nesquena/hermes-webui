@@ -306,10 +306,16 @@ def test_webui_owned_session_with_api_metadata_is_not_pruned(monkeypatch):
     assert pruned == []
 
 
-def test_webui_sidebar_skips_cli_projection_but_prunes_imported_orphan(monkeypatch):
-    """The WebUI-only bucket retains direct state.db orphan recovery without
-    building the expensive CLI/gateway projection it does not return."""
+def test_webui_sidebar_bounds_cli_projection_and_prunes_imported_orphan(monkeypatch):
+    """The WebUI-only bucket retains direct state.db orphan recovery. Review
+    round 2 refined the projection contract: the badge cache MAY consult the
+    CLI projection (bounded: single-flight, TTL, last-known-good) so the
+    sidebar-tab badges stay authoritative -- but per build at most once, and
+    the projection rows never enter the returned payload."""
     import api.routes as routes
+    from api import route_session_list_cache as _cache_mod
+
+    _cache_mod._reset_cli_badge_cache_for_tests()
 
     row = {
         "session_id": "cli-orphan-webui-bucket",
@@ -347,6 +353,20 @@ def test_webui_sidebar_skips_cli_projection_but_prunes_imported_orphan(monkeypat
         sidebar_source="webui",
     )
 
-    assert cli_projection_calls == []
+    # Bounded, not forbidden: at most ONE badge-cache-mediated projection.
+    assert len(cli_projection_calls) <= 1
     assert payload["sessions"] == []
     assert pruned == ["cli-orphan-webui-bucket"]
+
+    # A second build inside the badge TTL pays nothing further.
+    cli_projection_calls.clear()
+    routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        sidebar_source="webui",
+    )
+    assert cli_projection_calls == []
+    _cache_mod._reset_cli_badge_cache_for_tests()
