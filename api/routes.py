@@ -2162,8 +2162,10 @@ def _prune_orphaned_imported_agent_sidecars(rows, *, cli_by_id, diag_stage=None)
     """Prune imported CLI/API sidecars whose backing state.db row is gone.
 
     This direct, uncapped state.db probe is deliberately independent of the
-    optional CLI/gateway projection: the WebUI sidebar skips that expensive
-    projection, but must retain the same orphan-recovery safety contract.
+    optional CLI/gateway projection: the WebUI sidebar does not run that
+    projection on the render path (it consults it only through the bounded,
+    TTL'd badge cache — see ``get_cli_sessions_for_badges``), but must retain
+    the same orphan-recovery safety contract.
     """
     if not rows:
         return list(rows) if rows is not None else []
@@ -2278,10 +2280,15 @@ def _build_session_list_cache_payload(
     show_cron_sessions = bool(show_cron_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-    # A WebUI-only sidebar request must not pay the CLI/agent projection cost and
-    # then filter it away. On large state.db / Claude-Code stores that projection
-    # can exceed the browser timeout and block later lightweight WebUI refreshes
-    # behind the same cache rebuild path.
+    # A WebUI-only sidebar request must not pay the CLI/agent projection cost
+    # PER POLL and then filter it away. On large state.db / Claude-Code stores
+    # that projection can exceed the browser timeout and block later
+    # lightweight WebUI refreshes behind the same cache rebuild path.
+    #
+    # It is not zero projection, though: the sidebar-tab badges below still
+    # need rows that exist only in that projection, so this branch consults it
+    # through the bounded per-scope badge cache (single-flight, completion-based
+    # TTL, last-known-good on failure) rather than on every request.
     load_cli_sessions = show_cli_sessions and sidebar_source != "webui"
     if load_cli_sessions:
         diag_stage("get_cli_sessions")
@@ -2465,7 +2472,14 @@ def _build_session_list_cache_payload(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
                 include_claude_code=show_claude_code_sessions,
-                profile_key=None if all_profiles else _get_active_profile_name(),
+                # Normalize exactly like the response-cache key does, so the
+                # badge scope and the bucket it invalidates are the same thing.
+                profile_key=(
+                    None if all_profiles
+                    else _route_session_list_cache._session_list_cache_profile_scope(
+                        _get_active_profile_name()
+                    )
+                ),
             )
         except Exception:
             logger.debug("cli badge count projection failed", exc_info=True)

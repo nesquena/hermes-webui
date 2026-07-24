@@ -379,7 +379,7 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
                 _session_list_cache_path_stamp(_session_list_cache_settings_file()),
                 streaming_marker,
                 swv,
-                _cli_badge_cache_generation(),
+                _cli_badge_cache_generation(_cli_badge_scope_for_cache_key(key)),
             )
         try:
             state_db_path = Path(str(_session_list_cache_state_db_path()))
@@ -397,9 +397,10 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[object, ...]:
             _session_list_cache_path_stamp(_session_list_cache_settings_file()),
             _session_list_cache_state_db_fingerprint(state_db_path),
             swv,
-            # Badge refresh with changed counts must invalidate this bucket
-            # exactly once (#6192 gate: authoritative sidebar-tab badges).
-            _cli_badge_cache_generation(),
+            # A badge refresh with changed counts must invalidate this bucket
+            # exactly once (#6192 gate: authoritative sidebar-tab badges) — and
+            # only THIS scope's bucket, not every profile's.
+            _cli_badge_cache_generation(_cli_badge_scope_for_cache_key(key)),
         )
     # WebUI-origin sessions can also receive settled rows in state.db when the
     # official Hermes Desktop App continues the same agent session.  The non-
@@ -578,25 +579,63 @@ def _session_list_cache_done(key: tuple, event: threading.Event | None) -> None:
 
 
 # ── CLI badge counts for sidebar_source=webui (#6192 gate follow-up) ─────────
-# The webui-tab shortcut skips the expensive get_cli_sessions() projection, but
-# the sidebar-tab badges (cli_session_count / archived_cli_count) must stay
-# authoritative — external state.db / Claude-Code rows exist ONLY in that
-# projection.  This cache hands the routes layer CLI rows for *counting only*
-# on a slow, churn-tolerant TTL: state.db writes never bust it directly (that
-# was exactly the rebuild storm the shortcut removed), it refreshes at most
-# once per TTL during a response-cache rebuild, and when a refresh actually
-# changes the badge-relevant signature its generation bumps so the response
-# stamp invalidates exactly once and converges on the fresh counts.
+# The webui-tab shortcut no longer runs the expensive get_cli_sessions()
+# projection PER POLL, but it does still pay it — bounded — because the
+# sidebar-tab badges (cli_session_count / archived_cli_count) must stay
+# authoritative: external state.db / Claude-Code rows exist ONLY in that
+# projection. This is the bounded-projection contract:
+#
+#   * PER KEY. Every (source_filter, all_profiles, include_claude_code,
+#     profile_key) scope owns its own rows, last-known-good, signature,
+#     expiry, generation and in-flight state. One global slot made an
+#     A → B → all-profiles → A rotation evict and re-project on every
+#     request, which is not "once per TTL" for anything.
+#   * BOUNDED. The map is LRU-capped, so a process that sees many scopes
+#     cannot grow it without limit.
+#   * SINGLE-FLIGHT WITH RESULT SHARING. One thread loads a key; concurrent
+#     callers for that key WAIT and consume the leader's result rather than
+#     being handed stale rows or []. Callers for a different key are
+#     unaffected — they neither block on nor inherit that key's state.
+#   * COMPLETION-BASED TTL. Expiry is stamped when the load finishes, not
+#     when it started, so a slow projection cannot be born already expired.
+#   * LAST-KNOWN-GOOD, FAILURE-AWARE. get_cli_sessions() normalizes its
+#     failures into stale rows or [] instead of raising, so "returned
+#     something" is not success. The outcome is read out-of-band via
+#     api.models.cli_projection_failed(); a failed projection never replaces
+#     last-known-good rows and never bumps a generation. Only a genuinely
+#     successful empty result may replace good rows with zeros.
+#   * KEY-LOCAL GENERATION. A refresh that changes one scope's badge-relevant
+#     signature bumps only that scope's generation, so the response stamp
+#     invalidates exactly that scope and converges on the fresh counts
+#     without disturbing unrelated ones.
 _CLI_BADGE_CACHE_LOCK = threading.Lock()
-_CLI_BADGE_CACHE: dict = {
-    "key": None,
-    "expires": 0.0,
-    "rows": [],
-    "sig": None,
-    "gen": 0,
-    "loading": False,
-    "has_good": False,  # rows came from a SUCCESSFUL load (last-known-good)
-}
+# How long a caller waits for the in-flight leader before giving up and
+# serving what it has. Bounded so a wedged projection cannot pin request
+# threads for the whole TTL.
+_CLI_BADGE_LEADER_WAIT_SECONDS = 5.0
+# LRU cap. Real deployments have a handful of scopes (per profile, plus the
+# all-profiles view); this only has to stop unbounded growth.
+_CLI_BADGE_CACHE_MAX_KEYS = 32
+
+
+class _CliBadgeEntry:
+    """Per-scope badge state. Guarded by ``_CLI_BADGE_CACHE_LOCK``."""
+
+    __slots__ = ("rows", "has_good", "sig", "gen", "expires", "loading", "cond")
+
+    def __init__(self) -> None:
+        self.rows: list = []
+        self.has_good = False
+        self.sig = None
+        self.gen = 0
+        self.expires = 0.0
+        self.loading = False
+        # Shares the module lock, so waiting releases it and the leader's
+        # publish + notify happen in one critical section.
+        self.cond = threading.Condition(_CLI_BADGE_CACHE_LOCK)
+
+
+_CLI_BADGE_CACHE: "OrderedDict[tuple, _CliBadgeEntry]" = OrderedDict()
 
 
 def _cli_badge_ttl_seconds() -> float:
@@ -608,24 +647,115 @@ def _cli_badge_ttl_seconds() -> float:
         return 30.0
 
 
-def _cli_badge_cache_generation() -> int:
+def _cli_badge_entry_locked(key: tuple) -> _CliBadgeEntry:
+    """Fetch-or-create *key*'s entry and mark it most-recently-used.
+
+    Caller must hold ``_CLI_BADGE_CACHE_LOCK``.
+    """
+    entry = _CLI_BADGE_CACHE.get(key)
+    if entry is None:
+        entry = _CliBadgeEntry()
+        _CLI_BADGE_CACHE[key] = entry
+    else:
+        _CLI_BADGE_CACHE.move_to_end(key)
+    # Evict least-recently-used entries, but never one with a load in flight:
+    # its leader would publish into a detached object and its waiters would
+    # never be notified.
+    if len(_CLI_BADGE_CACHE) > _CLI_BADGE_CACHE_MAX_KEYS:
+        for victim_key in list(_CLI_BADGE_CACHE):
+            if len(_CLI_BADGE_CACHE) <= _CLI_BADGE_CACHE_MAX_KEYS:
+                break
+            if victim_key == key:
+                continue
+            victim = _CLI_BADGE_CACHE[victim_key]
+            if victim.loading:
+                continue
+            _CLI_BADGE_CACHE.pop(victim_key, None)
+    return entry
+
+
+def _cli_badge_scope(source_filter, all_profiles: bool, profile_key) -> tuple:
+    """The sidebar scope a badge key belongs to.
+
+    This is the badge key minus ``include_claude_code``: that flag is a
+    per-request settings toggle, not a separate sidebar scope, and a refresh
+    under either value must invalidate the same response-cache bucket.
+    """
+    return (source_filter, bool(all_profiles), None if all_profiles else profile_key)
+
+
+def _cli_badge_scope_for_cache_key(key: tuple):
+    """Map a session-list response-cache key onto its badge scope."""
+    try:
+        return _cli_badge_scope(key[9], bool(key[1]), key[0])
+    except Exception:
+        return None
+
+
+def _cli_badge_cache_generation(scope: tuple | None = None) -> int:
+    """Generation for one badge scope, or the total across all of them.
+
+    Key-local by design: summing only the entries in *scope* keeps a refresh
+    under profile A from invalidating profile B's (or the all-profiles view's)
+    response-cache bucket. ``None`` returns the total, which is what a caller
+    that does not know its scope — and every existing test — asks for.
+    """
     with _CLI_BADGE_CACHE_LOCK:
-        return int(_CLI_BADGE_CACHE["gen"])
+        if scope is None:
+            return sum(int(entry.gen) for entry in _CLI_BADGE_CACHE.values())
+        return sum(
+            int(entry.gen)
+            for key, entry in _CLI_BADGE_CACHE.items()
+            if _cli_badge_scope(key[0], key[1], key[3]) == scope
+        )
 
 
 def _reset_cli_badge_cache_for_tests() -> None:
     with _CLI_BADGE_CACHE_LOCK:
-        _CLI_BADGE_CACHE.update(
-            {
-                "key": None,
-                "expires": 0.0,
-                "rows": [],
-                "sig": None,
-                "gen": 0,
-                "loading": False,
-                "has_good": False,
-            }
+        _CLI_BADGE_CACHE.clear()
+
+
+def _cli_badge_signature(rows) -> tuple:
+    return tuple(
+        sorted(
+            (str(r.get("session_id") or ""), bool(r.get("archived")))
+            for r in rows
+            if isinstance(r, dict)
         )
+    )
+
+
+def _project_cli_sessions_for_badges(
+    *, source_filter, all_profiles: bool, include_claude_code: bool
+) -> tuple[list, bool]:
+    """Run the CLI projection and report whether it actually SUCCEEDED.
+
+    Late-binds ``routes.get_cli_sessions`` so focused tests that monkeypatch
+    the routes-level symbol keep steering this path too.
+    """
+    from api import models as _models
+    from api import routes as _routes
+
+    loader = _routes.get_cli_sessions
+    _models.begin_cli_projection_status()
+    try:
+        if _routes._callable_accepts_kwarg(loader, "include_claude_code"):
+            rows = loader(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=include_claude_code,
+            )
+        else:
+            rows = loader(source_filter=source_filter, all_profiles=all_profiles)
+    except Exception:
+        # A loader that raises is unambiguous.
+        return [], False
+    # A loader that returned may still have swallowed a failure internally and
+    # normalized it to stale rows or []. Treating that as success is what let
+    # a transient state.db error publish zero badges for a whole TTL.
+    if _models.cli_projection_failed():
+        return list(rows or []), False
+    return list(rows or []), True
 
 
 def get_cli_sessions_for_badges(
@@ -637,78 +767,58 @@ def get_cli_sessions_for_badges(
 ) -> list:
     """CLI rows for badge counting on webui-tab requests.
 
-    Explicit BOUNDED-PROJECTION contract (review round 2): the sidebar-tab
-    badges need rows that exist only in the CLI projection, so the webui
-    path pays that projection -- but bounded, single-flight, and
-    stale-tolerant rather than per-poll:
-
-    * TTL-bounded: state.db churn never busts this cache directly; a
-      refresh happens at most once per HERMES_WEBUI_CLI_BADGE_TTL_SECONDS.
-    * SINGLE-FLIGHT: exactly one thread performs a cold/expired load;
-      concurrent misses return the last-known rows immediately instead of
-      duplicating the projection.
-    * LAST-KNOWN-GOOD: a loader failure returns (and keeps) the previous
-      successful rows -- an error can never overwrite a good badge state
-      with zeros for a whole TTL window.
-
-    Late-binds ``routes.get_cli_sessions`` so focused tests that monkeypatch
-    the routes-level symbol keep steering this path too.
+    See the bounded-projection contract documented above this function.
     """
     key = (source_filter, bool(all_profiles), bool(include_claude_code), profile_key)
-    now = time.monotonic()
+    ttl = _cli_badge_ttl_seconds()
     with _CLI_BADGE_CACHE_LOCK:
-        same_key = _CLI_BADGE_CACHE["key"] == key
-        if same_key and now < _CLI_BADGE_CACHE["expires"]:
-            return list(_CLI_BADGE_CACHE["rows"])
-        if _CLI_BADGE_CACHE["loading"]:
-            # A leader is already projecting: serve stale-known state (same
-            # key) or empty (key change) WITHOUT caching -- never a second
-            # concurrent projection.
-            return list(_CLI_BADGE_CACHE["rows"]) if same_key else []
-        _CLI_BADGE_CACHE["loading"] = True
-    from api import routes as _routes
+        entry = _cli_badge_entry_locked(key)
+        deadline = time.monotonic() + _CLI_BADGE_LEADER_WAIT_SECONDS
+        while True:
+            if time.monotonic() < entry.expires:
+                # Inside this scope's TTL: serve its rows (empty only when this
+                # scope has never had a successful load).
+                return list(entry.rows) if entry.has_good else []
+            if not entry.loading:
+                entry.loading = True
+                break
+            # A leader is loading THIS key. Wait for its result instead of
+            # serving stale rows — a cold follower would otherwise publish
+            # zero badges while the answer was seconds away.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return list(entry.rows) if entry.has_good else []
+            entry.cond.wait(remaining)
 
-    loader = _routes.get_cli_sessions
+    rows: list = []
+    ok = False
     try:
-        if _routes._callable_accepts_kwarg(loader, "include_claude_code"):
-            rows = loader(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
-                include_claude_code=include_claude_code,
-            )
-        else:
-            rows = loader(source_filter=source_filter, all_profiles=all_profiles)
-        rows = list(rows or [])
-        failed = False
-    except Exception:
-        rows = []
-        failed = True
-    if failed:
+        rows, ok = _project_cli_sessions_for_badges(
+            source_filter=source_filter,
+            all_profiles=all_profiles,
+            include_claude_code=include_claude_code,
+        )
+    finally:
+        # Comprehensive: an import error, a signature failure or a cancellation
+        # must not strand ownership and wedge every future caller for this key
+        # into the bounded leader wait and then into serving [].
         with _CLI_BADGE_CACHE_LOCK:
-            _CLI_BADGE_CACHE["loading"] = False
-            if same_key and _CLI_BADGE_CACHE["has_good"]:
-                # Keep last-known-good; retry no earlier than next TTL tick.
-                _CLI_BADGE_CACHE["expires"] = now + _cli_badge_ttl_seconds()
-                return list(_CLI_BADGE_CACHE["rows"])
-            return []
-    sig = tuple(
-        sorted(
-            (str(r.get("session_id") or ""), bool(r.get("archived")))
-            for r in rows
-            if isinstance(r, dict)
-        )
-    )
-    with _CLI_BADGE_CACHE_LOCK:
-        if sig != _CLI_BADGE_CACHE["sig"]:
-            _CLI_BADGE_CACHE["gen"] += 1
-        _CLI_BADGE_CACHE.update(
-            {
-                "key": key,
-                "expires": now + _cli_badge_ttl_seconds(),
-                "rows": rows,
-                "sig": sig,
-                "loading": False,
-                "has_good": True,
-            }
-        )
-        return list(rows)
+            try:
+                if ok:
+                    # Building the signature touches loader-supplied rows and
+                    # can itself raise, so it lives inside the guarded region.
+                    sig = _cli_badge_signature(rows)
+                    if sig != entry.sig:
+                        entry.sig = sig
+                        entry.gen += 1
+                    entry.rows = rows
+                    entry.has_good = True
+            finally:
+                # Stamp the TTL on COMPLETION, not on entry: a projection that
+                # took longer than the TTL would otherwise be published already
+                # expired and re-run on the very next request.
+                entry.expires = time.monotonic() + ttl
+                entry.loading = False
+                entry.cond.notify_all()
+            result = list(entry.rows) if entry.has_good else []
+    return result

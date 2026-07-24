@@ -63,6 +63,38 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 _CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
 _CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, threading.Event]" = {}
+
+# ── Projection outcome signal ───────────────────────────────────────────────
+# `get_cli_sessions()` is deliberately additive-and-never-crashing: every
+# failure path is normalized into stale rows or `[]`. That makes a genuine
+# "no CLI sessions exist" result indistinguishable from "the projection blew
+# up" at the call site — which is fine for rendering, but NOT for a caller
+# that caches the answer. A badge cache that treats a failure-normalized `[]`
+# as success replaces its last-known-good counts with zeros and republishes
+# them for a whole TTL window.
+#
+# So record the outcome out-of-band, per calling thread (the projection runs
+# synchronously in the caller's thread), and let such callers ask.
+_cli_projection_status = threading.local()
+
+
+def _note_cli_projection_failure() -> None:
+    _cli_projection_status.failed = True
+
+
+def begin_cli_projection_status() -> None:
+    """Arm the outcome probe for a `get_cli_sessions()` call in this thread."""
+    _cli_projection_status.failed = False
+
+
+def cli_projection_failed() -> bool:
+    """True when the last armed `get_cli_sessions()` normalized a failure.
+
+    Note the direction of the residual race: an unrelated failure recorded by
+    the *same thread* can only make a caller keep its last-known-good rows,
+    never adopt bad ones.
+    """
+    return bool(getattr(_cli_projection_status, "failed", False))
 _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # LRU-bounded (drop-oldest) so a long-lived process under churn — where the
 # state.db fingerprint advances on every streamed message and the structural
@@ -6665,6 +6697,7 @@ def _load_and_cache_cli_sessions(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
             "all profiles" if all_profiles else db_path, _cli_err,
         )
+        _note_cli_projection_failure()
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
         return []
@@ -7532,6 +7565,7 @@ def get_cli_sessions(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
             "all profiles" if all_profiles else db_path, _cli_err,
         )
+        _note_cli_projection_failure()
         return []
 
 def _json_loads_if_string(value):
