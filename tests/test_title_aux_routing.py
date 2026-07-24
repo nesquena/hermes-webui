@@ -6,32 +6,76 @@ Covers:
   - aux→agent fallback triggers on 'llm_invalid_aux' status
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
+import importlib
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
-_agent_stub.auxiliary_client = _aux_stub
+def _snapshot_agent_modules():
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if name == 'agent' or name.startswith('agent.')
+    }
 
 
+def _clear_agent_modules():
+    for name in list(sys.modules):
+        if name == 'agent' or name.startswith('agent.'):
+            sys.modules.pop(name, None)
+
+
+def _restore_agent_modules(snapshot):
+    _clear_agent_modules()
+    for name, module in snapshot.items():
+        sys.modules[name] = module
+
+    agent_pkg = sys.modules.get('agent')
+    if not isinstance(agent_pkg, types.ModuleType):
+        return
+
+    for name, module in snapshot.items():
+        if not name.startswith('agent.'):
+            continue
+        child_name = name.split('.', 1)[1]
+        if '.' not in child_name:
+            setattr(agent_pkg, child_name, module)
+
+
+@contextmanager
 def _ensure_agent_aux_stub():
-    sys.modules['agent'] = _agent_stub
-    sys.modules['agent.auxiliary_client'] = _aux_stub
-    _agent_stub.auxiliary_client = _aux_stub
+    snapshot = _snapshot_agent_modules()
+    _clear_agent_modules()
+
+    try:
+        try:
+            aux_module = importlib.import_module('agent.auxiliary_client')
+        except ModuleNotFoundError:
+            agent_stub = types.ModuleType('agent')
+            agent_stub.__path__ = []
+            aux_module = types.ModuleType('agent.auxiliary_client')
+            sys.modules['agent'] = agent_stub
+            sys.modules['agent.auxiliary_client'] = aux_module
+            agent_stub.auxiliary_client = aux_module
+        else:
+            agent_pkg = sys.modules.get('agent')
+            if isinstance(agent_pkg, types.ModuleType):
+                agent_pkg.auxiliary_client = aux_module
+        yield aux_module
+    finally:
+        _restore_agent_modules(snapshot)
 
 
+@contextmanager
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
-    _ensure_agent_aux_stub()
-    return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+    with _ensure_agent_aux_stub() as aux_module:
+        with patch.object(aux_module, '_get_auxiliary_task_config', return_value=config_dict, create=True):
+            yield
 
 
 class TestAuxTitleConfigured(unittest.TestCase):
@@ -71,9 +115,9 @@ class TestAuxTitleConfigured(unittest.TestCase):
 
     def test_import_error_returns_false(self):
         from api.streaming import _aux_title_configured
-        _ensure_agent_aux_stub()
-        with patch('agent.auxiliary_client._get_auxiliary_task_config', side_effect=ImportError("no module"), create=True):
-            self.assertFalse(_aux_title_configured())
+        with _ensure_agent_aux_stub() as aux_module:
+            with patch.object(aux_module, '_get_auxiliary_task_config', side_effect=ImportError("no module"), create=True):
+                self.assertFalse(_aux_title_configured())
 
 
 class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
