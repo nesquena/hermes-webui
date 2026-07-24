@@ -412,7 +412,10 @@ async function switchPanel(name, opts = {}) {
     });
   }
   // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'tasks') {
+    if (_tasksSubtab === 'scripts') switchTasksSubtab(_tasksSubtab);
+    else await loadCrons();
+  }
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -1460,6 +1463,164 @@ function _clearCronDetail(){
   if (body) { body.innerHTML = ''; body.style.display = 'none'; }
   if (empty) empty.style.display = '';
   _setCronHeaderButtons('empty');
+}
+
+let _tasksSubtab = 'jobs';
+function handleTasksSubtabKeydown(event) {
+  if (!event) return;
+  const tabs = Array.from(document.querySelectorAll('.tasks-subtab'));
+  const current = event.currentTarget || event.target;
+  const currentIndex = tabs.indexOf(current);
+  if (currentIndex < 0) return;
+  let nextIndex = null;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
+  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  const next = tabs[nextIndex];
+  if (!next) return;
+  next.focus();
+  switchTasksSubtab(next.id === 'tasksSubtabScripts' ? 'scripts' : 'jobs');
+}
+function switchTasksSubtab(tab) {
+  const jobsPane = $('tasksJobsPane');
+  const scriptsPane = $('tasksScriptsPane');
+  const jobActions = $('tasksJobActions');
+  const scriptActions = $('tasksScriptActions');
+  _tasksSubtab = tab;
+  jobsPane.style.display = tab === 'jobs' ? '' : 'none';
+  scriptsPane.style.display = tab === 'scripts' ? '' : 'none';
+  jobActions.style.display = tab === 'jobs' ? '' : 'none';
+  scriptActions.style.display = tab === 'scripts' ? '' : 'none';
+  jobsPane.setAttribute('aria-hidden', String(tab !== 'jobs'));
+  scriptsPane.setAttribute('aria-hidden', String(tab !== 'scripts'));
+  document.querySelectorAll('.tasks-subtab').forEach(b => {
+    const selected = b.id === 'tasksSubtab' + tab.charAt(0).toUpperCase() + tab.slice(1);
+    b.classList.toggle('active', selected);
+    b.setAttribute('aria-selected', String(selected));
+    b.tabIndex = selected ? 0 : -1;
+  });
+  if (tab === 'scripts') loadScripts();
+}
+
+let _scriptsData = null;
+let _scriptsGeneration = 0;
+let _scriptsRequestId = 0;
+let _scriptsRawRequestId = 0;
+function _invalidateScriptsRequests(clearCache = true) {
+  _scriptsGeneration++;
+  _scriptsRequestId++;
+  if (typeof _scriptsRawRequestId === 'undefined') _scriptsRawRequestId = 1;
+  else _scriptsRawRequestId++;
+  if (clearCache) _scriptsData = null;
+}
+function _resetScriptsForProfileTransition() {
+  _invalidateScriptsRequests();
+  const box = $('scriptsList');
+  const refreshBtn = $('scriptsRefreshBtn');
+  if (box) box.replaceChildren();
+  if (refreshBtn) {
+    refreshBtn.style.opacity = '';
+    refreshBtn.disabled = false;
+  }
+}
+function _scriptsOwner() {
+  return { profile: (S && S.activeProfile) || 'default', generation: _scriptsGeneration };
+}
+function _scriptsOwns(owner, requestId, record) {
+  return owner.profile === ((S && S.activeProfile) || 'default')
+    && owner.generation === _scriptsGeneration
+    && (record || requestId === _scriptsRequestId)
+    && (!record || (_scriptsData && _scriptsData.includes(record)));
+}
+async function loadScripts(animate) {
+  const box = $('scriptsList');
+  const refreshBtn = $('scriptsRefreshBtn');
+  if (animate) {
+    if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
+    else _scriptsData = null;
+    if (refreshBtn) { refreshBtn.style.opacity = '0.5'; refreshBtn.disabled = true; }
+  }
+  if (_scriptsData) { _renderScriptsList(_scriptsData); return; }
+  const owner = _scriptsOwner();
+  const requestId = ++_scriptsRequestId;
+  try {
+    const data = await api('/api/scripts/list');
+    if (!_scriptsOwns(owner, requestId)) return;
+    _scriptsData = data.scripts || [];
+    _renderScriptsList(_scriptsData, owner);
+  } catch(e) {
+    if (_scriptsOwns(owner, requestId) && box) {
+      box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+    }
+  } finally {
+    if (animate && refreshBtn && _scriptsOwns(owner, requestId)) {
+      refreshBtn.style.opacity = ''; refreshBtn.disabled = false;
+    }
+  }
+}
+
+function _renderScriptsList(scripts, owner) {
+  owner = owner || (typeof _scriptsOwner === 'function'
+    ? _scriptsOwner()
+    : { profile: (typeof S !== 'undefined' && S && S.activeProfile) || 'default', generation: 0 });
+  const owns = (requestId, record) => typeof _scriptsOwns === 'function'
+    ? _scriptsOwns(owner, requestId, record)
+    : true;
+  const box = $('scriptsList');
+  if (!scripts.length) {
+    box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('scripts_no_scripts'))}</div>`;
+    return;
+  }
+  box.innerHTML = '';
+  for (const s of scripts) {
+    const el = document.createElement('div');
+    el.className = 'script-item';
+    const ext = s.name.split('.').pop();
+    const stem = s.name.replace(/\.[^.]+$/, '');
+    const langClass = ext === 'py' ? 'language-python' : 'language-bash';
+    el.innerHTML = `
+      <button type="button" class="script-header" aria-expanded="false">
+        <span class="script-name">${esc(stem)}</span>
+        <span class="script-ext">.${esc(ext)}</span>
+        <span class="script-expand" aria-hidden="true">▸</span>
+      </button>
+      ${s.description ? `<div class="script-desc">${esc(s.description)}</div>` : ''}
+      <div class="script-source" style="display:none">
+        <pre><code class="${langClass}">${esc(s.source || '')}</code></pre>
+      </div>`;
+    const header = el.querySelector('.script-header');
+    header.addEventListener('click', async () => {
+      const expanded = el.classList.toggle('expanded');
+      const sourceEl = el.querySelector('.script-source');
+      header.setAttribute('aria-expanded', String(expanded));
+      header.querySelector('.script-expand').textContent = expanded ? '▾' : '▸';
+      sourceEl.style.display = expanded ? '' : 'none';
+      if (expanded && !s._loaded) {
+        const rawRequestId = typeof _scriptsRawRequestId === 'undefined'
+          ? 1
+          : ++_scriptsRawRequestId;
+        s._rawRequestId = rawRequestId;
+        sourceEl.querySelector('code').textContent = t('loading') || 'Loading...';
+        try {
+          const r = await api('/api/scripts/raw?path=' + encodeURIComponent(s.name));
+          if (!owns(rawRequestId, s) || s._rawRequestId !== rawRequestId) return;
+          s.source = r.source || '';
+          sourceEl.querySelector('code').textContent = s.source;
+          s._loaded = true;
+          if (window.Prism) Prism.highlightElement(sourceEl.querySelector('code'));
+        } catch(e) {
+          if (owns(rawRequestId, s) && s._rawRequestId === rawRequestId) {
+            sourceEl.querySelector('code').textContent = t('scripts_load_error') || 'Failed to load source.';
+          }
+        }
+      }
+      sourceEl.style.display = el.classList.contains('expanded') ? '' : 'none';
+    });
+    box.appendChild(el);
+  }
 }
 
 async function runCurrentCron(){ if (_currentCronDetail) await cronRun(_currentCronDetail.id); }
@@ -6536,7 +6697,8 @@ async function _profileSwitchPanelLoad(){
   _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();
+  else if (_currentPanel === 'tasks') await loadCrons();
   if (_currentPanel === 'kanban') await loadKanban();
   if (_currentPanel === 'profiles') await loadProfilesPanel();
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
@@ -7009,6 +7171,9 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
+    if (typeof _resetScriptsForProfileTransition === 'function') _resetScriptsForProfileTransition();
+    else if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
+    else _scriptsData = null;
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
@@ -7201,6 +7366,9 @@ async function switchToProfile(name) {
     // are intact — restore the real list/tree so the loading skeletons we showed
     // up front don't strand. (#4662)
     if (_switchGen === _profileSwitchGeneration) {
+      if (typeof _resetScriptsForProfileTransition === 'function') _resetScriptsForProfileTransition();
+      else if (typeof _invalidateScriptsRequests === 'function') _invalidateScriptsRequests();
+      else _scriptsData = null;
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
       // rather than strand the up-front skeleton (#4671). Lift the embargo too so the
@@ -7216,6 +7384,7 @@ async function switchToProfile(name) {
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
       }
+      if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();
     }
     return false;
   } finally {

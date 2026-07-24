@@ -115,3 +115,15 @@ def test_vietnamese_locale_has_no_duplicate_keys():
     keys = key_pattern.findall(extract_locale_block(src, "vi"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Vietnamese locale has duplicate keys: {duplicates}"
+
+
+def test_french_locale_keeps_cron_translations():
+    src = read(REPO / "static" / "i18n.js")
+    fr_block = extract_locale_block(src, "fr")
+    expected = [
+        "cron_view_full_output: 'Voir la sortie complète'",
+        "cron_all_runs: 'Toutes les exécutions'",
+        "cron_duplicate: 'Dupliquer'",
+    ]
+    for entry in expected:
+        assert entry in fr_block

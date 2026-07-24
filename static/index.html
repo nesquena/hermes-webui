@@ -206,14 +206,39 @@
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
       <div class="panel-head">
-        <span data-i18n="scheduled_jobs">Scheduled jobs</span>
-        <div class="panel-head-actions">
+        <div class="tasks-subtabs" role="tablist" aria-label="Tasks views">
+          <button type="button" class="tasks-subtab active" id="tasksSubtabJobs"
+            role="tab" aria-controls="tasksJobsPane" aria-selected="true" tabindex="0"
+            data-i18n="tab_tasks_jobs" onclick="switchTasksSubtab('jobs')" onkeydown="handleTasksSubtabKeydown(event)">Jobs</button>
+          <button type="button" class="tasks-subtab" id="tasksSubtabScripts"
+            role="tab" aria-controls="tasksScriptsPane" aria-selected="false" tabindex="-1"
+            data-i18n="tab_tasks_scripts" onclick="switchTasksSubtab('scripts')" onkeydown="handleTasksSubtabKeydown(event)">Scripts</button>
+        </div>
+        <div class="panel-head-actions" id="tasksJobActions">
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="cronRefreshBtn" onclick="loadCrons(true)" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
+        <div class="panel-head-actions" id="tasksScriptActions" style="display:none">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom"
+            id="scriptsRefreshBtn" onclick="loadScripts(true)"
+            data-tooltip="Refresh scripts" aria-label="Refresh scripts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+          </button>
+        </div>
       </div>
-      <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
-      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <!-- Jobs subtab -->
+      <div id="tasksJobsPane" role="tabpanel" aria-labelledby="tasksSubtabJobs">
+        <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
+        <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
+      <!-- Scripts subtab -->
+      <div id="tasksScriptsPane" role="tabpanel" aria-labelledby="tasksSubtabScripts" style="display:none">
+        <div class="scripts-list" id="scriptsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
     </div>
     <!-- Kanban panel -->
     <div class="panel-view" id="panelKanban">

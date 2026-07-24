@@ -74,11 +74,17 @@ let _cronPollSince=10;
 let _cronUnreadCount=1;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-profile-job']);
+let _profileSwitchOpeningExistingSession=false;
 global.S={{activeProfile:'default'}};
 global.api=async()=>({{active:'alternate',is_default:false}});
 global.localStorage={{removeItem(){{}}}};
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _clearCronSessionCompletionUnreadForInactiveProfiles(){{}}
+async function switchToProfile(name){{
+  S.activeProfile=name;
+  _resetCronUnreadForProfileSwitch();
+  return true;
+}}
 {reset}
 {switch}
 (async()=>{{
@@ -182,6 +188,7 @@ let _cronUnreadCount=0;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-cron-job']);
 let renders=0;
+let _profileSwitchOpeningExistingSession=false;
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global._allSessions=[];
 global.api=async()=>({{active:'profile-b',is_default:false}});
@@ -205,6 +212,11 @@ function _clearSessionCompletionUnread(sid){{
 {has_unread}
 {clear_helpers}
 {reset}
+async function switchToProfile(name){{
+  S.activeProfile=name;
+  _resetCronUnreadForProfileSwitch();
+  return true;
+}}
 {switch}
 (async()=>{{
   _markSessionCompletionUnread('old-cron-session', 4, {{source:'cron', profile:'profile-a'}});
