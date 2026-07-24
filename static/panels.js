@@ -13050,6 +13050,135 @@ function loadGatewayStatus(){
   if(!card) return;
   return api('/api/gateway/status').then(r=>_renderGatewayStatus(r)).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_status_load_failed'))}</div>`});
 }
+
+// ── Ops actions (Maintenance card): doctor / security audit / backup ────────
+const OPS_ACTIONS=['doctor','security_audit','backup'];
+const OPS_ACTION_PATHS={doctor:'/api/ops/doctor',security_audit:'/api/ops/security-audit',backup:'/api/ops/backup'};
+const OPS_ACTION_LABEL_KEYS={doctor:'ops_action_doctor',security_audit:'ops_action_security_audit',backup:'ops_action_backup'};
+const OPS_ACTION_CONFIRM_KEYS={security_audit:'ops_confirm_security_audit',backup:'ops_confirm_backup'};
+let _opsActionsPollTimer=null;
+let _opsActionsPollInFlight=false;
+let _opsActionsCardShape=null;
+function _opsActionStatusBadge(status){
+  const colors={idle:'#6b7280',running:'#3b82f6',completed:'#22c55e',failed:'#ef4444',timeout:'#ef4444',busy:'#6b7280'};
+  const color=colors[status]||'#6b7280';
+  return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--code-bg);border:1px solid var(--border2);color:${color}"><span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block"></span>${esc(t('ops_status_'+status)||status)}</span>`;
+}
+function _renderOpsActionsCard(data){
+  const card=$('opsActionsCard');
+  if(!card||!data) return;
+  if(!data.allowed){
+    _opsActionsCardShape=null;
+    card.innerHTML=`<div style="font-size:12px;color:var(--muted)">${esc(t('ops_gate_disabled').replace('{flag}','HERMES_WEBUI_ALLOW_OPS_ACTIONS'))}</div>`;
+    return;
+  }
+  const isRunning=data.status==='running';
+  // Structure is built once per shape; polls only update badge/log/error in
+  // place so the log <details> keeps its open state, focus, and scroll
+  // position instead of being torn down every 2 seconds.
+  const shape=JSON.stringify([!!data.allowed,OPS_ACTIONS.map(a=>[a===data.action,a==='backup'&&!!(data.backup_available||data.backup_path)&&!isRunning])]);
+  if(_opsActionsCardShape!==shape){
+    _opsActionsCardShape=shape;
+    const rows=OPS_ACTIONS.map(action=>{
+      const isActive=data.action===action;
+      const downloadBtn=(action==='backup'&&(data.backup_available||data.backup_path)&&!isRunning)
+        ?`<button type="button" class="sm-btn" onclick="downloadOpsBackup()" style="padding:5px 10px;font-size:12px" data-i18n="ops_download_backup">${esc(t('ops_download_backup'))}</button>`
+        :'';
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <button type="button" class="sm-btn ops-action-btn" data-ops-action="${esc(action)}" ${isRunning?'disabled':''} onclick="runOpsAction('${esc(action)}')" style="padding:6px 12px;font-size:12px">${esc(t(OPS_ACTION_LABEL_KEYS[action]))}</button>
+        <span data-ops-badge="${esc(action)}">${isActive?_opsActionStatusBadge(data.status):''}</span>
+        ${downloadBtn}
+      </div>`;
+    }).join('');
+    card.innerHTML=rows
+      +`<details data-ops-log-details style="margin-top:6px;display:none"><summary style="cursor:pointer;font-size:11px;color:var(--muted)" data-i18n="ops_view_log">${esc(t('ops_view_log'))}</summary><pre data-ops-log style="max-height:240px;overflow:auto;font-size:11px;padding:8px;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre></details>`
+      +`<div data-ops-error role="status" aria-live="polite" style="font-size:11px;color:var(--error,#e05);margin-top:6px;display:none"></div>`;
+  }
+  for(const action of OPS_ACTIONS){
+    const badge=card.querySelector(`[data-ops-badge="${action}"]`);
+    if(badge) badge.innerHTML=(data.action===action)?_opsActionStatusBadge(data.status):'';
+    const btn=card.querySelector(`[data-ops-action="${action}"]`);
+    if(btn) btn.disabled=isRunning;
+  }
+  const details=card.querySelector('[data-ops-log-details]');
+  const pre=card.querySelector('[data-ops-log]');
+  if(details&&pre){
+    const log=data.log||'';
+    details.style.display=log?'':'none';
+    if(pre.textContent!==log){
+      const pinned=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
+      pre.textContent=log;
+      if(pinned) pre.scrollTop=pre.scrollHeight;
+    }
+  }
+  const errEl=card.querySelector('[data-ops-error]');
+  if(errEl){
+    errEl.style.display=data.error?'':'none';
+    errEl.textContent=data.error||'';
+  }
+}
+function _stopOpsActionsPolling(){
+  if(_opsActionsPollTimer){clearTimeout(_opsActionsPollTimer);_opsActionsPollTimer=null;}
+}
+function _syncOpsActionsPolling(data){
+  // One self-scheduling poll: the next request is armed only after the
+  // prior one settles, so a slow /api/ops/status can never fan out into
+  // concurrent requests. Any failure or panel teardown cancels the chain.
+  const shouldPoll=!!(data&&(data.status==='running'||data.busy));
+  if(!shouldPoll){_stopOpsActionsPolling();return;}
+  if(_opsActionsPollTimer||_opsActionsPollInFlight) return;
+  _opsActionsPollTimer=setTimeout(()=>{_opsActionsPollTimer=null;loadOpsActionsStatus();},2000);
+}
+function loadOpsActionsStatus(){
+  const card=$('opsActionsCard');
+  if(!card) return;
+  if(_opsActionsPollInFlight) return;
+  _opsActionsPollInFlight=true;
+  return api('/api/ops/status',{timeoutToast:false}).then(r=>{
+    _opsActionsPollInFlight=false;
+    _renderOpsActionsCard(r);
+    _syncOpsActionsPolling(r);
+    return r;
+  }).catch(()=>{
+    _opsActionsPollInFlight=false;
+    _stopOpsActionsPolling();
+    _opsActionsCardShape=null;
+    card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('ops_status_load_failed'))}</div>`;
+  });
+}
+async function runOpsAction(action){
+  const confirmKey=OPS_ACTION_CONFIRM_KEYS[action];
+  if(confirmKey){
+    let message=t(confirmKey);
+    if(action==='backup'){
+      // The archive contains credentials -- say so explicitly, always.
+      message+='\n\n'+t('ops_confirm_backup_contents');
+    }
+    const confirmed=await showConfirmDialog({title:t(OPS_ACTION_LABEL_KEYS[action]),message,danger:action==='backup'});
+    if(!confirmed) return;
+  }
+  try{
+    const result=await api(OPS_ACTION_PATHS[action],{method:'POST',body:JSON.stringify({}),timeoutMs:15000,timeoutToast:false});
+    _renderOpsActionsCard(result);
+    _syncOpsActionsPolling(result);
+  }catch(e){
+    const msg=e&&e.message?e.message:String(e||'');
+    if(typeof showToast==='function') showToast(`${t('ops_action_failed')}${msg?': '+msg:''}`,5000,'error');
+    loadOpsActionsStatus();
+  }
+}
+function downloadOpsBackup(){
+  // Temporary-anchor download (the app's standard pattern) -- window.open
+  // is unreliable in the iOS PWA and popup-blocked elsewhere.
+  const url=new URL('api/ops/backup/download',document.baseURI||location.href);
+  const a=document.createElement('a');
+  a.href=url.href;
+  a.download='';
+  a.rel='noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
 async function _gatewayAction(action){
   if(_gatewayActionInFlight) return;
   _gatewayActionInFlight=true;
@@ -13071,7 +13200,8 @@ const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name, opts){
   _origSwitchSettings(name, opts);
   if(name==='preferences') updateNotificationPermissionStatus();
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();loadOpsActionsStatus();}
+  else{_stopOpsActionsPolling();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

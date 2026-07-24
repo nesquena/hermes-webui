@@ -1193,6 +1193,15 @@ def _gateway_status_payload() -> dict:
     }
 
 
+_OPS_ACTION_BY_PATH = {
+    "/api/ops/doctor": "doctor",
+    "/api/ops/security-audit": "security_audit",
+    "/api/ops/backup": "backup",
+}
+_OPS_ACTIONS_GATE_MESSAGE = (
+    "Maintenance actions are disabled. Set HERMES_WEBUI_ALLOW_OPS_ACTIONS=1 to enable."
+)
+
 _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 
 # Server-side single-flight guard for gateway lifecycle actions. The client
@@ -5739,6 +5748,22 @@ def _client_ip_for_rate_limit(handler) -> str:
 
 def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Deployment-owned security gates are decided ONCE, from the environment the
+# OPERATOR started the process with (TARS gate review P0): profile .env files
+# are loaded into the live os.environ at profile init/switch, so a live read
+# would let a profile flip an operator-closed gate (doctor / security audit /
+# credential-bearing backups) open at runtime. The snapshot is immutable for
+# the process lifetime; changing the gate requires an operator restart.
+_OPS_ACTIONS_GATE_STARTUP_SNAPSHOT: bool = (
+    os.getenv("HERMES_WEBUI_ALLOW_OPS_ACTIONS", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+
+def _ops_actions_allowed() -> bool:
+    return _OPS_ACTIONS_GATE_STARTUP_SNAPSHOT
 
 
 def _request_client_ip(handler) -> str:
@@ -13695,6 +13720,47 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/gateway/status":
         return j(handler, _gateway_status_payload())
 
+    # ── Ops actions (Maintenance card): status is always readable, even when
+    # gated off, so the frontend can render the disabled state with its flag
+    # name instead of silently hiding the card. ──
+    if parsed.path == "/api/ops/status":
+        from api.ops_actions import get_status
+        from api.profiles import get_active_profile_name as _ops_profile
+
+        # Profile-owned: status/log/backup info is only ever the REQUESTING
+        # profile's own run state (gate follow-up: a run started under
+        # profile A must be invisible to profile B).
+        status = get_status(_ops_profile())
+        allowed = _ops_actions_allowed()
+        status["allowed"] = allowed
+        if not allowed:
+            # Defense-in-depth: this route stays open even when the gate is
+            # off (so the frontend can render the disabled state), but a
+            # prior run's log tail/error/backup path could carry details
+            # from before the gate was turned off -- don't let those leak
+            # through the one route that ignores the gate.
+            status["log"] = ""
+            status["error"] = None
+            status["backup_path"] = None
+            status["last_successful_backup"] = None
+            status["backup_available"] = False
+        return j(handler, status)
+
+    if parsed.path == "/api/ops/backup/download":
+        if not _ops_actions_allowed():
+            return bad(handler, _OPS_ACTIONS_GATE_MESSAGE, 403)
+        from api.ops_actions import latest_backup_path
+        from api.profiles import get_active_profile_name as _ops_profile
+
+        # Bound to the requesting profile AND re-validated (regular file,
+        # no symlink, contained in the profile's own backup root, readable
+        # ZIP) inside latest_backup_path -- a stale/spoofed state path can
+        # never serve bytes from outside the owned root.
+        backup_path = latest_backup_path(_ops_profile())
+        if not backup_path:
+            return j(handler, {"error": "No backup available for download"}, status=404)
+        return _serve_file_bytes(handler, backup_path, "application/zip", "attachment", "no-store")
+
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
@@ -15537,6 +15603,29 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path in {"/api/gateway/start", "/api/gateway/stop", "/api/gateway/restart"}:
         return _handle_gateway_lifecycle(handler, parsed.path.rsplit("/", 1)[-1], body)
+
+    # ── Ops actions (Maintenance card): doctor / security audit / backup ──
+    if parsed.path in _OPS_ACTION_BY_PATH:
+        if not _ops_actions_allowed():
+            return j(
+                handler,
+                {"error": _OPS_ACTIONS_GATE_MESSAGE, "allowed": False},
+                status=403,
+            )
+        from api.ops_actions import start_action
+        from api.profiles import get_active_profile_name as _ops_profile
+
+        try:
+            started, status = start_action(
+                _OPS_ACTION_BY_PATH[parsed.path], _ops_profile()
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        # On 409 the snapshot is the caller's OWN state (when the caller's
+        # profile owns the running action) or a minimal busy envelope with
+        # no log/path/error (when another profile does).
+        status["allowed"] = True
+        return j(handler, status, status=200 if started else 409)
 
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
