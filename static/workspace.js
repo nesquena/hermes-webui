@@ -645,12 +645,13 @@ async function _workspacePathExists(path, sessionId){
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
-async function openArtifactPath(artifact){
-  const descriptor=artifact&&typeof artifact==='object'?artifact:{path:artifact};
-  const sessionId=String(descriptor.session_id||'').trim();
-  const workspaceRoot=String(descriptor.workspace_root||'').replace(/\/+$/,'');
+async function openArtifactPath(path){
+  const isDescriptor=path&&typeof path==='object';
+  const descriptor=isDescriptor?path:{path};
   const expectedSession=S.session&&String(S.session.session_id||'');
   const expectedWorkspace=S.session&&String(S.session.workspace||'').replace(/\/+$/,'');
+  const sessionId=String(isDescriptor?descriptor.session_id:expectedSession||'').trim();
+  const workspaceRoot=String(isDescriptor?descriptor.workspace_root:expectedWorkspace||'').replace(/\/+$/,'');
   if(!descriptor.path||!sessionId||!workspaceRoot||sessionId!==expectedSession||workspaceRoot!==expectedWorkspace) return;
   // Artifact links are an explicit request to inspect a file. A closed
   // workspace panel must expand before openFile paints the preview, otherwise

@@ -400,7 +400,7 @@ def test_live_stream_completion_uses_landed_artifact_descriptors():
 
 def test_artifact_open_expands_a_closed_workspace_preview_before_loading_file():
     workspace = (ROOT / "static/workspace.js").read_text(encoding="utf-8")
-    start = workspace.index("async function openArtifactPath(artifact)")
+    start = workspace.index("async function openArtifactPath(path)")
     end = workspace.index("// ── Workspace file-tree", start)
     body = workspace[start:end]
     assert "ensureWorkspacePreviewVisible()" in body
