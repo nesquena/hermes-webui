@@ -174,3 +174,72 @@ def test_badge_cache_generation_bumps_only_on_count_changes(monkeypatch):
     )
     cache_mod.get_cli_sessions_for_badges(profile_key="default")
     assert cache_mod._cli_badge_cache_generation() == gen2 + 1
+
+
+def test_parallel_cold_misses_run_exactly_one_projection(monkeypatch):
+    """Review round 2: concurrent cold misses must not fan the projection
+    out -- one leader loads, followers get last-known state immediately."""
+    import threading as _threading
+
+    from api import route_session_list_cache as cache_mod
+
+    monkeypatch.setenv("HERMES_WEBUI_CLI_BADGE_TTL_SECONDS", "3600")
+    cache_mod._reset_cli_badge_cache_for_tests()
+
+    load_calls = []
+    release = _threading.Event()
+
+    def slow_loader(source_filter=None, all_profiles=False):
+        load_calls.append(1)
+        release.wait(timeout=5)
+        return _external_cli_rows(2)
+
+    monkeypatch.setattr(routes, "get_cli_sessions", slow_loader)
+
+    results = {}
+
+    def worker(name):
+        results[name] = cache_mod.get_cli_sessions_for_badges(profile_key="default")
+
+    threads = [_threading.Thread(target=worker, args=(f"t{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    import time as _time
+
+    deadline = _time.time() + 2
+    while len(load_calls) == 0 and _time.time() < deadline:
+        _time.sleep(0.01)
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(load_calls) == 1, "parallel misses duplicated the projection"
+    leader_rows = [r for r in results.values() if r]
+    assert leader_rows and len(leader_rows[0]) == 2
+
+
+def test_loader_failure_keeps_last_known_good(monkeypatch):
+    """Review round 2: an error must never overwrite a good badge state
+    with zeros for a TTL window."""
+    from api import route_session_list_cache as cache_mod
+
+    monkeypatch.setenv("HERMES_WEBUI_CLI_BADGE_TTL_SECONDS", "0")
+    cache_mod._reset_cli_badge_cache_for_tests()
+
+    monkeypatch.setattr(
+        routes, "get_cli_sessions",
+        lambda source_filter=None, all_profiles=False: _external_cli_rows(3),
+    )
+    good = cache_mod.get_cli_sessions_for_badges(profile_key="default")
+    assert len(good) == 3
+
+    def broken(source_filter=None, all_profiles=False):
+        raise RuntimeError("projection exploded")
+
+    monkeypatch.setattr(routes, "get_cli_sessions", broken)
+    after_failure = cache_mod.get_cli_sessions_for_badges(profile_key="default")
+    assert len(after_failure) == 3, "failure clobbered last-known-good"
+    # And the generation did not churn on the failure path.
+    gen_before = cache_mod._cli_badge_cache_generation()
+    cache_mod.get_cli_sessions_for_badges(profile_key="default")
+    assert cache_mod._cli_badge_cache_generation() == gen_before

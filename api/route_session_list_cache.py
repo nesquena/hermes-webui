@@ -594,6 +594,8 @@ _CLI_BADGE_CACHE: dict = {
     "rows": [],
     "sig": None,
     "gen": 0,
+    "loading": False,
+    "has_good": False,  # rows came from a SUCCESSFUL load (last-known-good)
 }
 
 
@@ -614,7 +616,15 @@ def _cli_badge_cache_generation() -> int:
 def _reset_cli_badge_cache_for_tests() -> None:
     with _CLI_BADGE_CACHE_LOCK:
         _CLI_BADGE_CACHE.update(
-            {"key": None, "expires": 0.0, "rows": [], "sig": None, "gen": 0}
+            {
+                "key": None,
+                "expires": 0.0,
+                "rows": [],
+                "sig": None,
+                "gen": 0,
+                "loading": False,
+                "has_good": False,
+            }
         )
 
 
@@ -625,7 +635,21 @@ def get_cli_sessions_for_badges(
     include_claude_code: bool = True,
     profile_key=None,
 ) -> list:
-    """CLI rows for badge counting on webui-tab requests, TTL-cached.
+    """CLI rows for badge counting on webui-tab requests.
+
+    Explicit BOUNDED-PROJECTION contract (review round 2): the sidebar-tab
+    badges need rows that exist only in the CLI projection, so the webui
+    path pays that projection -- but bounded, single-flight, and
+    stale-tolerant rather than per-poll:
+
+    * TTL-bounded: state.db churn never busts this cache directly; a
+      refresh happens at most once per HERMES_WEBUI_CLI_BADGE_TTL_SECONDS.
+    * SINGLE-FLIGHT: exactly one thread performs a cold/expired load;
+      concurrent misses return the last-known rows immediately instead of
+      duplicating the projection.
+    * LAST-KNOWN-GOOD: a loader failure returns (and keeps) the previous
+      successful rows -- an error can never overwrite a good badge state
+      with zeros for a whole TTL window.
 
     Late-binds ``routes.get_cli_sessions`` so focused tests that monkeypatch
     the routes-level symbol keep steering this path too.
@@ -633,8 +657,15 @@ def get_cli_sessions_for_badges(
     key = (source_filter, bool(all_profiles), bool(include_claude_code), profile_key)
     now = time.monotonic()
     with _CLI_BADGE_CACHE_LOCK:
-        if _CLI_BADGE_CACHE["key"] == key and now < _CLI_BADGE_CACHE["expires"]:
+        same_key = _CLI_BADGE_CACHE["key"] == key
+        if same_key and now < _CLI_BADGE_CACHE["expires"]:
             return list(_CLI_BADGE_CACHE["rows"])
+        if _CLI_BADGE_CACHE["loading"]:
+            # A leader is already projecting: serve stale-known state (same
+            # key) or empty (key change) WITHOUT caching -- never a second
+            # concurrent projection.
+            return list(_CLI_BADGE_CACHE["rows"]) if same_key else []
+        _CLI_BADGE_CACHE["loading"] = True
     from api import routes as _routes
 
     loader = _routes.get_cli_sessions
@@ -647,9 +678,19 @@ def get_cli_sessions_for_badges(
             )
         else:
             rows = loader(source_filter=source_filter, all_profiles=all_profiles)
+        rows = list(rows or [])
+        failed = False
     except Exception:
         rows = []
-    rows = list(rows or [])
+        failed = True
+    if failed:
+        with _CLI_BADGE_CACHE_LOCK:
+            _CLI_BADGE_CACHE["loading"] = False
+            if same_key and _CLI_BADGE_CACHE["has_good"]:
+                # Keep last-known-good; retry no earlier than next TTL tick.
+                _CLI_BADGE_CACHE["expires"] = now + _cli_badge_ttl_seconds()
+                return list(_CLI_BADGE_CACHE["rows"])
+            return []
     sig = tuple(
         sorted(
             (str(r.get("session_id") or ""), bool(r.get("archived")))
@@ -666,6 +707,8 @@ def get_cli_sessions_for_badges(
                 "expires": now + _cli_badge_ttl_seconds(),
                 "rows": rows,
                 "sig": sig,
+                "loading": False,
+                "has_good": True,
             }
         )
         return list(rows)
