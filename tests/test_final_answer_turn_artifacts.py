@@ -72,7 +72,6 @@ def test_turn_artifact_references_require_server_landed_descriptors():
         ],
         [],
         [],
-        [],
     ]
 
 
