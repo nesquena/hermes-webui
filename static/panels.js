@@ -5152,7 +5152,7 @@ async function installSkillsHubResult(identifier) {
         + (findingCount ? ' · ' + findingCount + ' ' + (t('skills_hub_findings') || 'finding(s)') : '')
         + (reason ? '\n' + reason : '')
         + '\n\n' + (t('skills_hub_blocked_see_results') || 'Details are in the scan result below the action log.'),
-      confirmLabel: t('close') || 'OK',
+      confirmLabel: t('terminal_close') || 'OK',
       danger: true,
     });
     return;
