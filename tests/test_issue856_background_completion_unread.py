@@ -1,6 +1,7 @@
 """Regression checks for #856 background completion unread markers."""
 
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -497,6 +498,75 @@ def test_switching_away_counts_as_background_completion():
     )
 
 
+
+
+def _extract_js_function(js: str, name: str, prefix: str = "function") -> str:
+    marker = f"{prefix} {name}("
+    start = js.find(marker)
+    if start == -1:
+        raise AssertionError(f"{name} function not found")
+    brace = js.find("{", start)
+    if brace == -1:
+        raise AssertionError(f"{name} opening brace not found")
+    depth = 1
+    i = brace + 1
+    while i < len(js) and depth > 0:
+        ch = js[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        raise AssertionError(f"{name} function braces unbalanced")
+    return js[start:i]
+
+
+def _extract_session_helpers(name: str) -> str:
+    names = [
+        '_getSessionCompletionUnread',
+        '_saveSessionCompletionUnread',
+        '_migrateSessionCompletionUnreadToFinalSession',
+    ]
+    if name in names:
+        block = _extract_js_function(SESSIONS_JS, name)
+    elif name == 'session_storage_var':
+        block = "const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';\nlet _sessionCompletionUnread = null;\n"
+    else:
+        raise AssertionError(f'unsupported helper block: {name}')
+    return block
+
+
+def _run_node_for_completion_marker(initial_unread: dict, old_sid: str, final_sid: str):
+    helper_src = "\n".join([
+        _extract_session_helpers('session_storage_var').strip(),
+        _extract_session_helpers('_getSessionCompletionUnread').strip(),
+        _extract_session_helpers('_saveSessionCompletionUnread').strip(),
+        _extract_session_helpers('_migrateSessionCompletionUnreadToFinalSession').strip(),
+    ])
+    script = f"""
+const _localStorage = {{}};
+const localStorage = {{
+  getItem: (key) => Object.prototype.hasOwnProperty.call(_localStorage, key) ? _localStorage[key] : null,
+  setItem: (key, value) => {{ _localStorage[key] = String(value); }},
+}};
+
+{helper_src}
+
+const initial = {json.dumps(initial_unread)};
+_sessionCompletionUnread = null;
+const existing = _getSessionCompletionUnread();
+for (const [key, value] of Object.entries(initial)) {{
+  existing[key] = value;
+}}
+_saveSessionCompletionUnread();
+_migrateSessionCompletionUnreadToFinalSession('{old_sid}','{final_sid}');
+console.log(JSON.stringify(_getSessionCompletionUnread(), null, 2));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout.strip())
+
+
 def test_restore_settled_background_stream_marks_completion_unread():
     restore_idx = MESSAGES_JS.find("async function _restoreSettledSession(source")
     assert restore_idx != -1, "_restoreSettledSession(source) not found"
@@ -506,9 +576,70 @@ def test_restore_settled_background_stream_marks_completion_unread():
     assert "const completedSid=session.session_id||activeSid;" in restore_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in restore_block
     assert "_markSessionCompletionUnread(completedSid, session.message_count);" in restore_block
+    assert "_migrateSessionCompletionUnreadToFinalSession(activeSid, completedSid)" in restore_block
     assert "if(isSessionViewed) _markSessionViewed(completedSid" in restore_block, (
         "restore-settled fallback must not mark a hidden/background completion read"
     )
+
+
+def test_restore_settled_path_migrates_manual_completion_unread_to_new_session_id():
+    initial = {
+        "old-stream": {
+            "message_count": 4,
+            "completed_at": 1000,
+            "manual": True,
+            "manual_pending": True,
+            "source": "legacy",
+        },
+        "new-stream": {
+            "message_count": 9,
+            "completed_at": 1002,
+            "source": "terminal-stream-end",
+            "profile": "production",
+        },
+    }
+    updated = _run_node_for_completion_marker(initial, 'old-stream', 'new-stream')
+    assert 'old-stream' not in updated
+    assert 'new-stream' in updated
+    assert updated['new-stream']['manual'] is True
+    assert updated['new-stream']['manual_pending'] is True
+    assert updated['new-stream']['message_count'] == 9
+    assert updated['new-stream']['source'] == 'terminal-stream-end'
+    assert updated['new-stream']['profile'] == 'production'
+
+
+def test_apperror_continuation_path_migrates_manual_completion_unread_to_new_session_id():
+    apperror_start = MESSAGES_JS.find("source.addEventListener('apperror',")
+    apperror_end = MESSAGES_JS.find("source.addEventListener('warning'", apperror_start)
+    apperror_test_block = MESSAGES_JS[apperror_start:apperror_end]
+    assert "_migrateSessionCompletionUnreadToFinalSession(currentSid, completionSid)" in apperror_test_block
+    assert "const completionSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||eventSid||currentSid;" in apperror_test_block
+
+    initial = {
+        "old-continuation": {
+            "message_count": 2,
+            "completed_at": 1000,
+            "manual": True,
+            "manual_pending": False,
+            "source": "legacy",
+        },
+        "new-continuation": {
+            "message_count": 11,
+            "completed_at": 1100,
+            "source": "gateway",
+            "profile": "default",
+            "manual": True,
+            "manual_pending": True,
+        },
+    }
+    updated = _run_node_for_completion_marker(initial, 'old-continuation', 'new-continuation')
+    assert 'old-continuation' not in updated
+    assert 'new-continuation' in updated
+    assert updated['new-continuation']['manual'] is True
+    assert updated['new-continuation']['message_count'] == 11
+    assert updated['new-continuation']['source'] == 'gateway'
+    assert updated['new-continuation']['profile'] == 'default'
+    assert updated['new-continuation']['manual_pending'] is True
 
 
 def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker():
