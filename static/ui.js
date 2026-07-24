@@ -13662,7 +13662,7 @@ function _turnArtifactEntriesFromScene(scene){
       session_id: sessionId,
       tool_name: toolName,
       tool_call_id: toolCallId,
-      type: artifact.type,
+      type: artifactType,
       owner: {
         session_id: sessionId,
         workspace_root: payload.workspace_root.replace(/\/+$/,''),
