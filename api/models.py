@@ -1236,6 +1236,13 @@ _DRAFT_SIDECAR_DIRNAME = '_drafts'
 _DRAFT_SIDECAR_CACHE: dict = {}
 _DRAFT_SIDECAR_LOCK = threading.Lock()
 _COMPOSER_DRAFT_LOCKS: dict = {}
+# Monotonic per-session draft revision. The composer autosaves on a debounce,
+# so a write can already be in flight when the user hits send and the client
+# clears the draft. Without an ordering token the clear completes, the older
+# write lands afterwards, and the sent message's text is resurrected as a
+# draft. Every mutating response carries the revision it produced; a request
+# that quotes an older one is rejected instead of applied.
+_COMPOSER_DRAFT_REVISIONS: dict = {}
 
 
 def get_composer_draft_lock(sid) -> threading.Lock:
@@ -1256,36 +1263,116 @@ def composer_draft_sidecar_path(sid):
     return SESSION_DIR / _DRAFT_SIDECAR_DIRNAME / f'{sid}.json'
 
 
-def read_composer_draft_sidecar(sid):
-    """Return the sidecar draft dict for *sid*, or None when absent/unreadable.
+def composer_draft_revision(sid) -> int:
+    """Current draft revision for *sid* (0 before the first mutation)."""
+    with _DRAFT_SIDECAR_LOCK:
+        return int(_COMPOSER_DRAFT_REVISIONS.get(str(sid), 0))
 
-    None means "no sidecar" (caller falls back to the legacy in-file field);
-    an existing sidecar with an empty draft is a real, authoritative value —
-    that distinction is what lets a cleared draft win over a stale legacy one.
+
+def bump_composer_draft_revision(sid) -> int:
+    """Advance and return *sid*'s draft revision. Call under the session's
+    draft lock, immediately after a successful mutation."""
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        nxt = int(_COMPOSER_DRAFT_REVISIONS.get(key, 0)) + 1
+        _COMPOSER_DRAFT_REVISIONS[key] = nxt
+        return nxt
+
+
+def composer_draft_revision_is_stale(sid, claimed_revision) -> bool:
+    """True when *claimed_revision* is older than what the server has applied.
+
+    A request that carries no revision is not stale — old clients and the
+    first write of a session both legitimately omit it.
+    """
+    if claimed_revision is None:
+        return False
+    try:
+        claimed = int(claimed_revision)
+    except (TypeError, ValueError):
+        return False
+    return claimed < composer_draft_revision(sid)
+
+
+# Read outcomes. `None` used to mean three different things — "no sidecar",
+# "I could not stat/read/parse it", and "a redirect record lives here" — and a
+# destructive caller that reads the first meaning out of the second deletes a
+# recoverable draft (and its zero-message owner) because of a transient error.
+DRAFT_ABSENT = 'absent'
+DRAFT_PRESENT = 'present'
+DRAFT_UNREADABLE = 'unreadable'
+DRAFT_REDIRECTED = 'redirected'
+
+
+def read_composer_draft_sidecar_status(sid):
+    """Return ``(draft, status, redirect_to)`` for *sid*'s sidecar.
+
+    ``status`` is one of ``DRAFT_ABSENT`` / ``DRAFT_PRESENT`` /
+    ``DRAFT_UNREADABLE`` / ``DRAFT_REDIRECTED``. Only ``DRAFT_ABSENT`` means
+    "there is no durable draft here"; ``DRAFT_UNREADABLE`` means the answer is
+    unknown and every destructive caller must fail closed on it.
     """
     p = composer_draft_sidecar_path(sid)
     if p is None:
-        return None
+        return None, DRAFT_ABSENT, None
     try:
         st = p.stat()
+    except FileNotFoundError:
+        return None, DRAFT_ABSENT, None
     except OSError:
-        return None
+        # Permission denied, EIO, a vanished parent directory: we do not know
+        # whether a draft exists.
+        logger.debug("Draft sidecar stat failed for %s", sid, exc_info=True)
+        return None, DRAFT_UNREADABLE, None
     stat_key = (st.st_mtime_ns, st.st_size)
     key = str(sid)
     with _DRAFT_SIDECAR_LOCK:
         cached = _DRAFT_SIDECAR_CACHE.get(key)
         if cached is not None and cached[0] == stat_key:
-            return copy.deepcopy(cached[1])
+            return copy.deepcopy(cached[1]), DRAFT_PRESENT, None
     try:
-        data = _json_loads_session(p.read_text(encoding='utf-8'))
+        raw = p.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None, DRAFT_ABSENT, None
+    except OSError:
+        logger.debug("Draft sidecar read failed for %s", sid, exc_info=True)
+        return None, DRAFT_UNREADABLE, None
+    try:
+        data = _json_loads_session(raw)
     except Exception:
-        return None
-    draft = data.get('draft') if isinstance(data, dict) else None
+        # A truncated or corrupt sidecar is NOT an absent one. Deleting the
+        # owner here throws away a draft that a later repair could recover.
+        logger.debug("Draft sidecar parse failed for %s", sid, exc_info=True)
+        return None, DRAFT_UNREADABLE, None
+    if not isinstance(data, dict):
+        return None, DRAFT_UNREADABLE, None
+    redirect_to = str(data.get('redirect_to') or '').strip()
+    if redirect_to:
+        return None, DRAFT_REDIRECTED, redirect_to
+    draft = data.get('draft')
     if not isinstance(draft, dict):
-        return None
+        return None, DRAFT_UNREADABLE, None
     with _DRAFT_SIDECAR_LOCK:
         _DRAFT_SIDECAR_CACHE[key] = (stat_key, copy.deepcopy(draft))
+    return draft, DRAFT_PRESENT, None
+
+
+def read_composer_draft_sidecar(sid):
+    """Return the sidecar draft dict for *sid*, or None when there is none.
+
+    Convenience wrapper for the many NON-destructive readers. A caller that
+    deletes anything on the strength of the answer must use
+    ``read_composer_draft_sidecar_status()`` instead and fail closed on
+    ``DRAFT_UNREADABLE``.
+    """
+    draft, _status, _redirect = read_composer_draft_sidecar_status(sid)
     return draft
+
+
+def composer_draft_redirect_target(sid):
+    """The SID that owns *sid*'s draft after a session-id rotation, if any."""
+    _draft, status, redirect_to = read_composer_draft_sidecar_status(sid)
+    return redirect_to if status == DRAFT_REDIRECTED else None
 
 
 def write_composer_draft_sidecar(sid, draft) -> dict:
@@ -1338,8 +1425,54 @@ def delete_composer_draft_sidecar(sid) -> bool:
     return not p.exists()
 
 
+def write_composer_draft_redirect(old_sid, new_sid) -> bool:
+    """Leave a durable ``old_sid -> new_sid`` marker in the old sidecar slot.
+
+    Copying the draft once is not enough. Compression rotates the session id
+    while the composer keeps autosaving on a debounce, so a request that was
+    already in flight still names the OLD sid — and because the archived parent
+    session still exists, the old-sid write was accepted and stranded the
+    newest draft on a session nobody loads any more. The marker makes the
+    rotation discoverable across restarts, so a late request can be routed to
+    the live sid (or told which sid is live) instead of silently writing into
+    the void.
+    """
+    p = composer_draft_sidecar_path(old_sid)
+    if p is None:
+        return False
+    payload = _json_dumps_session({
+        'redirect_to': str(new_sid),
+        'updated_at': time.time(),
+    })
+    tmp = p.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        _safe_replace(tmp, p)
+    except Exception:
+        logger.warning("Failed to record draft redirect %s -> %s", old_sid, new_sid, exc_info=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    with _DRAFT_SIDECAR_LOCK:
+        # The old slot no longer holds a draft; drop any cached copy so a
+        # reader cannot serve pre-rotation content.
+        _DRAFT_SIDECAR_CACHE.pop(str(old_sid), None)
+    return True
+
+
 def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
-    """Move draft ownership across a session-id rotation without clobbering a newer draft."""
+    """Move draft ownership across a session-id rotation.
+
+    Installs a durable continuation marker on the old sid whether or not there
+    was a draft to copy: the point of the marker is to catch requests that are
+    still in flight for the old sid, and those exist regardless.
+    """
     old_sid = str(old_sid or '')
     new_sid = str(new_sid or '')
     if old_sid == new_sid or not is_safe_session_id(old_sid) or not is_safe_session_id(new_sid):
@@ -1350,21 +1483,62 @@ def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
     )
     with locks[0][1]:
         with locks[1][1]:
-            old_draft = read_composer_draft_sidecar(old_sid)
-            if old_draft is None:
+            old_draft, old_status, _redirect = read_composer_draft_sidecar_status(old_sid)
+            if old_status == DRAFT_UNREADABLE:
+                # Do not overwrite a sidecar we could not read: it may still
+                # hold a recoverable draft.
+                logger.warning(
+                    "Skipping draft migration %s -> %s: old sidecar unreadable",
+                    old_sid, new_sid,
+                )
                 return
-            if read_composer_draft_sidecar(new_sid) is None:
-                write_composer_draft_sidecar(new_sid, old_draft)
-                update_cached_composer_draft(new_sid, old_draft)
-            delete_composer_draft_sidecar(old_sid)
+            if old_status == DRAFT_REDIRECTED:
+                return
+            if old_draft is not None:
+                _new_draft, new_status, _r = read_composer_draft_sidecar_status(new_sid)
+                if new_status == DRAFT_UNREADABLE:
+                    logger.warning(
+                        "Skipping draft migration %s -> %s: new sidecar unreadable",
+                        old_sid, new_sid,
+                    )
+                    return
+                if new_status == DRAFT_ABSENT:
+                    write_composer_draft_sidecar(new_sid, old_draft)
+                    update_cached_composer_draft(new_sid, old_draft)
+                    bump_composer_draft_revision(new_sid)
+            # Replace the old slot with the continuation marker rather than
+            # deleting it, so a late old-sid request is routable.
+            if not write_composer_draft_redirect(old_sid, new_sid):
+                # Could not install the marker; at least do not leave the old
+                # draft where a late write would compete with the new sid.
+                delete_composer_draft_sidecar(old_sid)
+            bump_composer_draft_revision(old_sid)
+
+
+def resolve_composer_draft_status(sid, legacy=None):
+    """Return ``(draft, readable)`` for *sid*.
+
+    ``readable`` is False when the sidecar exists but could not be read or
+    parsed — the draft is then UNKNOWN, not empty. Destructive callers must
+    treat that as "keep everything".
+    """
+    sidecar, status, redirect_to = read_composer_draft_sidecar_status(sid)
+    if status == DRAFT_UNREADABLE:
+        return {}, False
+    if status == DRAFT_REDIRECTED:
+        # Ownership moved; this sid holds no draft of its own, but the rotation
+        # target may. Report unreadable-for-destructive-purposes so a cleanup
+        # pass never deletes a row whose draft simply lives elsewhere now.
+        return {}, bool(redirect_to) is False
+    if sidecar is not None:
+        return sidecar, True
+    return (legacy if isinstance(legacy, dict) else {}), True
 
 
 def resolve_composer_draft(sid, legacy=None) -> dict:
     """Sidecar draft when present, else the legacy in-file composer_draft."""
-    sidecar = read_composer_draft_sidecar(sid)
-    if sidecar is not None:
-        return sidecar
-    return legacy if isinstance(legacy, dict) else {}
+    draft, _readable = resolve_composer_draft_status(sid, legacy)
+    return draft
 
 
 def update_cached_composer_draft(sid, draft) -> None:

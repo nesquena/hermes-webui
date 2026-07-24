@@ -162,18 +162,23 @@ def test_noop_resave_skips_disk_write(session_store):
     s.save(skip_index=True)
     p = session_store / "hotpath4.json"
     st1 = os.stat(p)
+    bytes1 = p.read_bytes()
     # Identical content, no updated_at touch → must not rewrite the file.
     s.save(touch_updated_at=False, skip_index=True)
     st2 = os.stat(p)
     assert (st1.st_mtime_ns, st1.st_size) == (st2.st_mtime_ns, st2.st_size), (
         "byte-identical re-save should skip the disk write"
     )
-    # Real change → must write.
+    assert p.read_bytes() == bytes1
+    # Real change → must write. Assert on the CONTENT, not on the timestamp:
+    # `st_mtime_ns` inequality is a proxy that fails on coarse-granularity
+    # filesystems (and on a write that lands inside the same tick) even though
+    # the write demonstrably happened. The bytes are the actual contract.
     s.title = "changed"
     s.save(touch_updated_at=False, skip_index=True)
-    st3 = os.stat(p)
-    assert st3.st_mtime_ns != st1.st_mtime_ns
-    assert json.loads(p.read_text(encoding="utf-8"))["title"] == "changed"
+    bytes3 = p.read_bytes()
+    assert bytes3 != bytes1, "a real change did not reach disk"
+    assert json.loads(bytes3.decode("utf-8"))["title"] == "changed"
 
 
 def test_noop_skip_defers_to_external_writer(session_store):
