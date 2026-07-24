@@ -571,15 +571,27 @@ function _artifactCandidatesFromToolCall(tc){
 // Session artifact discovery is intentionally broad. The final-answer list is
 // stricter: it only accepts successful, structured write-tool evidence owned
 // by this turn.
+const _turnArtifactPatchContinuation = { refs: null, keys: null };
+
+function _turnArtifactPatchRefKey(ref){
+  if(!ref) return '';
+  return `${ref.workspace_root || ''}\u0000${ref.path || ''}\u0000${ref.tool_call_id || ''}\u0000${ref.tool_name || ''}`;
+}
+
 function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
   const name=_artifactToolName(tc.name);
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
+  const isPatch = name === 'patch';
+  if(!isPatch){
+    _turnArtifactPatchContinuation.refs = null;
+    _turnArtifactPatchContinuation.keys = null;
+  }
   const allowArtifactCallIdFallback = name === 'patch';
+  const explicitToolCallId = _artifactScalarString(tc.tool_call_id || tc.id);
   const completionToolCallId = _artifactScalarString(
-    tc.tool_call_id
+    explicitToolCallId
     || tc.tid
-    || tc.id
     || (allowArtifactCallIdFallback ? (() => {
       const artifacts = Array.isArray(tc.artifacts) ? tc.artifacts : [];
       for(const artifact of artifacts){
@@ -590,8 +602,10 @@ function turnArtifactReferencesFromToolCall(tc){
     })() : '')
   );
   if(!completionToolCallId) return [];
+  const isPatchContinuation = isPatch && Boolean(_artifactScalarString(tc.tid)) && !explicitToolCallId;
   const seen=new Set();
   const out=[];
+  const refsToPush=[];
   for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
     if(!artifact||typeof artifact!=='object') continue;
     if(typeof artifact.path !== 'string' || typeof artifact.workspace_root !== 'string') continue;
@@ -609,7 +623,37 @@ function turnArtifactReferencesFromToolCall(tc){
       || seen.has(key)
     ) continue;
     seen.add(key);
-    out.push({path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName});
+    const ref = {path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName};
+    refsToPush.push(ref);
+    out.push(ref);
+  }
+  if(isPatch && isPatchContinuation && _turnArtifactPatchContinuation.refs){
+    if(refsToPush.length){
+      const carryKeys=_turnArtifactPatchContinuation.keys || new Set();
+      for(const ref of refsToPush){
+        const key = _turnArtifactPatchRefKey(ref);
+        if(!key || carryKeys.has(key)) continue;
+        carryKeys.add(key);
+        _turnArtifactPatchContinuation.refs.push(ref);
+      }
+      _turnArtifactPatchContinuation.keys = carryKeys;
+    }
+    _turnArtifactPatchContinuation.refs = null;
+    _turnArtifactPatchContinuation.keys = null;
+    return [];
+  }
+  if(isPatch){
+    if(out.length){
+      const keys = new Set();
+      for(const ref of out){
+        keys.add(_turnArtifactPatchRefKey(ref));
+      }
+      _turnArtifactPatchContinuation.refs = out;
+      _turnArtifactPatchContinuation.keys = keys;
+      return out;
+    }
+    _turnArtifactPatchContinuation.refs = null;
+    _turnArtifactPatchContinuation.keys = null;
   }
   return out;
 }
