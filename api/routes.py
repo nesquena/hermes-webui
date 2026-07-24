@@ -60,6 +60,7 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.process_event_utils import stamp_message_source
 from api.shares import create_or_refresh_share, load_share, revoke_share
 from api.turn_artifacts import landed_artifact_descriptors, normalize_tool_name, tool_result_is_error
 
@@ -21038,8 +21039,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
-    if source and source != "webui":
-        user_msg["_source"] = source
+    stamp_message_source(user_msg, source)
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = int(started_at)
     if attachments:
