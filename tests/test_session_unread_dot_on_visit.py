@@ -159,6 +159,13 @@ def _extract(name: str) -> str:
     raise AssertionError(f"could not brace-match {name}")
 
 
+def _extract_if_present(name: str) -> str:
+    marker = f"function {name}("
+    if marker not in SESSIONS_JS:
+        return ""
+    return _extract(name)
+
+
 def _run_node(script: str) -> dict:
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
@@ -640,6 +647,7 @@ def test_visible_tab_message_load_still_syncs_viewed_count():
 
 
 def _completion_rotation_script(*, final_exists: bool) -> str:
+    migrate = _extract_if_present("_migrateSessionCompletionUnreadToFinalSession")
     mark_completed = _extract("_markSessionCompletedInList")
     get_unread = _extract("_getSessionCompletionUnread")
     save_unread = _extract("_saveSessionCompletionUnread")
@@ -671,6 +679,7 @@ function _forgetObservedStreamingSession() {{}}
 function renderSessionListFromCache() {{}}
 {get_unread}
 {save_unread}
+{migrate}
 {mark_completed}
 const unread = _getSessionCompletionUnread();
 unread.old = {{message_count: 4, completed_at: 10, manual: true, manual_pending: true}};
