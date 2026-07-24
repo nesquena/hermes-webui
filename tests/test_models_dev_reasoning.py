@@ -45,9 +45,12 @@ def test_models_dev_unknown_allows_compatibility_fallback(monkeypatch):
 
     import api.config as cfg
 
+    # models.dev unknown → heuristic fallback. Grok family soft ceiling still
+    # applies on the fallback route (low/medium/high/xhigh); it must NOT clamp
+    # authoritative models.dev results (covered by the True cases above).
     assert cfg.resolve_model_reasoning_efforts(
         "x-ai/grok-4", provider_id="openrouter"
-    ) == list(cfg.VALID_REASONING_EFFORTS)
+    ) == ["low", "medium", "high", "xhigh"]
 
 
 def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):
@@ -152,3 +155,38 @@ display:
     assert status["reasoning_effort"] == "medium"
     assert status["supported_efforts"] == list(cfg.VALID_REASONING_EFFORTS)
     assert status["supports_reasoning_effort"] is True
+
+
+def test_models_dev_grok45_keeps_hard_floor_and_ladder(monkeypatch):
+    """Grok-4.5 hard floor survives models.dev authority (#6438 round 3).
+
+    models.dev may authoritatively declare supports_reasoning=True (full ladder),
+    but Grok-4.5 still cannot do minimal and cannot turn reasoning off. The floor
+    / ladder clamp is a provider contract layered on top of the authoritative
+    source, not a heuristic guess.
+    """
+    _install_fake_models_dev(
+        monkeypatch,
+        lambda provider, model: SimpleNamespace(supports_reasoning=True),
+    )
+
+    import api.config as cfg
+
+    for provider in ("xai", "xai-oauth", "custom:proxy"):
+        efforts = cfg.resolve_model_reasoning_efforts("grok-4.5", provider_id=provider)
+        assert efforts == ["low", "medium", "high"], provider
+        assert "minimal" not in efforts, provider
+        assert cfg.coerce_reasoning_effort_for_model(
+            "minimal", "grok-4.5", provider_id=provider
+        ) == "low", provider
+        assert (
+            cfg.coerce_reasoning_effort_for_model(
+                "none", "grok-4.5", provider_id=provider
+            )
+            == ""
+        ), provider
+        # Non-4.5 Grok on the same authoritative path still keeps a full ladder
+        # (models.dev authority for which levels exist).
+        assert cfg.resolve_model_reasoning_efforts(
+            "grok-4.3", provider_id=provider
+        ) == list(cfg.VALID_REASONING_EFFORTS), provider

@@ -3330,6 +3330,16 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         return True
     if "mimo" in token_set or normalized.startswith("mimo"):
         return True
+    # xAI Grok family: bare ids like "grok-4.5" / "x-ai/grok-4.5" support
+    # reasoning_effort. Without this family match, the composer reasoning chip
+    # stays hidden even when the agent is already sending effort for Grok.
+    # Names that already contain "reasoning"/"thinking" match the generic
+    # branch above and never reach here.
+    # Token-only match (no startswith): after [^a-z0-9]+ normalization,
+    # "grok-4.5" → tokens include "grok", while "grokfast-150x" → "grokfast"
+    # and must NOT be treated as Grok reasoning-capable.
+    if "grok" in token_set:
+        return True
     if "glm" in token_set or normalized.startswith("glm"):
         return True
     if "step" in token_set or normalized.startswith("step"):
@@ -3545,7 +3555,65 @@ def _filter_reasoning_efforts_for_provider(
         return normalized
     if zai_supports is False:
         return []
+    # NOTE: Grok family ceilings intentionally live in
+    # ``_apply_grok_family_effort_ceiling`` (applied by the heuristic fallback
+    # only). models.dev / agent-metadata results must remain authoritative and
+    # must NOT be re-clamped here (#6438 review).
     return normalized
+
+
+def _grok_bare_model_id(model_id: str | None) -> str:
+    """Return the bare Grok model id after provider/custom-prefix stripping."""
+    return _strip_provider_hint_for_reasoning(str(model_id or "")).lower().rsplit("/", 1)[-1]
+
+
+def _is_grok_model_id(model_id: str | None) -> bool:
+    """True when *model_id* is a Grok-family name (token-boundary match)."""
+    bare = _grok_bare_model_id(model_id)
+    if not bare:
+        return False
+    # Same normalization _candidate_supports_reasoning uses so "x-ai/grok-4.5"
+    # and "@custom:proxy:grok-4.5" stay consistent with the capability heuristic.
+    for candidate in _reasoning_name_candidates(bare):
+        normalized = re.sub(r"[^a-z0-9]+", "-", str(candidate or "").strip().lower()).strip("-")
+        tokens = [token for token in normalized.split("-") if token]
+        if "grok" in set(tokens):
+            return True
+    return False
+
+
+def _is_grok_45_model_id(model_id: str | None) -> bool:
+    """True only for the official dotted id ``grok-4.5`` (plus path/custom prefix).
+
+    Official xAI spelling is the single product id ``grok-4.5``. Hyphen/underscore
+    forms (``grok-4-5`` / ``grok-4_5``), ``-latest``, and letter/turbo suffixes
+    are intentionally NOT treated as Grok-4.5.
+    """
+    bare = _grok_bare_model_id(model_id)
+    if not bare or "grok" not in bare:
+        return False
+    # bare is last path segment (custom-hint stripped). Match dotted 4.5 only,
+    # end-anchored. Prefix separators (/, :, etc.) are allowed before "grok".
+    return bool(re.search(r"(?:^|[^a-z0-9])grok-4\.5$", bare))
+
+
+def _apply_grok_family_effort_ceiling(
+    efforts: list[str],
+    model_id: str | None,
+) -> list[str]:
+    """Apply Grok family effort ceilings for heuristic/fallback routes only.
+
+    Whole family: low/medium/high/xhigh (drop minimal/max).
+    Grok-4.5: low/medium/high (drop xhigh as well).
+    No-op for non-Grok ids. models.dev authoritative results must NOT pass here.
+    """
+    if not efforts or not _is_grok_model_id(model_id):
+        return efforts
+    if _is_grok_45_model_id(model_id):
+        allowed = {"low", "medium", "high"}
+    else:
+        allowed = {"low", "medium", "high", "xhigh"}
+    return [eff for eff in efforts if eff in allowed]
 
 
 _KNOWN_REASONING_PROVIDERS = frozenset({
@@ -3637,15 +3705,15 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "xiaomi/",
     )
     if any(model.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+        return _apply_grok_family_effort_ceiling(list(VALID_REASONING_EFFORTS), model)
     if _nested_gateway_route_reasoning(model):
-        return list(VALID_REASONING_EFFORTS)
+        return _apply_grok_family_effort_ceiling(list(VALID_REASONING_EFFORTS), model)
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
     # "vendor.deepseek.v3.2" are treated consistently.
     if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
-        return list(VALID_REASONING_EFFORTS)
+        return _apply_grok_family_effort_ceiling(list(VALID_REASONING_EFFORTS), model)
     return []
 
 
@@ -3884,12 +3952,22 @@ def resolve_model_reasoning_efforts(
     # the forced-tier contract. (#6219 round-3)
     if _zai_glm_classification(model_id, provider_id) == "forced":
         return []
-    # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
-    # the ceiling filter only knows the reasoning LEVELS.
-    had_none = "none" in raw
+    # Grok-4.5 is mandatory-reasoning: never advertise 'none' even if an upstream
+    # capability source listed it. The composer also hides None via
+    # allows_reasoning_off=false from get_reasoning_status.
+    if _is_grok_45_model_id(model_id):
+        had_none = False
+    else:
+        had_none = "none" in raw
     filtered = _filter_reasoning_efforts_for_provider(
         [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
     )
+    # Grok-4.5 hard provider contract (independent of models.dev authority):
+    # floor is low, ceiling is high. models.dev may still decide that the model
+    # *supports reasoning*, but it must not re-advertise minimal/xhigh/max for a
+    # model whose native ladder is only low/medium/high (#6438 re-gate round 3).
+    if _is_grok_45_model_id(model_id):
+        filtered = [eff for eff in filtered if eff in {"low", "medium", "high"}]
     if had_none:
         # Keep 'none' in its original leading position if it was there.
         return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
@@ -4054,6 +4132,16 @@ def coerce_reasoning_effort_for_model(
     # early-return below so the forced-tier contract wins. (#6219 round-3)
     if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
         return ""
+    # Grok-4.5 is also mandatory-reasoning: a stored 'none' must not be sent as
+    # reasoning_effort:none (custom proxies 400; native xAI ignores while the UI
+    # still showed Off). Fall through to the provider default (empty).
+    if raw == "none" and _is_grok_45_model_id(model_id):
+        return ""
+    # Grok-4.5 hard floor is low. Even when models.dev authoritatively returns a
+    # fuller ladder that still lists 'minimal', never send minimal for 4.5
+    # (custom proxy 400 / native silent clamp → UI/provider mismatch).
+    if raw == "minimal" and _is_grok_45_model_id(model_id):
+        return "low"
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
@@ -4087,6 +4175,12 @@ def coerce_reasoning_effort_for_model(
             raw_idx = None
         if raw_idx is not None:
             for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
+                if level in ceiling:
+                    return level
+            # Below the floor of a known ceiling (e.g. minimal on Grok-4.5 whose
+            # ladder starts at low): escalate to the lowest allowed level rather
+            # than preserving an unsupported floor value.
+            for level in ladder:
                 if level in ceiling:
                     return level
     # An empty list is ambiguous: resolve_model_reasoning_efforts() returns []
@@ -4125,7 +4219,10 @@ def coerce_reasoning_effort_for_model(
         return raw
     # Degrade to the closest *lower* supported level instead of silently
     # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
-    # target model caps below the configured effort. Never escalate.
+    # target model caps below the configured effort. When the requested level is
+    # below every supported level (e.g. minimal on a Grok-4.5 ladder that starts
+    # at low), escalate to the lowest supported level so we never send an
+    # unsupported floor.
     ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
     try:
         raw_idx = ladder.index(raw)
@@ -4134,9 +4231,9 @@ def coerce_reasoning_effort_for_model(
     for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
         if level in supported:
             return level
-    # raw is below every supported level (shouldn't happen for a non-empty set
-    # that excludes raw, but be safe): preserve the configured effort rather
-    # than blank it.
+    for level in ladder:
+        if level in supported:
+            return level
     return raw
 
 
@@ -4187,6 +4284,9 @@ def get_reasoning_status(
         resolve_model, resolve_provider
     )
     supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
+    # Grok-4.5 cannot disable reasoning. Default True preserves prior behavior
+    # for every other model (composer always offered Default + None).
+    allows_reasoning_off = not _is_grok_45_model_id(resolve_model)
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
@@ -4204,6 +4304,8 @@ def get_reasoning_status(
         # effort-capable model OR a ZAI GLM model that accepts the thinking
         # toggle but not the effort ladder. False hides the chip entirely.
         "supports_thinking_toggle": supports_thinking_toggle,
+        # Whether the composer may offer the "None" (reasoning off) option.
+        "allows_reasoning_off": allows_reasoning_off,
     }
 
 
