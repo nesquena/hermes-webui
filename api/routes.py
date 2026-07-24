@@ -8980,11 +8980,6 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             payload = artifact.get("payload")
             if not isinstance(payload, dict):
                 continue
-            event_type = (
-                artifact.get("type")
-                if isinstance(artifact.get("type"), str)
-                else artifact.get("source_event_type")
-            )
             payload_workspace_root = payload.get("workspace_root")
             payload_path = payload.get("path")
             if not isinstance(payload_workspace_root, str) or not isinstance(payload_path, str):
@@ -9011,8 +9006,6 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
                 if existing_index is not None and existing_index < len(artifacts):
                     existing = artifacts[existing_index]
                     existing_payload = existing.get("payload") if isinstance(existing, dict) else None
-                    existing_type = existing.get("type") if isinstance(existing, dict) else None
-                    existing_source_event_type = existing.get("source_event_type") if isinstance(existing, dict) else None
                     existing_has_tool_identity = (
                         isinstance(existing_payload, dict)
                         and isinstance(existing_payload.get("tool_name"), str)
