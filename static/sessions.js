@@ -1388,9 +1388,6 @@ async function newSession(flash, options={}){
   // a late external refresh cannot put the composer back on that old session.
   if(typeof _loadSessionGeneration==='number') _loadSessionGeneration += 1;
   if(typeof _loadingSessionId!=='undefined') _loadingSessionId = null;
-  const _newSessionGeneration = typeof _loadSessionGeneration==='number'
-    ? _loadSessionGeneration
-    : null;
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
@@ -1489,9 +1486,9 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    const _newSessionGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
-    // A sidebar selection can supersede New Chat while its POST is in flight.
-    // The response must not reclaim pane ownership from that newer navigation.
+    // Do not let a newer sidebar load be overwritten by this response.
     if(_newSessionGeneration!==null && _loadSessionGeneration!==_newSessionGeneration) return;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
