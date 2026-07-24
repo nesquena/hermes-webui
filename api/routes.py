@@ -8762,6 +8762,23 @@ def _final_turn_artifact_paths(
     source = list(messages or [])
     paths_by_final_index = {}
     replay_session_id = str(session_id or "").strip()
+
+    def _invalidate_call(
+        call_id: str,
+        *,
+        invalid_calls: set[str],
+        declared_calls: dict[str, str],
+        descriptors_by_id: dict[str, list[dict]],
+        result_order: list[str],
+    ) -> None:
+        if not call_id:
+            return
+        invalid_calls.add(call_id)
+        declared_calls.pop(call_id, None)
+        descriptors_by_id.pop(call_id, None)
+        if call_id in result_order:
+            result_order.remove(call_id)
+
     user_indexes = [idx for idx, message in enumerate(source) if isinstance(message, dict) and message.get("role") == "user"]
     for position, turn_start in enumerate(user_indexes):
         turn_end = user_indexes[position + 1] if position + 1 < len(user_indexes) else len(source)
@@ -8784,15 +8801,6 @@ def _final_turn_artifact_paths(
         result_order: list[str] = []
         consumed_calls: set[str] = set()
 
-        def _invalidate_call(call_id: str) -> None:
-            if not call_id:
-                return
-            invalid_calls.add(call_id)
-            declared_calls.pop(call_id, None)
-            descriptors_by_id.pop(call_id, None)
-            if call_id in result_order:
-                result_order.remove(call_id)
-
         turn_messages = source[turn_start + 1 : final_idx]
         for message in turn_messages:
             if not isinstance(message, dict):
@@ -8808,7 +8816,13 @@ def _final_turn_artifact_paths(
                     if not call_id:
                         continue
                     if call_id in observed_declarations:
-                        _invalidate_call(call_id)
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
                         continue
                     observed_declarations.add(call_id)
                     if call_id in invalid_calls:
@@ -8817,11 +8831,23 @@ def _final_turn_artifact_paths(
                     if not raw_name and isinstance(call.get("function"), dict):
                         raw_name = call["function"].get("name")
                     if not isinstance(raw_name, str):
-                        _invalidate_call(call_id)
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
                         continue
                     name = normalize_tool_name(raw_name)
                     if not name:
-                        _invalidate_call(call_id)
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
                         continue
                     declared_calls[call_id] = name
                 continue
@@ -8839,10 +8865,22 @@ def _final_turn_artifact_paths(
                 continue
             tool_name = normalize_tool_name(message.get("name") or message.get("tool_name"))
             if not tool_name or tool_name != declared_calls[tool_call_id]:
-                _invalidate_call(tool_call_id)
+                _invalidate_call(
+                    tool_call_id,
+                    invalid_calls=invalid_calls,
+                    declared_calls=declared_calls,
+                    descriptors_by_id=descriptors_by_id,
+                    result_order=result_order,
+                )
                 continue
             if tool_call_id in consumed_calls:
-                _invalidate_call(tool_call_id)
+                _invalidate_call(
+                    tool_call_id,
+                    invalid_calls=invalid_calls,
+                    declared_calls=declared_calls,
+                    descriptors_by_id=descriptors_by_id,
+                    result_order=result_order,
+                )
                 continue
             consumed_calls.add(tool_call_id)
             descriptors_for_call = _turn_artifact_descriptors_from_tool_result(
@@ -8851,7 +8889,13 @@ def _final_turn_artifact_paths(
                 session_id=replay_session_id,
             )
             if not descriptors_for_call:
-                _invalidate_call(tool_call_id)
+                _invalidate_call(
+                    tool_call_id,
+                    invalid_calls=invalid_calls,
+                    declared_calls=declared_calls,
+                    descriptors_by_id=descriptors_by_id,
+                    result_order=result_order,
+                )
                 continue
             if tool_call_id in invalid_calls:
                 continue
