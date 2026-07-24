@@ -31,6 +31,7 @@ import re
 import signal
 import subprocess
 import threading
+from pathlib import Path
 import time
 from typing import Optional
 
@@ -142,6 +143,24 @@ def validate_source(source: str) -> str:
     if not source:
         raise PluginSourceError("source is required")
     if source.startswith("https://"):
+        # Review P1: the source reaches the CLI via argv, visible to local
+        # process inspection, and the display-side redaction cannot help
+        # there. Until the agent grows a secret-safe source/credential
+        # channel, refuse URLs that carry secrets in-band: userinfo
+        # (user:token@host), query strings, or fragments.
+        rest = source[len("https://"):]
+        host_part = rest.split("/", 1)[0]
+        if "@" in host_part:
+            raise PluginSourceError(
+                "Credentials in the URL are not accepted (they would be visible "
+                "in the process list). Configure Git credentials on the server "
+                "instead."
+            )
+        if "?" in source or "#" in source:
+            raise PluginSourceError(
+                "Query strings and fragments are not accepted in plugin source "
+                "URLs (tokens there would be visible in the process list)."
+            )
         return source
     if source.startswith(("http://", "file://", "git@", "ssh://")):
         raise PluginSourceError("Only https:// URLs or 'owner/repo' shorthand are allowed.")
@@ -154,9 +173,7 @@ def validate_source(source: str) -> str:
     return source
 
 
-def _user_plugins_dir() -> "Path":
-    from pathlib import Path
-
+def _user_plugins_dir() -> Path:
     active_home, _cli_profile = _gateway_restart_profile_context()
     return Path(active_home) / "plugins"
 
@@ -449,5 +466,20 @@ def start_action(
                 }
                 _RUNNING_PROFILES.discard(profile_key)
 
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        # Thread admission failed: _run never ran, its finally cannot release
+        # the slot -- release synchronously or this profile 409s until a
+        # WebUI restart (review P1).
+        with _LOCK:
+            _RUNNING_PROFILES.discard(profile_key)
+            _LAST_BY_PROFILE[profile_key] = {
+                "action": action,
+                "name": _redact_credentials(arg),
+                "ok": False,
+                "log_tail": "Could not start the background runner",
+                "finished_at": time.time(),
+            }
+        raise
     return True, get_status()

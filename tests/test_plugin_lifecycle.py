@@ -387,26 +387,25 @@ class TestCredentialRedaction:
         assert pl._redact_credentials("") == ""
         assert pl._redact_credentials(None) == ""
 
-    def test_install_source_with_credentials_is_redacted_in_status(self, pl, monkeypatch):
-        source = "https://user:sekret123@example.com/owner/repo.git"
-        # validate_source only checks the https:// prefix -- the raw
-        # credential-bearing URL passes through unchanged, exactly as
-        # start_action() needs it to actually clone.
-        assert pl.validate_source(source) == source
-
+    def test_credential_urls_in_cli_output_are_redacted_in_status(self, pl, monkeypatch):
+        # Review round 2 inverted the ingress contract: credential-bearing
+        # SOURCE urls are rejected up front (see TestReviewRound2). The
+        # redaction layer still matters for URLs the CLI itself prints
+        # (redirects, submodules, error messages) -- pin that here.
+        leaked = "https://user:sekret123@example.com/owner/repo.git"
         _install_fake_popen(
             monkeypatch,
-            stdout=f"Cloning into 'repo'...\nfatal: could not read from remote: {source}",
+            stdout=f"Cloning into 'repo'...\nfatal: could not read from remote: {leaked}",
             returncode=1,
         )
 
-        pl.start_action("install", source)
+        pl.start_action("install", "owner/repo")
         _wait_until_idle(pl)
 
         last = pl.get_status()["last"]
         assert "sekret123" not in last["name"]
         assert "sekret123" not in last["log_tail"]
-        assert last["name"] == "https://***@example.com/owner/repo.git"
+        assert last["name"] == "owner/repo"
         assert "https://***@example.com/owner/repo.git" in last["log_tail"]
 
     def test_plain_shorthand_source_is_unaffected(self, pl, monkeypatch):
@@ -997,7 +996,6 @@ def test_routes_reject_string_booleans(monkeypatch):
     """bool("false") is True — the route must 400 on non-JSON-boolean
     force/enable instead of granting destructive semantics."""
     import io as _io
-    import json as _json
     from urllib.parse import urlparse
 
     import api.routes as routes
@@ -1041,3 +1039,42 @@ def test_plugin_write_flag_is_operator_protected():
     from api.profiles import _PROTECTED_ENV_KEYS
 
     assert "HERMES_WEBUI_ALLOW_PLUGIN_WRITE" in _PROTECTED_ENV_KEYS
+
+
+class TestReviewRound2:
+    def test_https_urls_with_inband_secrets_are_rejected(self, pl):
+        for bad in (
+            "https://user:token@github.com/x/y.git",
+            "https://github.com/x/y.git?token=sekret",
+            "https://github.com/x/y.git#access_token=sekret",
+        ):
+            with pytest.raises(pl.PluginSourceError):
+                pl.validate_source(bad)
+        # Clean HTTPS and shorthand still pass.
+        assert pl.validate_source("https://github.com/x/y.git")
+        assert pl.validate_source("owner/repo")
+
+    def test_thread_start_failure_releases_the_profile_slot(self, pl, monkeypatch):
+        """Review P1: a failing Thread.start() must not leave the profile
+        slot reserved forever."""
+        _install_fake_popen(monkeypatch, stdout="ok\n", returncode=0)
+
+        class _BoomThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(pl.threading, "Thread", _BoomThread)
+        with pytest.raises(RuntimeError):
+            pl.start_action("install", "owner/repo")
+        assert pl._profile_key() not in pl._RUNNING_PROFILES
+
+        # And the very next action (with a working thread) succeeds.
+        monkeypatch.undo()
+        monkeypatch.setattr(pl, "_resolve_hermes_command", lambda: "/fake/hermes")
+        monkeypatch.setattr(pl, "_gateway_restart_profile_context", lambda: (Path("/fake/home"), None))
+        _install_fake_popen(monkeypatch, stdout="ok\n", returncode=0)
+        started, _ = pl.start_action("install", "owner/repo")
+        assert started is True
