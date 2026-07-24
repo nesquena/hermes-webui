@@ -11,6 +11,7 @@ from api import agent_tts_worker
 class _FakeTts:
     def __init__(self, available_by_provider, *, with_limit=True):
         self.available_by_provider = dict(available_by_provider)
+        self.requirement_checks = []
         self._config = {}
         self.text_to_speech_tool = lambda text, output_path: None
         if with_limit:
@@ -26,6 +27,7 @@ class _FakeTts:
 
     def check_tts_requirements(self):
         provider = self._get_provider(self._load_tts_config()).lower()
+        self.requirement_checks.append(provider)
         return bool(self.available_by_provider.get(provider, False))
 
     def _check_edge_available(self):
@@ -118,6 +120,127 @@ def test_capability_many_rows_use_exact_candidate_requirements(monkeypatch):
     assert "env_vars" not in repr(result)
     assert "OPENAI_API_KEY" not in repr(result)
     assert "must-not-leak" not in repr(result)
+
+
+def test_managed_nous_and_direct_openai_rows_keep_distinct_labels(monkeypatch):
+    rows = [
+        {
+            "name": "Nous Subscription",
+            "tts_provider": "openai",
+            "managed_nous_feature": "tts",
+        },
+        {"name": "OpenAI TTS", "tts_provider": "openai"},
+    ]
+    modules = _modules(
+        {"tts": {"provider": "openai", "use_gateway": False}},
+        rows,
+        {"openai": True},
+    )
+    monkeypatch.setattr(agent_tts_worker, "_import_agent_modules", lambda: modules)
+
+    result = agent_tts_worker.build_capability_payload()
+
+    assert [row["name"] for row in result["providers"]] == [
+        "Nous Subscription",
+        "OpenAI TTS",
+    ]
+    assert [row["label_key"] for row in result["providers"]] == [
+        None,
+        "tts_provider_openai",
+    ]
+
+
+def test_capability_skips_expensive_requirements_for_unconfigured_inactive_rows(
+    monkeypatch,
+):
+    rows = [
+        {"name": "Microsoft Edge TTS", "tts_provider": "edge"},
+        {
+            "name": "OpenAI TTS",
+            "tts_provider": "openai",
+            "configured": False,
+        },
+        {
+            "name": "ElevenLabs",
+            "tts_provider": "elevenlabs",
+            "configured": False,
+        },
+    ]
+    modules = _modules(
+        {"tts": {"provider": "edge"}},
+        rows,
+        {"edge": True, "openai": True, "elevenlabs": True},
+    )
+    monkeypatch.setattr(agent_tts_worker, "_import_agent_modules", lambda: modules)
+
+    result = agent_tts_worker.build_capability_payload()
+
+    assert modules[0].requirement_checks == ["edge", "edge"]
+    assert [row["available"] for row in result["providers"]] == [
+        True,
+        False,
+        False,
+    ]
+
+
+def test_managed_provider_readiness_error_fails_closed(monkeypatch):
+    rows = [
+        {
+            "name": "Nous Subscription",
+            "tts_provider": "openai",
+            "managed_nous_feature": "tts",
+        },
+        {"name": "Microsoft Edge TTS", "tts_provider": "edge"},
+    ]
+    modules = _modules(
+        {"tts": {"provider": "edge"}},
+        rows,
+        {"edge": True, "openai": True},
+    )
+
+    def readiness(*_args, **_kwargs):
+        raise RuntimeError("portal unavailable")
+
+    modules[1].provider_readiness_status = readiness
+    monkeypatch.setattr(agent_tts_worker, "_import_agent_modules", lambda: modules)
+
+    result = agent_tts_worker.build_capability_payload()
+    managed = next(
+        row for row in result["providers"] if row["name"] == "Nous Subscription"
+    )
+
+    assert managed["configured"] is False
+    assert managed["available"] is False
+    assert managed["selectable"] is False
+
+
+def test_active_managed_provider_readiness_error_marks_top_level_unavailable(monkeypatch):
+    rows = [
+        {
+            "name": "Nous Subscription",
+            "tts_provider": "openai",
+            "managed_nous_feature": "tts",
+        }
+    ]
+    modules = _modules(
+        {"tts": {"provider": "openai", "use_gateway": True}},
+        rows,
+        {"openai": True},
+    )
+
+    def readiness(*_args, **_kwargs):
+        raise RuntimeError("portal unavailable")
+
+    modules[1].provider_readiness_status = readiness
+    monkeypatch.setattr(agent_tts_worker, "_import_agent_modules", lambda: modules)
+
+    result = agent_tts_worker.build_capability_payload()
+
+    assert result["active_provider"] == "openai"
+    assert result["active_provider_name"] == "Nous Subscription"
+    assert result["active_provider_available"] is False
+    assert result["providers"][0]["available"] is False
+    assert result["providers"][0]["selectable"] is False
 
 
 def test_unknown_provider_uses_safe_agent_name_without_dynamic_i18n_key(monkeypatch):

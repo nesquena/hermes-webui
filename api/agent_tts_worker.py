@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -73,9 +74,46 @@ _EDGE_VOICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class WorkerOperationError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(
+        self,
+        code: str,
+        *,
+        diagnostic: str | None = None,
+        provider: str | None = None,
+    ):
         super().__init__(code)
         self.code = code
+        self.diagnostic = diagnostic
+        self.provider = provider
+
+
+_ACTIVE_CONFIG_BINDING: ContextVar[
+    tuple[Path, Path, tuple[int, int] | None] | None
+] = ContextVar("agent_tts_config_binding", default=None)
+
+
+def _classify_provider_failure(value: Any) -> str:
+    """Reduce arbitrary provider failures to a bounded, non-secret category."""
+    try:
+        text = str(value or "").lower()[:2048]
+    except Exception:
+        text = ""
+    if any(marker in text for marker in ("timed out", "timeout", "deadline")):
+        return "provider_timeout"
+    if any(marker in text for marker in ("rate limit", "quota", "too many requests", "429")):
+        return "provider_rate_limit"
+    if any(
+        marker in text
+        for marker in ("unauthorized", "forbidden", "api key", "authentication", "401", "403")
+    ):
+        return "provider_auth"
+    if any(marker in text for marker in ("bad request", "invalid argument", "400")):
+        return "provider_request"
+    if any(marker in text for marker in ("module", "dependency", "not installed")):
+        return "provider_dependency"
+    if any(marker in text for marker in ("connection", "network", "dns", "ssl")):
+        return "provider_network"
+    return "provider_error"
 
 
 _BUILTIN_LABEL_KEYS = {
@@ -168,6 +206,60 @@ def _unsupported_capability() -> dict[str, Any]:
     }
 
 
+def _resolve_text_limits(
+    tts_tool: Any,
+    provider: str,
+    tts_snapshot: dict[str, Any],
+) -> tuple[int, int, str]:
+    limit_resolver = getattr(tts_tool, "_resolve_max_text_length", None)
+    if callable(limit_resolver):
+        provider_limit = int(limit_resolver(provider, copy.deepcopy(tts_snapshot)))
+        if provider_limit <= 0:
+            raise ValueError("non-positive limit")
+        limit_source = "agent"
+    else:
+        provider_limit = 2000
+        limit_source = "compatibility_fallback"
+    try:
+        transport_limit = int(os.environ.get("HERMES_WEBUI_TTS_REQUEST_MAX_CHARS", "4000"))
+    except ValueError:
+        transport_limit = 4000
+    transport_limit = max(256, min(transport_limit, 10000))
+    return provider_limit, min(provider_limit, transport_limit), limit_source
+
+
+def _resolve_runtime_provider(tts_tool: Any, provider: str, available: bool) -> str:
+    resolved = provider
+    if provider != "edge" or not available:
+        return resolved
+    check_edge = getattr(tts_tool, "_check_edge_available", None)
+    check_neutts = getattr(tts_tool, "_check_neutts_available", None)
+    try:
+        if callable(check_edge) and not check_edge() and callable(check_neutts) and check_neutts():
+            resolved = "neutts"
+    except Exception:
+        pass
+    return resolved
+
+
+def _provider_readiness(
+    tools_config: Any,
+    row: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    is_active: bool,
+) -> bool | None:
+    readiness = getattr(tools_config, "provider_readiness_status", None)
+    if not callable(readiness):
+        return None
+    try:
+        return readiness(
+            row, copy.deepcopy(config), is_active=is_active
+        ) == "ready"
+    except Exception:
+        return False
+
+
 def build_capability_payload() -> dict[str, Any]:
     """Mirror Agent/Desktop selection semantics without exposing setup secrets."""
     try:
@@ -216,16 +308,6 @@ def build_capability_payload() -> dict[str, Any]:
         return _unsupported_capability()
 
     active_available = _requirements_for_config(tts_tool, config)
-    resolved_provider = active_provider
-    if active_provider == "edge" and active_available:
-        check_edge = getattr(tts_tool, "_check_edge_available", None)
-        check_neutts = getattr(tts_tool, "_check_neutts_available", None)
-        try:
-            if callable(check_edge) and not check_edge() and callable(check_neutts) and check_neutts():
-                resolved_provider = "neutts"
-        except Exception:
-            resolved_provider = active_provider
-
     rows: list[dict[str, Any]] = []
     active_name = active_provider
     for raw_row in visible_rows:
@@ -236,11 +318,6 @@ def build_capability_payload() -> dict[str, Any]:
         if not _PROVIDER_ID_RE.fullmatch(provider_id) or not name:
             continue
         try:
-            candidate = _candidate_config(tools_config, raw_row, config)
-            available = _requirements_for_config(tts_tool, candidate)
-        except Exception:
-            available = False
-        try:
             active = bool(
                 tools_config._is_provider_active(
                     raw_row, copy.deepcopy(config), force_fresh=True
@@ -250,23 +327,38 @@ def build_capability_payload() -> dict[str, Any]:
             active = bool(tools_config._is_provider_active(raw_row, copy.deepcopy(config)))
         except Exception:
             active = False
-        readiness = getattr(tools_config, "provider_readiness_status", None)
-        if callable(readiness):
+        # Readiness is the managed-provider entitlement boundary. An exception
+        # is unknown, never permission to use an unrelated direct credential.
+        configured = _provider_readiness(
+            tools_config, raw_row, config, is_active=active
+        )
+        # Requirements checks import provider SDKs in the one-shot worker. The
+        # Agent readiness contract already proves an inactive row with missing
+        # setup/credentials cannot run, so avoid importing its SDK merely to
+        # rediscover the same unavailable result. Active and ready candidates
+        # still receive the exact Agent requirements check.
+        if configured is not False:
             try:
-                configured = readiness(
-                    raw_row, copy.deepcopy(config), is_active=active
-                ) == "ready"
+                candidate = _candidate_config(tools_config, raw_row, config)
+                available = _requirements_for_config(tts_tool, candidate)
             except Exception:
-                configured = available
+                available = False
         else:
+            available = False
+        if configured is None:
             configured = available
         if active:
             active_name = name
+            active_available = bool(available)
         rows.append(
             {
                 "name": name,
                 "provider_id": provider_id,
-                "label_key": _BUILTIN_LABEL_KEYS.get(provider_id),
+                "label_key": (
+                    None
+                    if raw_row.get("managed_nous_feature")
+                    else _BUILTIN_LABEL_KEYS.get(provider_id)
+                ),
                 "badge": _safe_label(raw_row.get("badge")),
                 "tag": _safe_label(raw_row.get("tag")),
                 "configured": bool(configured),
@@ -276,6 +368,9 @@ def build_capability_payload() -> dict[str, Any]:
             }
         )
 
+    resolved_provider = _resolve_runtime_provider(
+        tts_tool, active_provider, active_available
+    )
     configured_providers = tts_snapshot.get("providers")
     configured_active = (
         configured_providers.get(active_provider)
@@ -305,23 +400,12 @@ def build_capability_payload() -> dict[str, Any]:
         )
         active_name = active_provider
 
-    limit_resolver = getattr(tts_tool, "_resolve_max_text_length", None)
-    if callable(limit_resolver):
-        try:
-            provider_limit = int(limit_resolver(active_provider, copy.deepcopy(tts_snapshot)))
-            if provider_limit <= 0:
-                raise ValueError("non-positive limit")
-            limit_source = "agent"
-        except Exception:
-            return _unsupported_capability()
-    else:
-        provider_limit = 2000
-        limit_source = "compatibility_fallback"
     try:
-        transport_limit = int(os.environ.get("HERMES_WEBUI_TTS_REQUEST_MAX_CHARS", "4000"))
-    except ValueError:
-        transport_limit = 4000
-    transport_limit = max(256, min(transport_limit, 10000))
+        provider_limit, request_limit, limit_source = _resolve_text_limits(
+            tts_tool, active_provider, tts_snapshot
+        )
+    except Exception:
+        return _unsupported_capability()
 
     provider_write_supported = all(
         callable(value)
@@ -343,7 +427,7 @@ def build_capability_payload() -> dict[str, Any]:
         "active_provider_available": active_available,
         "resolved_provider": resolved_provider,
         "provider_max_text_length": provider_limit,
-        "request_max_text_length": min(provider_limit, transport_limit),
+        "request_max_text_length": request_limit,
         "limit_source": limit_source,
         "config_fingerprint": _config_fingerprint(config),
         "providers": rows,
@@ -392,7 +476,7 @@ def _capture_config_binding(config_module: Any):
 @contextmanager
 def _config_process_lock(config_module: Any):
     """Serialize an Agent config transaction with ambient WebUI YAML writers."""
-    _declared, target, _link_identity, _get_path = _capture_config_binding(
+    declared, target, link_identity, original_get_path = _capture_config_binding(
         config_module
     )
     lock_path = target.with_name(f".{target.name}.hermes-webui.lock")
@@ -414,7 +498,14 @@ def _config_process_lock(config_module: Any):
             import fcntl
 
             fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        _verify_config_binding(declared, target, link_identity)
+        config_module.get_config_path = lambda: target
+        token = _ACTIVE_CONFIG_BINDING.set((declared, target, link_identity))
+        try:
+            yield
+        finally:
+            _ACTIVE_CONFIG_BINDING.reset(token)
+            config_module.get_config_path = original_get_path
     finally:
         try:
             if os.name == "nt":  # pragma: no cover - Windows CI is unavailable
@@ -447,6 +538,8 @@ def _verify_config_binding(
     declared: Path, target: Path, link_identity: tuple[int, int] | None
 ) -> None:
     if link_identity is None:
+        if declared.is_symlink():
+            raise WorkerOperationError("config_write_failed")
         return
     try:
         current = os.lstat(declared)
@@ -464,9 +557,18 @@ def _save_agent_config(config_module: Any, config: dict[str, Any]) -> None:
     save_config = getattr(config_module, "save_config", None)
     if not callable(save_config):
         raise WorkerOperationError("agent_contract_unavailable")
-    declared, target, link_identity, original_get_path = _capture_config_binding(
-        config_module
-    )
+    active_binding = _ACTIVE_CONFIG_BINDING.get()
+    if active_binding is not None:
+        declared, target, link_identity = active_binding
+        _verify_config_binding(declared, target, link_identity)
+        try:
+            save_config(config)
+        except Exception as exc:
+            raise WorkerOperationError("config_write_failed") from exc
+        _verify_config_binding(declared, target, link_identity)
+        return
+    declared, target, link_identity, original_get_path = _capture_config_binding(config_module)
+    _verify_config_binding(declared, target, link_identity)
     config_module.get_config_path = lambda: target
     try:
         save_config(config)
@@ -553,8 +655,22 @@ def select_provider_payload(
         apply_selection("tts", provider_name, candidate)
     except Exception as exc:
         raise WorkerOperationError("invalid_provider") from exc
+    configured = _provider_readiness(
+        tools_config, exact_row, candidate, is_active=True
+    )
+    if configured is False:
+        raise WorkerOperationError("provider_unavailable")
     if not _requirements_for_config(tts_tool, candidate):
         raise WorkerOperationError("provider_unavailable")
+    candidate_tts = candidate.get("tts")
+    if not isinstance(candidate_tts, dict):
+        candidate_tts = {}
+    try:
+        provider_limit, request_limit, limit_source = _resolve_text_limits(
+            tts_tool, provider_id, candidate_tts
+        )
+    except Exception as exc:
+        raise WorkerOperationError("agent_contract_unavailable") from exc
 
     previous_tts_present = "tts" in current
     previous_tts = copy.deepcopy(current.get("tts")) if previous_tts_present else None
@@ -584,11 +700,29 @@ def select_provider_payload(
         raise WorkerOperationError("config_write_failed") from exc
     if not is_active or not is_available:
         raise WorkerOperationError("config_write_failed")
+    authoritative_tts = authoritative.get("tts")
+    if not isinstance(authoritative_tts, dict):
+        authoritative_tts = {}
+    try:
+        provider_limit, request_limit, limit_source = _resolve_text_limits(
+            tts_tool, provider_id, authoritative_tts
+        )
+    except Exception as exc:
+        raise WorkerOperationError("config_write_failed") from exc
+    resolved_provider = _resolve_runtime_provider(
+        tts_tool, provider_id, bool(is_available)
+    )
 
     return {
         "active_provider": provider_id,
         "active_provider_name": provider_name,
         "active_provider_available": True,
+        "resolved_provider": resolved_provider,
+        "configured": True,
+        "synthesis_supported": True,
+        "provider_max_text_length": provider_limit,
+        "request_max_text_length": request_limit,
+        "limit_source": limit_source,
         "config_fingerprint": _config_fingerprint(authoritative),
         "previous_tts_present": previous_tts_present,
         "previous_tts": previous_tts,
@@ -627,6 +761,10 @@ def restore_tts_payload(
     authoritative = load_config()
     if not isinstance(authoritative, dict):
         authoritative = {}
+    if ("tts" in authoritative) != previous_tts_present or (
+        previous_tts_present and authoritative.get("tts") != previous_tts
+    ):
+        raise WorkerOperationError("config_write_failed")
     section = authoritative.get("tts")
     snapshot = copy.deepcopy(section) if isinstance(section, dict) else {}
     active_provider = str(tts_tool._get_provider(snapshot) or "edge").strip().lower()
@@ -725,15 +863,33 @@ def synthesize_payload(
             lambda: synthesis(text=text, output_path=str(output_path)),
         )
     except Exception as exc:
-        raise WorkerOperationError("synthesis_failed") from exc
+        raise WorkerOperationError(
+            "synthesis_failed",
+            diagnostic=_classify_provider_failure(exc),
+            provider=(
+                configured_provider
+                if _PROVIDER_ID_RE.fullmatch(configured_provider)
+                else None
+            ),
+        ) from exc
     if not isinstance(raw_result, str) or len(raw_result.encode("utf-8")) > STATUS_MAX_BYTES:
         raise WorkerOperationError("synthesis_failed")
     try:
         result = json.loads(raw_result)
     except json.JSONDecodeError as exc:
         raise WorkerOperationError("synthesis_failed") from exc
-    if not isinstance(result, dict) or result.get("success") is not True:
+    if not isinstance(result, dict):
         raise WorkerOperationError("synthesis_failed")
+    if result.get("success") is not True:
+        raise WorkerOperationError(
+            "synthesis_failed",
+            diagnostic=_classify_provider_failure(result.get("error")),
+            provider=(
+                configured_provider
+                if _PROVIDER_ID_RE.fullmatch(configured_provider)
+                else None
+            ),
+        )
     artifact_value = result.get("file_path")
     actual_provider = str(result.get("provider") or "").strip().lower()
     if not isinstance(artifact_value, str) or not artifact_value:
@@ -792,7 +948,12 @@ def dispatch_request(request: Any) -> dict[str, Any]:
     try:
         return handler(request)
     except WorkerOperationError as exc:
-        return _status(False, exc.code)
+        fields = {}
+        if exc.diagnostic:
+            fields["diagnostic"] = exc.diagnostic
+        if exc.provider:
+            fields["provider"] = exc.provider
+        return _status(False, exc.code, **fields)
     except Exception:
         return _status(False, "agent_contract_unavailable")
 

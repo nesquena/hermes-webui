@@ -53,6 +53,7 @@ def _capability():
                 "name": "Microsoft Edge TTS",
                 "provider_id": "edge",
                 "available": True,
+                "configured": True,
                 "selectable": True,
                 "active": True,
             }
@@ -81,6 +82,68 @@ def test_settings_surface_has_live_status_busy_and_provider_guidance():
     assert "tts_provider_guidance" in PANELS_JS
     assert "option.disabled=!row.selectable" in PANELS_JS
     assert "inert.disabled=true" in PANELS_JS
+    assert "getSettingsState(settings,{refresh:false})" in PANELS_JS
+
+
+def test_settings_state_reuses_profile_scoped_capability_until_manual_refresh():
+    capability = json.dumps(_capability())
+    api_impl = f"""async(path)=>{{
+  if(path==='/api/tts/capability'){{globalThis.capabilityCalls=(globalThis.capabilityCalls||0)+1;return {capability};}}
+  throw new Error('unexpected '+path);
+}}"""
+    body = """
+const settings={tts_engine:'agent',persisted_speech_keys:['tts_engine'],speech_settings_revision:1};
+Promise.resolve()
+  .then(()=>HermesTTS.getSettingsState(settings))
+  .then(()=>HermesTTS.getSettingsState(settings))
+  .then(state=>process.stdout.write(JSON.stringify({calls:capabilityCalls,provider:state.capability.active_provider})));
+"""
+    assert _node(body, api_impl) == {"calls": 1, "provider": "edge"}
+
+
+def test_provider_save_updates_cached_capability_without_forced_reload():
+    capability = _capability()
+    capability["providers"].append(
+        {
+            "name": "Google Gemini TTS",
+            "provider_id": "gemini",
+            "available": True,
+            "configured": True,
+            "selectable": True,
+            "active": False,
+        }
+    )
+    capability_json = json.dumps(capability)
+    fingerprint = "sha256:" + "1" * 64
+    api_impl = f"""async(path,opts)=>{{
+  globalThis.calls=(globalThis.calls||[]);calls.push(path);
+  if(path==='/api/tts/capability')return {capability_json};
+  if(path==='/api/tts/provider')return {{active_provider:'gemini',active_provider_name:'Google Gemini TTS',active_provider_available:true,synthesis_supported:true,provider_max_text_length:800,request_max_text_length:800,limit_source:'agent',config_fingerprint:'{fingerprint}'}};
+  throw new Error('unexpected '+path);
+}}"""
+    body = """
+const settings={tts_engine:'agent',persisted_speech_keys:['tts_engine'],speech_settings_revision:1};
+HermesTTS.getSettingsState(settings,{refresh:true})
+  .then(state=>HermesTTS.selectProvider('Google Gemini TTS',state.capability))
+  .then(()=>HermesTTS.getSettingsState(settings))
+  .then(state=>process.stdout.write(JSON.stringify({
+    calls,
+    active:state.capability.active_provider,
+    synthesis:state.capability.synthesis_supported,
+    requestMax:state.capability.request_max_text_length,
+    rows:state.capability.providers.map(row=>[row.name,row.active,row.configured,row.selectable])
+  })));
+"""
+    assert _node(body, api_impl) == {
+        "calls": ["/api/tts/capability", "/api/tts/provider"],
+        "active": "gemini",
+        "synthesis": True,
+        "requestMax": 800,
+        "rows": [
+            ["Microsoft Edge TTS", False, True, True],
+            ["Google Gemini TTS", True, True, True],
+        ],
+    }
 
 
 def test_timeout_reconciliation_cannot_apply_after_profile_switch():

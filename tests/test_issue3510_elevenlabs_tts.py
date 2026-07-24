@@ -24,7 +24,9 @@ class Handler:
         self.rfile = io.BytesIO(encoded)
         self.wfile = io.BytesIO()
         self.headers = {"Content-Length": str(len(encoded))}
-        self.client_address = ("9.9.9.9", 12345)
+        # Reach the legacy-engine boundary under auth-disabled local-origin policy.
+        # Public remote peers are rejected earlier with local_origin_required.
+        self.client_address = ("127.0.0.1", 12345)
         self.status = None
         self.sent_headers = {}
 

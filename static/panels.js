@@ -8999,7 +8999,7 @@ async function _setupTtsSettings(settings){
   let state;
   try{
     setStatus('tts_capability_loading','loading');
-    state=await window.HermesTTS.getSettingsState(settings,{refresh:true});
+    state=await window.HermesTTS.getSettingsState(settings,{refresh:false});
     if(!setupIsCurrent())return;
     render(state);
   }catch(error){
@@ -9055,7 +9055,7 @@ async function _setupTtsSettings(settings){
     setStatus('tts_provider_saving','loading');
     try{
       await window.HermesTTS.selectProvider(requested,state.capability);
-      state=await window.HermesTTS.getSettingsState(settings,{refresh:true});
+      state=await window.HermesTTS.getSettingsState(settings,{refresh:false});
       render(state);
       setStatus('tts_provider_saved','success');
     }catch(error){

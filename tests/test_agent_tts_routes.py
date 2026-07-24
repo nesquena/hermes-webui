@@ -238,7 +238,15 @@ def test_provider_route_requires_exact_schema_and_delegates(monkeypatch):
         calls.append((op, payload, kwargs))
         return {
             "ok": True,
-            "active_provider": "Microsoft Edge TTS",
+            "active_provider": "edge",
+            "active_provider_name": "Microsoft Edge TTS",
+            "active_provider_available": True,
+            "resolved_provider": "neutts",
+            "configured": True,
+            "synthesis_supported": True,
+            "provider_max_text_length": 4000,
+            "request_max_text_length": 900,
+            "limit_source": "agent_contract",
             "config_fingerprint": "sha256:new",
         }
 
@@ -257,6 +265,19 @@ def test_provider_route_requires_exact_schema_and_delegates(monkeypatch):
     assert calls[0][1] == {
         "provider_name": "Microsoft Edge TTS",
         "expected_fingerprint": "sha256:" + "0" * 64,
+    }
+    assert handler.json() == {
+        "ok": True,
+        "active_provider": "edge",
+        "active_provider_name": "Microsoft Edge TTS",
+        "active_provider_available": True,
+        "resolved_provider": "neutts",
+        "configured": True,
+        "synthesis_supported": True,
+        "provider_max_text_length": 4000,
+        "request_max_text_length": 900,
+        "limit_source": "agent_contract",
+        "config_fingerprint": "sha256:new",
     }
 
 

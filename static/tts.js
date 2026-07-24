@@ -138,7 +138,7 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
     return !isAutosaveSuppressed(settingKey)&&(generation===undefined||isSettingsGenerationCurrent(generation));
   }
 
-  async function getSettingsState(settings,{refresh=true}={}){
+  async function getSettingsState(settings,{refresh=false}={}){
     const requestGeneration=++settingsGeneration;
     const persistedEngine=_persistedEngine(settings);
     let capability=null;
@@ -243,8 +243,22 @@ window.registerHermesTtsEngine = function registerHermesTtsEngineTombstone(){
       error.name='AbortError';
       throw error;
     }
-    invalidateCapability();
-    return result;
+    capabilityGeneration+=1;
+    const activeName=String(result&&result.active_provider_name||providerName);
+    const updated={
+      ...capability,
+      ...result,
+      providers:Array.isArray(capability.providers)?capability.providers.map(row=>{
+        const selected=row&&row.name===activeName;
+        if(!selected)return {...row,active:false};
+        const configured=result.configured===undefined?row.configured===true:result.configured===true;
+        const available=result.active_provider_available===undefined?row.available===true:result.active_provider_available===true;
+        return {...row,active:true,configured,available,selectable:configured&&available};
+      }):[],
+    };
+    capabilityCache=updated;
+    capabilityProfile=profile;
+    return updated;
   }
 
   function splitText(text,maxChars){

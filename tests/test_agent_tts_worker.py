@@ -180,6 +180,25 @@ def test_supervisor_rejects_oversized_status(tmp_path, monkeypatch):
     assert exc_info.value.code == "agent_worker_protocol"
 
 
+def test_worker_failure_log_uses_only_allowlisted_diagnostics(caplog):
+    payload = {
+        "schema": 1,
+        "ok": False,
+        "code": "synthesis_failed",
+        "diagnostic": "provider_timeout",
+        "provider": "gemini",
+        "raw_error": "secret-token-must-not-leak",
+    }
+
+    with pytest.raises(agent_tts.AgentTtsError) as exc_info:
+        agent_tts._raise_worker_error(payload)
+
+    assert exc_info.value.code == "synthesis_failed"
+    assert "diagnostic=provider_timeout" in caplog.text
+    assert "provider=gemini" in caplog.text
+    assert "secret-token-must-not-leak" not in caplog.text
+
+
 def test_timeout_terminates_tree_reaps_and_cleans(tmp_path, monkeypatch):
     scope = _scope(tmp_path)
     terminated = []

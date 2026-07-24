@@ -16,7 +16,7 @@ import api.routes as routes
 
 
 class _FakeHandler:
-    def __init__(self, body: bytes, client="1.2.3.4"):
+    def __init__(self, body: bytes, client="127.0.0.1"):
         self.command = "POST"
         self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
@@ -87,7 +87,7 @@ def test_french_voice_remains_reserved_for_migration_but_edge_never_synthesizes(
     assert voice in routes._TTS_EDGE_VOICES
     handler = _post(
         {"engine": "edge", "text": "Bonjour"},
-        client=f"10.99.0.{FRENCH_VOICES.index(voice) + 1}",
+        client=f"127.0.0.{FRENCH_VOICES.index(voice) + 1}",
     )
     routes._handle_tts(handler, None)
 
@@ -109,7 +109,7 @@ def test_unlisted_french_locale_is_not_added_to_migration_allowlist(monkeypatch)
     assert "fr-BE-CharlineNeural" not in routes._TTS_EDGE_VOICES
 
     handler = _post(
-        {"engine": "edge", "text": "Bonjour"}, client="10.99.1.1"
+        {"engine": "edge", "text": "Bonjour"}, client="127.0.0.20"
     )
     routes._handle_tts(handler, None)
     assert handler.status == 409

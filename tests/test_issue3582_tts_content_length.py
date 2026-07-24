@@ -18,7 +18,7 @@ class Handler:
         self.rfile = io.BytesIO(encoded)
         self.wfile = io.BytesIO()
         self.headers = {"Content-Length": str(len(encoded))}
-        self.client_address = ("3.0.0.1", 12345)
+        self.client_address = ("127.0.0.1", 12345)
         self.status = None
         self.sent_headers = {}
 

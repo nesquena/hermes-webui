@@ -235,6 +235,41 @@ def _install_worker(monkeypatch, tmp_path, tts, config=None):
     return loads
 
 
+def test_worker_reports_only_bounded_failure_category(monkeypatch, tmp_path):
+    tts = FakeTts(VALID_AUDIO["speech.mp3"])
+    _install_worker(
+        monkeypatch,
+        tmp_path,
+        tts,
+        config={"tts": {"provider": "gemini"}},
+    )
+    tts.text_to_speech_tool = lambda text, output_path: json.dumps(
+        {
+            "success": False,
+            "error": "HTTPS read timed out; secret-token-must-not-leak",
+        }
+    )
+
+    status = agent_tts_worker.dispatch_request(
+        {
+            "schema": agent_tts_worker.SCHEMA,
+            "op": "synthesize",
+            "text": "hello",
+            "request_dir": str(tmp_path),
+            "output_path": str(tmp_path / "audio.mp3"),
+        }
+    )
+
+    assert status == {
+        "schema": agent_tts_worker.SCHEMA,
+        "ok": False,
+        "code": "synthesis_failed",
+        "diagnostic": "provider_timeout",
+        "provider": "gemini",
+    }
+    assert "secret-token-must-not-leak" not in repr(status)
+
+
 def test_worker_uses_one_immutable_snapshot_and_exact_agent_call(monkeypatch, tmp_path):
     tts = FakeTts(VALID_AUDIO["speech.mp3"], limit=5)
     loads = _install_worker(monkeypatch, tmp_path, tts)

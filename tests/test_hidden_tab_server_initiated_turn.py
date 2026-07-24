@@ -96,6 +96,33 @@ def test_hidden_poll_hits_session_status_and_attaches_as_replay():
     assert "_attachServerInitiatedStream(sid, streamId, true)" in body
 
 
+def test_hidden_poll_stops_after_session_not_found():
+    """A production-index row may be absent from isolated WebUI state.
+
+    A 404 is authoritative for this server instance; continuing the six-second
+    hidden-tab poll only floods the browser console and can never attach.
+    """
+    start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
+    assert start != -1
+    body = MESSAGES_JS[start:start + 1800]
+    assert "if (r.status === 404)" in body
+    not_found = body.find("if (r.status === 404)")
+    assert "_stopHiddenActiveStreamPoll();" in body[not_found:not_found + 200]
+
+
+def test_stale_hidden_poll_response_cannot_stop_replacement_poll():
+    start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
+    assert start != -1
+    body = MESSAGES_JS[start:start + 2300]
+    assert "const pollGeneration=" in body
+    assert "_sessionStreamHiddenPollGeneration!==pollGeneration" in body
+    not_found = body.find("if (r.status === 404)")
+    assert not_found != -1
+    assert "_sessionStreamHiddenPollGeneration===pollGeneration" in body[
+        not_found:not_found + 300
+    ]
+
+
 def test_hidden_poll_started_on_both_hidden_paths():
     """The poll must start on BOTH ways a tab ends up hidden with a session.
 

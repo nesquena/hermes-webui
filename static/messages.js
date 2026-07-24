@@ -7381,6 +7381,7 @@ let _sessionStreamHiddenSid = null;
 // on session switch.
 let _sessionStreamHiddenPollTimer = null;
 let _sessionStreamHiddenPollSid = null;
+let _sessionStreamHiddenPollGeneration = 0;
 // Bounded-retry budget for the hidden poll's "attach returned false → keep
 // polling" path (PR #5266 follow-up gate). A never-current pane (multi-pane:
 // another session stays on screen) would otherwise poll /api/session/status
@@ -7485,18 +7486,26 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
 function _startHiddenActiveStreamPoll(sid) {
   if (!sid) return;
   _stopHiddenActiveStreamPoll();
+  const pollGeneration=++_sessionStreamHiddenPollGeneration;
   _sessionStreamHiddenPollSid = sid;
   const tick = () => {
     // Stop conditions: tab became visible (real SSE takes over), session
     // switched, or we're already rendering a stream.
+    if (_sessionStreamHiddenPollGeneration!==pollGeneration) return;
     if (typeof document !== 'undefined' && !document.hidden) { _stopHiddenActiveStreamPoll(); return; }
-    if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
+    if (_sessionStreamHiddenPollSid !== sid) return;
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
-        .then(r => r.ok ? r.json() : null)
+        .then(r => {
+          if (r.status === 404) {
+            if (_sessionStreamHiddenPollSid === sid && _sessionStreamHiddenPollGeneration===pollGeneration) _stopHiddenActiveStreamPoll();
+            return null;
+          }
+          return r.ok ? r.json() : null;
+        })
         .then(d => {
-          if (!d || _sessionStreamHiddenPollSid !== sid) return;
+          if (!d || _sessionStreamHiddenPollSid !== sid || _sessionStreamHiddenPollGeneration!==pollGeneration) return;
           const streamId = d.active_stream_id;
           if (streamId && S.activeStreamId !== String(streamId)) {
             // Server-initiated turn in flight while hidden → attach as replay.
@@ -7539,6 +7548,7 @@ function _startHiddenActiveStreamPoll(sid) {
 }
 
 function _stopHiddenActiveStreamPoll() {
+  _sessionStreamHiddenPollGeneration += 1;
   if (_sessionStreamHiddenPollTimer) { clearInterval(_sessionStreamHiddenPollTimer); _sessionStreamHiddenPollTimer = null; }
   _sessionStreamHiddenPollSid = null;
   // Reset the bounded-retry budget so a fresh poll never inherits a stale count.

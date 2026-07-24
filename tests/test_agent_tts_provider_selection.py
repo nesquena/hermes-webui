@@ -197,6 +197,7 @@ def test_selects_exact_duplicate_provider_row_and_preserves_unrelated_config(
     tmp_path, monkeypatch
 ):
     path = tmp_path / "config.yaml"
+    monkeypatch.setenv("HERMES_WEBUI_TTS_REQUEST_MAX_CHARS", "900")
     original = {
         "model": {"default": "example/model"},
         "stt": {"provider": "whisper"},
@@ -218,6 +219,11 @@ def test_selects_exact_duplicate_provider_row_and_preserves_unrelated_config(
     assert cfg.current["model"] == original["model"]
     assert cfg.current["stt"] == original["stt"]
     assert result["active_provider_name"] == "Nous Subscription"
+    assert result["resolved_provider"] == "openai"
+    assert result["synthesis_supported"] is True
+    assert result["provider_max_text_length"] == 4000
+    assert result["request_max_text_length"] == 900
+    assert result["limit_source"] == "agent"
     assert result["config_fingerprint"] == _fingerprint(cfg.current)
 
 
@@ -276,6 +282,53 @@ def test_unknown_or_mismatched_row_fails_before_save(
     assert cfg.saved == []
 
 
+def test_managed_provider_selection_readiness_error_fails_before_save(
+    tmp_path, monkeypatch
+):
+    original = {"tts": {"provider": "edge"}}
+    _tts, tools, cfg = _install(monkeypatch, tmp_path / "config.yaml", original)
+
+    def readiness(*_args, **_kwargs):
+        raise RuntimeError("portal unavailable")
+
+    tools.provider_readiness_status = readiness
+
+    with pytest.raises(agent_tts_worker.WorkerOperationError) as exc_info:
+        agent_tts_worker.select_provider_payload(
+            "Nous Subscription", "openai", _fingerprint(original)
+        )
+
+    assert exc_info.value.code == "provider_unavailable"
+    assert cfg.saved == []
+    assert cfg.current == original
+
+
+def test_post_save_limit_metadata_uses_authoritative_normalized_config(
+    tmp_path, monkeypatch
+):
+    original = {"tts": {"provider": "edge"}}
+    tts, _tools, cfg = _install(monkeypatch, tmp_path / "config.yaml", original)
+    tts._resolve_max_text_length = lambda provider, snapshot: int(
+        snapshot.get("normalized_limit", 4000)
+    )
+    original_save = cfg.save_config
+
+    def save_with_normalization(config):
+        normalized = copy.deepcopy(config)
+        normalized.setdefault("tts", {})["normalized_limit"] = 777
+        original_save(normalized)
+
+    cfg.save_config = save_with_normalization
+
+    result = agent_tts_worker.select_provider_payload(
+        "OpenAI TTS", "openai", _fingerprint(original)
+    )
+
+    assert cfg.current["tts"]["normalized_limit"] == 777
+    assert result["provider_max_text_length"] == 777
+    assert result["request_max_text_length"] == 777
+
+
 def test_stale_fingerprint_and_unavailable_candidate_fail_before_save(
     tmp_path, monkeypatch
 ):
@@ -317,6 +370,55 @@ def test_read_only_or_managed_save_is_detected_by_authoritative_reprobe(
     assert exc_info.value.code == "config_write_failed"
     assert len(cfg.saved) == 1
     assert cfg.current == original
+
+
+def test_compensation_refuses_silent_non_write(tmp_path, monkeypatch):
+    post = {"model": {"default": "x"}, "tts": {"provider": "openai"}}
+    _tts, _tools, cfg = _install(
+        monkeypatch, tmp_path / "config.yaml", post, refuse_save=True
+    )
+
+    with pytest.raises(agent_tts_worker.WorkerOperationError) as exc_info:
+        agent_tts_worker.restore_tts_payload(
+            {"provider": "edge"}, True, _fingerprint(post)
+        )
+
+    assert exc_info.value.code == "config_write_failed"
+    assert cfg.current == post
+
+
+def test_symlink_retarget_before_save_fails_without_mutating_either_target(
+    tmp_path, monkeypatch
+):
+    old_target = tmp_path / "old.yaml"
+    new_target = tmp_path / "new.yaml"
+    original = {"tts": {"provider": "edge"}}
+    old_target.write_text(yaml.safe_dump(original), encoding="utf-8")
+    new_target.write_text("marker: untouched\n", encoding="utf-8")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(old_target)
+    cfg = _install_disk(monkeypatch, link, original)
+    _tts, tools, imported_cfg = agent_tts_worker._import_agent_modules()
+    assert imported_cfg is cfg
+    original_apply = tools.apply_provider_selection
+
+    def apply_and_retarget(*args, **kwargs):
+        original_apply(*args, **kwargs)
+        link.unlink()
+        link.symlink_to(new_target)
+
+    tools.apply_provider_selection = apply_and_retarget
+
+    with pytest.raises(agent_tts_worker.WorkerOperationError) as exc_info:
+        agent_tts_worker.select_provider_payload(
+            "OpenAI TTS", "openai", _fingerprint(original)
+        )
+
+    assert exc_info.value.code == "config_write_failed"
+    assert yaml.safe_load(old_target.read_text(encoding="utf-8")) == original
+    assert yaml.safe_load(new_target.read_text(encoding="utf-8")) == {
+        "marker": "untouched"
+    }
 
 
 def test_symlinked_config_binds_old_writer_to_referent(tmp_path, monkeypatch):

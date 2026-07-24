@@ -9,7 +9,9 @@ every exit.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -28,6 +30,8 @@ from api.profiles import (
     get_active_profile_name,
     get_hermes_home_for_profile,
 )
+
+logger = logging.getLogger(__name__)
 
 AGENT_TTS_SCHEMA = 1
 AGENT_TTS_REQUEST_MAX_BYTES = 64 * 1024
@@ -375,10 +379,36 @@ def _read_status_file(path: Path) -> dict[str, Any]:
     return payload
 
 
+_WORKER_DIAGNOSTICS = frozenset(
+    {
+        "provider_timeout",
+        "provider_rate_limit",
+        "provider_auth",
+        "provider_request",
+        "provider_dependency",
+        "provider_network",
+        "provider_error",
+    }
+)
+_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
 def _raise_worker_error(payload: dict[str, Any]) -> None:
     code = str(payload.get("code") or "agent_worker_protocol")
     if code not in _ERROR_STATUS:
         code = "agent_worker_protocol"
+    diagnostic = str(payload.get("diagnostic") or "")
+    if diagnostic not in _WORKER_DIAGNOSTICS:
+        diagnostic = "none"
+    provider = str(payload.get("provider") or "").strip().lower()
+    if not _PROVIDER_ID_RE.fullmatch(provider):
+        provider = "unknown"
+    logger.warning(
+        "Agent TTS worker failed code=%s diagnostic=%s provider=%s",
+        code,
+        diagnostic,
+        provider,
+    )
     raise _error(code)
 
 

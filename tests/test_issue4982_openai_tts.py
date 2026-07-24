@@ -25,7 +25,9 @@ class Handler:
         self.rfile = io.BytesIO(encoded)
         self.wfile = io.BytesIO()
         self.headers = {"Content-Length": str(len(encoded))}
-        self.client_address = ("10.82.0.1", 12345)
+        # Reach the retired-engine/request-schema boundary deterministically;
+        # remote auth-disabled denial is covered by the route security suite.
+        self.client_address = ("127.0.0.1", 12345)
         self.status = None
         self.sent_headers = {}
 

@@ -18496,6 +18496,12 @@ def _provider_public_result(result: dict, *, settings: dict | None = None) -> di
         "active_provider": result.get("active_provider"),
         "active_provider_name": result.get("active_provider_name"),
         "active_provider_available": result.get("active_provider_available") is True,
+        "resolved_provider": result.get("resolved_provider"),
+        "configured": result.get("configured") is True,
+        "synthesis_supported": result.get("synthesis_supported") is True,
+        "provider_max_text_length": result.get("provider_max_text_length"),
+        "request_max_text_length": result.get("request_max_text_length"),
+        "limit_source": result.get("limit_source"),
         "config_fingerprint": result.get("config_fingerprint"),
     }
     if settings is not None:

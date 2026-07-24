@@ -16,7 +16,7 @@ from api.agent_tts import AgentTtsAudio
 
 
 class Handler:
-    def __init__(self, body, *, command="POST", client="1.2.3.4", headers=None):
+    def __init__(self, body, *, command="POST", client="127.0.0.1", headers=None):
         encoded = json.dumps(body).encode("utf-8")
         self.command = command
         self.rfile = io.BytesIO(encoded)
@@ -102,6 +102,9 @@ def test_agent_rejects_edge_voice_and_prosody_overrides(monkeypatch):
 
 
 def test_agent_rate_limit_uses_raw_peer_not_spoofed_forwarded_for(monkeypatch):
+    # Authorization/trusted-proxy behavior has dedicated route tests. Isolate
+    # this assertion to limiter ownership of the raw socket peer.
+    monkeypatch.setattr(routes, "_tts_gate_allows", lambda _handler: True)
     monkeypatch.setattr(routes, "_tts_synthesis_limiter", routes._TtsRateLimiter(60))
     monkeypatch.setattr(
         routes,
