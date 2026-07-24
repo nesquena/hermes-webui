@@ -101,12 +101,7 @@ logger = logging.getLogger(__name__)
 
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import (
-    j,
-    get_profile_cookie,
-    _build_csp_report_only_policy,
-    _CLIENT_DISCONNECT_ERRORS,
-)
+from api.helpers import j, get_profile_cookie, InvalidProfileCookie, handle_invalid_profile_cookie, _build_csp_report_only_policy, _CLIENT_DISCONNECT_ERRORS
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -372,16 +367,17 @@ class Handler(BaseHTTPRequestHandler):
         self._safe_webui_print(f'[webui] {record}')
 
     def do_GET(self) -> None:
-        self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
+        self._req_t0 = time.time(); reset_trusted_auth_request_state(self); parsed = urlparse(self.path)
         try:
-            parsed = urlparse(self.path)
+            cookie_profile = get_profile_cookie(self, reject_invalid=True)
+            if cookie_profile:
+                set_request_profile(cookie_profile)
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except InvalidProfileCookie as exc:
+            return handle_invalid_profile_cookie(self, parsed, exc)
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
@@ -398,18 +394,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
+            if not _is_csp_report_post:
+                cookie_profile = get_profile_cookie(self, reject_invalid=True)
+                if cookie_profile:
+                    set_request_profile(cookie_profile)
             if not _is_csp_report_post and not check_auth(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except InvalidProfileCookie as exc:
+            return handle_invalid_profile_cookie(self, parsed, exc)
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return

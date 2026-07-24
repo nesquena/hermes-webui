@@ -1077,6 +1077,10 @@ _LEGACY_PROFILE_COOKIE_ENV = 'WEBUI_PROFILE_COOKIE_NAME'
 _legacy_profile_cookie_warned = False
 
 
+class InvalidProfileCookie(ValueError):
+    """Raised when a present profile cookie cannot map to a valid profile."""
+
+
 def get_profile_cookie_name() -> str:
     """Return the cookie name used to persist the active WebUI profile.
 
@@ -1104,7 +1108,7 @@ def get_profile_cookie_name() -> str:
     return PROFILE_COOKIE_NAME
 
 
-def get_profile_cookie(handler) -> str | None:
+def get_profile_cookie(handler, *, reject_invalid: bool = False) -> str | None:
     """Extract and authenticate the active-profile cookie value.
 
     When WebUI auth is enabled, the profile cookie is treated as an
@@ -1116,15 +1120,36 @@ def get_profile_cookie(handler) -> str | None:
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
+    cookie_name = get_profile_cookie_name()
+
+    def _header_mentions_profile_cookie() -> bool:
+        prefix = f"{cookie_name}="
+        for part in str(cookie_header or "").split(";"):
+            token = part.strip()
+            if token == cookie_name or token.startswith(prefix):
+                return True
+            if "=" in token and token.split("=", 1)[0].strip() == cookie_name:
+                return True
+        return False
+
+    def _invalid(reason: str) -> None:
+        if reject_invalid:
+            raise InvalidProfileCookie(reason)
+        return None
+
+    has_profile_cookie = _header_mentions_profile_cookie()
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
     try:
         cookie.load(cookie_header)
     except _hc.CookieError:
+        if has_profile_cookie:
+            return _invalid("Malformed active profile cookie")
         return None
-    cookie_name = get_profile_cookie_name()
     morsel = cookie.get(cookie_name)
-    if not (morsel and morsel.value):
+    if not (morsel and str(morsel.value or "").strip()):
+        if has_profile_cookie:
+            return _invalid("Empty active profile cookie")
         return None
 
     from api.profiles import _PROFILE_ID_RE
@@ -1132,19 +1157,40 @@ def get_profile_cookie(handler) -> str | None:
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
 
+    def _known_profile_name(val: str) -> bool:
+        if not _valid_profile_name(val):
+            return False
+        if not reject_invalid:
+            return True
+        try:
+            from api.profiles import _is_root_profile, get_hermes_home_for_profile
+
+            if _is_root_profile(val):
+                return True
+            return get_hermes_home_for_profile(val).is_dir()
+        except Exception:
+            logger.debug("Failed to validate active profile cookie target", exc_info=True)
+            return False
+
     raw_val = morsel.value
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():
             val = verify_profile_cookie_value(raw_val, parse_cookie(handler))
-            return val if val and _valid_profile_name(val) else None
+            if val and _known_profile_name(val):
+                return val
+            return _invalid("Invalid or unknown active profile cookie")
+    except InvalidProfileCookie:
+        raise
     except Exception:
         logger.warning("Failed to verify active profile cookie", exc_info=True)
-        return None
+        return _invalid("Invalid active profile cookie")
 
     # No-auth mode: the cookie is a per-browser UI preference, not an authz
     # boundary, so retain the legacy plain profile-name format.
-    return raw_val if _valid_profile_name(raw_val) else None
+    if _known_profile_name(raw_val):
+        return raw_val
+    return _invalid("Invalid or unknown active profile cookie")
 
 
 def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str | None = None) -> str:
@@ -1197,7 +1243,8 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
     return cookie[cookie_name].OutputString()
 
 
-def clear_profile_cookie(handler) -> None:
+def build_clear_profile_cookie() -> str:
+    """Build a Set-Cookie header that clears the active-profile cookie."""
     import http.cookies as _hc
 
     cookie = _hc.SimpleCookie()
@@ -1207,4 +1254,39 @@ def clear_profile_cookie(handler) -> None:
     cookie[cookie_name]['httponly'] = True
     cookie[cookie_name]['samesite'] = 'Lax'
     cookie[cookie_name]['max-age'] = '0'
-    handler.send_header('Set-Cookie', cookie[cookie_name].OutputString())
+    return cookie[cookie_name].OutputString()
+
+
+def clear_profile_cookie(handler) -> None:
+    handler.send_header('Set-Cookie', build_clear_profile_cookie())
+
+
+def _is_browser_shell_get_path(path: str) -> bool:
+    """Return whether a stale profile cookie can recover through the app shell."""
+    return (
+        path in {"/", "/login", "/index.html", "/share"}
+        or path.startswith("/session/")
+        or path.startswith("/share/")
+    )
+
+
+def handle_invalid_profile_cookie(handler, parsed, exc: InvalidProfileCookie):
+    clear_header = build_clear_profile_cookie()
+    path = getattr(parsed, "path", "") or "/"
+    if getattr(handler, "command", "") == "GET" and _is_browser_shell_get_path(path):
+        location = path
+        query = getattr(parsed, "query", "")
+        if query:
+            location = f"{location}?{query}"
+        return t(
+            handler,
+            "",
+            status=303,
+            extra_headers={"Location": location, "Set-Cookie": clear_header},
+        )
+    return j(
+        handler,
+        {"error": str(exc), "profile_cookie_reset": True},
+        status=400,
+        extra_headers={"Set-Cookie": clear_header},
+    )

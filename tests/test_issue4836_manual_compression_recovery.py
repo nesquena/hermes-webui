@@ -72,7 +72,7 @@ def _install_fake_compression_runtime(monkeypatch, agent_cls):
     monkeypatch.setattr(
         _cfg,
         "resolve_model_provider",
-        lambda model: ("openai/gpt-5.4-mini", "openai", "https://api.openai.com/v1"),
+        lambda model, **kwargs: ("openai/gpt-5.4-mini", "openai", "https://api.openai.com/v1"),
     )
     monkeypatch.setattr(
         _cfg,

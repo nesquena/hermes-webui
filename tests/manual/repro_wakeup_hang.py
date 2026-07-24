@@ -65,7 +65,7 @@ def _install_fakes():
 
     cfg._invoke_models_rebuild = _hung_rebuild
     # No disk cache → forces the cold rebuild branch.
-    cfg._load_models_cache_from_disk = lambda: None
+    cfg._load_models_cache_from_disk = lambda *, config_data=None: None
 
     fake_stream = "stream-repro-1"
     captured = {}

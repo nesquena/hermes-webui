@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import shutil
 import subprocess
 import time
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,13 +23,15 @@ NODE = shutil.which("node")
 
 
 class _Handler:
-    def __init__(self, *, headers=None, client_address=("127.0.0.1", 12345)):
+    def __init__(self, *, headers=None, client_address=("127.0.0.1", 12345), body=b""):
         self.headers = dict(headers or {})
+        if body and "Content-Length" not in self.headers:
+            self.headers["Content-Length"] = str(len(body))
         self.client_address = client_address
         self.command = "GET"
         self.path = "/"
         self.request = SimpleNamespace()
-        self.rfile = io.BytesIO(b"")
+        self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
         self.status = None
         self.sent_headers = []
@@ -52,6 +56,40 @@ class _Handler:
 
     def header_values(self, name):
         return [value for key, value in self.sent_headers if key == name]
+
+
+def _cookie_value(set_cookie_headers, cookie_name):
+    prefix = f"{cookie_name}="
+    for header in set_cookie_headers:
+        if header.startswith(prefix):
+            return header.split("=", 1)[1].split(";", 1)[0]
+    raise AssertionError(f"{cookie_name} Set-Cookie header missing: {set_cookie_headers!r}")
+
+
+def _install_known_work_profile(monkeypatch, tmp_path):
+    work_home = tmp_path / "profiles" / "work"
+    work_home.mkdir(parents=True)
+
+    def _home_for_profile(name):
+        if name == "work":
+            return work_home
+        return tmp_path
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", _home_for_profile)
+    return work_home
+
+
+def _install_delete_profile_stub(monkeypatch, delete_calls):
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    profiles_module = types.ModuleType("hermes_cli.profiles")
+
+    def fake_delete_profile(profile, *, yes=False):
+        delete_calls.append((profile, yes))
+
+    profiles_module.delete_profile = fake_delete_profile
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_module)
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +135,77 @@ def _trusted_env(
         monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", proxy_cidrs)
     if logout_url is not None:
         monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL", logout_url)
+
+
+def test_password_auth_enable_resigns_selected_profile_cookie(monkeypatch, tmp_path):
+    _install_known_work_profile(monkeypatch, tmp_path)
+    auth_state = {"enabled": False}
+    monkeypatch.setattr(auth, "is_password_auth_enabled", lambda: auth_state["enabled"])
+    monkeypatch.setattr(auth, "get_password_hash", lambda: "hash" if auth_state["enabled"] else None)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+
+    def _save_settings(_body):
+        auth_state["enabled"] = True
+        return {"theme": "dark", "password_hash": "redacted"}
+
+    monkeypatch.setattr(routes, "save_settings", _save_settings)
+    profiles.set_request_profile("work")
+    handler = _Handler(
+        headers={"Cookie": "hermes_profile=work"},
+        body=b'{"_set_password":"owner-password"}',
+    )
+    handler.command = "POST"
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/settings", query=""))
+
+    assert handler.status == 200
+    set_cookies = handler.header_values("Set-Cookie")
+    session_cookie = _cookie_value(set_cookies, "hermes_session")
+    profile_cookie = _cookie_value(set_cookies, "hermes_profile")
+    assert auth.verify_profile_cookie_value(profile_cookie, session_cookie) == "work"
+
+    next_handler = _Handler(headers={"Cookie": f"hermes_session={session_cookie}; hermes_profile={profile_cookie}"})
+    from api.helpers import get_profile_cookie
+
+    assert get_profile_cookie(next_handler, reject_invalid=True) == "work"
+
+
+def test_password_auth_disable_rewrites_selected_profile_plain_cookie(monkeypatch, tmp_path):
+    _install_known_work_profile(monkeypatch, tmp_path)
+    auth_state = {"enabled": True}
+    monkeypatch.setattr(auth, "is_password_auth_enabled", lambda: auth_state["enabled"])
+    monkeypatch.setattr(auth, "get_password_hash", lambda: "hash" if auth_state["enabled"] else None)
+    monkeypatch.setattr(auth, "verify_password", lambda password: password == "old-password")
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr("api.passkeys.clear_credentials", lambda: None)
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+
+    def _save_settings(_body):
+        auth_state["enabled"] = False
+        return {"theme": "dark"}
+
+    monkeypatch.setattr(routes, "save_settings", _save_settings)
+    session_cookie = auth.create_session()
+    signed_profile = auth.sign_profile_cookie_value("work", session_cookie)
+    profiles.set_request_profile("work")
+    handler = _Handler(
+        headers={"Cookie": f"hermes_session={session_cookie}; hermes_profile={signed_profile}"},
+        body=b'{"_clear_password":true,"_current_password":"old-password"}',
+    )
+    handler.command = "POST"
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/settings", query=""))
+
+    assert handler.status == 200
+    profile_cookie = _cookie_value(handler.header_values("Set-Cookie"), "hermes_profile")
+    assert profile_cookie == "work"
+
+    next_handler = _Handler(headers={"Cookie": f"hermes_profile={profile_cookie}"})
+    from api.helpers import get_profile_cookie
+
+    assert get_profile_cookie(next_handler, reject_invalid=True) == "work"
 
 
 def test_trusted_header_only_enables_auth_gate(monkeypatch):
@@ -354,6 +463,428 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
     assert any(value.startswith("hermes_profile=") for value in handler.header_values("Set-Cookie"))
 
 
+def test_profile_delete_rejects_trusted_session_bound_to_target(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile="devops",
+    )
+    handler = _Handler(headers={
+        "Cookie": f"hermes_session={cookie}",
+        "Remote-User": "alice",
+        "Remote-Groups": "hermes_devops",
+    })
+    handler.command = "POST"
+    delete_calls = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "devops"})
+    monkeypatch.setattr(
+        "api.profiles.delete_profile_api",
+        lambda name: delete_calls.append(name) or {"ok": True, "name": name},
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Profile is bound to the current session"
+    assert delete_calls == []
+    assert auth.session_bound_profile(cookie) == "devops"
+
+
+def test_profile_delete_allows_unbound_trusted_session_default_handoff(monkeypatch):
+    _trusted_env(monkeypatch)
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile=None,
+    )
+    handler = _Handler(headers={
+        "Cookie": f"hermes_session={cookie}",
+        "Remote-User": "alice",
+    })
+    handler.command = "POST"
+    delete_calls = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "work"})
+    monkeypatch.setattr(
+        "api.profiles.delete_profile_api",
+        lambda name: delete_calls.append(name) or {"ok": True, "name": name, "active": "default"},
+    )
+
+    profiles.set_request_profile("work")
+    try:
+        assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+        routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+    finally:
+        profiles.clear_request_profile()
+
+    assert handler.status == 200
+    assert handler.json_body() == {"ok": True, "name": "work", "active": "default"}
+    assert delete_calls == ["work"]
+    assert auth.session_bound_profile(cookie) is None
+    assert any(value.startswith("hermes_profile=default.") for value in handler.header_values("Set-Cookie"))
+
+
+def test_profile_delete_rejects_trusted_session_cleanup_regression(monkeypatch):
+    delete_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+
+    _trusted_env(monkeypatch)
+    work_session = auth.create_session(auth_type="trusted", username="alice", bound_profile="work")
+    auth.create_session(auth_type="trusted", username="alice", bound_profile="devops")
+
+    with pytest.raises(RuntimeError, match="active trusted session"):
+        profiles.delete_profile_api("work")
+
+    assert auth.session_bound_profile(work_session) == "work"
+    assert delete_calls == []
+
+
+def test_profile_delete_rejects_legacy_trusted_session_binding(monkeypatch):
+    delete_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+
+    _trusted_env(monkeypatch)
+    cookie = auth.create_session(auth_type="trusted", username="alice")
+    token = cookie.split(".")[0]
+    session = auth._sessions[token]
+    if isinstance(session, dict):
+        session = dict(session)
+        session.pop("bound_profile", None)
+        session["profile"] = "work"
+        auth._sessions[token] = session
+
+    with pytest.raises(RuntimeError, match="active trusted session"):
+        profiles.delete_profile_api("work")
+
+    assert auth.session_bound_profile(cookie) == "work"
+    assert delete_calls == []
+
+
+def test_profile_delete_route_rejects_when_other_session_still_bound(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
+    _ = auth.create_session(auth_type="trusted", username="alice", bound_profile="work")
+    current = auth.create_session(auth_type="trusted", username="alice", bound_profile="devops")
+    delete_calls = []
+
+    handler = _Handler(headers={
+        "Cookie": f"hermes_session={current}",
+        "Remote-User": "alice",
+        "Remote-Groups": "hermes_devops",
+    })
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "work"})
+    def _reject_delete(_name: str):
+        delete_calls.append(_name)
+        raise RuntimeError("Profile is bound to an active trusted session")
+    monkeypatch.setattr("api.profiles.delete_profile_api", _reject_delete)
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 409
+    assert handler.json_body()["error"] == "Profile is bound to an active trusted session"
+    assert delete_calls == ["work"]
+
+
+def test_profile_delete_route_rejects_when_group_policy_targets_profile(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"alice-group": "work"})
+    current = auth.create_session(auth_type="trusted", username="alice", bound_profile=None)
+    delete_calls = []
+
+    handler = _Handler(headers={
+        "Cookie": f"hermes_session={current}",
+        "Remote-User": "alice",
+    })
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "work"})
+    def _reject_delete(_name: str):
+        delete_calls.append(_name)
+        raise RuntimeError("Profile is bound by trusted group policy")
+    monkeypatch.setattr("api.profiles.delete_profile_api", _reject_delete)
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 409
+    assert handler.json_body()["error"] == "Profile is bound by trusted group policy"
+    assert delete_calls == ["work"]
+
+
+def _profile_delete_route_handler(cookie, *, username="alice", body_name="work", groups=None):
+    headers = {
+        "Cookie": f"hermes_session={cookie}",
+        "Remote-User": username,
+    }
+    if groups is not None:
+        headers["Remote-Groups"] = groups
+    handler = _Handler(headers=headers, body=json.dumps({"name": body_name}).encode("utf-8"))
+    handler.command = "POST"
+    return handler
+
+
+def _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls):
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+    monkeypatch.setattr(
+        profiles,
+        "switch_profile",
+        lambda name, *, process_wide=True: switch_calls.append((name, process_wide))
+        or {"active": name},
+    )
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+
+
+def test_profile_delete_route_runs_real_guard_for_other_bound_session(monkeypatch):
+    _trusted_env(monkeypatch)
+    target_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile="work"
+    )
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 409
+    assert handler.json_body()["error"] == "Profile is bound to an active trusted session"
+    assert delete_calls == []
+    assert switch_calls == []
+    assert auth.session_bound_profile(target_cookie) == "work"
+
+
+def test_profile_delete_route_runs_real_guard_for_group_policy(monkeypatch):
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"alice-group": "work"},
+    )
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 409
+    assert handler.json_body()["error"] == "Profile is bound by trusted group policy"
+    assert delete_calls == []
+    assert switch_calls == []
+
+
+def test_profile_delete_route_fails_closed_on_authority_inspection_error(monkeypatch):
+    _trusted_env(monkeypatch)
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+
+    def _raise_authority_error():
+        raise ValueError("invalid group policy")
+
+    monkeypatch.setattr(auth, "_trusted_group_profile_map", _raise_authority_error)
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 409
+    assert handler.json_body()["error"] == "Cannot validate trusted group-policy bindings for profile deletion"
+    assert delete_calls == []
+    assert switch_calls == []
+
+
+def test_profile_delete_route_preserves_legacy_authority_after_rejection(monkeypatch):
+    _trusted_env(monkeypatch)
+    legacy_cookie = auth.create_session(auth_type="trusted", username="alice")
+    legacy_token = legacy_cookie.split(".", 1)[0]
+    legacy_record = dict(auth._sessions[legacy_token])
+    legacy_record.pop("bound_profile", None)
+    legacy_record["profile"] = "work"
+    auth._sessions[legacy_token] = legacy_record
+    auth._save_sessions(auth._sessions)
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 409
+    assert delete_calls == []
+    auth._sessions.clear()
+    auth._sessions.update(auth._load_sessions())
+    assert auth.session_bound_profile(legacy_cookie) == "work"
+
+    follow_up = _profile_delete_route_handler(current_cookie, body_name="default")
+    assert auth.check_auth(follow_up, SimpleNamespace(path="/api/sessions", query="")) is True
+    info = auth.ensure_trusted_auth_session(follow_up)
+    assert info["bound_profile"] is None
+    assert auth.session_bound_profile(current_cookie) is None
+
+
+def test_profile_delete_rejection_preserves_current_trusted_session(monkeypatch):
+    _trusted_env(monkeypatch)
+    legacy_cookie = auth.create_session(auth_type="trusted", username="alice")
+    legacy_token = legacy_cookie.split(".", 1)[0]
+    legacy_record = dict(auth._sessions[legacy_token])
+    legacy_record.pop("bound_profile", None)
+    legacy_record["profile"] = "work"
+    auth._sessions[legacy_token] = legacy_record
+    auth._save_sessions(auth._sessions)
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    tokens_before = set(auth._sessions)
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+    assert handler.status == 409
+
+    create_calls = []
+    real_create_session = auth.create_session
+    monkeypatch.setattr(
+        auth,
+        "create_session",
+        lambda **kwargs: create_calls.append(kwargs) or real_create_session(**kwargs),
+    )
+    follow_up = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(follow_up, SimpleNamespace(path="/api/sessions", query="")) is True
+    info = auth.ensure_trusted_auth_session(follow_up)
+
+    assert auth.verify_session(current_cookie)
+    assert set(auth._sessions) == tokens_before
+    assert info["token"] == current_cookie.split(".", 1)[0]
+    assert info["bound_profile"] is None
+    assert create_calls == []
+    assert getattr(follow_up, "_pending_set_cookies", []) == []
+
+
+def test_profile_delete_route_blocks_reconciliation_interleaving(monkeypatch):
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"alice-group": "work"},
+    )
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    reconcile_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+    real_group_map = auth._trusted_group_profile_map
+    armed = False
+    reconcile_started = False
+    reconciliation_calls = []
+
+    def _group_map_after_session_scan():
+        nonlocal reconcile_started
+        mapping = real_group_map()
+        if armed and not reconciliation_calls and not reconcile_started:
+            reconcile_started = True
+            reconcile_handler = _profile_delete_route_handler(
+                reconcile_cookie,
+                body_name="default",
+                groups="alice-group",
+            )
+            assert auth.check_auth(reconcile_handler, SimpleNamespace(path="/api/sessions", query="")) is True
+            reconcile_info = auth.ensure_trusted_auth_session(reconcile_handler)
+            assert reconcile_info["bound_profile"] == "work"
+            reconciliation_calls.append(reconcile_info["token"])
+        return mapping
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+
+    # Authenticate before arming the hook. The outer guard's map read then runs
+    # only after its session scan has released the sessions lock; the recursive
+    # inner read belongs to reconciliation rather than the earlier auth path.
+    monkeypatch.setattr(auth, "_trusted_group_profile_map", _group_map_after_session_scan)
+    armed = True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert reconciliation_calls
+    assert handler.status == 409
+    assert handler.json_body()["error"] == "Profile is bound by trusted group policy"
+    assert delete_calls == []
+    assert switch_calls == []
+
+
+def test_profile_delete_route_checks_authority_before_switch_or_delete(monkeypatch):
+    _trusted_env(monkeypatch)
+    current_cookie = auth.create_session(
+        auth_type="trusted", username="alice", bound_profile=None
+    )
+    delete_calls = []
+    switch_calls = []
+    _prepare_real_profile_delete(monkeypatch, delete_calls, switch_calls)
+    order = []
+    real_guard = auth._assert_profile_delete_has_no_active_trusted_binding
+    monkeypatch.setattr(
+        auth,
+        "_assert_profile_delete_has_no_active_trusted_binding",
+        lambda name: order.append("guard") or real_guard(name),
+    )
+    switch_calls_proxy = profiles.switch_profile
+    monkeypatch.setattr(
+        profiles,
+        "switch_profile",
+        lambda name, *, process_wide=True: order.append("switch")
+        or switch_calls_proxy(name, process_wide=process_wide),
+    )
+    delete_calls_proxy = sys.modules["hermes_cli.profiles"].delete_profile
+    monkeypatch.setattr(
+        sys.modules["hermes_cli.profiles"],
+        "delete_profile",
+        lambda name, *, yes=False: order.append("delete")
+        or delete_calls_proxy(name, yes=yes),
+    )
+
+    handler = _profile_delete_route_handler(current_cookie)
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/profile/delete", query="")) is True
+    routes.handle_post(handler, SimpleNamespace(path="/api/profile/delete", query=""))
+
+    assert handler.status == 200
+    assert order == ["guard", "delete"]
+
+
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
     _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(
@@ -445,6 +976,45 @@ def test_existing_trusted_session_rotates_for_current_identity(monkeypatch):
     assert handler._trusted_auth_session_info["bound_profile"] == "bob"
     assert handler._trusted_auth_session_cookie_value != cookie
     assert profiles.get_active_profile_name() == "bob"
+
+
+def test_unbound_trusted_identity_rotation_resigns_selected_profile_cookie(monkeypatch, tmp_path):
+    _install_known_work_profile(monkeypatch, tmp_path)
+    _trusted_env(monkeypatch)
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile=None,
+    )
+    profile_cookie = auth.sign_profile_cookie_value("work", cookie)
+    profiles.set_request_profile("work")
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={cookie}; hermes_profile={profile_cookie}",
+            "Remote-User": "bob",
+        }
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.verify_session(cookie) is False
+    pending = getattr(handler, "_pending_set_cookies", [])
+    replacement_session = _cookie_value(pending, "hermes_session")
+    replacement_profile = _cookie_value(pending, "hermes_profile")
+    assert replacement_session != cookie
+    assert auth.verify_profile_cookie_value(replacement_profile, replacement_session) == "work"
+
+    profiles.clear_request_profile()
+    next_handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={replacement_session}; hermes_profile={replacement_profile}",
+            "Remote-User": "bob",
+        }
+    )
+    from api.helpers import get_profile_cookie
+
+    profiles.set_request_profile(get_profile_cookie(next_handler, reject_invalid=True))
+    assert auth.check_auth(next_handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert profiles.get_active_profile_name() == "work"
 
 
 def test_trusted_reconciliation_cache_resets_between_requests(monkeypatch):

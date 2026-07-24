@@ -583,8 +583,12 @@ def test_configured_provider_slash_model_keeps_provider_context():
         runtime_model = config.model_with_provider_context(
             "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
             "local-llama",
+            config_data=config.cfg,
         )
-        model, provider, base_url = config.resolve_model_provider(runtime_model)
+        model, provider, base_url = config.resolve_model_provider(
+            runtime_model,
+            config_data=config.cfg,
+        )
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
@@ -1033,12 +1037,24 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 
+    with routes.STREAMS_LOCK:
+        previous_streams = dict(routes.STREAMS)
+    created_stream_ids = set()
     handler = FakeHandler()
-    routes._handle_chat_start(
-        handler,
-        {"session_id": session.session_id, "message": "new turn"},
-    )
-    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    try:
+        routes._handle_chat_start(
+            handler,
+            {"session_id": session.session_id, "message": "new turn"},
+        )
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    finally:
+        with routes.STREAMS_LOCK:
+            created_stream_ids = set(routes.STREAMS) - set(previous_streams)
+            routes.STREAMS.clear()
+            routes.STREAMS.update(previous_streams)
+        for stream_id in created_stream_ids:
+            routes.unregister_stream_owner(stream_id)
+            routes.STREAM_GOAL_RELATED.pop(stream_id, None)
 
     assert handler.status == 200
     assert payload["effective_model"] == "gpt-5.5"

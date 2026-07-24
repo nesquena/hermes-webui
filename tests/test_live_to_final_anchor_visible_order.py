@@ -846,12 +846,13 @@ def test_application_error_settlement_attaches_projected_anchor_scene_before_ren
     session_idx = apperror.index("const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);")
     attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = apperror.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
+    clear_idx = apperror.index("clearLiveToolCards();if(!assistantText)removeThinking();")
     render_idx = apperror.index("renderMessages({preserveScroll:true});")
-    assert session_idx < attach_idx < carry_idx < render_idx
+    assert session_idx < attach_idx < carry_idx < clear_idx < render_idx
 
     synthetic_push_idx = apperror.index("S.messages.push({role:'assistant',content:`**${label}:**")
     synthetic_attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", synthetic_push_idx)
-    assert synthetic_push_idx < synthetic_attach_idx < render_idx
+    assert synthetic_push_idx < synthetic_attach_idx < clear_idx < render_idx
 
 
 def test_connection_error_terminal_message_attaches_projected_anchor_scene_before_render():
@@ -884,6 +885,20 @@ def test_done_sets_turn_duration_before_persisting_anchor_scene():
     duration_idx = done.index("lastAsst._turnDuration=d.usage.duration_seconds;")
     attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     assert duration_idx < attach_idx
+
+
+def test_done_settlement_persists_anchor_before_owner_cleanup():
+    done = _event_listener_body(MESSAGES_JS, "done")
+
+    attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    cleanup_idx = done.index("_clearOwnerInflightState();", attach_idx)
+    clear_stream_idx = done.index("S.activeStreamId=null;", cleanup_idx)
+    fallback_msgs_idx = done.index("const _doneMsgsForAnchor=(d.session.messages||[]).filter(m=>m&&m.role);")
+    fallback_attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(_doneMsgsForAnchor);")
+    fallback_cleanup_idx = done.index("_clearOwnerInflightState();", fallback_attach_idx)
+
+    assert attach_idx < cleanup_idx < clear_stream_idx
+    assert fallback_msgs_idx < fallback_attach_idx < fallback_cleanup_idx
 
 
 def test_settled_anchor_scene_is_persisted_as_ui_metadata():

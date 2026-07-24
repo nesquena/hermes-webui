@@ -40,6 +40,7 @@ from api.config import (
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
+    get_config_snapshot,
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
@@ -441,6 +442,8 @@ def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
+    *,
+    config_data: dict | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return provider/key/base_url overrides for ``custom:*`` endpoints.
 
@@ -453,7 +456,10 @@ def _resolve_custom_provider_runtime_overrides(
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    _cp_key, _cp_base = resolve_custom_provider_connection(
+        resolved_provider,
+        config_data=config_data,
+    )
     if not resolved_api_key and _cp_key:
         resolved_api_key = _cp_key
     if not resolved_base_url and _cp_base:
@@ -6785,7 +6791,7 @@ def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
 
 
 def _attempt_credential_self_heal(
-    provider_id, session_id, _agent_lock_ref, *, target_model=None,
+    provider_id, session_id, _agent_lock_ref, *, target_model=None, profile_name=None,
 ):
     """Try to silently refresh credentials after a 401/auth error (#1401).
 
@@ -6803,38 +6809,43 @@ def _attempt_credential_self_heal(
        re-invoke ``run_conversation`` with these).
     """
     try:
-        from api.oauth import (
-            read_auth_json,
-            resolve_runtime_provider_with_anthropic_env_lock,
-        )
-        from api.config import (
-            SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
-            invalidate_credential_pool_cache,
-        )
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from api import profiles as profiles_api
 
-        # 1. Re-read auth.json (triggers a fresh credential scan)
-        _fresh_auth = read_auth_json()
-        if not _fresh_auth:
-            logger.debug('[webui] self-heal: auth.json empty or missing, skipping')
-            return None
+        with profiles_api.profile_scope_for_detached_worker(
+            profile_name, "credential self-heal", logger_override=logger
+        ):
+            from api.oauth import (
+                read_auth_json,
+                resolve_runtime_provider_with_anthropic_env_lock,
+            )
+            from api.config import (
+                SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
+                invalidate_credential_pool_cache,
+            )
+            from hermes_cli.runtime_provider import resolve_runtime_provider
 
-        # 2. Evict the cached agent for this session
-        _evicted_entry = None
-        with SESSION_AGENT_CACHE_LOCK:
-            _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
-        if _evicted_entry is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
+            # 1. Re-read auth.json (triggers a fresh credential scan)
+            _fresh_auth = read_auth_json()
+            if not _fresh_auth:
+                logger.debug('[webui] self-heal: auth.json empty or missing, skipping')
+                return None
 
-        # 3. Invalidate the credential pool for this provider
-        invalidate_credential_pool_cache(provider_id)
+            # 2. Evict the cached agent for this session
+            _evicted_entry = None
+            with SESSION_AGENT_CACHE_LOCK:
+                _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+            if _evicted_entry is not None:
+                _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
-        # 4. Re-resolve runtime provider with fresh credentials
-        _new_rt = resolve_runtime_provider_with_anthropic_env_lock(
-            resolve_runtime_provider,
-            requested=provider_id,
-            target_model=target_model,
-        )
+            # 3. Invalidate the credential pool for this provider
+            invalidate_credential_pool_cache(provider_id)
+
+            # 4. Re-resolve runtime provider with fresh credentials
+            _new_rt = resolve_runtime_provider_with_anthropic_env_lock(
+                resolve_runtime_provider,
+                requested=provider_id,
+                target_model=target_model,
+            )
 
         logger.info(
             '[webui] self-heal: credential refresh succeeded for provider=%s session=%s',
@@ -7154,6 +7165,7 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    _model_resolution_cfg = None
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -8437,41 +8449,52 @@ def _run_agent_streaming(
             _current_sig = _mk_sig(_sig_model, _sig_provider)
             _explicitly_picked = bool(_picked_sig) and _picked_sig == _current_sig
             with profiles_api.profile_scope_for_detached_worker(
-                _resolved_profile_name, "model resolution", logger_override=logger
+                _resolved_profile_name, "model/runtime resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
+                _model_resolution_cfg = get_config_snapshot()
                 resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                    model_with_provider_context(model, provider_context),
+                    model_with_provider_context(
+                        model,
+                        provider_context,
+                        config_data=_model_resolution_cfg,
+                    ),
                     explicitly_picked=_explicitly_picked,
+                    config_data=_model_resolution_cfg,
                 )
-            configured_base_url = resolved_base_url
+                configured_base_url = resolved_base_url
 
-            # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-            # Pass the resolved provider so non-default providers get their own credentials.
-            resolved_api_key = None
-            try:
-                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                    resolve_runtime_provider,
-                    requested=resolved_provider,
-                    target_model=resolved_model,
-                )
-                resolved_api_key = _rt.get("api_key")
-                if not resolved_provider:
-                    resolved_provider = _rt.get("provider")
-                resolved_base_url = _runtime_preferred_base_url(
-                    _rt, resolved_provider, configured_base_url
-                )
-            except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                # Resolve API key via Hermes runtime provider (matches gateway
+                # behaviour). Keep this inside the same profile scope as model
+                # resolution so runtime credentials cannot fall back to a
+                # different profile's ambient process env.
+                resolved_api_key = None
+                try:
+                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                        resolve_runtime_provider,
+                        requested=resolved_provider,
+                        target_model=resolved_model,
+                    )
+                    resolved_api_key = _rt.get("api_key")
+                    if not resolved_provider:
+                        resolved_provider = _rt.get("provider")
+                    resolved_base_url = _runtime_preferred_base_url(
+                        _rt, resolved_provider, configured_base_url
+                    )
+                except Exception as _e:
+                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
-            # Named custom providers (custom:slug) may not be resolvable by
-            # hermes_cli.runtime_provider directly. Fall back to config.yaml
-            # custom_providers[] so WebUI can pass explicit creds/base_url.
-            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                resolved_provider, resolved_api_key, resolved_base_url
-            )
+                # Named custom providers (custom:slug) may not be resolvable by
+                # hermes_cli.runtime_provider directly. Fall back to config.yaml
+                # custom_providers[] so WebUI can pass explicit creds/base_url.
+                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                    resolved_provider,
+                    resolved_api_key,
+                    resolved_base_url,
+                    config_data=_model_resolution_cfg,
+                )
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
@@ -9475,6 +9498,7 @@ def _run_agent_streaming(
                         _heal_rt = _attempt_credential_self_heal(
                             resolved_provider or '', session_id, _agent_lock,
                             target_model=resolved_model,
+                            profile_name=_resolved_profile_name,
                         )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
@@ -9486,9 +9510,19 @@ def _run_agent_streaming(
                             resolved_base_url = _runtime_preferred_base_url(
                                 _heal_rt, resolved_provider, configured_base_url
                             )
-                            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                                resolved_provider, resolved_api_key, resolved_base_url
-                            )
+                            from api import profiles as profiles_api
+
+                            with profiles_api.profile_scope_for_detached_worker(
+                                _resolved_profile_name,
+                                "credential self-heal custom provider",
+                                logger_override=logger,
+                            ):
+                                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                                    resolved_provider,
+                                    resolved_api_key,
+                                    resolved_base_url,
+                                    config_data=_model_resolution_cfg,
+                                )
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
@@ -10706,6 +10740,7 @@ def _run_agent_streaming(
                 _heal_rt = _attempt_credential_self_heal(
                     resolved_provider or '', session_id, _agent_lock,
                     target_model=resolved_model,
+                    profile_name=_resolved_profile_name,
                 )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
@@ -10718,9 +10753,19 @@ def _run_agent_streaming(
                     resolved_base_url = _runtime_preferred_base_url(
                         _heal_rt, resolved_provider, configured_base_url
                     )
-                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url
-                    )
+                    from api import profiles as profiles_api
+
+                    with profiles_api.profile_scope_for_detached_worker(
+                        _resolved_profile_name,
+                        "credential self-heal custom provider",
+                        logger_override=logger,
+                    ):
+                        resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                            resolved_provider,
+                            resolved_api_key,
+                            resolved_base_url,
+                            config_data=_model_resolution_cfg,
+                        )
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
                     _heal_kwargs['api_key'] = resolved_api_key

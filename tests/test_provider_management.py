@@ -5,7 +5,9 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import os
 import sys
+import threading
 import types
 import urllib.error
 import urllib.request
@@ -87,7 +89,7 @@ class TestGetProviders:
         monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
         monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
 
-        def _counting_has_key(pid):
+        def _counting_has_key(pid, _config_data=None):
             calls.append(pid)
             return False
 
@@ -119,7 +121,11 @@ class TestGetProviders:
         monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
         monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
         monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
-        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: active_home["path"] == home_b)
+        monkeypatch.setattr(
+            prov,
+            "_provider_has_key",
+            lambda _pid, _config_data=None: active_home["path"] == home_b,
+        )
 
         try:
             first = prov.get_providers()
@@ -147,9 +153,13 @@ class TestGetProviders:
         monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset())
         monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: set())
         monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
-        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: key_present["value"])
+        monkeypatch.setattr(
+            prov,
+            "_provider_has_key",
+            lambda _pid, _config_data=None: key_present["value"],
+        )
 
-        def _fake_write_env_file(_path, values):
+        def _fake_write_env_file(_path, values, **_kwargs):
             key_present["value"] = bool(values.get("ANTHROPIC_API_KEY"))
 
         monkeypatch.setattr(prov, "_write_env_file", _fake_write_env_file)
@@ -236,7 +246,7 @@ class TestGetProviders:
         try:
             result = get_providers()
             for p in result["providers"]:
-                assert "id" in p, f"Missing 'id' in provider entry"
+                assert "id" in p, "Missing 'id' in provider entry"
                 assert "display_name" in p, f"Missing 'display_name' for {p['id']}"
                 assert "has_key" in p, f"Missing 'has_key' for {p['id']}"
                 assert "configurable" in p, f"Missing 'configurable' for {p['id']}"
@@ -395,6 +405,264 @@ class TestSetProviderKey:
             config.cfg.clear()
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
+
+    def test_named_profile_key_write_does_not_mutate_process_env(self, monkeypatch, tmp_path):
+        """Saving/removing a non-process-active profile key must not replace live env."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        work_home = base / "profiles" / "work"
+        work_home.mkdir(parents=True)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(profiles, "_active_profile", "default")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "default-process-key")
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api import providers as prov
+        from api.providers import set_provider_key
+        profiles.set_request_profile("work")
+        try:
+            result = set_provider_key("anthropic", "sk-ant-work-key-12345678")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "default-process-key"
+            work_env = work_home.joinpath(".env")
+            assert prov._load_env_file(work_env)["ANTHROPIC_API_KEY"] == (
+                "sk-ant-work-key-12345678"
+            )
+
+            removed = set_provider_key("anthropic", None)
+            assert removed["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "default-process-key"
+            assert "ANTHROPIC_API_KEY" not in prov._load_env_file(work_env)
+        finally:
+            profiles.clear_request_profile()
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_default_profile_key_write_does_not_mutate_named_process_env(self, monkeypatch, tmp_path):
+        """A default-profile request must not replace a named process profile's live key."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        work_home = base / "profiles" / "work"
+        work_home.mkdir(parents=True)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(profiles, "_active_profile", "work")
+        monkeypatch.setenv("HERMES_HOME", str(work_home))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "work-process-key")
+
+        from api import providers as prov
+
+        profiles.set_request_profile("default")
+        try:
+            result = prov.set_provider_key("anthropic", "sk-ant-default-key-12345678")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "work-process-key"
+            root_env = base.joinpath(".env")
+            assert prov._load_env_file(root_env)["ANTHROPIC_API_KEY"] == (
+                "sk-ant-default-key-12345678"
+            )
+
+            removed = prov.set_provider_key("anthropic", None)
+            assert removed["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "work-process-key"
+            assert "ANTHROPIC_API_KEY" not in prov._load_env_file(root_env)
+        finally:
+            profiles.clear_request_profile()
+
+    def test_process_active_named_profile_key_write_mutates_process_env(self, monkeypatch, tmp_path):
+        """A request targeting the process-active named profile updates live env on set/remove."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        work_home = base / "profiles" / "work"
+        work_home.mkdir(parents=True)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(profiles, "_active_profile", "work")
+        monkeypatch.setenv("HERMES_HOME", str(work_home))
+
+        from api import providers as prov
+
+        profiles.set_request_profile("work")
+        try:
+            result = prov.set_provider_key("anthropic", "sk-ant-work-key-23456789")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-work-key-23456789"
+
+            removed = prov.set_provider_key("anthropic", None)
+            assert removed["ok"] is True
+            assert "ANTHROPIC_API_KEY" not in os.environ
+            assert "ANTHROPIC_API_KEY" not in prov._load_env_file(work_home.joinpath(".env"))
+        finally:
+            profiles.clear_request_profile()
+
+    def test_root_alias_provider_key_write_mutates_process_env_when_process_root(self, monkeypatch, tmp_path):
+        """Renamed-root aliases are the same authority as default for live key writes."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        base.mkdir()
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in {"default", "kinni"})
+        monkeypatch.setattr(profiles, "_active_profile", "default")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+
+        from api import providers as prov
+
+        profiles.set_request_profile("kinni")
+        try:
+            result = prov.set_provider_key("anthropic", "sk-ant-root-key-12345678")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-root-key-12345678"
+
+            removed = prov.set_provider_key("anthropic", None)
+            assert removed["ok"] is True
+            assert "ANTHROPIC_API_KEY" not in os.environ
+        finally:
+            profiles.clear_request_profile()
+
+    def test_renamed_root_request_does_not_mutate_named_process_env(self, monkeypatch, tmp_path):
+        """A renamed-root request must not mutate a live non-root process profile."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        base.mkdir()
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(
+            profiles,
+            "_is_root_profile",
+            lambda name: name in {"default", "renamed"},
+        )
+        monkeypatch.setattr(profiles, "_active_profile", "work")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "work-process-key")
+
+        from api import providers as prov
+
+        profiles.set_request_profile("renamed")
+        try:
+            result = prov.set_provider_key("anthropic", "sk-ant-root-request-key-12345678")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "work-process-key"
+            assert "ANTHROPIC_API_KEY" in prov._load_env_file(base.joinpath(".env"))
+            assert prov._load_env_file(base.joinpath(".env"))["ANTHROPIC_API_KEY"] == (
+                "sk-ant-root-request-key-12345678"
+            )
+        finally:
+            profiles.clear_request_profile()
+
+    def test_provider_key_write_fails_closed_when_profile_ownership_errors(self, monkeypatch, tmp_path):
+        """Ownership uncertainty still persists the file but must not touch live env."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        base.mkdir()
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(profiles, "_active_profile", "default")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "server-process-key")
+
+        def _boom(_row_profile, _active_profile):
+            raise RuntimeError("profile ownership unavailable")
+
+        monkeypatch.setattr(profiles, "_profiles_match", _boom)
+
+        from api import providers as prov
+
+        profiles.set_request_profile("default")
+        try:
+            result = prov.set_provider_key("anthropic", "sk-ant-default-key-87654321")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "server-process-key"
+            assert prov._load_env_file(base.joinpath(".env"))["ANTHROPIC_API_KEY"] == (
+                "sk-ant-default-key-87654321"
+            )
+        finally:
+            profiles.clear_request_profile()
+
+    def test_provider_key_write_and_process_switch_share_live_env_lock(self, monkeypatch, tmp_path):
+        """Process-wide switching cannot interleave after ownership and before env mutation."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        work_home = base / "profiles" / "work"
+        work_home.mkdir(parents=True)
+        work_home.joinpath(".env").write_text(
+            "ANTHROPIC_API_KEY=work-process-key\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+        monkeypatch.setattr(profiles, "_active_profile", "default")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "default-process-key")
+        monkeypatch.setattr(config, "STREAMS", {}, raising=False)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        from api import providers as prov
+
+        env_file = base.joinpath(".env")
+        ownership_entered = threading.Event()
+        release_writer = threading.Event()
+        switch_done = threading.Event()
+        errors = []
+
+        def gated_live_env_decision():
+            allowed = prov._provider_key_write_updates_process_env()
+            ownership_entered.set()
+            if not release_writer.wait(timeout=2):
+                raise AssertionError("writer gate was not released")
+            return allowed
+
+        def write_key():
+            try:
+                prov._write_env_file(
+                    env_file,
+                    {"ANTHROPIC_API_KEY": "sk-ant-default-key-12345678"},
+                    update_process_env=gated_live_env_decision,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        def switch_to_work():
+            try:
+                profiles.switch_profile("work", process_wide=True)
+                switch_done.set()
+            except BaseException as exc:
+                errors.append(exc)
+
+        writer = threading.Thread(target=write_key)
+        writer.start()
+        assert ownership_entered.wait(timeout=2)
+        switcher = threading.Thread(target=switch_to_work)
+        switcher.start()
+        assert not switch_done.wait(timeout=0.1)
+        release_writer.set()
+        writer.join(timeout=2)
+        switcher.join(timeout=2)
+
+        assert not writer.is_alive()
+        assert not switcher.is_alive()
+        assert errors == []
+        assert prov._load_env_file(env_file)["ANTHROPIC_API_KEY"] == (
+            "sk-ant-default-key-12345678"
+        )
+        assert profiles._active_profile == "work"
+        assert os.environ["ANTHROPIC_API_KEY"] == "work-process-key"
 
     def test_oauth_provider_rejected(self, monkeypatch, tmp_path):
         """Setting a key for an OAuth provider should fail."""
