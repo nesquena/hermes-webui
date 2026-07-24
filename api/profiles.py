@@ -2652,6 +2652,21 @@ def delete_profile_api(name: str) -> dict:
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
 
+    try:
+        from api import auth as _auth
+
+        _auth._assert_profile_delete_has_no_active_trusted_binding(name)
+    except RuntimeError:
+        raise
+    except Exception:
+        logger.debug(
+            "Could not validate trusted profile deletion dependencies",
+            exc_info=True,
+        )
+        raise RuntimeError(
+            "Cannot validate trusted auth dependencies for profile deletion"
+        ) from None
+
     # Browser profile switches are per-request cookie/TLS scoped. If the browser
     # deletes its current profile, hand it back to default in the same response so
     # the next request does not carry a now-unknown HttpOnly cookie.
@@ -2676,13 +2691,7 @@ def delete_profile_api(name: str) -> dict:
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:
-            raise ValueError(f"Profile '{name}' does not exist.")
-    try:
-        from api import auth as _auth
-        _auth.clear_trusted_session_bindings_for_deleted_profile(name)
-    except Exception:
-        logger.debug("Could not clear trusted session bindings for deleted profile", exc_info=True)
-
+            raise ValueError(f"Profile '{name}' does not exist.") from None
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()

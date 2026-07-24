@@ -809,6 +809,92 @@ def session_bound_profile(cookie_value: str) -> str | None:
     return bound_profile or None
 
 
+def _trusted_session_bound_profile(record: object) -> str | None:
+    """Return the profile bound to a persisted session record.
+
+    Trusted session cleanup checks both the newer ``bound_profile`` field and the
+    legacy ``profile`` field so stale records are discovered regardless of
+    historical key shape.
+    """
+    if not isinstance(record, dict):
+        return None
+    bound_profile = record.get('bound_profile')
+    if not bound_profile:
+        bound_profile = record.get('profile')
+    bound_profile = str(bound_profile or '').strip()
+    return bound_profile or None
+
+
+def _assert_profile_delete_has_no_active_trusted_binding(target_profile: str) -> None:
+    """Fail-closed guard for destructive profile deletions.
+
+    Prevents deletion when any trusted session authority still points at the
+    candidate profile, including legacy session records and trusted group policy
+    bindings.
+    """
+    try:
+        from api import profiles as _profiles
+    except Exception as exc:
+        logger.debug(
+            "Could not load profile helpers while validating trusted profile delete",
+            exc_info=exc,
+        )
+        raise RuntimeError(
+            "Cannot validate trusted-session bindings for profile deletion"
+        ) from None
+
+    target = str(target_profile or '').strip()
+    if not target:
+        return
+
+    def _matches_target(candidate: str | None) -> bool:
+        if not candidate:
+            return False
+        return _profiles._profiles_match(candidate, target)
+
+    try:
+        with _SESSIONS_LOCK:
+            for _token, record in list(_sessions.items()):
+                if not isinstance(record, dict):
+                    continue
+                auth_type = str(record.get('auth_type') or '').strip()
+                if auth_type and auth_type != 'trusted':
+                    continue
+                bound_profile = _trusted_session_bound_profile(record)
+                if _matches_target(bound_profile):
+                    raise RuntimeError(
+                        "Profile is bound to an active trusted session"
+                    )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.debug(
+            "Could not verify trusted-session bindings for profile deletion",
+            exc_info=exc,
+        )
+        raise RuntimeError(
+            "Cannot validate trusted-session bindings for profile deletion"
+        ) from None
+
+    try:
+        mapping = _trusted_group_profile_map()
+    except Exception as exc:
+        logger.debug(
+            "Could not parse trusted-group profile map while validating deletion",
+            exc_info=exc,
+        )
+        raise RuntimeError(
+            "Cannot validate trusted group-policy bindings for profile deletion"
+        ) from None
+
+    if mapping:
+        for mapped_profile in mapping.values():
+            if _matches_target(str(mapped_profile or '').strip()):
+                raise RuntimeError(
+                    "Profile is bound by trusted group policy"
+                )
+
+
 def clear_trusted_session_bindings_for_deleted_profile(profile_name: str) -> int:
     """Clear trusted-session profile bindings that point at a deleted profile.
 
@@ -834,7 +920,10 @@ def clear_trusted_session_bindings_for_deleted_profile(profile_name: str) -> int
             for token, record in list(_sessions.items()):
                 if not isinstance(record, dict):
                     continue
-                bound_profile = str(record.get('bound_profile') or '').strip()
+                auth_type = str(record.get('auth_type') or '').strip()
+                if auth_type and auth_type != 'trusted':
+                    continue
+                bound_profile = _trusted_session_bound_profile(record)
                 if not bound_profile:
                     continue
                 if not _profiles._profiles_match(bound_profile, target_profile):
