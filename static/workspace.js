@@ -493,8 +493,20 @@ function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
   const name=String(tc.name||'').replace(/^functions\./,'');
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
-  const args=tc.arguments||tc.args||tc.input||{};
-  if(!args||typeof args!=='object') return [];
+  let args=tc.arguments||tc.args||tc.input||{};
+  if(typeof args==='string'){
+    try{args=JSON.parse(args);}catch(_){args={};}
+  }
+  if(!args||typeof args!=='object') args={};
+  let result=null;
+  for(const candidate of [tc.result,tc.output,tc.snippet,tc.preview]){
+    if(!candidate) continue;
+    if(typeof candidate==='object'){ result=candidate; break; }
+    if(typeof candidate==='string'){
+      try{ result=JSON.parse(candidate); break; }catch(_){}
+    }
+  }
+  if(result&&typeof result==='object'&&result.success===false) return [];
   const seen=new Set();
   const out=[];
   const add=candidate=>{
@@ -506,6 +518,13 @@ function turnArtifactReferencesFromToolCall(tc){
   for(const key of ['path','file_path','source','destination']) add(args[key]);
   if(Array.isArray(args.paths)) args.paths.forEach(add);
   if(Array.isArray(args.edits)) args.edits.forEach(edit=>add(edit&&edit.path));
+  // Patch tools may return their changed paths in structured JSON rather than
+  // repeat a single argument path. Never mine unified-diff text or prose.
+  if(result&&typeof result==='object'){
+    for(const key of ['resolved_path','path','file_path','destination']) add(result[key]);
+    if(Array.isArray(result.files_modified)) result.files_modified.forEach(item=>add(item&&typeof item==='object'?item.path:item));
+    if(Array.isArray(result.files_created)) result.files_created.forEach(item=>add(item&&typeof item==='object'?item.path:item));
+  }
   return out;
 }
 
@@ -644,6 +663,10 @@ async function _workspacePathExists(path){
 
 async function openArtifactPath(path){
   if(!path) return;
+  // Artifact links are an explicit request to inspect a file. A closed
+  // workspace panel must expand before openFile paints the preview, otherwise
+  // the file is selected behind an invisible right-hand column.
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   switchWorkspacePanelTab('files');
   let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.

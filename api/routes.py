@@ -8686,6 +8686,126 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
+_TURN_ARTIFACT_MUTATION_TOOLS = frozenset(
+    {
+        "write_file",
+        "patch",
+        "edit_file",
+        "create_file",
+        "mcp_filesystem_write_file",
+        "mcp_filesystem_edit_file",
+    }
+)
+
+
+def _turn_artifact_paths_from_tool_result(message) -> list[str]:
+    """Return successful structured mutation paths from one transcript tool row."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
+        return []
+    name = str(message.get("name") or message.get("tool_name") or "").removeprefix("functions.")
+    if name not in _TURN_ARTIFACT_MUTATION_TOOLS or message.get("is_error") is True:
+        return []
+    result = message.get("content", message.get("result", message.get("output")))
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(result, dict) or result.get("success") is False:
+        return []
+    candidates = [result.get(key) for key in ("resolved_path", "path", "file_path", "destination")]
+    candidates.extend(result.get("files_modified") or [])
+    candidates.extend(result.get("files_created") or [])
+    paths = []
+    seen = set()
+    for candidate in candidates:
+        value = candidate.get("path") if isinstance(candidate, dict) else candidate
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            paths.append(value)
+    return paths
+
+
+def _final_turn_artifact_paths(messages) -> dict[int, list[str]]:
+    """Return successful mutation paths keyed by each turn's final answer index."""
+    source = list(messages or [])
+    paths_by_final_index = {}
+    user_indexes = [idx for idx, message in enumerate(source) if isinstance(message, dict) and message.get("role") == "user"]
+    for position, turn_start in enumerate(user_indexes):
+        turn_end = user_indexes[position + 1] if position + 1 < len(user_indexes) else len(source)
+        final_idx = next(
+            (
+                idx
+                for idx in range(turn_end - 1, turn_start, -1)
+                if isinstance(source[idx], dict)
+                and source[idx].get("role") == "assistant"
+                and str(source[idx].get("content") or "").strip()
+            ),
+            None,
+        )
+        if final_idx is None:
+            continue
+        paths = []
+        seen = set()
+        for message in source[turn_start + 1 : final_idx]:
+            for path in _turn_artifact_paths_from_tool_result(message):
+                if path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+        if not paths:
+            continue
+        paths_by_final_index[final_idx] = paths
+    return paths_by_final_index
+
+
+def _artifact_only_anchor_scene(message, paths) -> dict:
+    """Build the smallest activity_scene_v1 projection for replayed artifact evidence."""
+    return {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {"source_message_refs": [_assistant_anchor_scene_message_ref(message)]},
+        "lifecycle": {},
+        "final_answer": _anchor_scene_message_text(message),
+        "final_message_ref": _assistant_anchor_scene_message_ref(message),
+        "terminal_state": None,
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+    }
+
+
+def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_index, *, message_offset=0) -> list:
+    """Merge transcript-derived artifact evidence into the existing Anchor projection."""
+    if not isinstance(messages, list) or not isinstance(paths_by_final_index, dict):
+        return messages
+    out = list(messages)
+    for local_idx, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        paths = paths_by_final_index.get(int(message_offset or 0) + local_idx)
+        if not paths:
+            continue
+        scene = message.get("_anchor_activity_scene")
+        next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message, paths)
+        artifacts = list(next_scene.get("artifacts") or [])
+        seen = {
+            str((artifact.get("payload") or {}).get("path") or "")
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+        }
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            artifacts.append({"type": "artifact_reference", "payload": {"path": path, "source": "transcript_replay"}})
+        next_scene["artifacts"] = artifacts
+        next_message = dict(message)
+        next_message["_anchor_activity_scene"] = next_scene
+        out[local_idx] = next_message
+    return out
+
+
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -12737,6 +12857,7 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
+                _final_turn_artifacts = _final_turn_artifact_paths(_all_msgs)
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
                     msg_limit=msg_limit,
@@ -12750,6 +12871,11 @@ def handle_get(handler, parsed) -> bool:
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
                     tool_calls=getattr(s, "tool_calls", None),
+                )
+                _truncated_msgs = _attach_replayed_turn_artifacts_to_anchor_scenes(
+                    _truncated_msgs,
+                    _final_turn_artifacts,
+                    message_offset=_messages_offset,
                 )
             else:
                 _truncated_msgs = []

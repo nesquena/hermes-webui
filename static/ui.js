@@ -13639,10 +13639,14 @@ function _turnArtifactEntriesFromScene(scene){
   }
   return entries;
 }
-function _renderTurnArtifactListForMessage(message, segment){
-  if(!message||!message._anchor_activity_scene||!segment) return false;
+function _turnArtifactEntriesForMessage(message, rawIdx){
+  void rawIdx;
+  return _turnArtifactEntriesFromScene(message&&message._anchor_activity_scene);
+}
+function _renderTurnArtifactListForMessage(message, segment, rawIdx){
+  if(!message||!segment) return false;
   segment.querySelectorAll(':scope > [data-turn-artifact-list="1"]').forEach(node=>node.remove());
-  const entries=_turnArtifactEntriesFromScene(message._anchor_activity_scene);
+  const entries=_turnArtifactEntriesForMessage(message,rawIdx);
   if(!entries.length) return false;
   const list=document.createElement('div');
   list.className='turn-artifact-list';
@@ -16888,9 +16892,11 @@ function renderMessages(options){
   }
   for(const [rawIdx,seg] of assistantSegments){
     const msg=S.messages[rawIdx];
-    if(msg&&msg._anchor_activity_scene){
-      _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
-      _renderTurnArtifactListForMessage(msg, seg);
+    if(msg){
+      if(msg._anchor_activity_scene){
+        _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
+      }
+      _renderTurnArtifactListForMessage(msg, seg, rawIdx);
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
