@@ -18248,12 +18248,10 @@ function clearLiveToolCards(){
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
-  // Legacy #liveToolCards container cleanup — kept for safety in case any
-  // leftover cards were inserted there before this refactor took effect.
-  if(!preserveDom){
-    const container=$('liveToolCards');
-    if(container){container.innerHTML='';container.style.display='none';}
-  }
+  // Legacy #liveToolCards container cleanup (sibling to the settled-rendered
+  // subtree). Always clear/hide it to avoid leaking stale fallback content.
+  const container=$('liveToolCards');
+  if(container){container.innerHTML='';container.style.display='none';}
 }
 function _hideLiveActivityForFinalAnswerOnly(){
   clearLiveToolCards();

@@ -240,9 +240,9 @@ def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
         globalThis.$ = (id) => id === 'liveAssistantTurn' ? {{}} : id === 'liveToolCards' ? legacy : null;
         {clear_live}
         clearLiveToolCards({{preserveDom: true}});
-        const preserved = {{removed, timerClears, intentClears, legacy: legacy.innerHTML}};
+        const preserved = {{removed, timerClears, intentClears, legacy: legacy.innerHTML, legacyDisplay: legacy.style.display}};
         clearLiveToolCards();
-        const defaultCleared = {{removed, timerClears, intentClears, legacy: legacy.innerHTML}};
+        const defaultCleared = {{removed, timerClears, intentClears, legacy: legacy.innerHTML, legacyDisplay: legacy.style.display}};
         console.log(JSON.stringify({{preserved, defaultCleared}}));
     """)
     res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
@@ -252,10 +252,12 @@ def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
         "removed": 0,
         "timerClears": 1,
         "intentClears": 1,
-        "legacy": "legacy",
+        "legacy": "",
+        "legacyDisplay": "none",
     }, "preserveDom cleanup must leave the live worklog visible until the settled render replaces it"
     assert out["defaultCleared"]["removed"] == 2, "error/cancel cleanup must still remove live rows"
     assert out["defaultCleared"]["legacy"] == "", "default cleanup must still clear the legacy container"
+    assert out["defaultCleared"]["legacyDisplay"] == "none", "legacy cleanup must hide the container"
     assert "clearLiveToolCards({preserveDom:true})" in done, (
         "the normal done handler must preserve the visible live Worklog until its "
         "settled transcript render replaces it"
