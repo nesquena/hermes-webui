@@ -1707,6 +1707,42 @@ def test_gateway_save_failure_producers_emit_bounded_recovery_rows(
         assert f"event: {event_name}\n" in body
 
 
+def test_gateway_terminal_error_save_failure_is_marked_unsaved(monkeypatch, tmp_path):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.streaming as streaming
+
+    session = models.Session(
+        session_id="gateway_terminal_error_save_failed",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=[{"role": "user", "content": "prompt"}],
+        context_messages=[],
+    )
+    session.active_stream_id = "gateway_terminal_error_stream"
+
+    def _fail_save(*_args, **_kwargs):
+        raise OSError("forced gateway terminal error save failure")
+
+    session.save = _fail_save
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        session.active_stream_id,
+        str(tmp_path),
+        "gpt-4o",
+        "openai",
+        "gateway exploded",
+    )
+
+    assert payload["terminal_session_persisted"] is False
+    assert "terminal_session_persisted_session_id" not in payload
+
+
 def test_replay_run_journal_reads_suffix_after_default_row_cap(tmp_path, monkeypatch):
     import api.run_journal as run_journal
     import api.routes as routes

@@ -546,6 +546,53 @@ def test_run_journal_consumes_legacy_overcap_terminal_row_and_continues(tmp_path
     assert journal["events"][1]["event"] == "stream_end"
 
 
+def test_run_journal_legacy_overcap_terminal_respects_exhausted_row_cap(tmp_path):
+    session_id = "session_legacy_overcap_row_cap"
+    run_id = "run_legacy_overcap_row_cap"
+    path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+    path.parent.mkdir(parents=True)
+    ordinary = {
+        "version": 1,
+        "event_id": f"{run_id}:1",
+        "seq": 1,
+        "run_id": run_id,
+        "session_id": session_id,
+        "event": "token",
+        "type": "token",
+        "payload": {"text": "first"},
+    }
+    oversized_terminal = {
+        "version": 1,
+        "event_id": f"{run_id}:2",
+        "seq": 2,
+        "run_id": run_id,
+        "session_id": session_id,
+        "event": "done",
+        "type": "done",
+        "terminal": True,
+        "terminal_state": "completed",
+        "payload": {"session": {"session_id": session_id, "messages": [{"content": "x" * 1000}]}},
+    }
+    path.write_text(
+        json.dumps(ordinary, separators=(",", ":")) + "\n"
+        + json.dumps(oversized_terminal, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    journal = read_run_events(
+        session_id,
+        run_id,
+        session_dir=tmp_path,
+        max_bytes=512,
+        max_rows=1,
+    )
+
+    assert [event["seq"] for event in journal["events"]] == [1]
+    assert journal["complete"] is False
+    assert journal["limit_reason"] == "replay_limit_rows"
+    assert journal["malformed"] == [{"line": 2, "reason": "replay_limit_rows"}]
+
+
 def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
     path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"
     path.parent.mkdir(parents=True)

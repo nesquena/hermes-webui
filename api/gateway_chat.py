@@ -758,14 +758,19 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.workspace = str(workspace)
         session.model = model
         session.model_provider = model_provider
+        terminal_session_persisted = False
         try:
             session.save()
+            terminal_session_persisted = True
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
         error_payload["session"] = redact_session_data(
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
+        error_payload["terminal_session_persisted"] = terminal_session_persisted
+        if terminal_session_persisted:
+            error_payload["terminal_session_persisted_session_id"] = session.session_id
     return error_payload
 
 

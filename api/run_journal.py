@@ -1510,6 +1510,11 @@ def read_run_events(
                 and byte_cap is not None
                 and emitted_bytes + len(raw_bytes) > byte_cap
             ):
+                if row_cap is not None and emitted_rows >= row_cap:
+                    limit_reason = "replay_limit_rows"
+                    malformed.append({"line": line_no, "reason": limit_reason})
+                    complete = False
+                    break
                 recovered = _legacy_overcap_terminal_event(
                     raw_bytes,
                     session_id=str(session_id),

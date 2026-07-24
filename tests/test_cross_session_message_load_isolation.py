@@ -702,12 +702,47 @@ async function runNewSessionSupersedesOldForceReload() {
   };
 }
 
+async function runSidebarLoadSupersedesPendingNewSession() {
+  createEnvironment();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  S.session = { session_id: 'sid-seed', message_count: 1, active_stream_id: null };
+  S.messages = [{ role: 'assistant', content: 'seed' }];
+  const calls = {
+    newSession: apiHost.enqueue('/api/session/new'),
+    atlasMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    atlasMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+  };
+
+  const creating = newSession(false, {});
+  await waitForQueued(apiHost, calls.newSession.url);
+  const loading = loadSession('sid-atlas', { force: true });
+  await waitForQueued(apiHost, calls.atlasMeta.url);
+  calls.atlasMeta._resolve(API_ATLAS_META);
+  await waitForQueued(apiHost, calls.atlasMsgs.url);
+  calls.atlasMsgs._resolve(API_ATLAS_MSGS);
+  await loading;
+
+  calls.newSession._resolve(API_NEW_SESSION);
+  await creating;
+
+  return {
+    scenario: 'sidebar-load-supersedes-pending-new-session',
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    apiCalls: apiHost.apiCalls.slice(),
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
     newSessionSupersedesOldForceReload: await runNewSessionSupersedesOldForceReload(),
+    sidebarLoadSupersedesPendingNewSession: await runSidebarLoadSupersedesPendingNewSession(),
   };
 }
 
@@ -841,6 +876,14 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     )
     assert new_session["staleMessagesFetched"] is False, (
         "stale old force reload should stop at metadata ownership check"
+    )
+
+    sidebar_new_session = body["sidebarLoadSupersedesPendingNewSession"]
+    assert sidebar_new_session["finalSid"] == "sid-atlas", (
+        "a newer sidebar selection must remain active when an older New Chat POST resolves"
+    )
+    assert sidebar_new_session["messages"] == ["new-active-transcript"], (
+        "stale New Chat response must not replace the selected sidebar transcript"
     )
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
