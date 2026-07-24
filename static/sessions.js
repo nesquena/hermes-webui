@@ -5283,12 +5283,46 @@ function _syncSessionAttentionSoundState(sessions){
   }
   next.forEach((sig,sid)=>{
     const prev=_sessionAttentionSoundState.get(sid);
-    if(prev!==sig){
-      const [kind,countRaw]=String(sig).split(':');
-      const count=Number(countRaw)||1;
+    const [kind,countRaw]=String(sig).split(':');
+    const count=Number(countRaw)||1;
+    const retry=window._attentionNotificationRetryKeys;
+    const retryState=retry instanceof Map?retry.get(sid):null;
+    const retryKey=typeof retryState==='string'?retryState:(retryState&&retryState.key);
+    const retryAttempts=typeof retryState==='string'?1:Number(retryState&&retryState.attempts)||0;
+    const retryKeyForSignature=typeof _attentionSoundKey==='function'
+      ?_attentionSoundKey(sid,kind,count):`${sid}:${sig}`;
+    if(prev!==sig&&retry instanceof Map&&retryKey!==retryKeyForSignature) retry.delete(sid);
+    const shouldRetry=typeof _attentionSoundKey==='function'
+      &&retryKey===_attentionSoundKey(sid,kind,count)
+      &&(retryAttempts===1
+        ||(typeof _attentionRetryEligible==='function'&&_attentionRetryEligible(sid,kind,count)));
+    if(prev!==sig||shouldRetry){
       const s=(Array.isArray(sessions)?sessions:[]).find(item=>item&&item.session_id===sid)||{session_id:sid};
       const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;
       if(playKey&&typeof playAttentionSound==='function') playAttentionSound(playKey);
+      // Pair the audio cue with a background system notification so a
+      // minimized/backgrounded PWA still surfaces a NON-active session that
+      // needs attention. The active session's own approval/clarify SSE
+      // handlers already notify, so skip it here to avoid a double alert.
+      // sendBrowserNotification self-gates to hidden tabs and honors the
+      // user's notification setting, matching every other audio cue.
+      try{
+        const _activeSid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+        if(sig&&sid!==_activeSid&&typeof sendBrowserNotification==='function'
+          &&typeof _hasAttentionNotificationKey==='function'
+          &&typeof _deliverAttentionNotification==='function'
+          &&!_hasAttentionNotificationKey(s.session_id,kind,count)){
+          const _title=kind==='approval'?'Waiting for permission decision'
+            :(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
+          const _body=(s&&s.title)?String(s.title):'A background session needs you';
+          _deliverAttentionNotification(s.session_id,kind,count,_title,_body);
+        }
+      }catch(_e){}
+    }
+  });
+  _sessionAttentionSoundState.forEach((_sig,sid)=>{
+    if(!next.has(sid)&&typeof _clearAttentionNotificationKey==='function'){
+      _clearAttentionNotificationKey(sid);
     }
   });
   _sessionAttentionSoundState.clear();
@@ -5719,14 +5753,22 @@ function _refreshSessionListAfterSidebarResume(reason){
   void refreshSessionList(reason, {force:true});
 }
 
+let _hiddenAttentionPollTick = 0;
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
-    // Skip while the tab is hidden: this poll fetches /api/sessions and rebuilds
-    // the sidebar, work the user cannot see. The visibilitychange handler below
-    // brings the list current the moment the tab is shown again, so no update is
-    // lost — the background tab just stops burning network + DOM churn.
-    if(typeof document !== 'undefined' && document.hidden) return;
+    // While the tab is hidden this poll normally pauses (the user cannot see
+    // the sidebar; visibilitychange refreshes on return). But when browser
+    // notifications are enabled, attention that APPEARS while hidden must
+    // still be discovered (gate follow-up #1) -- so keep a reduced-cadence
+    // observation path alive (every 3rd tick) instead of going fully dark.
+    if(typeof document !== 'undefined' && document.hidden){
+      if(!window._notificationsEnabled) return;
+      _hiddenAttentionPollTick = (Number(_hiddenAttentionPollTick)||0) + 1;
+      if(_hiddenAttentionPollTick % 3 !== 0) return;
+    } else {
+      _hiddenAttentionPollTick = 0;
+    }
     void renderSessionList({deferWhileInteracting:true});
   }, _streamingPollMs);
   if(typeof document !== 'undefined' && !_streamingPollVisibilityHandler){

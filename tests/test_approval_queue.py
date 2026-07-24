@@ -129,6 +129,7 @@ def test_chat_stream_approval_listener_renders_received_count():
     function playAttentionSound() {{}}
     function _attentionSoundKey() {{ return 'approval'; }}
     function sendBrowserNotification() {{}}
+    function _deliverAttentionNotification() {{}}
     {listener}
     source.listeners.approval({{ data: JSON.stringify({{command: 'head', approval_id: 'a', pending_count: 2}}) }});
     process.stdout.write(JSON.stringify(rendered));
