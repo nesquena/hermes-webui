@@ -752,13 +752,13 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
     )
 
 
-def _save_webui_deleted_session_tombstone(ids) -> None:
+def _save_webui_deleted_session_tombstone(ids) -> bool:
     try:
         sorted_ids = sorted(set(
             str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
         ))
     except TypeError:
-        return
+        return False
     if len(sorted_ids) > WEBUI_DELETED_SESSION_TOMBSTONE_CAP:
         sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
     payload = {
@@ -777,6 +777,8 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, p)
+        _fsync_composer_draft_directory(SESSION_DIR)
+        return True
     except Exception:
         logger.debug("Failed to save webui deleted-session tombstone", exc_info=True)
         if _tmp is not None:
@@ -784,18 +786,19 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        return False
 
 
-def _record_webui_deleted_session_tombstone(sid: str) -> None:
+def _record_webui_deleted_session_tombstone(sid: str) -> bool:
     sid = str(sid or "").strip()
     if not sid:
-        return
+        return False
     with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
         current = set(_load_webui_deleted_session_tombstone())
         if sid in current:
-            return
+            return True
         current.add(sid)
-        _save_webui_deleted_session_tombstone(current)
+        return _save_webui_deleted_session_tombstone(current)
 
 
 def _clear_webui_deleted_session_tombstone(sid: str) -> None:
@@ -1751,9 +1754,26 @@ class Session:
         with _session_save_lock(self.session_id):
             self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
 
-    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def _save_locked(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        allow_deleted_session_restore: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        # Session deletion records a durable tombstone while holding this same
+        # save stripe. A stale Session object queued behind deletion must not
+        # recreate its owner file after the delete endpoint has acknowledged
+        # success. Fresh sessions receive new IDs; explicit recovery paths own
+        # tombstone clearing before they persist a restored owner.
+        if (
+            not allow_deleted_session_restore
+            and not self.path.exists()
+            and self.session_id in _load_webui_deleted_session_tombstone()
+        ):
+            raise RuntimeError(f"Refusing to save deleted session {self.session_id!r}")
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial

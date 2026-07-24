@@ -353,7 +353,7 @@ function _clearComposerDraft(sid, text, files) {
     if (typeof showToast === 'function') {
       showToast('Could not clear the saved draft. It may reappear after reload.', 5000, 'warning');
     }
-    return null;
+    throw error;
   });
 }
 

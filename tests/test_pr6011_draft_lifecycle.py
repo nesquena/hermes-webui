@@ -135,6 +135,74 @@ def test_delete_restores_owner_when_authoritative_draft_unlink_fails(session_env
 
 
 
+def test_delete_without_owner_or_sidecar_is_idempotent(session_env, monkeypatch):
+    """A never-persisted session has no draft state to checkpoint before delete."""
+    response = _post_session_delete(monkeypatch, "draft-delete-never-persisted")
+
+    assert response["status"] == 200
+    assert response["payload"]["ok"] is True
+
+
+
+def test_delete_retains_owner_when_backup_unlink_fails(session_env, monkeypatch):
+    from api import models
+
+    session_dir, _sessions = session_env
+    sid = "draft-delete-backup-unlink-failure"
+    owner = models.Session(session_id=sid, title="Retain after backup failure")
+    owner.save(skip_index=True)
+    owner_path = session_dir / f"{sid}.json"
+    backup_path = owner_path.with_suffix(".json.bak")
+    backup_path.write_text(owner_path.read_text(encoding="utf-8"), encoding="utf-8")
+    original_unlink = type(backup_path).unlink
+
+    def fail_backup_unlink(path, *args, **kwargs):
+        if path == backup_path:
+            raise OSError("simulated backup unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(backup_path), "unlink", fail_backup_unlink)
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert owner_path.exists()
+    assert backup_path.exists()
+
+
+
+def test_deleted_session_rejects_stale_save(session_env, monkeypatch):
+    from api import models
+
+    session_dir, _sessions = session_env
+    sid = "draft-delete-stale-save"
+    owner = models.Session(session_id=sid, title="Must not resurrect")
+    owner.save(skip_index=True)
+
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 200
+    with pytest.raises(RuntimeError, match="deleted"):
+        owner.save(skip_index=True)
+    assert not (session_dir / f"{sid}.json").exists()
+
+
+
+def test_delete_restores_owner_when_tombstone_write_fails(session_env, monkeypatch):
+    from api import models, routes
+
+    session_dir, _sessions = session_env
+    sid = "draft-delete-tombstone-failure"
+    owner = models.Session(session_id=sid, title="Retain without tombstone")
+    owner.save(skip_index=True)
+    monkeypatch.setattr(routes, "_record_webui_deleted_session_tombstone", lambda _sid: False)
+
+    response = _post_session_delete(monkeypatch, sid)
+
+    assert response["status"] == 500
+    assert (session_dir / f"{sid}.json").exists()
+
+
+
 def test_delete_fsync_failure_after_sidecar_unlink_keeps_legacy_draft(session_env, monkeypatch):
     from api import models
 

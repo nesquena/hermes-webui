@@ -28,6 +28,49 @@ def test_clear_composer_draft_suppresses_same_session_stale_restore():
     assert "const confirmed = result && result.draft;" in clear_body
 
 
+def test_clear_composer_draft_rejects_after_terminal_retry_failure():
+    """The send-error recovery path must be able to observe a terminal clear failure."""
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    clear_fn = _block(
+        SESSIONS_JS,
+        "function _clearComposerDraft(sid, text, files)",
+        "const SESSION_VIEWED_COUNTS_KEY",
+    )
+    harness = textwrap.dedent(
+        """
+        let _draftSaveTimer = 0;
+        let warned = false;
+        function clearTimeout() {}
+        function _clearRememberedNewChatDraftSession() {}
+        function _suppressComposerDraftRestoreAfterSubmit() {}
+        function _composerDraftFilesForPersist(files) { return files || []; }
+        function _rememberComposerDraftPayloadState() {}
+        function showToast() { warned = true; }
+        function api() { return Promise.reject(new Error('terminal clear failure')); }
+
+        %(clear_fn)s
+
+        _clearComposerDraft('sid-1', 'submitted', []).then(
+          () => console.log(JSON.stringify({ fulfilled: true, warned })),
+          () => console.log(JSON.stringify({ fulfilled: false, warned })),
+        );
+        """
+    ) % {"clear_fn": clear_fn}
+    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
+    import json
+    observed = json.loads(result.stdout)
+
+    assert observed == {"fulfilled": False, "warned": True}
+
+
 def test_non_empty_draft_save_clears_submit_restore_suppression():
     save_body = _block(SESSIONS_JS, "function _saveComposerDraft(sid, text, files)", "function _composerDraftHasPayload")
     assert "_clearComposerDraftRestoreSuppression(sid);" in save_body

@@ -350,7 +350,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             )
             assert clear_idx > delete_idx, f"{label} session/delete handler boundary not found"
             delete_block = text[delete_idx:clear_idx]
-            lock_idx = delete_block.find("with get_composer_draft_lock(sid):")
+            lock_idx = delete_block.find("with get_composer_draft_lock(sid), _session_save_lock(sid):")
             draft_delete_idx = delete_block.find("delete_composer_draft_sidecar(sid)")
             prune_idx = delete_block.find("prune_session_from_index(sid)")
             assert -1 not in (lock_idx, draft_delete_idx, prune_idx), \
@@ -375,8 +375,9 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
     )
     assert clear_idx > delete_idx, "session/delete handler boundary not found"
     delete_block = routes_src[delete_idx:clear_idx]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    assert "backup_path = p.with_suffix('.json.bak')" in delete_block
+    assert "backup_path.unlink()" in delete_block, \
+        "session/delete must unlink <sid>.json.bak before acknowledging deletion"
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

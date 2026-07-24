@@ -9458,6 +9458,7 @@ from api.models import (
     write_composer_draft_sidecar,
     delete_composer_draft_sidecar,
     get_composer_draft_lock,
+    _session_save_lock,
     _fsync_composer_draft_directory,
     update_cached_composer_draft,
 )
@@ -14975,16 +14976,16 @@ def handle_post(handler, parsed) -> bool:
         # lock used by POST /api/session/draft. Whichever operation wins, the
         # final state cannot contain a draft without an owning session.
         sidecar_deleted = False
-        with get_composer_draft_lock(sid):
+        with get_composer_draft_lock(sid), _session_save_lock(sid):
             sidecar_state, _sidecar_draft = composer_draft_sidecar_state(sid)
             if sidecar_state == "unreadable":
                 return bad(handler, "Saved draft is unreadable; session was retained", 500)
             owner = None
             try:
                 owner = Session.load(sid)
-                if owner is None:
-                    raise FileNotFoundError(p)
                 if sidecar_state == "present":
+                    if owner is None:
+                        return bad(handler, "Saved draft has no session owner; session was retained", 500)
                     # A failed unlink may mean ``unlink()`` succeeded but its
                     # parent directory fsync did not. Persist the authoritative
                     # draft in the legacy owner before staging so either outcome
@@ -14998,14 +14999,16 @@ def handle_post(handler, parsed) -> bool:
             # Stage the owner under the same directory first. That lets a
             # sidecar-delete failure restore the owner atomically rather than
             # orphaning the authoritative draft after a partial delete.
-            staged_owner = p.with_name(f".{p.name}.deleting-{uuid.uuid4().hex}")
-            try:
-                os.replace(p, staged_owner)
-            except FileNotFoundError:
-                staged_owner = None
-            except Exception:
-                logger.debug("Failed to stage session file for deletion %s", p, exc_info=True)
-                return bad(handler, "Failed to remove session; saved draft was retained", 500)
+            staged_owner = None
+            if owner is not None:
+                staged_owner = p.with_name(f".{p.name}.deleting-{uuid.uuid4().hex}")
+                try:
+                    os.replace(p, staged_owner)
+                except FileNotFoundError:
+                    staged_owner = None
+                except Exception:
+                    logger.debug("Failed to stage session file for deletion %s", p, exc_info=True)
+                    return bad(handler, "Failed to remove session; saved draft was retained", 500)
             if not delete_composer_draft_sidecar(sid):
                 if staged_owner is not None:
                     try:
@@ -15014,6 +15017,20 @@ def handle_post(handler, parsed) -> bool:
                     except Exception:
                         logger.exception("Failed to restore session owner after draft-delete failure: %s", sid)
                 return bad(handler, "Failed to remove saved draft; session was retained", 500)
+            backup_path = p.with_suffix('.json.bak')
+            try:
+                if backup_path.exists():
+                    backup_path.unlink()
+                    _fsync_composer_draft_directory(SESSION_DIR)
+            except Exception:
+                logger.exception("Failed to remove session backup for %s", sid)
+                try:
+                    if staged_owner is not None:
+                        os.replace(staged_owner, p)
+                        _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore session after backup-delete failure: %s", sid)
+                return bad(handler, "Failed to remove session backup; session was retained", 500)
             try:
                 if staged_owner is not None:
                     staged_owner.unlink(missing_ok=True)
@@ -15042,24 +15059,31 @@ def handle_post(handler, parsed) -> bool:
                     logger.exception("Failed to restore session after final directory fsync failure: %s", sid)
                 return bad(handler, "Failed to finalize session deletion; session was retained", 500)
             sidecar_deleted = True
+            if not is_messaging_session and not _record_webui_deleted_session_tombstone(sid):
+                logger.error("Failed to record delete tombstone for %s", sid)
+                try:
+                    if sidecar_state == "present":
+                        write_composer_draft_sidecar(sid, _sidecar_draft)
+                    if owner is not None:
+                        owner._save_locked(
+                            touch_updated_at=False,
+                            skip_index=True,
+                            allow_deleted_session_restore=True,
+                        )
+                    _fsync_composer_draft_directory(SESSION_DIR)
+                except Exception:
+                    logger.exception("Failed to restore session after tombstone failure: %s", sid)
+                return bad(handler, "Failed to finalize session deletion; session was retained", 500)
             with LOCK:
                 SESSIONS.pop(sid, None)
             # Evict cached agent so turn count doesn't leak into a recycled session
             from api.config import _evict_session_agent
             _evict_session_agent(sid)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+
         try:
             prune_session_from_index(sid)
         except Exception:
             logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-        if sidecar_deleted and not is_messaging_session:
-            try:
-                _record_webui_deleted_session_tombstone(sid)
-            except Exception:
-                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
