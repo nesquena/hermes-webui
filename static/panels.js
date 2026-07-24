@@ -1420,10 +1420,17 @@ async function _loadRunContent(jobId, filename, runId){
           usage.textContent = usageStrip;
           body.appendChild(usage);
         }
+        // Surface a truncation notice inside the expanded view too: the server
+        // caps `content` at 512 KiB, so "View full output" shows the bounded
+        // preview, not the whole file when truncated.
+        if (data.truncated) _appendCronTruncatedNotice(body);
         btn.remove();
       };
       body.appendChild(btn);
     }
+    // When the server capped the output (truncated flag), surface a notice so the
+    // user knows the displayed content is a bounded preview, not the whole file.
+    if (data.truncated) _appendCronTruncatedNotice(body);
   } catch(e) {
     body.textContent = 'Error: ' + e.message;
   }
@@ -1956,6 +1963,23 @@ function _cronOutputSnippet(content) {
   const responseIdx = lines.findIndex(l => l.startsWith('## Response') || l.startsWith('# Response'));
   const body = (responseIdx >= 0 ? lines.slice(responseIdx + 1) : lines).join('\n').trim();
   return body.slice(0, 600) || '(empty)';
+}
+
+// Append a visible "output truncated" notice when the server capped a file
+// read at _FILE_READ_MAX_BYTES (512 KiB). Used by cron run output and skill
+// linked-file views so a bounded preview is not presented as the whole file.
+function _appendTruncatedNotice(body, labelKey, fallbackText) {
+  if (!body) return;
+  const notice = document.createElement('div');
+  notice.className = 'truncated-output-notice';
+  notice.style.cssText = 'margin-top:8px;padding:6px 10px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);font-size:12px';
+  notice.textContent = (typeof t === 'function' && t(labelKey)) || fallbackText;
+  body.appendChild(notice);
+}
+
+function _appendCronTruncatedNotice(body) {
+  _appendTruncatedNotice(body, 'cron_output_truncated_hint',
+    'Output is large; showing a bounded preview (front-matter + response). The full file is on disk.');
 }
 
 function _formatCronRunUsageStrip(usage) {
@@ -5053,6 +5077,12 @@ async function openSkillFile(skillName, filePath) {
     }
     body.innerHTML = header + content;
     body.style.display = '';
+    // Surface a truncation notice when the server capped the linked-file read
+    // (512 KiB) so a bounded preview is not presented as the whole file.
+    if (data && data.truncated) {
+      _appendTruncatedNotice(body, 'skill_file_truncated_hint',
+        'File is large; showing the first 512 KiB only.');
+    }
     const empty = $('skillDetailEmpty');
     if (empty) empty.style.display = 'none';
     body.querySelectorAll('.skill-file-back').forEach(a => {
