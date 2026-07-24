@@ -573,20 +573,48 @@ function _artifactCandidatesFromToolCall(tc){
 // by this turn.
 function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
-  const name=_artifactToolName(tc.name);
-  if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
+  const artifactScalarString = typeof _artifactScalarString === 'function'
+    ? _artifactScalarString
+    : (value) => (typeof value === 'string' ? value.trim() : '');
+  const normalizeToolName = (value) => {
+    const name = artifactScalarString(value);
+    if(typeof _artifactToolName === 'function'){
+      try{
+        return _artifactToolName(value);
+      }catch(_){}
+    }
+    return name ? name.replace(/^functions\./,'') : '';
+  };
+  const mutationTools = (typeof ARTIFACT_MUTATION_TOOLS === 'object' && ARTIFACT_MUTATION_TOOLS instanceof Set)
+    ? ARTIFACT_MUTATION_TOOLS
+    : new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+  const normalizeArtifactPath = typeof _normalizeArtifactPath === 'function'
+    ? _normalizeArtifactPath
+    : (path) => {
+      if(typeof path !== 'string' || !path) return '';
+      const trimmed = path.trim().replace(/[`"'<>),.;:]+$/g,'').replace(/^[`"'(<]+/g,'');
+      if(!trimmed || trimmed.length>240 || trimmed.includes('://')) return '';
+      const cleaned = trimmed.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
+      if(!cleaned) return '';
+      if(typeof ARTIFACT_IGNORE_RE === 'object' && ARTIFACT_IGNORE_RE && ARTIFACT_IGNORE_RE.test(cleaned)) return '';
+      if(!(/[./]/.test(cleaned))) return '';
+      return cleaned;
+    };
+  const currentSessionId = (typeof S === 'object' && S && S.session)
+    ? (typeof S.session.session_id === 'string' ? S.session.session_id : '')
+    : '';
+  const name=normalizeToolName(tc.name);
+  if(!mutationTools.has(name)) return [];
   const allowArtifactCallIdFallback = name === 'patch';
-  const explicitToolCallId = _artifactScalarString(tc.tool_call_id || tc.id);
-  const completionSessionId = _artifactScalarString(
-    tc.session_id || (S && S.session && S.session.session_id)
-  );
-  const completionToolCallId = _artifactScalarString(
+  const explicitToolCallId = artifactScalarString(tc.tool_call_id || tc.id);
+  const completionSessionId = artifactScalarString(tc.session_id || currentSessionId);
+  const completionToolCallId = artifactScalarString(
     explicitToolCallId
     || tc.tid
     || (allowArtifactCallIdFallback ? (() => {
       const artifacts = Array.isArray(tc.artifacts) ? tc.artifacts : [];
       for(const artifact of artifacts){
-        const toolCallId = _artifactScalarString(artifact && artifact.tool_call_id);
+        const toolCallId = artifactScalarString(artifact && artifact.tool_call_id);
         if(toolCallId) return toolCallId;
       }
       return '';
@@ -598,10 +626,10 @@ function turnArtifactReferencesFromToolCall(tc){
   for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
     if(!artifact||typeof artifact!=='object') continue;
     if(typeof artifact.path !== 'string' || typeof artifact.workspace_root !== 'string') continue;
-    const path=_normalizeArtifactPath(artifact.path);
+    const path=normalizeArtifactPath(artifact.path);
     const workspaceRoot=artifact.workspace_root.replace(/\/+$/,'');
-    const toolCallId=_artifactScalarString(artifact.tool_call_id);
-    const toolName=_artifactToolName(artifact.tool_name);
+    const toolCallId=artifactScalarString(artifact.tool_call_id);
+    const toolName=normalizeToolName(artifact.tool_name);
     const key=`${workspaceRoot}\u0000${path}`;
     if(
       !path
