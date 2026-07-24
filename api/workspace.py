@@ -900,6 +900,57 @@ def _strip_surrounding_quotes(path: str) -> str:
     return s
 
 
+STRICT_WORKSPACE_REGISTRATION_ENV = "HERMES_WEBUI_STRICT_WORKSPACE_REGISTRATION"
+ALLOWED_WORKSPACE_ROOTS_ENV = "HERMES_WEBUI_ALLOWED_WORKSPACE_ROOTS"
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def strict_workspace_registration_enabled() -> bool:
+    """Return True when Add Space must not expand the trusted-root set.
+
+    Default remains permissive (PR #991 / #953 external mounts). Opt in with
+    ``HERMES_WEBUI_STRICT_WORKSPACE_REGISTRATION=1`` for multi-tenant or
+    agent-host deployments where registering an arbitrary existing directory
+    would widen the filesystem boundary the agent and workspace file APIs may
+    later treat as trusted.
+    """
+    return _env_flag_enabled(STRICT_WORKSPACE_REGISTRATION_ENV)
+
+
+def _configured_allowed_workspace_roots() -> list[Path]:
+    """Extra roots permitted under strict registration (comma-separated env)."""
+    raw = os.getenv(ALLOWED_WORKSPACE_ROOTS_ENV, "") or ""
+    roots: list[Path] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            roots.append(_resolve_path(part))
+        except (OSError, ValueError):
+            continue
+    return roots
+
+
+def _is_under_allowed_registration_root(candidate: Path) -> bool:
+    home = _home_path()
+    if home != Path("/") and _is_within(candidate, home):
+        return True
+    for root in _configured_allowed_workspace_roots():
+        if _is_within(candidate, root):
+            return True
+    try:
+        default_ws = _resolve_path(_BOOT_DEFAULT_WORKSPACE)
+        if _is_within(candidate, default_ws):
+            return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
 def validate_workspace_to_add(path: str) -> Path:
     """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
 
@@ -913,6 +964,11 @@ def validate_workspace_to_add(path: str) -> Path:
     Surrounding quotes (single or double) are stripped before validation —
     macOS Finder's "Copy as Pathname" wraps paths in single quotes by default,
     and users routinely paste those into the Add Space input.
+
+    When ``HERMES_WEBUI_STRICT_WORKSPACE_REGISTRATION`` is enabled, registration
+    is limited to paths under the home directory, the boot default workspace,
+    or roots listed in ``HERMES_WEBUI_ALLOWED_WORKSPACE_ROOTS`` so Add Space
+    cannot silently expand the agent/file-API trust boundary (#6424).
     """
     path = _strip_surrounding_quotes(path)
     candidate = _resolve_path(path)
@@ -937,6 +993,13 @@ def validate_workspace_to_add(path: str) -> Path:
 
     if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
+
+    if strict_workspace_registration_enabled() and not _is_under_allowed_registration_root(candidate):
+        raise ValueError(
+            "Strict workspace registration is enabled: path must be under your "
+            "home directory, the default workspace, or a root listed in "
+            f"{ALLOWED_WORKSPACE_ROOTS_ENV}"
+        )
 
     return candidate
 
