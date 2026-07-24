@@ -441,10 +441,13 @@ Expected behavior:
 - If a turn creates or edits workspace artifacts, the settled reply should not
   hide the fact that those artifacts exist or make them impossible to find.
 - A compact, untitled file list may appear beneath the settled final answer
-  only when that turn has successful, structured write-tool evidence. It must
-  not infer files from the final-answer prose, read-only calls, or earlier
-  turns. Selecting a row uses the existing Workspace preview and its path and
-  existence checks.
+  only when that turn has an authoritative landed-mutation descriptor. The
+  descriptor binds the canonical tool call, write-time workspace root, and
+  normalized relative path. It must not infer files from final-answer prose,
+  request arguments, read-only calls, failed writes, unpaired tool results, or
+  earlier turns. If the workspace has changed since the write, the link is
+  omitted rather than rebound to a same-named file. Selecting a row uses the
+  existing Workspace preview and its path and existence checks.
 - On replay, that evidence belongs to the same `activity_scene_v1.artifacts`
   projection that owns the settled reply. A paginated transcript may derive
   missing structured write evidence from the full turn before its display

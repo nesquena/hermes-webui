@@ -2778,15 +2778,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const toolId=String(tc.tid||tc.id||tc.tool_call_id||'tool');
     for(const [index,artifact] of turnArtifactReferencesFromToolCall(tc).entries()){
       const path=String(artifact&&artifact.path||'').trim();
+      const workspaceRoot=String(artifact&&artifact.workspace_root||'').trim();
       if(!path) continue;
-      const localId=`artifact:${toolId}:${index}:${path}`;
+      const localId=`artifact:${toolId}:${index}:${workspaceRoot}:${path}`;
       if(_anchorHasArtifactReference(localId)) continue;
       // A distinct anchor event must not reuse the tool_complete SSE event id.
       _applyToAnchor('artifact_reference',{
         local_id:localId,
         seq:_nextAnchorLocalSeq(),
         path,
-        source:String(artifact.source||tc.name||'tool'),
+        workspace_root:workspaceRoot,
+        tool_name:String(artifact.tool_name||tc.name||'tool'),
         tool_call_id:toolId,
       },null,null,{render:false});
     }
@@ -5260,6 +5262,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.done=true;
       if(typeof d.is_error==='boolean') tc.is_error=d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
+      if(Array.isArray(d.artifacts)) tc.artifacts=d.artifacts;
       if(tc.started_at===undefined||tc.started_at===null) tc.started_at=Date.now()/1000;
       if(!tc.tid) tc.tid=explicitTid||_liveToolTid(d,tc.activityBurstId,tc.activitySegmentSeq);
     } else {

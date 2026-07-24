@@ -13614,14 +13614,11 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   group.removeAttribute('data-worklog-rows-deferred');
   return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
 }
-function _turnArtifactWorkspacePath(path){
+function _turnArtifactWorkspacePath(path, workspaceRoot){
   let value=String(path||'').trim().replace(/^(?:\.\/)+/,'');
   if(!value||value.length>512||value.includes('://')||/[\\\0]/.test(value)||/^[A-Za-z]:/.test(value)) return '';
   const workspace=String(S&&S.session&&S.session.workspace||'').replace(/\/+$/,'');
-  if(value.startsWith('/')){
-    if(!workspace||!value.startsWith(`${workspace}/`)) return '';
-    value=value.slice(workspace.length+1);
-  }
+  if(!workspace||String(workspaceRoot||'').replace(/\/+$/,'')!==workspace||value.startsWith('/')) return '';
   const parts=value.split('/');
   if(parts.some(part=>!part||part==='.'||part==='..')) return '';
   return value;
@@ -13632,7 +13629,7 @@ function _turnArtifactEntriesFromScene(scene){
   const entries=[];
   for(const artifact of artifacts){
     const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
-    const path=_turnArtifactWorkspacePath(payload.path);
+    const path=_turnArtifactWorkspacePath(payload.path,payload.workspace_root);
     if(!path||seen.has(path)) continue;
     seen.add(path);
     entries.push({path});

@@ -17,33 +17,27 @@ def _run_node(script):
     return json.loads(result.stdout)
 
 
-def test_turn_artifact_references_require_successful_structured_write_evidence():
+def test_turn_artifact_references_require_server_landed_descriptors():
     workspace = (ROOT / "static/workspace.js").read_text(encoding="utf-8")
     start = workspace.index("const ARTIFACT_IGNORE_RE")
     end = workspace.index("const _turnMutatedPreviewPaths")
     output = _run_node(
         workspace[start:end]
         + "\nconsole.log(JSON.stringify(["
-        + "turnArtifactReferencesFromToolCall({name:'write_file',arguments:{path:'output/report.md'}}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-1',tool_name:'write_file'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'read_file',arguments:{path:'output/report.md'}}),"
-        + "turnArtifactReferencesFromToolCall({name:'write_file',is_error:true,arguments:{path:'output/report.md'}}),"
+        + "turnArtifactReferencesFromToolCall({name:'write_file',is_error:true,artifacts:[{path:'output/report.md',workspace_root:'/workspace'}]}),"
         + "turnArtifactReferencesFromToolCall({name:'write_file',output:'```diff\\n+++ output/inferred.md\\n```'}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/report.md','output/notes.md']})}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:false,files_modified:['output/rejected.md']})}),"
-        + "turnArtifactReferencesFromToolCall({name:'write_file',arguments:{source:'input/source.md',destination:'output/destination.md'}}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',result:[],output:JSON.stringify({success:true,files_modified:['output/from-output.md']})}),"
-        + "turnArtifactReferencesFromToolCall({name:'patch',content:JSON.stringify({success:true,files_created:['output/from-content.md']})})"
+        + "turnArtifactReferencesFromToolCall({name:'patch',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-2',tool_name:'patch'},{path:'output/notes.md',workspace_root:'/workspace',tool_call_id:'call-2',tool_name:'patch'}]}),"
+        + "turnArtifactReferencesFromToolCall({name:'patch',preview:JSON.stringify({success:true,files_modified:['output/rejected.md']})})"
         + "]));"
     )
     assert output == [
-        [{"path": "output/report.md", "source": "write_file"}], [], [], [],
+        [{"path": "output/report.md", "workspace_root": "/workspace", "tool_call_id": "call-1", "tool_name": "write_file"}], [], [], [],
         [
-            {"path": "output/report.md", "source": "patch"},
-            {"path": "output/notes.md", "source": "patch"},
+            {"path": "output/report.md", "workspace_root": "/workspace", "tool_call_id": "call-2", "tool_name": "patch"},
+            {"path": "output/notes.md", "workspace_root": "/workspace", "tool_call_id": "call-2", "tool_name": "patch"},
         ], [],
-        [{"path": "output/destination.md", "source": "write_file"}],
-        [{"path": "output/from-output.md", "source": "patch"}],
-        [{"path": "output/from-content.md", "source": "patch"}],
     ]
 
 
@@ -55,13 +49,13 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     )
     scene = {
         "artifacts": [
-            {"payload": {"path": "output/report.md"}},
-            {"payload": {"path": "./output/report.md"}},
-            {"payload": {"path": "/workspace/output/absolute.md"}},
-            {"payload": {"path": "/outside/private.md"}},
-            {"payload": {"path": "../escape.md"}},
-            {"payload": {"path": "output\\windows.md"}},
-            {"payload": {"path": "C:/outside/windows.md"}},
+            {"payload": {"path": "output/report.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "./output/report.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "output/old-workspace.md", "workspace_root": "/workspace-a"}},
+            {"payload": {"path": "/outside/private.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "../escape.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "output\\windows.md", "workspace_root": "/workspace"}},
+            {"payload": {"path": "output/unbound.md"}},
         ]
     }
     output = _run_node(
@@ -71,7 +65,7 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
         + json.dumps(scene)
         + ")));"
     )
-    assert output == [{"path": "output/report.md"}, {"path": "output/absolute.md"}]
+    assert output == [{"path": "output/report.md"}]
     assert "_attachTurnArtifactsFromToolCall(tc);" in messages
     assert "_applyToAnchor('artifact_reference'" in messages
     assert "if(typeof _renderTurnArtifactListForMessage==='function')" in ui
@@ -89,7 +83,7 @@ def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fa
         "const S={session:{workspace:'/workspace'},messages:[{role:'assistant',content:'final'}]};\n"
         + helpers
         + "\nconsole.log(JSON.stringify(_turnArtifactEntriesForMessage({"
-        + "_anchor_activity_scene:{artifacts:[{payload:{path:'/workspace/output/large-worklog.md'}}]}},0)));"
+        + "_anchor_activity_scene:{artifacts:[{payload:{path:'output/large-worklog.md',workspace_root:'/workspace'}}]}},0)));"
     )
     assert output == [{"path": "output/large-worklog.md"}]
 
@@ -97,114 +91,27 @@ def test_final_answer_uses_anchor_scene_artifact_refs_without_message_history_fa
 def test_replay_merges_missing_artifact_into_existing_anchor_scene():
     from api import routes
 
-    messages = [
-        {
-            "role": "assistant",
-            "content": "final answer",
-            "_anchor_activity_scene": {
-                "version": "activity_scene_v1",
-                "activity_rows": [{"type": "tool"}],
-                "artifacts": [{"type": "artifact_reference", "payload": {"path": "/workspace/output/report.md"}}],
-            },
-        }
-    ]
+    messages = [{
+        "role": "assistant",
+        "content": "final answer",
+        "_anchor_activity_scene": {
+            "version": "activity_scene_v1",
+            "activity_rows": [{"type": "tool"}],
+            "artifacts": [{"type": "artifact_reference", "payload": {"path": "output/report.md", "workspace_root": "/workspace"}}],
+        },
+    }]
 
     hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
         messages,
-        {0: ["/workspace/output/report.md", "/workspace/output/large-worklog.md"]},
+        {0: [{"path": "output/report.md", "workspace_root": "/workspace"}, {"path": "output/large-worklog.md", "workspace_root": "/workspace", "tool_call_id": "call-2", "tool_name": "patch"}]},
     )
 
     scene = hydrated[0]["_anchor_activity_scene"]
     assert scene["activity_rows"] == [{"type": "tool"}]
     assert scene["artifacts"] == [
-        {"type": "artifact_reference", "payload": {"path": "/workspace/output/report.md"}},
-        {
-            "type": "artifact_reference",
-            "payload": {
-                "path": "/workspace/output/large-worklog.md",
-                "source": "transcript_replay",
-            },
-        },
+        {"type": "artifact_reference", "payload": {"path": "output/report.md", "workspace_root": "/workspace"}},
+        {"type": "artifact_reference", "payload": {"path": "output/large-worklog.md", "workspace_root": "/workspace", "tool_call_id": "call-2", "tool_name": "patch", "source": "transcript_replay"}},
     ]
-
-
-def test_paginated_replay_keeps_write_arg_artifact_when_result_is_plain_text():
-    from api import routes
-
-    messages = [
-        {"role": "user", "content": "write the report"},
-        {
-            "role": "tool",
-            "name": "write_file",
-            "arguments": json.dumps({"path": "/workspace/output/plain-text-confirmation.md"}),
-            "content": "Wrote /workspace/output/plain-text-confirmation.md",
-        },
-        {"role": "assistant", "content": "final answer"},
-    ]
-
-    assert routes._turn_artifact_paths_from_tool_result(messages[1]) == [
-        "/workspace/output/plain-text-confirmation.md"
-    ]
-
-    paths_by_final_index = routes._final_turn_artifact_paths(messages)
-    window, offset = routes._message_window_for_display(messages, msg_limit=1)
-    hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
-        window, paths_by_final_index, message_offset=offset
-    )
-
-    assert offset == 2
-    assert hydrated[0]["_anchor_activity_scene"]["artifacts"] == [
-        {
-            "type": "artifact_reference",
-            "payload": {
-                "path": "/workspace/output/plain-text-confirmation.md",
-                "source": "transcript_replay",
-            },
-        }
-    ]
-
-
-def test_replay_rejects_write_arg_artifact_when_structured_result_failed():
-    from api import routes
-
-    message = {
-        "role": "tool",
-        "name": "write_file",
-        "arguments": {"path": "/workspace/output/rejected.md"},
-        "content": json.dumps({"success": False, "path": "/workspace/output/rejected.md"}),
-    }
-
-    assert routes._turn_artifact_paths_from_tool_result(message) == []
-
-
-def test_replay_ignores_source_arg_and_continues_past_array_result_candidates():
-    from api import routes
-
-    assert routes._turn_artifact_paths_from_tool_result(
-        {
-            "role": "tool",
-            "name": "write_file",
-            "args": {
-                "source": "/workspace/input/source.md",
-                "destination": "/workspace/output/destination.md",
-            },
-            "content": "Wrote /workspace/output/destination.md",
-        }
-    ) == ["/workspace/output/destination.md"]
-
-    assert routes._turn_artifact_paths_from_tool_result(
-        {
-            "role": "tool",
-            "name": "patch",
-            "result": [],
-            "output": json.dumps(
-                {
-                    "success": True,
-                    "files_modified": ["/workspace/output/from-output.md"],
-                }
-            ),
-        }
-    ) == ["/workspace/output/from-output.md"]
 
 
 def test_paginated_session_response_keeps_turn_artifacts_from_earlier_tool_rows():
@@ -212,38 +119,57 @@ def test_paginated_session_response_keeps_turn_artifacts_from_earlier_tool_rows(
 
     messages = [
         {"role": "user", "content": "write the report"},
-        {
-            "role": "tool",
-            "name": "patch",
-            "content": json.dumps(
-                {
-                    "success": True,
-                    "files_modified": ["/workspace/output/large-worklog.md"],
-                }
-            ),
-        },
+        {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {"name": "patch", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call-1", "name": "patch", "content": json.dumps({"success": True, "files_modified": ["/workspace/output/large-worklog.md"]})},
         {"role": "assistant", "content": "working"},
         {"role": "tool", "name": "read_file", "content": "ignored"},
         {"role": "assistant", "content": "final answer"},
     ]
 
-    paths_by_final_index = routes._final_turn_artifact_paths(messages)
+    paths_by_final_index = routes._final_turn_artifact_paths(messages, workspace_root="/workspace")
     window, offset = routes._message_window_for_display(messages, msg_limit=1)
-    hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
-        window, paths_by_final_index, message_offset=offset
-    )
+    hydrated = routes._attach_replayed_turn_artifacts_to_anchor_scenes(window, paths_by_final_index, message_offset=offset)
 
-    assert offset == 4
+    assert offset == 5
     assert hydrated[0]["_anchor_activity_scene"]["version"] == "activity_scene_v1"
     assert hydrated[0]["_anchor_activity_scene"]["artifacts"] == [
-        {
-            "type": "artifact_reference",
-            "payload": {
-                "path": "/workspace/output/large-worklog.md",
-                "source": "transcript_replay",
-            },
-        }
+        {"type": "artifact_reference", "payload": {"path": "output/large-worklog.md", "workspace_root": "/workspace", "tool_call_id": "call-1", "tool_name": "patch", "source": "transcript_replay"}},
     ]
+
+
+def test_replay_rejects_failed_unpaired_and_workspace_mismatched_writes():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "write"},
+        {"role": "assistant", "tool_calls": [{"id": "call-ok", "function": {"name": "write_file"}}]},
+        {"role": "tool", "tool_call_id": "call-ok", "name": "write_file", "content": json.dumps({"error": "denied", "resolved_path": "/workspace-a/output/failed.md"})},
+        {"role": "tool", "tool_call_id": "call-orphan", "name": "write_file", "content": json.dumps({"bytes_written": 2, "resolved_path": "/workspace-a/output/orphan.md"})},
+        {"role": "assistant", "tool_calls": [{"id": "call-patch", "function": {"name": "patch"}}]},
+        {"role": "tool", "tool_call_id": "call-patch", "name": "patch", "content": json.dumps({"success": True, "files_modified": ["/workspace-a/output/report.md"]})},
+        {"role": "assistant", "content": "final"},
+    ]
+
+    assert routes._final_turn_artifact_paths(messages, workspace_root="/workspace-a") == {
+        6: [{"path": "output/report.md", "workspace_root": "/workspace-a", "tool_call_id": "call-patch", "tool_name": "patch"}]
+    }
+
+
+def test_landed_artifact_descriptors_use_actual_hermes_success_shapes():
+    from api.turn_artifacts import landed_artifact_descriptors
+
+    assert landed_artifact_descriptors(
+        "write_file", {"bytes_written": 3, "resolved_path": "/workspace/output/report.md"},
+        workspace_root="/workspace", tool_call_id="call-write",
+    ) == [{"path": "output/report.md", "workspace_root": "/workspace", "tool_call_id": "call-write", "tool_name": "write_file"}]
+    assert landed_artifact_descriptors(
+        "write_file", {"error": "permission denied", "resolved_path": "/workspace/output/report.md"},
+        workspace_root="/workspace", tool_call_id="call-write",
+    ) == []
+    assert landed_artifact_descriptors(
+        "mcp_filesystem_write_file", {"bytes_written": 3, "resolved_path": "/workspace/output/report.md"},
+        workspace_root="/workspace", tool_call_id="call-plugin",
+    ) == []
 
 
 def test_artifact_open_expands_a_closed_workspace_preview_before_loading_file():

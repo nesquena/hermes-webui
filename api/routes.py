@@ -61,6 +61,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.turn_artifacts import landed_artifact_descriptors, normalize_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -8686,94 +8687,40 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
-_TURN_ARTIFACT_MUTATION_TOOLS = frozenset(
-    {
-        "write_file",
-        "patch",
-        "edit_file",
-        "create_file",
-        "mcp_filesystem_write_file",
-        "mcp_filesystem_edit_file",
-    }
-)
-
-
-def _turn_artifact_paths_from_tool_result(message) -> list[str]:
-    """Return successful structured mutation paths from one transcript tool row."""
+def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str) -> list[dict]:
+    """Return only paired, canonical landed mutations from one tool row."""
     if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
         return []
-    name = str(message.get("name") or message.get("tool_name") or "").removeprefix("functions.")
-    if name not in _TURN_ARTIFACT_MUTATION_TOOLS or message.get("is_error") is True:
+    if message.get("is_error") is True:
         return []
+    name = normalize_tool_name(message.get("name") or message.get("tool_name"))
+    tool_call_id = str(message.get("tool_call_id") or "").strip()
+    if not tool_call_id:
+        return []
+    result = message.get("content", message.get("result", message.get("output")))
+    return landed_artifact_descriptors(
+        name, result, workspace_root=workspace_root, tool_call_id=tool_call_id
+    )
 
-    args = message.get("arguments") or message.get("args") or message.get("input") or {}
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except (TypeError, ValueError):
-            args = {}
-    if not isinstance(args, dict):
-        args = {}
 
-    result = None
-    for candidate in (
-        message.get("content"),
-        message.get("result"),
-        message.get("output"),
-        message.get("snippet"),
-        message.get("preview"),
-    ):
-        if not candidate:
+def _declared_turn_tool_calls(messages) -> dict[str, str]:
+    declared = {}
+    for message in messages:
+        if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
             continue
-        if isinstance(candidate, dict):
-            result = candidate
-            break
-        if isinstance(candidate, str):
-            try:
-                parsed = json.loads(candidate)
-            except (TypeError, ValueError):
+        for call in list(message.get("tool_calls") or []):
+            if not isinstance(call, dict):
                 continue
-            if isinstance(parsed, dict):
-                result = parsed
-                break
-
-    if isinstance(result, dict) and result.get("success") is False:
-        return []
-
-    paths = []
-    seen = set()
-
-    def add(candidate):
-        value = candidate.get("path") if isinstance(candidate, dict) else candidate
-        if not isinstance(value, str):
-            return
-        value = value.strip()
-        if value and value not in seen:
-            seen.add(value)
-            paths.append(value)
-
-    for key in ("path", "file_path", "destination"):
-        add(args.get(key))
-    arg_paths = args.get("paths")
-    for candidate in arg_paths if isinstance(arg_paths, list) else []:
-        add(candidate)
-    arg_edits = args.get("edits")
-    for edit in arg_edits if isinstance(arg_edits, list) else []:
-        add(edit.get("path") if isinstance(edit, dict) else None)
-    if isinstance(result, dict):
-        for key in ("resolved_path", "path", "file_path", "destination"):
-            add(result.get(key))
-        modified = result.get("files_modified")
-        for candidate in modified if isinstance(modified, list) else []:
-            add(candidate)
-        created = result.get("files_created")
-        for candidate in created if isinstance(created, list) else []:
-            add(candidate)
-    return paths
+            call_id = str(call.get("id") or call.get("tool_call_id") or "").strip()
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = normalize_tool_name(call.get("name") or function.get("name"))
+            if call_id and name and call_id not in declared:
+                declared[call_id] = name
+    return declared
 
 
-def _final_turn_artifact_paths(messages) -> dict[int, list[str]]:
-    """Return successful mutation paths keyed by each turn's final answer index."""
+def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, list[dict]]:
+    """Return paired, landed artifact descriptors keyed by final answer index."""
     source = list(messages or [])
     paths_by_final_index = {}
     user_indexes = [idx for idx, message in enumerate(source) if isinstance(message, dict) and message.get("role") == "user"]
@@ -8791,16 +8738,25 @@ def _final_turn_artifact_paths(messages) -> dict[int, list[str]]:
         )
         if final_idx is None:
             continue
-        paths = []
+        descriptors = []
         seen = set()
-        for message in source[turn_start + 1 : final_idx]:
-            for path in _turn_artifact_paths_from_tool_result(message):
-                if path not in seen:
-                    seen.add(path)
-                    paths.append(path)
-        if not paths:
+        turn_messages = source[turn_start + 1 : final_idx]
+        declared_calls = _declared_turn_tool_calls(turn_messages)
+        consumed_calls = set()
+        for message in turn_messages:
+            tool_call_id = str(message.get("tool_call_id") or "").strip() if isinstance(message, dict) else ""
+            tool_name = normalize_tool_name(message.get("name") or message.get("tool_name")) if isinstance(message, dict) else ""
+            if not tool_call_id or tool_call_id in consumed_calls or declared_calls.get(tool_call_id) != tool_name:
+                continue
+            consumed_calls.add(tool_call_id)
+            for descriptor in _turn_artifact_descriptors_from_tool_result(message, workspace_root=workspace_root):
+                key = (descriptor["workspace_root"], descriptor["path"])
+                if key not in seen:
+                    seen.add(key)
+                    descriptors.append(descriptor)
+        if not descriptors:
             continue
-        paths_by_final_index[final_idx] = paths
+        paths_by_final_index[final_idx] = descriptors
     return paths_by_final_index
 
 
@@ -8835,15 +8791,23 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
         next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message, paths)
         artifacts = list(next_scene.get("artifacts") or [])
         seen = {
-            str((artifact.get("payload") or {}).get("path") or "")
+            (
+                str((artifact.get("payload") or {}).get("workspace_root") or ""),
+                str((artifact.get("payload") or {}).get("path") or ""),
+            )
             for artifact in artifacts
             if isinstance(artifact, dict)
         }
-        for path in paths:
-            if path in seen:
+        for descriptor in paths:
+            if not isinstance(descriptor, dict):
                 continue
-            seen.add(path)
-            artifacts.append({"type": "artifact_reference", "payload": {"path": path, "source": "transcript_replay"}})
+            path = str(descriptor.get("path") or "")
+            workspace_root = str(descriptor.get("workspace_root") or "")
+            key = (workspace_root, path)
+            if not path or key in seen:
+                continue
+            seen.add(key)
+            artifacts.append({"type": "artifact_reference", "payload": {**descriptor, "source": "transcript_replay"}})
         next_scene["artifacts"] = artifacts
         next_message = dict(message)
         next_message["_anchor_activity_scene"] = next_scene
@@ -12902,7 +12866,9 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
-                _final_turn_artifacts = _final_turn_artifact_paths(_all_msgs)
+                _final_turn_artifacts = _final_turn_artifact_paths(
+                    _all_msgs, workspace_root=str(getattr(s, "workspace", "") or "")
+                )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
                     msg_limit=msg_limit,
@@ -21058,9 +21024,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
-    from api.process_event_utils import stamp_message_source
-
-    stamp_message_source(user_msg, source)
+    if source and source != "webui":
+        user_msg["_source"] = source
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = int(started_at)
     if attachments:

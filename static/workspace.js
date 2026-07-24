@@ -493,40 +493,18 @@ function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
   const name=String(tc.name||'').replace(/^functions\./,'');
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
-  let args=tc.arguments||tc.args||tc.input||{};
-  if(typeof args==='string'){
-    try{args=JSON.parse(args);}catch(_){args={};}
-  }
-  if(!args||typeof args!=='object') args={};
-  let result=null;
-  for(const candidate of [tc.result,tc.output,tc.content,tc.snippet,tc.preview]){
-    if(!candidate) continue;
-    if(typeof candidate==='object'&&!Array.isArray(candidate)){ result=candidate; break; }
-    if(typeof candidate==='string'){
-      try{
-        const parsed=JSON.parse(candidate);
-        if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){ result=parsed; break; }
-      }catch(_){}
-    }
-  }
-  if(result&&typeof result==='object'&&result.success===false) return [];
   const seen=new Set();
   const out=[];
-  const add=candidate=>{
-    const path=_normalizeArtifactPath(candidate);
-    if(!path||seen.has(path)) return;
-    seen.add(path);
-    out.push({path,source:name});
-  };
-  for(const key of ['path','file_path','destination']) add(args[key]);
-  if(Array.isArray(args.paths)) args.paths.forEach(add);
-  if(Array.isArray(args.edits)) args.edits.forEach(edit=>add(edit&&edit.path));
-  // Patch tools may return their changed paths in structured JSON rather than
-  // repeat a single argument path. Never mine unified-diff text or prose.
-  if(result&&typeof result==='object'){
-    for(const key of ['resolved_path','path','file_path','destination']) add(result[key]);
-    if(Array.isArray(result.files_modified)) result.files_modified.forEach(item=>add(item&&typeof item==='object'?item.path:item));
-    if(Array.isArray(result.files_created)) result.files_created.forEach(item=>add(item&&typeof item==='object'?item.path:item));
+  for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
+    if(!artifact||typeof artifact!=='object') continue;
+    const path=_normalizeArtifactPath(artifact.path);
+    const workspaceRoot=String(artifact.workspace_root||'').replace(/\/+$/,'');
+    const toolCallId=String(artifact.tool_call_id||'').trim();
+    const toolName=String(artifact.tool_name||'').replace(/^functions\./,'');
+    const key=`${workspaceRoot}\u0000${path}`;
+    if(!path||!workspaceRoot||!toolCallId||toolName!==name||seen.has(key)) continue;
+    seen.add(key);
+    out.push({path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName});
   }
   return out;
 }
