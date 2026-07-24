@@ -549,11 +549,26 @@ def test_switching_back_to_target_before_service_worker_delivery_cancels_alert()
     assert retry["lastFailedAt"] > 0
 
 
-def test_active_session_attention_never_uses_background_delivery_seam():
+def test_selected_session_attention_uses_the_shared_seam_while_hidden():
+    """The selected session is no longer excluded from the background seam.
+
+    This test used to require zero delivery for the active SID regardless of
+    visibility. That was wrong: when the tab is hidden the active session's SSE
+    is torn down, so its own approval/clarify handlers cannot notify, and the
+    list poll is the only remaining signal. Excluding the selected SID there
+    meant the user got no alert at all for the session they were working in.
+
+    Suppression now lives entirely at the late, visibility-aware boundary
+    (`onlyIfInactive` in `_showPwaNotification`): active + visible suppresses,
+    active + hidden delivers. This probe runs with `document.hidden = true`.
+    Selected + visible staying at zero is covered by
+    tests/test_pr5945_gate_followups.py.
+    """
     result = _run_attention_delivery_race_probe(active_sid="target", service_worker_succeeds=True)
 
-    assert result["shown"] == []
-    assert result["delivered"] is False
+    assert len(result["shown"]) == 1, result
+    assert result["shown"][0]["sid"] == "target"
+    assert result["delivered"] is True
 
 
 def test_attention_sound_is_softer_short_reverse_of_completion_sound():

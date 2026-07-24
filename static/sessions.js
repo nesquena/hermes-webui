@@ -5301,14 +5301,25 @@ function _syncSessionAttentionSoundState(sessions){
       const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;
       if(playKey&&typeof playAttentionSound==='function') playAttentionSound(playKey);
       // Pair the audio cue with a background system notification so a
-      // minimized/backgrounded PWA still surfaces a NON-active session that
-      // needs attention. The active session's own approval/clarify SSE
-      // handlers already notify, so skip it here to avoid a double alert.
-      // sendBrowserNotification self-gates to hidden tabs and honors the
-      // user's notification setting, matching every other audio cue.
+      // minimized/backgrounded PWA still surfaces a session that needs
+      // attention.
+      //
+      // Selected and non-selected sessions both route through this seam. An
+      // unconditional `sid !== activeSid` exclusion here was wrong: when the
+      // tab is hidden the active session's SSE is torn down, so its own
+      // approval/clarify handlers cannot notify — the list poll is the only
+      // remaining signal, and dropping the selected SID meant the user got
+      // nothing at all for the very session they were working in.
+      //
+      // Double-alerting is prevented where it belongs: the late,
+      // visibility-aware boundary inside the delivery path suppresses only
+      // `active + visible` (`onlyIfInactive` in _showPwaNotification), and the
+      // generation-backed pending/delivered claim in
+      // _deliverAttentionNotification remains the dedup authority against the
+      // SSE path. `active + hidden` is eligible, which is exactly the case the
+      // SSE handlers can no longer cover.
       try{
-        const _activeSid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
-        if(sig&&sid!==_activeSid&&typeof sendBrowserNotification==='function'
+        if(sig&&typeof sendBrowserNotification==='function'
           &&typeof _hasAttentionNotificationKey==='function'
           &&typeof _deliverAttentionNotification==='function'
           &&!_hasAttentionNotificationKey(s.session_id,kind,count)){

@@ -17,6 +17,7 @@ from tests.test_session_attention_sound import (
     MESSAGES_JS,
     NODE,
     REPO,
+    SESSIONS_JS,
     _function_source,
 )
 
@@ -165,3 +166,117 @@ setTimeout(() => console.log(JSON.stringify({
     )
     assert result["lateShown"] == 0
     assert result["delivered"] is False
+
+
+def _run_hidden_poll_tick_probe(*, hidden: bool, ticks: int = 3, sse_first: bool = False) -> dict:
+    """Drive the REAL production composition for the selected session.
+
+    The list poll → payload → ``_syncSessionAttentionSoundState`` → delivery
+    chain is what actually runs when the tab is hidden: the active session's
+    SSE is torn down, so its own approval/clarify handlers cannot notify and
+    this is the only remaining signal. Calling ``_deliverAttentionNotification``
+    directly (as the earlier follow-up test did) bypasses the synchronizer and
+    therefore cannot catch a synchronizer that drops the selected SID.
+
+    Uses the real ``_showPwaNotification``/``_notificationOptions`` so the late
+    ``onlyIfInactive`` visibility boundary is exercised rather than stubbed.
+    """
+    if NODE is None:  # pragma: no cover - node is installed in CI
+        pytest.skip("node not on PATH")
+    functions = "\n".join(
+        (
+            _function_source(MESSAGES_JS, "_attentionSoundKey"),
+            _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_clearAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_deliverAttentionNotification"),
+            _function_source(MESSAGES_JS, "sendBrowserNotification"),
+            _function_source(MESSAGES_JS, "_notificationOptions"),
+            _function_source(MESSAGES_JS, "_showPwaNotification"),
+            _function_source(SESSIONS_JS, "_sessionAttentionSoundSignature"),
+            _function_source(SESSIONS_JS, "_syncSessionAttentionSoundState"),
+        )
+    )
+    sse_line = (
+        "_deliverAttentionNotification('target','approval',1,'Approval required','Build');"
+        if sse_first
+        else ""
+    )
+    script = f"""
+global.window = global;
+global.document = {{hidden: {json.dumps(hidden)}, hasFocus: () => {json.dumps(not hidden)}}};
+global.location = {{origin: 'https://example.test', href: 'https://example.test/'}};
+// The SELECTED session is the one that needs attention.
+global.S = {{session: {{session_id: 'target'}}}};
+global._notificationsEnabled = true;
+global._isBackgroundedForBrowserNotification = () => !!document.hidden;
+global._sessionUrlForSid = sid => `/?session=${{sid}}`;
+global.assistantDisplayName = () => 'Hermes';
+global.requestNotificationPermission = () => Promise.resolve('granted');
+global.playAttentionSound = () => {{}};
+const sink = [];
+const _setNavigator = nav => Object.defineProperty(globalThis, 'navigator', {{value: nav, configurable: true}});
+_setNavigator({{serviceWorker: {{getRegistration: () => Promise.resolve({{
+  active: true,
+  showNotification: (title, opts) => {{sink.push({{title, tag: opts && opts.tag}}); return Promise.resolve();}},
+}})}}}});
+// A direct Notification would also be a delivery; count it in the same sink so
+// "one sink call" means one alert regardless of which transport served it.
+function Notification(title, opts) {{ sink.push({{title, tag: opts && opts.tag}}); }}
+Notification.permission = 'granted';
+global.Notification = Notification;
+let _sessionAttentionSoundPrimed = true;
+const _sessionAttentionSoundState = new Map();
+{functions}
+{sse_line}
+// The real list payload the sidebar applies, unchanged across ticks — the
+// signature is stable, so only the first tick may deliver.
+const payload = [{{session_id: 'target', title: 'Build', attention: {{kind: 'approval', count: 1}}}}];
+let tick = 0;
+(function nextTick() {{
+  if (tick++ >= {ticks}) {{
+    setTimeout(() => console.log(JSON.stringify({{
+      sinkCalls: sink.length,
+      sink,
+      delivered: _hasAttentionNotificationKey('target', 'approval', 1),
+    }})), 20);
+    return;
+  }}
+  _syncSessionAttentionSoundState(payload);
+  setTimeout(nextTick, 10);
+}})();
+"""
+    completed = subprocess.run(
+        [NODE, "-e", script], cwd=REPO, check=True, text=True, capture_output=True
+    )
+    return json.loads(completed.stdout)
+
+
+def test_selected_session_hidden_delivers_exactly_once_through_the_poll_path():
+    """Three hidden poll ticks on the SELECTED session → exactly one alert.
+
+    This is the composition the gate reproduced: hidden tab tears down the
+    active session's SSE, the list poll observes its attention, and the
+    synchronizer used to drop that SID because it equalled the active one.
+    """
+    result = _run_hidden_poll_tick_probe(hidden=True)
+
+    assert result["sinkCalls"] == 1, result
+    assert result["delivered"] is True
+    assert result["sink"][0]["tag"] == "hermes-target"
+
+
+def test_selected_session_visible_delivers_nothing_through_the_poll_path():
+    """Selected + visible stays suppressed at the late visibility boundary."""
+    result = _run_hidden_poll_tick_probe(hidden=False)
+
+    assert result["sinkCalls"] == 0, result
+    assert result["delivered"] is False
+
+
+def test_sse_then_poll_race_on_the_selected_session_still_alerts_once():
+    """The SSE path claiming first must not produce a second alert from the poll."""
+    result = _run_hidden_poll_tick_probe(hidden=True, sse_first=True)
+
+    assert result["sinkCalls"] == 1, result
+    assert result["delivered"] is True
