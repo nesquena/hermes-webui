@@ -243,9 +243,10 @@ def _resolve_token_endpoint_auth(cfg: dict[str, Any], discovery: dict[str, Any])
 def _basic_client_authorization(client_id: str, client_secret: str) -> str:
     # RFC 6749 section 2.3.1: the id and secret are each
     # application/x-www-form-urlencoded before forming the Basic credentials,
-    # so reserved characters (":" in particular) stay unambiguous.
-    username = urllib.parse.quote(client_id, safe="")
-    password = urllib.parse.quote(client_secret, safe="")
+    # so reserved characters (":" in particular) stay unambiguous. quote_plus
+    # implements that algorithm — space encodes to "+", not "%20".
+    username = urllib.parse.quote_plus(client_id)
+    password = urllib.parse.quote_plus(client_secret)
     credentials = f"{username}:{password}".encode("utf-8")
     return "Basic " + base64.b64encode(credentials).decode("ascii")
 

@@ -13,7 +13,7 @@ explicitly configures a method.
 
 import base64
 import time
-from urllib.parse import unquote
+from urllib.parse import unquote_plus
 
 
 def _base_cfg(**overrides):
@@ -81,7 +81,7 @@ def _decode_basic(headers):
     username, _, password = (
         base64.b64decode(value.removeprefix("Basic ")).decode("ascii").partition(":")
     )
-    return unquote(username), unquote(password)
+    return unquote_plus(username), unquote_plus(password)
 
 
 def test_auto_switches_to_basic_when_post_is_not_supported(monkeypatch):
@@ -163,10 +163,11 @@ def test_public_client_sends_no_credentials_either_way(monkeypatch):
 
 def test_basic_credentials_are_form_urlencoded_before_base64(monkeypatch):
     # RFC 6749 2.3.1: id/secret are application/x-www-form-urlencoded inside
-    # the Basic credentials, so reserved characters must round-trip.
+    # the Basic credentials, so reserved characters must round-trip and a
+    # space must encode as "+" (form-urlencoding), not "%20".
     form, headers = _run_token_exchange(
         monkeypatch,
-        cfg=_base_cfg(client_id="client:acme%co", client_secret="p@ss:w%rd"),
+        cfg=_base_cfg(client_id="client:acme co", client_secret="p@ss:w%rd"),
         discovery_extra={
             "token_endpoint_auth_methods_supported": ["client_secret_basic"],
         },
@@ -174,10 +175,12 @@ def test_basic_credentials_are_form_urlencoded_before_base64(monkeypatch):
     raw = headers["Authorization"].removeprefix("Basic ")
     decoded = base64.b64decode(raw).decode("ascii")
     encoded_user, _, encoded_pass = decoded.partition(":")
-    assert unquote(encoded_user) == "client:acme%co"
-    assert unquote(encoded_pass) == "p@ss:w%rd"
-    # The encoded halves themselves must not contain a bare ":" so the
-    # username/password split stays unambiguous.
+    assert unquote_plus(encoded_user) == "client:acme co"
+    assert unquote_plus(encoded_pass) == "p@ss:w%rd"
+    # Form-urlencoding: space is "+", and the encoded halves must not
+    # contain a bare ":" so the username/password split stays unambiguous.
+    assert "+" in encoded_user
+    assert "%20" not in encoded_user
     assert ":" not in encoded_user
     assert ":" not in encoded_pass
     assert "client_secret" not in form
@@ -188,6 +191,14 @@ def test_unknown_configured_method_falls_back_to_auto(monkeypatch):
 
     assert auth_oidc._normalize_token_auth_method("bogus") == "auto"
     assert auth_oidc._normalize_token_auth_method(None) == "auto"
+
+
+def test_valid_configured_methods_normalize_case_and_whitespace():
+    import api.auth_oidc as auth_oidc
+
     assert auth_oidc._normalize_token_auth_method("Client_Secret_Basic") == (
         "client_secret_basic"
+    )
+    assert auth_oidc._normalize_token_auth_method(" client_secret_post ") == (
+        "client_secret_post"
     )
