@@ -182,6 +182,89 @@ def test_static_catalog_budget_fallback_lists_local_providers(
     )
 
 
+def test_static_catalog_deduplicates_prefixed_default_model(monkeypatch):
+    """The timeout fallback must preserve #147's normalized default dedup.
+
+    A direct provider's static catalog uses bare model IDs, while config.yaml
+    may store the same default with a provider prefix.  The fallback must not
+    append the configured spelling as a second option merely because a live
+    provider rebuild exceeded its budget.
+    """
+    monkeypatch.setitem(
+        cfg._PROVIDER_MODELS,
+        "anthropic",
+        [{"id": "claude-opus-4.6", "label": "Claude Opus 4.6"}],
+    )
+    cfg.cfg = {
+        "model": {
+            "provider": "anthropic",
+            "default": "anthropic/claude-opus-4.6",
+        }
+    }
+
+    catalog = cfg._static_models_catalog_without_live_probes()
+    anthropic = next(
+        group for group in catalog["groups"] if group["provider_id"] == "anthropic"
+    )
+    normalized_ids = [
+        str(model["id"]).split("/", 1)[-1].replace("-", ".").lower()
+        for model in anthropic["models"]
+    ]
+
+    assert normalized_ids.count("claude.opus.4.6") == 1
+
+
+def test_static_catalog_preserves_distinct_vendor_namespaces(monkeypatch):
+    """Provider-prefix dedup must not collapse the remaining vendor path."""
+    monkeypatch.setitem(
+        cfg._PROVIDER_MODELS,
+        "nous",
+        [{"id": "@nous:vendor-a/model-x", "label": "Vendor A Model X"}],
+    )
+    cfg.cfg = {
+        "model": {
+            "provider": "nous",
+            "default": "@nous:vendor-b/model-x",
+        }
+    }
+
+    catalog = cfg._static_models_catalog_without_live_probes()
+    nous = next(group for group in catalog["groups"] if group["provider_id"] == "nous")
+    model_ids = {str(model["id"]) for model in nous["models"]}
+
+    assert "@nous:vendor-a/model-x" in model_ids
+    assert "@nous:vendor-b/model-x" in model_ids
+
+
+def test_static_catalog_injects_default_into_active_named_custom_group():
+    """A sibling group's bare ID must not suppress the active group's default."""
+    cfg.cfg = {
+        "model": {
+            "provider": "custom:my-proxy",
+            "default": "model-x",
+            "base_url": "https://proxy.example/v1",
+        },
+        "fallback_providers": [
+            {"provider": "anthropic", "model": "model-x"},
+        ],
+        "custom_providers": [
+            {
+                "name": "my-proxy",
+                "base_url": "https://proxy.example/v1",
+            },
+        ],
+    }
+
+    catalog = cfg._static_models_catalog_without_live_probes()
+    custom = next(
+        group
+        for group in catalog["groups"]
+        if group["provider_id"] == "custom:my-proxy"
+    )
+
+    assert [model["id"] for model in custom["models"]] == ["model-x"]
+
+
 def test_budget_exceeded_foreground_uses_richer_static_catalog_and_refreshes_out_of_band(
     monkeypatch,
     isolate_models_catalog_state,

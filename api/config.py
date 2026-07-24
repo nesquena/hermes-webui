@@ -5268,6 +5268,18 @@ def _static_models_catalog_without_live_probes() -> dict:
             if mid not in configured_model_ids[pid]:
                 configured_model_ids[pid].append(mid)
 
+        def _provider_model_identity(model_id: object, provider_id: object) -> str:
+            """Strip only this group's routing prefix, preserving vendor paths."""
+            raw = str(model_id or "").strip()
+            pid = str(provider_id or "").strip()
+            if not raw or not pid:
+                return raw
+            raw_lower = raw.lower()
+            for prefix in (f"@{pid.lower()}:", f"{pid.lower()}/"):
+                if raw_lower.startswith(prefix):
+                    return raw[len(prefix):]
+            return raw
+
         if active_provider:
             detected_providers.add(active_provider)
             _append_model_id(active_provider, default_model)
@@ -5454,11 +5466,18 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if _plugin_profile is not None:
                     _fallback = getattr(_plugin_profile, "fallback_models", ()) or ()
                     raw_models = [{"id": str(mid), "label": str(mid)} for mid in _fallback]
+            raw_model_identities = {
+                _provider_model_identity(model.get("id"), pid)
+                for model in raw_models
+                if isinstance(model, dict)
+            }
             for model_id in configured_model_ids.get(pid, []):
-                if model_id and not any(m.get("id") == model_id for m in raw_models):
+                model_identity = _provider_model_identity(model_id, pid)
+                if model_id and model_identity not in raw_model_identities:
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
+                    raw_model_identities.add(model_identity)
             # Plugin-only providers (e.g. 9router) must enter `groups` even
             # when `raw_models` is empty so the post-loop filter sees them.
             # Without this, the earlier plugin-fallback pass only seeds
@@ -5474,17 +5493,19 @@ def _static_models_catalog_without_live_probes() -> dict:
                 )
 
         if default_model:
-            all_model_ids = {
-                str(model.get("id") or "")
-                for group in groups
-                for model in group.get("models", [])
+            target_group = next(
+                (group for group in groups if group.get("provider_id") == active_provider),
+                None,
+            )
+            target_model_identities = {
+                _provider_model_identity(model.get("id"), active_provider)
+                for model in (target_group or {}).get("models", [])
             }
-            if default_model not in all_model_ids and f"@{active_provider}:{default_model}" not in all_model_ids:
+            if (
+                _provider_model_identity(default_model, active_provider)
+                not in target_model_identities
+            ):
                 label = _get_label_for_model(default_model, groups)
-                target_group = next(
-                    (group for group in groups if group.get("provider_id") == active_provider),
-                    None,
-                )
                 if target_group is not None:
                     target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
                 elif groups:
