@@ -559,48 +559,66 @@ def test_read_cron_output_bounded_no_body_duplication(tmp_path):
 
 
 def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_path):
-    """Blocker 3: the batch budget must be charged AFTER a successful read
-    appends an entry, not before. Two unreadable large files previously
-    consumed the budget via `spent += charge` in their except branches, so a
-    later valid older file hit the cap and returned outputs: []."""
+    """Round-3 residual: a stat-visible large row that FAILS the real read must
+    NOT terminate the batch via the prospective budget check before the read is
+    attempted. The previous shape computed `charge` from f.stat() and broke when
+    `spent + charge > total_budget` BEFORE calling _read_cron_output_bounded —
+    so a large unreadable row was never tried and every valid older output after
+    it was suppressed.
+
+    Scenario (corrected chronology, descending sort by mtime):
+      1. successful newer rows that consume more than two caps,
+      2. a stat-visible large row whose real reader boundary fails,
+      3. a small valid older row.
+    The failed read must be attempted (not pre-empted by the budget check), no
+    empty entry or budget charge appears, and the valid older output remains."""
     out_dir = tmp_path / "cron-out" / "job1"
     out_dir.mkdir(parents=True)
-    # Two "unreadable" large files (we'll make _read_cron_output_bounded raise
-    # on them) + one valid smaller file that should still appear.
-    big_a = out_dir / "run-2.md"
-    big_a.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
-    big_b = out_dir / "run-1.md"
-    big_b.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    # Two successful newer rows, each just under 2 caps (so together > 2 caps).
+    new_a = out_dir / "run-3.md"
+    new_a.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 2 - 100)), encoding="utf-8")
+    new_b = out_dir / "run-2.md"
+    new_b.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 2 - 100)), encoding="utf-8")
+    # Large unreadable row (stat-visible as ~2 caps, will fail the real read).
+    unreadable = out_dir / "run-1.md"
+    unreadable.write_text("## Response\n" + ("X" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
+    # Small valid older row.
     valid = out_dir / "run-0.md"
     valid.write_text("## Response\nVALID_OLDER_OUTPUT\n", encoding="utf-8")
-    # run-1 is newest (mtime highest), run-2 middle, run-0 oldest.
-    os.utime(big_a, (100, 100))
-    os.utime(big_b, (200, 200))
-    os.utime(valid, (300, 300))
+    # Descending mtime order: newest first. unreadable is between the successful
+    # newer rows and the valid older row.
+    os.utime(new_a, (400, 400))
+    os.utime(new_b, (300, 300))
+    os.utime(unreadable, (200, 200))
+    os.utime(valid, (100, 100))
     _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
-    # Make the two big files "unreadable" by patching _read_cron_output_bounded
-    # to raise on them, simulating the OSError path that previously consumed
-    # budget without producing an entry.
+    # Make the large middle row fail the real read (return ok=False, simulating
+    # an open/fstat/seek/read OSError — NOT a legitimate empty file).
     original = routes._read_cron_output_bounded
 
-    def failing_for_big(path, *a, **kw):
-        if path.name in ("run-1.md", "run-2.md"):
-            raise OSError("simulated unreadable")
+    def failing_for_unreadable(path, *a, **kw):
+        if path.name == "run-1.md":
+            return "", False, False  # real read failure
         return original(path, *a, **kw)
 
-    monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_big)
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_unreadable)
 
     handler = _JSONHandler()
     routes._handle_cron_output(
         handler, SimpleNamespace(query="job_id=job1&limit=10")
     )
     body = _payload(handler)
-    # The valid older file's output must still appear despite the two unreadable
-    # newer files consuming budget-attempted reads.
     contents = [e.get("content", "") for e in body.get("outputs", [])]
+    # The valid older output must still appear — the failed read was attempted
+    # (not pre-empted by the budget check) and skipped without charging budget.
     assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
-        f"valid older output must survive unreadable newer files; got {contents}"
+        f"valid older output must survive a failed large row between it and the "
+        f"newer successful rows; got {contents}"
+    )
+    # No empty entries from the failed read.
+    assert all(c.strip() for c in contents), (
+        f"failed read must not append an empty entry; got {contents}"
     )
 
 

@@ -1489,10 +1489,11 @@ def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) ->
       The returned body therefore never contains more bytes than the source.
     - Every read is capped (no unbounded ``fh.read()``).
 
-    Returns ``(text, truncated)``. On open/fstat/read failure returns
-    ``("", False)`` — the caller's error handling covers missing/unreadable
-    files, and the cron batch does not charge budget for this (it treats an
-    empty string from a failed read as a skip).
+    Returns ``(text, truncated, ok)``. On open/fstat/read failure returns
+    ``("", False, False)`` — the ``ok=False`` third element distinguishes a real
+    read failure from a legitimate empty file so the cron batch skips it
+    entirely (no append, no budget charge). The caller's own error handling
+    covers the missing/unreadable-file UX.
     """
     try:
         fh = open(path, "rb")
@@ -20489,20 +20490,14 @@ def _handle_cron_output(handler, parsed):
         total_budget = _FILE_READ_MAX_BYTES * 4
         spent = 0
         for f in files:
-            try:
-                st = f.stat()
-            except OSError:
-                continue
-            # Charge the BOUNDED read size against the batch budget, not the
-            # full on-disk st_size: _read_cron_output_bounded reads at most one
-            # head cap + one tail cap (~2 * _FILE_READ_MAX_BYTES), so charging
-            # the full size would skip an oversized newest file entirely (blank
-            # output). Always admit at least the first (newest) file so the
-            # newest run is never blank.
-            charge = min(st.st_size, _FILE_READ_MAX_BYTES * 2)
-            if spent > 0 and spent + charge > total_budget:
-                truncated_files = True
-                break
+            # Attempt the bounded read FIRST, before any prospective budget
+            # check. A pre-read pathname-stat estimate (`charge`) previously
+            # terminated the loop when `spent + charge > total_budget` BEFORE
+            # the read was attempted — so a stat-visible large row that turned
+            # out unreadable (open/fstat/seek/read failure) was never tried,
+            # the loop broke, and every valid older output after it was
+            # suppressed. Read first; apply budget only to successes; continue
+            # past failures. (#6141 r3)
             try:
                 # Per-file bound with head-then-tail bias: a large prompt
                 # section pushes ## Response past a pure head cap, so use the
@@ -20510,23 +20505,33 @@ def _handle_cron_output(handler, parsed):
                 # surface per-file truncation on the output entry so a client
                 # can tell that file's content was clipped.
                 txt, file_truncated, read_ok = _read_cron_output_bounded(f)
-                if not read_ok:
-                    # Real read failure (open/fstat/read OSError) — NOT a
-                    # legitimate empty file. Skip entirely: do not append an
-                    # entry and do not charge budget. Charging a failed read
-                    # previously let unreadable large newest files consume the
-                    # budget and suppress a valid older output. (#6141 r2 #3)
-                    logger.debug("Failed to read cron output file %s", f)
-                    continue
-                entry = {"filename": f.name, "content": _cron_output_content_window(txt)}
-                if file_truncated:
-                    entry["truncated"] = True
-                outputs.append(entry)
-                # Charge the budget ONLY after a successful read that appended
-                # an entry. (#6141 gate blocker 3)
-                spent += charge
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
+                continue
+            if not read_ok:
+                # Real read failure (open/fstat/seek/read OSError) — NOT a
+                # legitimate empty file. Skip entirely: do not append an entry
+                # and do not charge budget. (#6141 r2 #3)
+                logger.debug("Failed to read cron output file %s", f)
+                continue
+            # Successful read: apply the cumulative budget decision now. Charge
+            # the BOUNDED read size (at most 2 * _FILE_READ_MAX_BYTES from one
+            # head cap + one tail cap), not the full on-disk st_size. Always
+            # admit at least the first (newest) successful file so the newest
+            # run is never blank.
+            try:
+                st = f.stat()
+                charge = min(st.st_size, _FILE_READ_MAX_BYTES * 2)
+            except OSError:
+                charge = _FILE_READ_MAX_BYTES * 2
+            if spent > 0 and spent + charge > total_budget:
+                truncated_files = True
+                break
+            entry = {"filename": f.name, "content": _cron_output_content_window(txt)}
+            if file_truncated:
+                entry["truncated"] = True
+            outputs.append(entry)
+            spent += charge
     result = {"job_id": job_id, "outputs": outputs}
     if truncated_files:
         result["truncated"] = True
