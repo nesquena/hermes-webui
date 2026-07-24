@@ -2794,8 +2794,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:_nextAnchorLocalSeq(),
         path,
         workspace_root:workspaceRoot,
+        session_id:String(artifact.session_id||'').trim(),
         tool_name:String(artifact.tool_name||tc.name||'tool'),
-        tool_call_id:toolId,
+        tool_call_id:String(artifact.tool_call_id||'').trim(),
       },null,null,{render:false});
     }
   }

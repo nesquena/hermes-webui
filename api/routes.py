@@ -8688,7 +8688,7 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
-def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str) -> list[dict]:
+def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str, session_id=None) -> list[dict]:
     """Return only paired, canonical landed mutations from one tool row."""
     if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
         return []
@@ -8711,29 +8711,57 @@ def _turn_artifact_descriptors_from_tool_result(message, *, workspace_root: str)
             candidate,
             workspace_root=workspace_root,
             tool_call_id=tool_call_id,
+            session_id=session_id,
         )
         if descriptors:
             return descriptors
     return []
 
 
-def _declared_turn_tool_calls(messages) -> dict[str, str]:
-    declared = {}
-    for message in messages:
-        if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
+def _ordered_turn_tool_results(messages):
+    """Return only uniquely ordered declaration/result pairs for one turn."""
+    declarations = {}
+    results = {}
+    invalid = set()
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
             continue
-        for call in list(message.get("tool_calls") or []):
-            if not isinstance(call, dict):
+        role = str(message.get("role") or "").lower()
+        if role == "assistant":
+            for call in list(message.get("tool_calls") or []):
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or call.get("tool_call_id") or "").strip()
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name = normalize_tool_name(call.get("name") or function.get("name"))
+                if not call_id or not name or call_id in declarations:
+                    if call_id:
+                        invalid.add(call_id)
+                    continue
+                declarations[call_id] = (index, name)
+        elif role == "tool":
+            call_id = str(message.get("tool_call_id") or "").strip()
+            name = normalize_tool_name(message.get("name") or message.get("tool_name"))
+            declaration = declarations.get(call_id)
+            if not call_id or not name or not declaration or call_id in results:
+                if call_id:
+                    invalid.add(call_id)
                 continue
-            call_id = str(call.get("id") or call.get("tool_call_id") or "").strip()
-            function = call.get("function") if isinstance(call.get("function"), dict) else {}
-            name = normalize_tool_name(call.get("name") or function.get("name"))
-            if call_id and name and call_id not in declared:
-                declared[call_id] = name
-    return declared
+            results[call_id] = (index, name, message)
+
+    paired = []
+    for call_id, (result_index, result_name, message) in results.items():
+        declaration = declarations.get(call_id)
+        if call_id in invalid or not declaration:
+            continue
+        declaration_index, declaration_name = declaration
+        if result_index <= declaration_index or result_name != declaration_name:
+            continue
+        paired.append((result_index, message))
+    return paired
 
 
-def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, list[dict]]:
+def _final_turn_artifact_paths(messages, *, workspace_root: str, session_id=None) -> dict[int, list[dict]]:
     """Return paired, landed artifact descriptors keyed by final answer index."""
     source = list(messages or [])
     paths_by_final_index = {}
@@ -8755,15 +8783,10 @@ def _final_turn_artifact_paths(messages, *, workspace_root: str) -> dict[int, li
         descriptors = []
         seen = set()
         turn_messages = source[turn_start + 1 : final_idx]
-        declared_calls = _declared_turn_tool_calls(turn_messages)
-        consumed_calls = set()
-        for message in turn_messages:
-            tool_call_id = str(message.get("tool_call_id") or "").strip() if isinstance(message, dict) else ""
-            tool_name = normalize_tool_name(message.get("name") or message.get("tool_name")) if isinstance(message, dict) else ""
-            if not tool_call_id or tool_call_id in consumed_calls or declared_calls.get(tool_call_id) != tool_name:
-                continue
-            consumed_calls.add(tool_call_id)
-            for descriptor in _turn_artifact_descriptors_from_tool_result(message, workspace_root=workspace_root):
+        for _, message in _ordered_turn_tool_results(turn_messages):
+            for descriptor in _turn_artifact_descriptors_from_tool_result(
+                message, workspace_root=workspace_root, session_id=session_id
+            ):
                 key = (descriptor["workspace_root"], descriptor["path"])
                 if key not in seen:
                     seen.add(key)
@@ -12883,6 +12906,7 @@ def handle_get(handler, parsed) -> bool:
                 _final_turn_artifacts = _final_turn_artifact_paths(
                     _all_msgs,
                     workspace_root=str(getattr(s, "workspace", "") or ""),
+                    session_id=sid,
                 )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,

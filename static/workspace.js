@@ -493,6 +493,8 @@ function turnArtifactReferencesFromToolCall(tc){
   if(!tc||tc.is_error) return [];
   const name=String(tc.name||'').replace(/^functions\./,'');
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
+  const eventToolCallId=String(tc.tid||tc.id||tc.tool_call_id||'').trim();
+  if(!eventToolCallId) return [];
   const seen=new Set();
   const out=[];
   for(const artifact of Array.isArray(tc.artifacts)?tc.artifacts:[]){
@@ -500,11 +502,12 @@ function turnArtifactReferencesFromToolCall(tc){
     const path=_normalizeArtifactPath(artifact.path);
     const workspaceRoot=String(artifact.workspace_root||'').replace(/\/+$/,'');
     const toolCallId=String(artifact.tool_call_id||'').trim();
+    const sessionId=String(artifact.session_id||'').trim();
     const toolName=String(artifact.tool_name||'').replace(/^functions\./,'');
     const key=`${workspaceRoot}\u0000${path}`;
-    if(!path||!workspaceRoot||!toolCallId||toolName!==name||seen.has(key)) continue;
+    if(!path||!workspaceRoot||!sessionId||toolCallId!==eventToolCallId||toolName!==name||seen.has(key)) continue;
     seen.add(key);
-    out.push({path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName});
+    out.push({path,workspace_root:workspaceRoot,session_id:sessionId,tool_call_id:toolCallId,tool_name:toolName});
   }
   return out;
 }
@@ -632,26 +635,31 @@ function renderSessionArtifacts(){
   }).join('');
 }
 
-async function _workspacePathExists(path){
-  if(!S.session||!path) return false;
+async function _workspacePathExists(path, sessionId){
+  if(!sessionId||!path) return false;
   const parts=String(path).split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
+  const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dir)}`);
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
-async function openArtifactPath(path){
-  if(!path) return;
+async function openArtifactPath(artifact){
+  const descriptor=artifact&&typeof artifact==='object'?artifact:{path:artifact};
+  const sessionId=String(descriptor.session_id||'').trim();
+  const workspaceRoot=String(descriptor.workspace_root||'').replace(/\/+$/,'');
+  const expectedSession=S.session&&String(S.session.session_id||'');
+  const expectedWorkspace=S.session&&String(S.session.workspace||'').replace(/\/+$/,'');
+  if(!descriptor.path||!sessionId||!workspaceRoot||sessionId!==expectedSession||workspaceRoot!==expectedWorkspace) return;
   // Artifact links are an explicit request to inspect a file. A closed
   // workspace panel must expand before openFile paints the preview, otherwise
   // the file is selected behind an invisible right-hand column.
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  let rel = String(descriptor.path).replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = S.session && S.session.workspace;
+  const ws = workspaceRoot;
   if(ws){
     const normWs = ws.replace(/\/+$/,'') + '/';
     if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
@@ -659,8 +667,11 @@ async function openArtifactPath(path){
   }
   if(!rel) rel = '.';
   try{
-    if(!(await _workspacePathExists(rel))){
+    if(!(await _workspacePathExists(rel, sessionId))){
       setStatus(t('file_open_failed'));
+      return;
+    }
+    if(!S.session||String(S.session.session_id||'')!==sessionId||String(S.session.workspace||'').replace(/\/+$/,'')!==workspaceRoot){
       return;
     }
   }catch(_){

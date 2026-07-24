@@ -36,13 +36,25 @@ def _workspace_relative_path(candidate, workspace_root: str) -> str | None:
     try:
         root = Path(workspace_root).expanduser().resolve()
         raw = Path(candidate).expanduser()
-        target = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+        # Replay has no persisted descriptor to bind a relative result to the
+        # workspace that actually received the write. Require the tool's
+        # absolute landed path instead of rebinding it to the current root.
+        if not raw.is_absolute():
+            return None
+        target = raw.resolve()
         return target.relative_to(root).as_posix()
     except (OSError, ValueError):
         return None
 
 
-def landed_artifact_descriptors(tool_name, result_value, *, workspace_root: str, tool_call_id) -> list[dict]:
+def landed_artifact_descriptors(
+    tool_name,
+    result_value,
+    *,
+    workspace_root: str,
+    tool_call_id,
+    session_id=None,
+) -> list[dict]:
     """Return fail-closed descriptors only for canonical successful mutations."""
     name = normalize_tool_name(tool_name)
     result = parse_tool_result(result_value)
@@ -57,10 +69,7 @@ def landed_artifact_descriptors(tool_name, result_value, *, workspace_root: str,
     if name == "write_file":
         if "bytes_written" not in result:
             return []
-        try:
-            if int(result["bytes_written"]) < 0:
-                return []
-        except (TypeError, ValueError):
+        if type(result["bytes_written"]) is not int or result["bytes_written"] < 0:
             return []
         candidates = [result.get("resolved_path")]
     elif name == "patch":
@@ -81,12 +90,13 @@ def landed_artifact_descriptors(tool_name, result_value, *, workspace_root: str,
         if not path or path in seen:
             continue
         seen.add(path)
-        descriptors.append(
-            {
-                "path": path,
-                "workspace_root": str(Path(root).expanduser().resolve()),
-                "tool_call_id": call_id,
-                "tool_name": name,
-            }
-        )
+        descriptor = {
+            "path": path,
+            "workspace_root": str(Path(root).expanduser().resolve()),
+            "tool_call_id": call_id,
+            "tool_name": name,
+        }
+        if str(session_id or "").strip():
+            descriptor["session_id"] = str(session_id).strip()
+        descriptors.append(descriptor)
     return descriptors

@@ -8375,6 +8375,7 @@ def _run_agent_streaming(
                             function_result,
                             workspace_root=_turn_workspace_root,
                             tool_call_id=tool_call_id,
+                            session_id=session_id,
                         )
                         put('tool_complete', {
                             'event_type': 'tool.completed',

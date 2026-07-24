@@ -13629,10 +13629,14 @@ function _turnArtifactEntriesFromScene(scene){
   const entries=[];
   for(const artifact of artifacts){
     const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
+    const toolName=String(payload.tool_name||'').replace(/^functions\./,'');
+    const toolCallId=String(payload.tool_call_id||'').trim();
+    const sessionId=String(payload.session_id||'').trim();
+    if(!['write_file','patch'].includes(toolName)||!toolCallId||!sessionId) continue;
     const path=_turnArtifactWorkspacePath(payload.path,payload.workspace_root);
     if(!path||seen.has(path)) continue;
     seen.add(path);
-    entries.push({path});
+    entries.push({path,workspace_root:String(payload.workspace_root||'').replace(/\/+$/,''),session_id:sessionId,tool_name:toolName,tool_call_id:toolCallId});
   }
   return entries;
 }
@@ -13662,7 +13666,7 @@ function _renderTurnArtifactListForMessage(message, segment, rawIdx){
     label.textContent=entry.path;
     item.append(icon,label);
     item.addEventListener('click',()=>{
-      if(typeof openArtifactPath==='function') openArtifactPath(entry.path);
+      if(typeof openArtifactPath==='function') openArtifactPath(entry);
     });
     list.appendChild(item);
   }
