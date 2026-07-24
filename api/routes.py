@@ -13017,6 +13017,18 @@ def handle_get(handler, parsed) -> bool:
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
             msgs = list(synth.messages or [])
+            if load_messages:
+                _truncated_msgs, _messages_offset = _message_window_for_display(
+                    msgs,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                    expand_renderable=expand_renderable,
+                )
+                if msg_limit is not None:
+                    _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
+            else:
+                _truncated_msgs = []
+                _messages_offset = 0
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
@@ -13056,10 +13068,15 @@ def handle_get(handler, parsed) -> bool:
                 # sessions and the user only discovers the block at
                 # POST time with a confusing 403.
                 "read_only": bool(getattr(synth, "read_only", False)),
-                "messages": msgs,
+                "messages": _truncated_msgs,
                 "tool_calls": [],
             }
-            attach_todo_state(sess, msgs)
+            if load_messages and msgs:
+                attach_todo_state(sess, msgs)
+            sess["_messages_truncated"] = (
+                load_messages and msg_limit is not None and _messages_offset > 0
+            )
+            sess["_messages_offset"] = _messages_offset
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": redact_session_data(sess)})
 
