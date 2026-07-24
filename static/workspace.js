@@ -266,12 +266,12 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
   const activeSessionId = S.session ? S.session.session_id : null;
   const activeWorkspaceRoot = _artifactScalarString(S.session && S.session.workspace).replace(/\/+$/,'');
   const ownerWorkspaceRoot = _artifactScalarString(owner.workspace_root);
-  const hasWorkspaceRoots =
-    ownerWorkspaceRoot && activeWorkspaceRoot;
+  const workspaceRootsMatch = !ownerWorkspaceRoot && !activeWorkspaceRoot
+    ? true
+    : ownerWorkspaceRoot === activeWorkspaceRoot;
   const grant = ownerSessionId &&
     ownerSessionId === activeSessionId &&
-    hasWorkspaceRoots &&
-    ownerWorkspaceRoot === activeWorkspaceRoot
+    workspaceRootsMatch
     ? _workspaceEscapeGrantForPath(normalizedPath)
     : null;
   const sessionId = encodeURIComponent(ownerSessionId);
@@ -514,7 +514,16 @@ function _artifactCandidatesFromText(text){
 
 function _artifactCandidatesFromToolCall(tc){
   if(!tc) return [];
-  const name = _artifactToolName(tc.name);
+  const normalizeToolName = (value) => {
+    const name = _artifactScalarString(value);
+    if(typeof _artifactToolName === 'function'){
+      try{
+        return _artifactToolName(value);
+      }catch(_){}
+    }
+    return name ? name.replace(/^functions\./,'') : '';
+  };
+  const name = normalizeToolName(tc.name);
   const args = tc.arguments || tc.args || tc.input || {};
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
@@ -725,7 +734,7 @@ async function openArtifactPath(path){
     setStatus(t('file_open_failed'));
     return;
   }
-  await openFile(rel);
+  await openFile(rel,{owner});
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
