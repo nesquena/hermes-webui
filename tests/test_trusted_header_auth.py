@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import shutil
 import subprocess
 import time
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,6 +77,19 @@ def _install_known_work_profile(monkeypatch, tmp_path):
 
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", _home_for_profile)
     return work_home
+
+
+def _install_delete_profile_stub(monkeypatch, delete_calls):
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    profiles_module = types.ModuleType("hermes_cli.profiles")
+
+    def fake_delete_profile(profile, *, yes=False):
+        delete_calls.append((profile, yes))
+
+    profiles_module.delete_profile = fake_delete_profile
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_module)
 
 
 @pytest.fixture(autouse=True)
@@ -510,6 +525,26 @@ def test_profile_delete_allows_unbound_trusted_session_default_handoff(monkeypat
     assert delete_calls == ["work"]
     assert auth.session_bound_profile(cookie) is None
     assert any(value.startswith("hermes_profile=default.") for value in handler.header_values("Set-Cookie"))
+
+
+def test_profile_delete_clears_trusted_session_bindings(monkeypatch):
+    delete_calls = []
+    _install_delete_profile_stub(monkeypatch, delete_calls)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "_validate_profile_name", lambda _name: None)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+
+    _trusted_env(monkeypatch)
+    work_session = auth.create_session(auth_type="trusted", username="alice", bound_profile="work")
+    other_session = auth.create_session(auth_type="trusted", username="alice", bound_profile="devops")
+
+    result = profiles.delete_profile_api("work")
+
+    assert result == {"ok": True, "name": "work"}
+    assert auth.session_bound_profile(work_session) is None
+    assert auth.session_bound_profile(other_session) == "devops"
+    assert delete_calls == [("work", True)]
 
 
 def test_auth_status_reports_trusted_session_fields(monkeypatch):

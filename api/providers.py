@@ -1267,17 +1267,32 @@ def _write_env_file(
             pass
 
 
+def _provider_key_process_env_snapshot() -> tuple[str, str] | None:
+    """Return ``(request_profile, process_profile)`` for the current ownership decision."""
+    from api import profiles as _profiles
+
+    with _profiles._profile_lock:
+        request_profile = str(_profiles.get_active_profile_name() or "").strip()
+        process_profile = str(getattr(_profiles, "_active_profile", "") or "").strip()
+        if not request_profile or not process_profile:
+            return None
+        return request_profile, process_profile
+
+
 def _provider_key_write_updates_process_env() -> bool:
     """Return whether a provider-key write targets the live process profile."""
     try:
         from api import profiles as _profiles
+    except Exception:
+        logger.debug("Could not load profile helpers for provider key ownership", exc_info=True)
+        return False
 
-        with _profiles._profile_lock:
-            request_profile = str(_profiles.get_active_profile_name() or "").strip()
-            process_profile = str(getattr(_profiles, "_active_profile", "") or "").strip()
-            if not request_profile or not process_profile:
-                return False
-            return _profiles._profiles_match(process_profile, request_profile)
+    try:
+        snapshot = _provider_key_process_env_snapshot()
+        if not snapshot:
+            return False
+        request_profile, process_profile = snapshot
+        return _profiles._profiles_match(process_profile, request_profile)
     except Exception:
         logger.debug("Could not determine process-env ownership for provider key write", exc_info=True)
         return False

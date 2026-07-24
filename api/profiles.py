@@ -2677,6 +2677,11 @@ def delete_profile_api(name: str) -> dict:
             shutil.rmtree(str(profile_dir))
         else:
             raise ValueError(f"Profile '{name}' does not exist.")
+    try:
+        from api import auth as _auth
+        _auth.clear_trusted_session_bindings_for_deleted_profile(name)
+    except Exception:
+        logger.debug("Could not clear trusted session bindings for deleted profile", exc_info=True)
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()

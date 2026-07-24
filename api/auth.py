@@ -809,6 +809,48 @@ def session_bound_profile(cookie_value: str) -> str | None:
     return bound_profile or None
 
 
+def clear_trusted_session_bindings_for_deleted_profile(profile_name: str) -> int:
+    """Clear trusted-session profile bindings that point at a deleted profile.
+
+    Return the number of session records updated.  Deleting a profile may leave
+    existing trusted sessions pinned to that profile; without this cleanup those
+    sessions can reconnect as orphaned-bound sessions and fail profile checks on
+    every protected request.  This function is intentionally fail-closed: any
+    resolution ambiguity leaves existing records untouched.
+    """
+    try:
+        from api import profiles as _profiles
+    except Exception:
+        logger.debug("Could not load profile helpers while clearing deleted-session bindings", exc_info=True)
+        return 0
+
+    target_profile = str(profile_name or '').strip()
+    if not target_profile:
+        return 0
+
+    updated = 0
+    try:
+        with _SESSIONS_LOCK:
+            for token, record in list(_sessions.items()):
+                if not isinstance(record, dict):
+                    continue
+                bound_profile = str(record.get('bound_profile') or '').strip()
+                if not bound_profile:
+                    continue
+                if not _profiles._profiles_match(bound_profile, target_profile):
+                    continue
+                record = dict(record)
+                record['bound_profile'] = None
+                _sessions[token] = record
+                updated += 1
+            if updated:
+                _save_sessions(_sessions)
+        return updated
+    except Exception:
+        logger.debug("Could not clear trusted session bindings for deleted profile", exc_info=True)
+        return 0
+
+
 def is_trusted_auth_enabled() -> bool:
     return _trusted_auth_header_configured()
 

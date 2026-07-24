@@ -534,6 +534,36 @@ class TestSetProviderKey:
         finally:
             profiles.clear_request_profile()
 
+    def test_renamed_root_request_does_not_mutate_named_process_env(self, monkeypatch, tmp_path):
+        """A renamed-root request must not mutate a live non-root process profile."""
+        _install_fake_hermes_cli(monkeypatch)
+        base = tmp_path / ".hermes"
+        base.mkdir()
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+        monkeypatch.setattr(
+            profiles,
+            "_is_root_profile",
+            lambda name: name in {"default", "renamed"},
+        )
+        monkeypatch.setattr(profiles, "_active_profile", "work")
+        monkeypatch.setenv("HERMES_HOME", str(base))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "work-process-key")
+
+        from api import providers as prov
+
+        profiles.set_request_profile("renamed")
+        try:
+            result = prov.set_provider_key("anthropic", "sk-ant-root-request-key-12345678")
+            assert result["ok"] is True
+            assert os.environ["ANTHROPIC_API_KEY"] == "work-process-key"
+            assert "ANTHROPIC_API_KEY" in prov._load_env_file(base.joinpath(".env"))
+            assert prov._load_env_file(base.joinpath(".env"))["ANTHROPIC_API_KEY"] == (
+                "sk-ant-root-request-key-12345678"
+            )
+        finally:
+            profiles.clear_request_profile()
+
     def test_provider_key_write_fails_closed_when_profile_ownership_errors(self, monkeypatch, tmp_path):
         """Ownership uncertainty still persists the file but must not touch live env."""
         _install_fake_hermes_cli(monkeypatch)
