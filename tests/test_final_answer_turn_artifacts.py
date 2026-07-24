@@ -75,6 +75,32 @@ def test_turn_artifact_references_require_server_landed_descriptors():
     ]
 
 
+def test_turn_artifact_references_require_strict_identity_fields():
+    workspace = (ROOT / "static/workspace.js").read_text(encoding="utf-8")
+    start = workspace.index("function turnArtifactReferencesFromToolCall(tc){")
+    end = workspace.index("const _turnMutatedPreviewPaths")
+    output = _run_node(
+        workspace[start:end]
+        + "\nconsole.log(JSON.stringify(["
+        + "turnArtifactReferencesFromToolCall({name:'write_file',tool_call_id:'call-1',session_id:'sid-owner',artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:'call-1',tool_name:'write_file'}]})"
+        + ","
+        + "turnArtifactReferencesFromToolCall({name:'write_file',tool_call_id:1,artifacts:[{path:'output/report.md',workspace_root:'/workspace',tool_call_id:1,tool_name:'write_file'}]})"
+        + "]));"
+    )
+    assert output == [
+        [
+            {
+                "path": "output/report.md",
+                "workspace_root": "/workspace",
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "session_id": "sid-owner",
+            },
+        ],
+        [],
+    ]
+
+
 def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
     ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
     messages = (ROOT / "static/messages.js").read_text(encoding="utf-8")
@@ -92,6 +118,8 @@ def test_final_answer_artifact_entries_are_turn_owned_and_workspace_scoped():
             {"type":"artifact_reference","payload": {"path": "C:/outside/windows.md", "workspace_root": "/workspace"}},
             {"type":"artifact_reference","payload": {"path": "output/unbound.md"}},
             {"type":"wrong_type","payload": {"path":"output/untyped.md","workspace_root":"/workspace", "session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-4"}},
+            {"type":"artifact_reference","payload": {"path":"output/invalid-type.md","workspace_root":"/workspace","session_id":22,"tool_name":"write_file","tool_call_id":"call-4"}},
+            {"payload": {"path":"output/no-type.md","workspace_root":"/workspace","session_id":"sid-owner","tool_name":"write_file","tool_call_id":"call-5"}},
         ]
     }
     output = _run_node(

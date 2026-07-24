@@ -2790,6 +2790,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         : typeof tc.id === 'string'
           ? tc.id.trim()
           : '';
+    const artifactSessionId = (
+      typeof tc.session_id === 'string'
+        ? tc.session_id.trim()
+        : typeof activeSid === 'string'
+          ? activeSid
+          : ''
+    );
     if(!toolCallId) return;
     for(const [index,artifact] of turnArtifactReferencesFromToolCall(tc).entries()){
       const artifactObj = artifact && typeof artifact === 'object' ? artifact : null;
@@ -2806,7 +2813,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:_nextAnchorLocalSeq(),
         path,
         workspace_root:workspaceRoot,
-        session_id:typeof artifactObj.session_id === 'string' ? artifactObj.session_id.trim() : '',
+        session_id:(
+          typeof artifactObj.session_id === 'string'
+            ? artifactObj.session_id.trim()
+            : artifactSessionId
+        ),
         tool_name: typeof artifactObj.tool_name === 'string' ? artifactObj.tool_name.trim() : String(tc.name||'tool'),
         tool_call_id:artifactCallId,
       },null,null,{render:false});

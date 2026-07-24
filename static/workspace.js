@@ -577,6 +577,9 @@ function turnArtifactReferencesFromToolCall(tc){
   if(!ARTIFACT_MUTATION_TOOLS.has(name)) return [];
   const allowArtifactCallIdFallback = name === 'patch';
   const explicitToolCallId = _artifactScalarString(tc.tool_call_id || tc.id);
+  const completionSessionId = _artifactScalarString(
+    tc.session_id || (S && S.session && S.session.session_id)
+  );
   const completionToolCallId = _artifactScalarString(
     explicitToolCallId
     || tc.tid
@@ -609,7 +612,14 @@ function turnArtifactReferencesFromToolCall(tc){
       || seen.has(key)
     ) continue;
     seen.add(key);
-    out.push({path,workspace_root:workspaceRoot,tool_call_id:toolCallId,tool_name:toolName});
+    const descriptor={
+      path,
+      workspace_root:workspaceRoot,
+      tool_call_id:toolCallId,
+      tool_name:toolName,
+    };
+    if(completionSessionId) descriptor.session_id=completionSessionId;
+    out.push(descriptor);
   }
   return out;
 }
@@ -770,14 +780,20 @@ async function openArtifactPath(path){
     : artifact && typeof artifact.path === 'string'
       ? artifact.path
       : '';
-  const owner = _artifactOwnerFromArtifactValue(artifact) || _artifactOwnerFromCurrentSession();
+  const owner = artifact
+    ? _artifactOwnerFromArtifactValue(artifact)
+    : _artifactOwnerFromCurrentSession();
   if(!pathValue || !owner) return;
+  const ownerStillActive = () => typeof _artifactOwnerMatchesSession === 'function'
+    ? _artifactOwnerMatchesSession(owner)
+    : true;
+  if(!ownerStillActive()) return;
   // Artifact links are an explicit request to inspect a file. A closed
   // workspace panel must expand before openFile paints the preview, otherwise
   // the file is selected behind an invisible right-hand column.
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   switchWorkspacePanelTab('files');
-  if(!_artifactOwnerMatchesSession(owner)) return;
+  if(!ownerStillActive()) return;
   let rel = pathValue.replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
   const ws = owner.workspace_root;
@@ -788,19 +804,17 @@ async function openArtifactPath(path){
   }
   if(!rel) rel = '.';
   try{
-    if(!_artifactOwnerMatchesSession(owner)) return;
+    if(!ownerStillActive()) return;
     if(!(await _workspacePathExists(rel,{owner}))){
-      setStatus(t('file_open_failed'));
+      if(ownerStillActive()) setStatus(t('file_open_failed'));
       return;
     }
   }catch(_){
-    setStatus(t('file_open_failed'));
+    if(ownerStillActive()) setStatus(t('file_open_failed'));
     return;
   }
-  // Legacy compatibility: keep string token "openFile(rel);" for tests.
-  if(!_artifactOwnerMatchesSession(owner)) return;
+  if(!ownerStillActive()) return;
   await openFile(rel,{owner});
-  // openFile(rel);
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -1247,12 +1261,12 @@ async function openFile(path, opts={}){
           (candidate.owner && candidate.owner.session_id) ||
           candidate.session_id
         );
-        if(typeof candidateSession === 'string' || typeof candidateSession === 'number'){
-          const id = String(candidateSession).trim();
+        if(typeof candidateSession === 'string'){
+          const id = candidateSession.trim();
           if(id) return id;
         }
         const session = S && S.session && (S.session.session_id || S.session.session_id);
-        return typeof session === 'string' || typeof session === 'number' ? String(session).trim() : '';
+        return typeof session === 'string' ? session.trim() : '';
       })();
       if(!sessionId) return null;
       return {
@@ -1305,7 +1319,7 @@ async function openFile(path, opts={}){
     if(!ownerStillActive()) return;
     $('previewImg').src=url;
     if(!ownerStillActive()) return;
-    $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+    $('previewImg').onerror=()=>{ if(!ownerStillActive()) return; setStatus(t('image_load_failed')); };
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     if(!ownerStillActive()) return;

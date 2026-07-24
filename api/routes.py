@@ -8689,7 +8689,10 @@ def _messages_for_limited_payload(messages) -> list:
 
 
 def _turn_artifact_descriptors_from_tool_result(
-    message, *, workspace_root: str, session_id: str | None = None
+    message,
+    *,
+    workspace_root: str,
+    session_id: str = "",
 ) -> list[dict]:
     """Return only paired, canonical landed mutations from one tool row."""
     if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
@@ -8753,11 +8756,12 @@ def _final_turn_artifact_paths(
     messages,
     *,
     workspace_root: str,
-    session_id: str | None = None,
+    session_id: str = "",
 ) -> dict[int, list[dict]]:
     """Return paired, landed artifact descriptors keyed by final answer index."""
     source = list(messages or [])
     paths_by_final_index = {}
+    replay_session_id = str(session_id or "").strip()
     user_indexes = [idx for idx, message in enumerate(source) if isinstance(message, dict) and message.get("role") == "user"]
     for position, turn_start in enumerate(user_indexes):
         turn_end = user_indexes[position + 1] if position + 1 < len(user_indexes) else len(source)
@@ -8773,13 +8777,11 @@ def _final_turn_artifact_paths(
         )
         if final_idx is None:
             continue
-        descriptors_by_id = {}
-        seen = set()
-        result_order = []
-        seen_result_ids = set()
         declared_calls: dict[str, str] = {}
         invalid_calls: set[str] = set()
-        invalid_result_ids = set()
+        descriptors_by_id: dict[str, list[dict]] = {}
+        result_order: list[str] = []
+        consumed_calls: set[str] = set()
         turn_messages = source[turn_start + 1 : final_idx]
         for message in turn_messages:
             if not isinstance(message, dict):
@@ -8802,9 +8804,14 @@ def _final_turn_artifact_paths(
                     name = normalize_tool_name(raw_name)
                     if not name:
                         continue
-                    if call_id in declared_calls or call_id in invalid_calls:
+                    if call_id in invalid_calls:
+                        continue
+                    if call_id in declared_calls:
                         invalid_calls.add(call_id)
                         declared_calls.pop(call_id, None)
+                        descriptors_by_id.pop(call_id, None)
+                        if call_id in result_order:
+                            result_order.remove(call_id)
                         continue
                     declared_calls[call_id] = name
                 continue
@@ -8814,33 +8821,46 @@ def _final_turn_artifact_paths(
             if not isinstance(raw_tool_call_id, str):
                 continue
             tool_call_id = raw_tool_call_id.strip()
-            if (
-                not tool_call_id
-                or tool_call_id in invalid_calls
-                or tool_call_id not in declared_calls
-            ):
+            if not tool_call_id or tool_call_id in invalid_calls:
+                invalid_calls.add(tool_call_id)
+                continue
+            if tool_call_id not in declared_calls:
+                invalid_calls.add(tool_call_id)
                 continue
             tool_name = normalize_tool_name(message.get("name") or message.get("tool_name"))
             if not tool_name or tool_name != declared_calls[tool_call_id]:
-                invalid_result_ids.add(tool_call_id)
+                invalid_calls.add(tool_call_id)
+                declared_calls.pop(tool_call_id, None)
+                descriptors_by_id.pop(tool_call_id, None)
+                if tool_call_id in result_order:
+                    result_order.remove(tool_call_id)
                 continue
-            if tool_call_id in seen_result_ids:
-                invalid_result_ids.add(tool_call_id)
+            if tool_call_id in consumed_calls:
+                invalid_calls.add(tool_call_id)
+                descriptors_by_id.pop(tool_call_id, None)
+                if tool_call_id in result_order:
+                    result_order.remove(tool_call_id)
                 continue
-            seen_result_ids.add(tool_call_id)
+            consumed_calls.add(tool_call_id)
             descriptors_for_call = _turn_artifact_descriptors_from_tool_result(
                 message,
                 workspace_root=workspace_root,
-                session_id=session_id,
+                session_id=replay_session_id,
             )
-            if descriptors_for_call:
-                descriptors_by_id[tool_call_id] = descriptors_for_call
-                result_order.append(tool_call_id)
-            else:
-                invalid_result_ids.add(tool_call_id)
+            if not descriptors_for_call:
+                invalid_calls.add(tool_call_id)
+                descriptors_by_id.pop(tool_call_id, None)
+                if tool_call_id in result_order:
+                    result_order.remove(tool_call_id)
+                continue
+            if tool_call_id in invalid_calls:
+                continue
+            descriptors_by_id[tool_call_id] = descriptors_for_call
+            result_order.append(tool_call_id)
         descriptors = []
+        seen = set()
         for result_id in result_order:
-            if result_id in invalid_calls or result_id in invalid_result_ids:
+            if result_id in invalid_calls:
                 continue
             for descriptor in descriptors_by_id.get(result_id, []):
                 key = (descriptor["workspace_root"], descriptor["path"])
@@ -8872,6 +8892,32 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
     """Merge transcript-derived artifact evidence into the existing Anchor projection."""
     if not isinstance(messages, list) or not isinstance(paths_by_final_index, dict):
         return messages
+
+    def _strict_artifact_reference(payload: dict, event_type: str | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        workspace_root = payload.get("workspace_root")
+        path = payload.get("path")
+        tool_name = payload.get("tool_name")
+        tool_call_id = payload.get("tool_call_id")
+        session_id = payload.get("session_id")
+        if not isinstance(event_type, str) or event_type != "artifact_reference":
+            return False
+        if not (
+            isinstance(workspace_root, str)
+            and workspace_root.strip()
+            and isinstance(path, str)
+            and path.strip()
+            and isinstance(tool_name, str)
+            and tool_name.strip()
+            and isinstance(tool_call_id, str)
+            and tool_call_id.strip()
+            and isinstance(session_id, str)
+            and session_id.strip()
+        ):
+            return False
+        return True
+
     out = list(messages)
     for local_idx, message in enumerate(messages):
         if not isinstance(message, dict) or message.get("role") != "assistant":
@@ -8890,6 +8936,11 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             payload = artifact.get("payload")
             if not isinstance(payload, dict):
                 continue
+            event_type = (
+                artifact.get("type")
+                if isinstance(artifact.get("type"), str)
+                else artifact.get("source_event_type")
+            )
             payload_workspace_root = payload.get("workspace_root")
             payload_path = payload.get("path")
             if not isinstance(payload_workspace_root, str) or not isinstance(payload_path, str):
@@ -8897,9 +8948,10 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             key = (payload_workspace_root, payload_path)
             if not key[0] or not key[1]:
                 continue
-            seen.add(key)
-            # Preserve the first observed artifact slot for deterministic replacement.
-            seen_to_first_index.setdefault(key, idx)
+            if key not in seen:
+                seen_to_first_index.setdefault(key, idx)
+            if _strict_artifact_reference(payload, event_type):
+                seen.add(key)
         for descriptor in descriptors:
             if not isinstance(descriptor, dict):
                 continue
@@ -8913,21 +8965,23 @@ def _attach_replayed_turn_artifacts_to_anchor_scenes(messages, paths_by_final_in
             if not path or not workspace_root:
                 continue
             if key in seen:
-                if key in seen_to_first_index:
-                    existing_index = seen_to_first_index[key]
-                    existing = artifacts[existing_index] if existing_index < len(artifacts) else None
+                existing_index = seen_to_first_index.get(key)
+                if existing_index is not None and existing_index < len(artifacts):
+                    existing = artifacts[existing_index]
                     existing_payload = existing.get("payload") if isinstance(existing, dict) else None
-                    if not isinstance(existing_payload, dict):
-                        continue
-                    existing_tool_name = existing_payload.get("tool_name")
-                    existing_tool_call_id = existing_payload.get("tool_call_id")
-                    if not (isinstance(existing_tool_name, str) and existing_tool_name.strip()) or not (
-                        isinstance(existing_tool_call_id, str) and existing_tool_call_id.strip()
+                    existing_type = existing.get("type") if isinstance(existing, dict) else None
+                    existing_source_event_type = existing.get("source_event_type") if isinstance(existing, dict) else None
+                    if (
+                        not _strict_artifact_reference(
+                            existing_payload if isinstance(existing_payload, dict) else {},
+                            existing_type or existing_source_event_type,
+                        )
                     ):
                         artifacts[existing_index] = {
                             "type": "artifact_reference",
                             "payload": {**descriptor, "source": "transcript_replay"},
                         }
+                seen.add(key)
                 continue
             seen.add(key)
             artifacts.append({"type": "artifact_reference", "payload": {**descriptor, "source": "transcript_replay"}})
@@ -12992,7 +13046,7 @@ def handle_get(handler, parsed) -> bool:
                 _final_turn_artifacts = _final_turn_artifact_paths(
                     _all_msgs,
                     workspace_root=str(getattr(s, "workspace", "") or ""),
-                    session_id=getattr(s, "session_id", None) or "",
+                    session_id=str(getattr(s, "session_id", "") or ""),
                 )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
