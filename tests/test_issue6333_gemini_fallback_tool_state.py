@@ -473,24 +473,25 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             tool_executions.append(copy.deepcopy(tool_row))
             messages.append(tool_row)
 
-    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
-    fake_runtime_module.resolve_runtime_provider = lambda requested=None, **_kw: {
-        "provider": requested or "nvidia",
-        "api_key": "synthetic-key",
-        "base_url": "https://integrate.api.nvidia.com/v1",
-    }
-    fake_hermes_cli = types.ModuleType("hermes_cli")
-    fake_hermes_cli.runtime_provider = fake_runtime_module
-    fake_model_normalize = types.ModuleType("hermes_cli.model_normalize")
-    fake_model_normalize.normalize_model_for_provider = lambda model, provider: model
-    fake_hermes_cli.model_normalize = fake_model_normalize
-    fake_hermes_state = types.ModuleType("hermes_state")
-    fake_hermes_state.SessionDB = lambda *args, **kwargs: None
+    import hermes_cli.model_normalize as model_normalize
+    import hermes_cli.runtime_provider as runtime_provider
+    import hermes_state
 
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.model_normalize", fake_model_normalize)
-    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(
+        runtime_provider,
+        "resolve_runtime_provider",
+        lambda requested=None, **_kw: {
+            "provider": requested or "nvidia",
+            "api_key": "synthetic-key",
+            "base_url": "https://integrate.api.nvidia.com/v1",
+        },
+    )
+    monkeypatch.setattr(
+        model_normalize,
+        "normalize_model_for_provider",
+        lambda model, provider: model,
+    )
+    monkeypatch.setattr(hermes_state, "SessionDB", lambda *args, **kwargs: None)
     monkeypatch.setattr(run_agent, "get_tool_definitions", lambda *args, **kwargs: [])
     monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda *args, **kwargs: {})
     monkeypatch.setattr(
