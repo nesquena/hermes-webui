@@ -4,6 +4,7 @@ import pathlib
 import queue
 import sys
 import types
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -60,39 +61,61 @@ def _assert_no_boundary_artifacts(messages):
     _assert_no_boundary_wrapper_instances(messages)
 
 
-def _import_real_conversation_loop():
-    original_agent_modules = {
+def _snapshot_agent_modules():
+    return {
         name: module
         for name, module in sys.modules.items()
         if name == "agent" or name.startswith("agent.")
     }
 
-    for name, module in list(original_agent_modules.items()):
-        if name != "agent" and not name.startswith("agent."):
-            continue
-        if isinstance(module, types.ModuleType) and getattr(module, "__file__", None) is None:
+
+def _clear_agent_modules():
+    for name in list(sys.modules):
+        if name == "agent" or name.startswith("agent."):
             sys.modules.pop(name, None)
 
-    def _restore_agent_modules():
-        for name in list(sys.modules):
-            if (name == "agent" or name.startswith("agent.")) and name not in original_agent_modules:
-                sys.modules.pop(name, None)
-        for name, module in original_agent_modules.items():
-            sys.modules[name] = module
 
+def _restore_agent_modules(snapshot):
+    _clear_agent_modules()
+    for name, module in snapshot.items():
+        sys.modules[name] = module
+
+    agent_pkg = sys.modules.get("agent")
+    if not isinstance(agent_pkg, types.ModuleType):
+        return
+
+    for name, module in snapshot.items():
+        if not name.startswith("agent."):
+            continue
+        child_name = name.split(".", 1)[1]
+        if "." not in child_name:
+            setattr(agent_pkg, child_name, module)
+
+
+def _fallback_reanchor_current_turn_user_idx(messages, user_message):
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user" and message.get("content") == user_message:
+            return idx
+    raise ValueError(f"user message not found for reanchor: {user_message!r}")
+
+
+@contextmanager
+def _import_real_conversation_loop():
+    original_agent_modules = _snapshot_agent_modules()
+    _clear_agent_modules()
     try:
         conversation_loop = pytest.importorskip(
             "agent.conversation_loop",
             reason="hermes-agent conversation loop not importable",
         )
-    except BaseException:
-        _restore_agent_modules()
-        raise
-
-    agent_pkg = sys.modules.get("agent")
-    if isinstance(agent_pkg, types.ModuleType):
-        agent_pkg.conversation_loop = conversation_loop  # type: ignore[attr-defined]
-    return conversation_loop, _restore_agent_modules
+        if not hasattr(conversation_loop, "reanchor_current_turn_user_idx"):
+            conversation_loop.reanchor_current_turn_user_idx = _fallback_reanchor_current_turn_user_idx  # type: ignore[attr-defined]
+        yield conversation_loop
+    finally:
+        _restore_agent_modules(original_agent_modules)
 
 
 def _repair(messages, *, model, base_url, boundary_index):
@@ -318,7 +341,8 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
     import api.session_lifecycle as lifecycle
     import api.streaming as streaming
     from api.models import Session
-    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+    conversation_loop_ctx = _import_real_conversation_loop()
+    conversation_loop = conversation_loop_ctx.__enter__()
     ChatCompletionsTransport = pytest.importorskip(
         "agent.transports.chat_completions",
         reason="hermes-agent transport modules not importable",
@@ -643,7 +667,7 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
             msg_text="continue after dirty copied result",
         )
     finally:
-        restore_agent_modules()
+        conversation_loop_ctx.__exit__(None, None, None)
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
         conversation_loop.build_turn_context = original_build_turn_context
         conversation_loop.reanchor_current_turn_user_idx = original_reanchor
@@ -766,7 +790,8 @@ def test_streaming_fallback_preserves_persisted_history_and_repairs_only_outboun
 def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_history():
     from api.streaming import _install_gemini_request_boundary_wrapper
     import api.streaming as streaming
-    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+    conversation_loop_ctx = _import_real_conversation_loop()
+    conversation_loop = conversation_loop_ctx.__enter__()
     get_transport = pytest.importorskip(
         "agent.transports",
         reason="hermes-agent transport modules not importable",
@@ -831,7 +856,7 @@ def test_transport_wrapper_repairs_real_chat_transport_and_preserves_primary_his
             for m in result
         ), "the wrapped build path must strip the current-turn unsigned group before Gemini sees it"
     finally:
-        restore_agent_modules()
+        conversation_loop_ctx.__exit__(None, None, None)
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
         conversation_loop.build_turn_context = original_build_turn_context
         conversation_loop.reanchor_current_turn_user_idx = original_reanchor
@@ -844,7 +869,8 @@ def test_boundary_wrapper_reanchors_rebuilt_message_list_and_strips_marker():
         _GeminiRequestBoundaryMessage,
         _install_gemini_request_boundary_wrapper,
     )
-    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+    conversation_loop_ctx = _import_real_conversation_loop()
+    conversation_loop = conversation_loop_ctx.__enter__()
 
     original_reanchor = conversation_loop.reanchor_current_turn_user_idx
     original_flag = streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
@@ -870,7 +896,7 @@ def test_boundary_wrapper_reanchors_rebuilt_message_list_and_strips_marker():
         assert outbound.pop(streaming._GEMINI_REQUEST_BOUNDARY_MARKER) is True
         assert rebuilt[2] == {"role": "user", "content": "current"}
     finally:
-        restore_agent_modules()
+        conversation_loop_ctx.__exit__(None, None, None)
         conversation_loop.reanchor_current_turn_user_idx = original_reanchor
         streaming._GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = original_flag
 
@@ -878,7 +904,8 @@ def test_boundary_wrapper_reanchors_rebuilt_message_list_and_strips_marker():
 def test_transport_wrapper_rewraps_replaced_real_chat_transport():
     from api.streaming import _install_gemini_request_boundary_wrapper
     import api.streaming as streaming
-    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+    conversation_loop_ctx = _import_real_conversation_loop()
+    conversation_loop = conversation_loop_ctx.__enter__()
     ChatCompletionsTransport = pytest.importorskip(
         "agent.transports.chat_completions",
         reason="hermes-agent transport modules not importable",
@@ -983,7 +1010,7 @@ def test_transport_wrapper_rewraps_replaced_real_chat_transport():
         )
         assert streaming._GEMINI_REQUEST_BOUNDARY_MARKER not in delegated["messages"][0]
     finally:
-        restore_agent_modules()
+        conversation_loop_ctx.__exit__(None, None, None)
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
         conversation_loop.build_turn_context = original_build_turn_context
         conversation_loop.reanchor_current_turn_user_idx = original_reanchor
@@ -1001,7 +1028,8 @@ def test_build_turn_wrapper_cleans_stale_marker_before_second_turn_and_keeps_sin
     import api.models as models
     import api.streaming as streaming
     from api.models import Session
-    conversation_loop, restore_agent_modules = _import_real_conversation_loop()
+    conversation_loop_ctx = _import_real_conversation_loop()
+    conversation_loop = conversation_loop_ctx.__enter__()
     ChatCompletionsTransport = pytest.importorskip(
         "agent.transports.chat_completions",
         reason="hermes-agent transport modules not importable",
@@ -1141,7 +1169,7 @@ def test_build_turn_wrapper_cleans_stale_marker_before_second_turn_and_keeps_sin
         _assert_no_boundary_artifacts(saved.messages)
         _assert_no_boundary_artifacts(saved.context_messages)
     finally:
-        restore_agent_modules()
+        conversation_loop_ctx.__exit__(None, None, None)
         ChatCompletionsTransport.build_kwargs = original_build_kwargs
         conversation_loop.build_turn_context = original_build_turn_context
         conversation_loop.reanchor_current_turn_user_idx = original_reanchor

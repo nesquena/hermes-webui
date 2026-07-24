@@ -25,12 +25,6 @@ def _install_auxiliary_client_modules():
         yield
 
 
-def _ensure_agent_aux_stub():
-    sys.modules['agent'] = _agent_stub
-    sys.modules['agent.auxiliary_client'] = _aux_stub
-    _agent_stub.auxiliary_client = _aux_stub
-
-
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
     return patch_tg_config(config_dict)
@@ -125,7 +119,6 @@ class TestAuxTitleConfigured(unittest.TestCase):
 
     def test_import_error_returns_false(self):
         from api.streaming import _aux_title_configured
-        _ensure_agent_aux_stub()
         with patch('agent.auxiliary_client._get_auxiliary_task_config', side_effect=ImportError("no module"), create=True):
             self.assertFalse(_aux_title_configured())
 
