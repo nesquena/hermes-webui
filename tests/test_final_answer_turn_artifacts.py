@@ -61,12 +61,14 @@ def test_turn_artifact_references_require_server_landed_descriptors():
                 "tool_call_id": "call-2",
                 "tool_name": "patch",
             },
+        ],
+        [
             {
                 "path": "output/tid.md",
                 "workspace_root": "/workspace",
                 "tool_call_id": "tid-1",
                 "tool_name": "patch",
-            },
+            }
         ],
         [],
         [],
