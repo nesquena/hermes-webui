@@ -83,4 +83,4 @@ def test_virtual_scroll_skips_dom_rebuild_when_window_is_unchanged():
     assert "nextWindow.start===currentStart" in schedule_block
     assert "nextWindow.end===currentEnd" in schedule_block
     assert "return;" in schedule_block
-    assert "renderSessionListFromCache();" in schedule_block
+    assert "renderSessionListFromCache({force:true});" in schedule_block
