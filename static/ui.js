@@ -23,6 +23,85 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+let _composerOwnershipTransition=null;
+
+function _composerControlSetDisabledReason(control,reason,active){
+  if(!control||!reason)return;
+  if(!control._composerDisabledReasons){
+    control._composerDisabledReasons=new Set();
+    control._composerDisabledBase=!!control.disabled;
+  }
+  if(active)control._composerDisabledReasons.add(reason);
+  else control._composerDisabledReasons.delete(reason);
+  control.disabled=control._composerDisabledReasons.size>0||!!control._composerDisabledBase;
+  if(!control._composerDisabledReasons.size){
+    delete control._composerDisabledReasons;
+    delete control._composerDisabledBase;
+  }
+}
+
+function _beginComposerOwnershipTransition(sourceSid,sourceProfile){
+  const token={sourceSid:sourceSid||null,sourceProfile:sourceProfile||'default',revision:0,mutations:[]};
+  _composerOwnershipTransition=token;
+  return token;
+}
+function _composerTransitionRecord(kind,value,ownerSid,abortValue){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return false;
+  if(ownerSid&&tx.sourceSid&&ownerSid===tx.sourceSid)return false;
+  tx.mutations.push({
+    revision:++tx.revision,
+    kind,
+    value,
+    abortValue:arguments.length>3?abortValue:value,
+  });
+  return true;
+}
+function _composerSetText(value,transitionValue,ownerSid){
+  const next=String(value||'');
+  const buffered=arguments.length>1?String(transitionValue||''):next;
+  if(_composerTransitionRecord('text-set',buffered,ownerSid,next))return false;
+  const input=$('msg');if(input)input.value=next;
+  return true;
+}
+function _composerAppendText(value){
+  const addition=String(value||'');
+  if(_composerTransitionRecord('text-append',addition))return false;
+  const input=$('msg');if(input)input.value=String(input.value||'')+addition;
+  return true;
+}
+function _composerAddFiles(files,ownerSid){
+  const additions=Array.from(files||[]).filter(Boolean);
+  if(_composerTransitionRecord('files-add',additions,ownerSid))return false;
+  const current=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  S.pendingFiles=[...current,...additions.filter(file=>!current.includes(file))];
+  return true;
+}
+function _composerReplaceFiles(files,ownerSid){
+  const replacement=Array.from(files||[]).filter(Boolean);
+  if(_composerTransitionRecord('files-replace',replacement,ownerSid))return false;
+  S.pendingFiles=[...replacement];
+  return true;
+}
+function _composerRemoveFile(file,ownerSid){
+  if(_composerTransitionRecord('file-remove',file,ownerSid))return false;
+  S.pendingFiles=(Array.isArray(S.pendingFiles)?S.pendingFiles:[]).filter(item=>item!==file);
+  return true;
+}
+function _drainComposerOwnershipTransition(token,aborted=false){
+  if(!token||_composerOwnershipTransition!==token)return false;
+  _composerOwnershipTransition=null;
+  for(const mutation of token.mutations){
+    const value=aborted?mutation.abortValue:mutation.value;
+    if(mutation.kind==='text-set')_composerSetText(value);
+    else if(mutation.kind==='text-append')_composerAppendText(value);
+    else if(mutation.kind==='files-add')_composerAddFiles(value);
+    else if(mutation.kind==='files-replace')_composerReplaceFiles(value);
+    else if(mutation.kind==='file-remove')_composerRemoveFile(value);
+  }
+  return true;
+}
+function _abortComposerOwnershipTransition(token){return _drainComposerOwnershipTransition(token,true);}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
@@ -7744,13 +7823,8 @@ function lockComposerForClarify(placeholderText){
   if (sid && typeof _saveComposerDraftNow === 'function') {
     _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
   }
-  if(!_composerLockState){
-    _composerLockState={
-      disabled: input.disabled,
-      placeholder: input.placeholder,
-    };
-  }
-  input.disabled=true;
+  if(!_composerLockState)_composerLockState={placeholder:input.placeholder};
+  _composerControlSetDisabledReason(input,'clarify',true);
   if(placeholderText) input.placeholder=placeholderText;
   updateSendBtn();
 }
@@ -7759,14 +7833,12 @@ function unlockComposerForClarify(){
   const input=$('msg');
   if(!input) return;
   if(_composerLockState){
-    input.disabled=!!_composerLockState.disabled;
     if(typeof _composerLockState.placeholder==='string'){
       input.placeholder=_composerLockState.placeholder;
     }
     _composerLockState=null;
-  }else{
-    input.disabled=false;
   }
+  _composerControlSetDisabledReason(input,'clarify',false);
   updateSendBtn();
 }
 
@@ -7944,8 +8016,13 @@ function setBusy(v){
           updateQueueBadge(sid);
           return;
         }
-        $('msg').value=next.text||'';
-        S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
+        // Keep a queued turn bound to sid if a session-owner handoff started
+        // during the settle window; send() must not capture it from the destination.
+        if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+          queueSessionMessage(sid,next);updateQueueBadge(sid);return;
+        }
+        _composerSetText(next.text||'',next.text||'',sid);
+        _composerReplaceFiles(Array.isArray(next.files)?next.files:[],sid);
         // Restore model from queued item (sent in /api/chat/start payload)
         // Note: profile is NOT restored — full profile switch requires server interaction
         if(next.model&&S.session&&next.model!==S.session.model){
@@ -20504,7 +20581,7 @@ function renderTray(){ // non-media files use paperclip chip
     chip.querySelector('button').onclick=()=>{
       // Revoke blob URL to avoid memory leak before removing
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
-      S.pendingFiles.splice(i,1);renderTray();
+      _composerRemoveFile(f,S.session&&S.session.session_id);renderTray();
     };
     tray.appendChild(chip);
   });
@@ -20519,18 +20596,16 @@ function _showUploadTooLarge(file){
   else if(typeof showToast==='function')showToast(message,5000,'error');
 }
 function addFiles(files){
-  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
-    // OS drag/drop can still reach this helper while the native controls are
-    // disabled. Replay those File objects after the transition settles so they
-    // belong to whichever session actually remains visible (new on success,
-    // source on failure) instead of being cleared at the ownership boundary.
-    const deferredFiles=Array.from(files||[]);
-    const replay=()=>setTimeout(()=>addFiles(deferredFiles),0);
-    Promise.resolve(_newSessionInFlight).then(replay,replay);
-    return;
-  }
+  const accepted=[];
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
+    if(!S.pendingFiles.find(p=>p.name===f.name))accepted.push(f);
+  }
+  if(_composerOwnershipTransition){
+    _composerAddFiles(accepted);
+    return;
+  }
+  for(const f of accepted){
     if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
   }
   renderTray();

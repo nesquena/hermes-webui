@@ -1444,23 +1444,22 @@ function _setNewSessionPending(pending){
     btn.disabled=!!pending;
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
-  // Freeze user-owned composer controls while the async transition still points
-  // at the source session. Otherwise input added after the source snapshot but
-  // before /api/session/new resolves would be cleared when the fresh owner loads.
-  // Preserve each control's prior state so a failed create restores it exactly.
+  // Native controls are one producer class. Programmatic producers use the
+  // ownership transaction and buffer mutations for the destination owner.
   const composerIds=['msg','fileInput','btnAttach','btnSavedPrompts','btnMic','btnVoiceMode'];
   for(let i=0;i<composerIds.length;i++){
     const control=$(composerIds[i]);
     if(!control) continue;
-    if(pending){
-      if(!Object.prototype.hasOwnProperty.call(control,'_newSessionDisabledBefore')){
-        control._newSessionDisabledBefore=!!control.disabled;
-      }
-      control.disabled=true;
-    }else if(Object.prototype.hasOwnProperty.call(control,'_newSessionDisabledBefore')){
-      control.disabled=!!control._newSessionDisabledBefore;
-      delete control._newSessionDisabledBefore;
-    }
+    if(typeof _composerControlSetDisabledReason==='function'){
+      _composerControlSetDisabledReason(control,'new-session',!!pending);
+    }else control.disabled=!!pending;
+  }
+  if(typeof document!=='undefined'&&document.querySelectorAll){
+    document.querySelectorAll('#attachTray button').forEach(control=>{
+      if(typeof _composerControlSetDisabledReason==='function'){
+        _composerControlSetDisabledReason(control,'new-session',!!pending);
+      }else control.disabled=!!pending;
+    });
   }
   const statusEl=$('composerStatus');
   const pendingText=_newSessionPendingText();
@@ -1584,87 +1583,57 @@ async function newSession(flash, options={}){
     ).trim()||'default';
     const sourceComposerText=($('msg')||{}).value||'';
     const sourceComposerFiles=S.pendingFiles?[...S.pendingFiles]:[];
-    if(previousSid&&typeof _saveComposerDraftNow==='function'){
-      await _saveComposerDraftNow(
-        previousSid,
-        sourceComposerText,
-        sourceComposerFiles,
-        previousProfile,
-        {rejectOnError:true}
-      );
+    const composerTransition=typeof _beginComposerOwnershipTransition==='function'
+      ? _beginComposerOwnershipTransition(previousSid,previousProfile)
+      : null;
+    // With no previous owner (the first Send on an empty app), the existing
+    // composer already belongs to the destination that is being created.
+    if(composerTransition&&!previousSid){
+      if(sourceComposerText&&typeof _composerSetText==='function')_composerSetText(sourceComposerText);
+      if(sourceComposerFiles.length&&typeof _composerAddFiles==='function')_composerAddFiles(sourceComposerFiles);
     }
-    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
-    // Programmatic producers (already-running dictation, Voice Mode, an open
-    // saved-prompt popup) can bypass disabled DOM controls while the request is
-    // in flight. Split only their newly inserted text/files from the source
-    // snapshot, restore the source owner, then apply that late input to the fresh
-    // session below. No user-owned data is discarded and the original draft does
-    // not leak into the new conversation.
-    const currentComposerText=($('msg')||{}).value||'';
-    const currentComposerFiles=S.pendingFiles?[...S.pendingFiles]:[];
-    const insertedComposerText=(()=>{
-      const source=String(sourceComposerText||'');
-      const current=String(currentComposerText||'');
-      if(source===current) return '';
-      let prefix=0;
-      while(prefix<source.length&&prefix<current.length&&source[prefix]===current[prefix]) prefix++;
-      let suffix=0;
-      while(
-        suffix<source.length-prefix&&suffix<current.length-prefix&&
-        source[source.length-1-suffix]===current[current.length-1-suffix]
-      ) suffix++;
-      return current.slice(prefix,current.length-suffix);
-    })();
-    const sourceFileSet=new Set(sourceComposerFiles);
-    // With no previous owner (the first Send on an empty app), the whole composer
-    // already belongs to the session being created. With an existing owner, only
-    // programmatic input inserted during the transition moves to the fresh one.
-    const lateComposerText=previousSid?insertedComposerText:currentComposerText;
-    const lateComposerFiles=previousSid
-      ? currentComposerFiles.filter(file=>!sourceFileSet.has(file))
-      : currentComposerFiles;
-    const composerMutated=currentComposerText!==sourceComposerText
-      ||currentComposerFiles.length!==sourceComposerFiles.length
-      ||currentComposerFiles.some((file,index)=>file!==sourceComposerFiles[index]);
-    if(composerMutated&&previousSid&&typeof _saveComposerDraftNow==='function'){
-      // The source reset is part of the ownership handoff. If it cannot be
-      // persisted, keep the current session visible and do not duplicate the
-      // late input into the newly created destination.
-      await _saveComposerDraftNow(
-        previousSid,
-        sourceComposerText,
-        sourceComposerFiles,
-        previousProfile,
-        {rejectOnError:true}
-      );
+    try{
+      if(previousSid&&typeof _saveComposerDraftNow==='function'){
+        await _saveComposerDraftNow(
+          previousSid,
+          sourceComposerText,
+          sourceComposerFiles,
+          previousProfile,
+          {rejectOnError:true}
+        );
+      }
+    }catch(error){
+      if(composerTransition&&typeof _abortComposerOwnershipTransition==='function'){
+        _abortComposerOwnershipTransition(composerTransition);
+      }
+      throw error;
     }
+    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)}).catch(error=>{
+      if(composerTransition&&typeof _abortComposerOwnershipTransition==='function'){
+        _abortComposerOwnershipTransition(composerTransition);
+      }
+      throw error;
+    });
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
-    // The fresh session now owns the composer. Rehydrate from its own draft
-    // (normally empty) so text from the previous session cannot leak across the
-    // direct newSession() state boundary. This runs only after create succeeds,
-    // leaving the old composer untouched if the request fails.
+    // Owner swap, destination restore, and ordered mutation drain are one
+    // synchronous transaction. There is deliberately no await in this block:
+    // producer callbacks can only run before it (and be buffered) or after it
+    // (and mutate the destination directly), never inside an unowned gap.
     if(typeof _restoreComposerDraft==='function') _restoreComposerDraft(S.session.composer_draft);
-    if(lateComposerText||lateComposerFiles.length){
-      const composer=$('msg');
-      if(composer&&lateComposerText){
-        const restoredText=String(composer.value||'');
-        composer.value=restoredText
-          ? `${restoredText}${restoredText.endsWith('\n')?'':'\n'}${lateComposerText}`
-          : lateComposerText;
-        if(typeof autoResize==='function') autoResize();
-        if(typeof updateSendBtn==='function') updateSendBtn();
-      }
-      if(lateComposerFiles.length){
-        const existingFiles=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
-        S.pendingFiles=[...existingFiles,...lateComposerFiles.filter(file=>!existingFiles.includes(file))];
-        if(typeof renderTray==='function') renderTray();
-      }
+    if(composerTransition&&typeof _drainComposerOwnershipTransition==='function'){
+      _drainComposerOwnershipTransition(composerTransition);
+    }
+    const composer=$('msg');
+    if(((composer||{}).value||'')||(S.pendingFiles&&S.pendingFiles.length)){
+      if(typeof autoResize==='function') autoResize();
+      if(typeof updateSendBtn==='function') updateSendBtn();
+      if(typeof renderTray==='function') renderTray();
       if(typeof _saveComposerDraftNow==='function'){
-        // Keep this inside the transition barrier: Voice Mode send() is waiting on
-        // _newSessionInFlight, so the later send-clear cannot overtake this save.
+        // Voice Mode send() waits on _newSessionInFlight, so destination draft
+        // persistence completes before an auto-send can clear the same payload.
         await _saveComposerDraftNow(
           S.session.session_id,
           (composer||{}).value||'',

@@ -798,7 +798,9 @@ function insertSavedPromptIntoComposer(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
   const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
+  const next=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
+  if(typeof _composerSetText==='function')_composerSetText(next,`${text}\n\n`);
+  else composer.value=next;
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
@@ -1033,7 +1035,8 @@ function _clearComposerAfterQueuedSelectionSend(){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   const draftText=composer?String(composer.value||''):'';
   const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
-  if(composer)composer.value='';
+  if(composer&&typeof _composerSetText==='function')_composerSetText('');
+  else if(composer)composer.value='';
   if(sid&&typeof _clearComposerDraft==='function') _clearComposerDraft(sid,draftText,draftFiles);
   _clearPendingSelections();
   if(typeof autoResize==='function') autoResize();
@@ -1043,7 +1046,9 @@ function _flushSelectionBlocksToComposer(){
   if(!_pendingSelections.length)return;
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer)return;
-  composer.value=_composerTextWithPendingSelections();
+  const next=_composerTextWithPendingSelections();
+  if(typeof _composerSetText==='function')_composerSetText(next,next);
+  else composer.value=next;
   _clearPendingSelections();
   composer.focus();
   try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
@@ -1258,12 +1263,14 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     const inp=$('msg');
     // Do not clobber a new message the user began typing during the async window.
     if(inp && !String(inp.value||'').trim()){
-      inp.value=restore;
+      if(typeof _composerSetText==='function')_composerSetText(restore,restore,sid);
+      else inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
       // Re-stage the originally attached files so a one-key resend keeps them.
       if(files.length){
-        S.pendingFiles=files;
+        if(typeof _composerReplaceFiles==='function')_composerReplaceFiles(files,sid);
+        else S.pendingFiles=files;
         if(typeof renderTray==='function') renderTray();
       }
       restoredVisible=true;
@@ -1331,7 +1338,9 @@ async function send(){
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
       _clearComposerAfterQueuedSelectionSend();
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
-      S.pendingFiles=[];renderTray();
+      if(typeof _composerReplaceFiles==='function')_composerReplaceFiles([],_targetSid);
+      else S.pendingFiles=[];
+      renderTray();
       updateQueueBadge(_targetSid);
       showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
     }

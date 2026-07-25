@@ -774,8 +774,9 @@ function _micToastKeyForRecognitionError(error){
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
-    S.pendingFiles.push(file);
-    renderTray();
+    if(typeof _composerAddFiles==='function')_composerAddFiles([file]);
+    else S.pendingFiles.push(file);
+    if(typeof _composerOwnershipTransition==='undefined'||!_composerOwnershipTransition)renderTray();
     // An explicit Send-button click while recording sets _micPendingSend — that
     // is an unambiguous send intent, so honor it even when the composer already
     // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
@@ -824,7 +825,8 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    ta.value=committed;
+    if(typeof _composerSetText==='function')_composerSetText(committed,clean);
+    else ta.value=committed;
     autoResize();
     if(window._micPendingSend){
       window._micPendingSend=false;
@@ -1003,7 +1005,8 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
-      ta.value=_prefix+(final||interim);
+      if(typeof _composerSetText==='function')_composerSetText(_prefix+(final||interim),final||interim);
+      else ta.value=_prefix+(final||interim);
       autoResize();
     };
 
@@ -1013,7 +1016,8 @@ function _micToastKeyForRecognitionError(error){
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      ta.value=committed;
+      if(typeof _composerSetText==='function')_composerSetText(committed,_finalText||committed);
+      else ta.value=committed;
       autoResize();
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
@@ -1617,7 +1621,8 @@ window.renderTranscript=function(container, messages, opts){
         if(event.results[i].isFinal){ final+=txt; _finalText=final; }
         else{ interim+=txt; }
       }
-      ta.value=final||interim;
+      if(typeof _composerSetText==='function')_composerSetText(final||interim);
+      else ta.value=final||interim;
       autoResize();
 
       // Auto-send on silence after final result
@@ -1670,7 +1675,8 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive) return;
     const text=(ta.value||'').trim();
     if(!text){
-      ta.value='';
+      if(typeof _composerSetText==='function')_composerSetText('');
+      else ta.value='';
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
       return;
     }
@@ -2000,7 +2006,8 @@ window.renderTranscript=function(container, messages, opts){
     // Restore original autoReadLastAssistant
     if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
     // Clear textarea if it was only voice input
-    ta.value='';
+    if(typeof _composerSetText==='function')_composerSetText('');
+    else ta.value='';
     autoResize();
   }
 
@@ -2540,7 +2547,11 @@ $('msg').addEventListener('paste',e=>{
   _attachLargePastedText(pastedTextFile);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
-  btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
+  btn.onclick=()=>{
+    if(typeof _composerSetText==='function')_composerSetText(btn.dataset.msg||'');
+    else $('msg').value=btn.dataset.msg;
+    send();
+  };
 });
 
 function applyEmptyStateSuggestionPref(){

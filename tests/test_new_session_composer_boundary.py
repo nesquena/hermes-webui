@@ -12,6 +12,7 @@ import pytest
 ROOT = Path(__file__).parents[1]
 SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
 UI_JS = ROOT.joinpath("static", "ui.js").read_text(encoding="utf-8")
+BOOT_JS = ROOT.joinpath("static", "boot.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 
 
@@ -46,15 +47,20 @@ def _composer_draft_helpers() -> str:
     return SESSIONS_JS[start:end]
 
 
+def _composer_authority_helpers() -> str:
+    start = UI_JS.index("let _composerOwnershipTransition=null;")
+    end = UI_JS.index("const OFFLINE_RECHECK_MS", start)
+    return UI_JS[start:end]
+
+
 def _run_pending_file_ownership_harness() -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
 
-    helper_source = json.dumps(_composer_draft_helpers())
+    helper_source = _composer_draft_helpers()
     script = textwrap.dedent(
         f"""
-        const draftHelpers = {helper_source};
         let _loadingSessionId = null;
         let trayRenders = 0;
         const oldFile = {{
@@ -73,7 +79,7 @@ def _run_pending_file_ownership_harness() -> dict:
         function autoResize() {{}}
         function updateSendBtn() {{}}
         function renderTray() {{ trayRenders += 1; }}
-        eval(draftHelpers);
+        {helper_source}
 
         (async () => {{
           await _saveComposerDraftNow('old-session', msg.value, S.pendingFiles);
@@ -137,7 +143,8 @@ def _run_new_session_harness(
     if not node:
         pytest.skip("node is required for the browser behavior harness")
 
-    function_source = json.dumps(_new_session_function())
+    function_source = _new_session_function()
+    authority_source = _composer_authority_helpers()
     initial_session = json.dumps(
         {"session_id": "old-session", "workspace": "/workspace", "message_count": 2}
         if has_session
@@ -146,7 +153,8 @@ def _run_new_session_harness(
     script = textwrap.dedent(
         f"""
         const assert = require('assert');
-        const newSession = eval('(' + {function_source} + ')');
+        {authority_source}
+        {function_source}
 
         let _newSessionInFlight = null;
         let _sessionSourceFilter = 'webui';
@@ -189,10 +197,11 @@ def _run_new_session_harness(
         function setComposerStatus() {{}}
         function updateQueueBadge() {{}}
         function clearLiveToolCards() {{}}
-        function _saveComposerDraftNow(sid, text, files) {{
+        function _saveComposerDraftNow(sid, text, files, _profile, opts) {{
           saves.push({{ sid, text, files }});
           if(saves.length === {json.dumps(fail_save_on_call)}) {{
-            return Promise.reject(new Error('draft save failed'));
+            const failed=Promise.reject(new Error('draft save failed'));
+            return opts&&opts.rejectOnError?failed:failed.catch(()=>{{}});
           }}
           return Promise.resolve();
         }}
@@ -206,8 +215,11 @@ def _run_new_session_harness(
           createCalls += 1;
           if ({str(fail_create).lower()}) throw new Error('create failed');
           const lateText = {json.dumps(late_text)};
-          if(lateText !== null) msg.value = lateText;
-          if({str(late_file).lower()}) S.pendingFiles.push(lateFile);
+          if(lateText !== null) {{
+            const destinationText = lateText.replace('draft owned by the old session', '');
+            _composerSetText(lateText, destinationText);
+          }}
+          if({str(late_file).lower()}) _composerAddFiles([lateFile]);
           return {{ session: {{
             session_id: 'new-session', profile:'default', workspace: '/workspace', messages: [],
             composer_draft: {{ text: '', files: [] }}, message_count: 0,
@@ -299,7 +311,7 @@ def test_source_draft_rejection_aborts_before_session_creation():
     assert result["pendingFileNames"] == ["private.pdf"]
 
 
-def test_source_reset_rejection_does_not_transfer_late_input_to_destination():
+def test_destination_draft_failure_does_not_orphan_created_session_or_drop_input():
     source_text = "draft owned by the old session"
     result = _run_new_session_harness(
         fail_create=False,
@@ -308,14 +320,14 @@ def test_source_reset_rejection_does_not_transfer_late_input_to_destination():
         fail_save_on_call=2,
     )
 
-    assert result["error"] == "draft save failed"
+    assert result["error"] is None
     assert result["createCalls"] == 1
-    assert result["activeSid"] == "old-session"
-    assert result["value"] == f"{source_text} voice addition"
-    assert result["pendingFileNames"] == ["private.pdf", "late-audio.webm"]
+    assert result["activeSid"] == "new-session"
+    assert result["value"] == " voice addition"
+    assert result["pendingFileNames"] == ["late-audio.webm"]
     assert [save["sid"] for save in result["saves"]] == [
         "old-session",
-        "old-session",
+        "new-session",
     ]
 
 
@@ -350,10 +362,7 @@ def test_programmatic_input_arriving_in_flight_moves_only_the_delta_to_new_sessi
     assert result["pendingFileNames"] == ["late-audio.webm"]
     assert result["saves"][0]["sid"] == "old-session"
     assert result["saves"][0]["text"] == source_text
-    assert result["saves"][1] == result["saves"][0], (
-        "the source owner must be reset to its pre-transition snapshot"
-    )
-    assert result["saves"][2] == {
+    assert result["saves"][1] == {
         "sid": "new-session",
         "text": " voice addition",
         "files": [
@@ -368,10 +377,12 @@ def test_new_session_pending_freezes_and_restores_composer_controls():
         pytest.skip("node is required for the browser behavior harness")
     assert node is not None
 
-    source = json.dumps(_set_new_session_pending_function())
+    source = _set_new_session_pending_function()
+    authority = _composer_authority_helpers()
     script = textwrap.dedent(
         f"""
-        const setPending = eval('(' + {source} + ')');
+        {authority}
+        {source}
         const ids = [
           'btnNewChat','btnTitlebarNewChat','msg','fileInput','btnAttach',
           'btnSavedPrompts','btnMic','btnVoiceMode'
@@ -384,9 +395,9 @@ def test_new_session_pending_freezes_and_restores_composer_controls():
         function _newSessionPendingText() {{ return 'Starting'; }}
         function setComposerStatus(text) {{ elements.composerStatus.textContent = text; }}
 
-        setPending(true);
+        _setNewSessionPending(true);
         const during = Object.fromEntries(ids.map(id => [id, elements[id].disabled]));
-        setPending(false);
+        _setNewSessionPending(false);
         const after = Object.fromEntries(ids.map(id => [id, elements[id].disabled]));
         process.stdout.write(JSON.stringify({{during, after}}));
         """
@@ -410,30 +421,31 @@ def test_files_dropped_while_new_session_is_pending_are_replayed_after_settlemen
         pytest.skip("node is required for the browser behavior harness")
     assert node is not None
 
-    source = json.dumps(_add_files_function())
+    source = _add_files_function()
+    authority = _composer_authority_helpers()
     script = textwrap.dedent(
         f"""
-        const addFiles = eval('(' + {source} + ')');
         const S = {{pendingFiles:[]}};
         const MAX_UPLOAD_BYTES = 1024;
         let trayRenders = 0;
+        const elements = {{msg:{{value:''}}}};
+        const $ = id => elements[id] || null;
         function renderTray() {{ trayRenders += 1; }}
         function _showUploadTooLarge() {{ throw new Error('unexpected large file'); }}
-        let settle;
-        let _newSessionInFlight = new Promise(resolve => {{ settle = resolve; }});
-        _newSessionInFlight.then(() => {{ _newSessionInFlight = null; }});
+        {authority}
+        {source}
         const file = {{name:'late.txt', size:4}};
 
+        const token=_beginComposerOwnershipTransition('old-session','default');
         addFiles([file]);
         const immediate = S.pendingFiles.map(item => item.name);
-        settle();
-        setTimeout(() => {{
-          process.stdout.write(JSON.stringify({{
-            immediate,
-            after: S.pendingFiles.map(item => item.name),
-            trayRenders,
-          }}));
-        }}, 20);
+        _drainComposerOwnershipTransition(token);
+        renderTray();
+        process.stdout.write(JSON.stringify({{
+          immediate,
+          after: S.pendingFiles.map(item => item.name),
+          trayRenders,
+        }}));
         """
     )
     proc = subprocess.run(
@@ -453,26 +465,24 @@ def test_draft_writes_for_one_session_are_serialized():
         pytest.skip("node is required for the browser behavior harness")
     assert node is not None
 
-    source = json.dumps(
-        _function(
-            SESSIONS_JS,
-            "_queueComposerDraftWrite",
-            "\n\nfunction _composerPendingFilesOwnerKey(",
-        )
+    source = _function(
+        SESSIONS_JS,
+        "_queueComposerDraftWrite",
+        "\n\nfunction _composerPendingFilesOwnerKey(",
     )
     script = textwrap.dedent(
         f"""
         const _composerDraftWriteBySid = new Map();
-        const queueWrite = eval('(' + {source} + ')');
+        {source}
         const order = [];
         let releaseFirst;
-        const first = queueWrite('sid-1', () => {{
+        const first = _queueComposerDraftWrite('sid-1', () => {{
           order.push('first-start');
           return new Promise(resolve => {{
             releaseFirst = () => {{ order.push('first-finish'); resolve(); }};
           }});
         }});
-        const second = queueWrite('sid-1', async () => {{ order.push('second-start'); }});
+        const second = _queueComposerDraftWrite('sid-1', async () => {{ order.push('second-start'); }});
         (async () => {{
           await Promise.resolve();
           await Promise.resolve();
@@ -498,23 +508,21 @@ def test_draft_write_queue_recovers_after_rejection_and_cleans_up():
         pytest.skip("node is required for the browser behavior harness")
     assert node is not None
 
-    source = json.dumps(
-        _function(
-            SESSIONS_JS,
-            "_queueComposerDraftWrite",
-            "\n\nfunction _composerPendingFilesOwnerKey(",
-        )
+    source = _function(
+        SESSIONS_JS,
+        "_queueComposerDraftWrite",
+        "\n\nfunction _composerPendingFilesOwnerKey(",
     )
     script = textwrap.dedent(
         f"""
         const _composerDraftWriteBySid = new Map();
-        const queueWrite = eval('(' + {source} + ')');
+        {source}
         const order = [];
-        const first = queueWrite('sid-1', async () => {{
+        const first = _queueComposerDraftWrite('sid-1', async () => {{
           order.push('first');
           throw new Error('write failed');
         }});
-        const second = queueWrite('sid-1', async () => {{ order.push('second'); }});
+        const second = _queueComposerDraftWrite('sid-1', async () => {{ order.push('second'); }});
         (async () => {{
           let firstRejected = false;
           try {{ await first; }} catch (_) {{ firstRejected = true; }}
@@ -546,16 +554,14 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         pytest.skip("node is required for the browser behavior harness")
     assert node is not None
 
-    source = json.dumps(
-        _function(
-            SESSIONS_JS,
-            "_saveComposerDraftNow",
-            "\n\n// Restore composer draft from server",
-        )
+    source = _function(
+        SESSIONS_JS,
+        "_saveComposerDraftNow",
+        "\n\n// Restore composer draft from server",
     )
     script = textwrap.dedent(
         f"""
-        const saveNow = eval('(' + {source} + ')');
+        {source}
         const S = {{session:null}};
         const _draftSaveTimer = null;
         const _composerDraftKnownPayloadSessions = new Set();
@@ -570,10 +576,10 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         (async () => {{
           let strictRejected = false;
           try {{
-            await saveNow('strict-sid', 'draft', [], 'default', {{rejectOnError:true}});
+            await _saveComposerDraftNow('strict-sid', 'draft', [], 'default', {{rejectOnError:true}});
           }} catch (_) {{ strictRejected = true; }}
           let softResolved = false;
-          await saveNow('soft-sid', 'draft', [], 'default').then(() => {{ softResolved = true; }});
+          await _saveComposerDraftNow('soft-sid', 'draft', [], 'default').then(() => {{ softResolved = true; }});
           process.stdout.write(JSON.stringify({{strictRejected, softResolved}}));
         }})().catch(error => {{ console.error(error); process.exit(1); }});
         """
@@ -589,12 +595,99 @@ def test_all_draft_post_paths_use_the_per_session_write_queue():
     assert SESSIONS_JS.count("enqueue(sid,()=>api('/api/session/draft'") == 3
 
 
-def test_late_draft_save_stays_inside_transition_before_auto_send_can_clear_it():
-    start = SESSIONS_JS.index("if(lateComposerText||lateComposerFiles.length)")
-    awaited_save = SESSIONS_JS.index("await _saveComposerDraftNow(", start)
-    transition_tail = SESSIONS_JS.index("S._pendingSessionToolsets=null", start)
+def test_owner_swap_restore_and_mutation_drain_have_no_await_gap():
+    start = SESSIONS_JS.index("S.session=data.session;S.messages=data.session.messages||[]")
+    restore = SESSIONS_JS.index("_restoreComposerDraft(S.session.composer_draft)", start)
+    drain = SESSIONS_JS.index("_drainComposerOwnershipTransition(composerTransition)", restore)
+    first_await = SESSIONS_JS.index("await _saveComposerDraftNow(", drain)
 
-    assert awaited_save < transition_tail
+    assert "await " not in SESSIONS_JS[restore:drain]
+    assert restore < drain < first_await
+
+
+def test_ordered_programmatic_callbacks_preserve_latest_replacement_and_raw_file():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'source text'}};
+        const S={{pendingFiles:[]}};
+        const $=id=>id==='msg'?msg:null;
+        {authority}
+        const raw={{name:'voice-input.webm'}};
+        const token=_beginComposerOwnershipTransition('old-session','default');
+        _composerSetText('Hello world','Hello world');
+        _composerSetText('Hello','Hello');
+        _composerAddFiles([raw]);
+        msg.value='';
+        S.pendingFiles=[];
+        _drainComposerOwnershipTransition(token);
+        process.stdout.write(JSON.stringify({{text:msg.value,files:S.pendingFiles.map(f=>f.name)}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"text": "Hello", "files": ["voice-input.webm"]}
+
+
+def test_failed_handoff_replays_full_source_form_not_destination_delta():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:'source draft'}};
+        const S={{pendingFiles:[]}};
+        const $=id=>id==='msg'?msg:null;
+        {authority}
+        const token=_beginComposerOwnershipTransition('old-session','default');
+        _composerSetText('source draft voice addition','voice addition');
+        _abortComposerOwnershipTransition(token);
+        process.stdout.write(msg.value);
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "source draft voice addition"
+
+
+def test_new_session_and_clarify_disabled_reasons_do_not_unlock_each_other():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const input={{disabled:false}};
+        {authority}
+        _composerControlSetDisabledReason(input,'new-session',true);
+        _composerControlSetDisabledReason(input,'clarify',true);
+        _composerControlSetDisabledReason(input,'new-session',false);
+        const afterNewSession=input.disabled;
+        _composerControlSetDisabledReason(input,'clarify',false);
+        const afterClarify=input.disabled;
+        process.stdout.write(JSON.stringify({{afterNewSession,afterClarify}}));
+        """
+    )
+    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"afterNewSession": True, "afterClarify": False}
+
+
+def test_async_composer_producers_route_through_ownership_authority():
+    assert "_composerAddFiles([file])" in BOOT_JS
+    assert BOOT_JS.count("_composerSetText(") >= 5
+    assert "_composerSetText(next,`${text}\\n\\n`)" in MESSAGES_JS
+    assert "_composerAddFiles(accepted)" in UI_JS
+    assert "_composerRemoveFile(f,S.session&&S.session.session_id)" in UI_JS
+
+
+def test_behavior_harness_uses_fixed_literal_source_only():
+    forbidden = "ev" + "al("  # keep the scanner token out of this harness too
+    assert forbidden not in Path(__file__).read_text()
 
 
 def test_programmatic_send_waits_for_new_session_owner_before_capturing_payload():
