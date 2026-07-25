@@ -3148,6 +3148,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
+  // Capture the currently loaded absolute base before the response
+  // overwrites _oldestIdx. Used below to reconcile by server interval.
+  const _prevOldestIdx = _oldestIdx;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
@@ -3177,15 +3180,16 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
-  // #6392: reconcile a capped same-session reload response with the
-  // preserved stale transcript (keepStaleUntilLoaded path) so that
-  // already-loaded older rows beyond the msg_limit window are not dropped.
-  // When the server returned a bounded tail that is narrower than the
-  // currently-loaded transcript, keep the prefix from S.messages and
-  // replace only the tail with the server's authoritative response.
-  if(Array.isArray(S.messages) && S.messages.length > msgs.length && msgs.length > 0){
-    const keepCount = S.messages.length - msgs.length;
-    msgs = S.messages.slice(0, keepCount).concat(msgs);
+  // #6392/#6421: reconcile a capped same-session reload response by the
+  // server's absolute interval [_oldestIdx, _oldestIdx + msgs.length),
+  // not by array length.  Preserve only rows strictly before that
+  // interval and set _oldestIdx to the actual first retained index.
+  if(Array.isArray(S.messages) && S.messages.length > 0 && msgs.length > 0 && _prevOldestIdx >= 0 && _prevOldestIdx < _oldestIdx){
+    const keepCount = _oldestIdx - _prevOldestIdx;
+    if(keepCount > 0 && keepCount <= S.messages.length){
+      msgs = S.messages.slice(0, keepCount).concat(msgs);
+      _oldestIdx = _prevOldestIdx;
+    }
   }
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next

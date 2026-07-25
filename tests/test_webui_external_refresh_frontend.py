@@ -463,7 +463,9 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")
     replace_pos = ensure_body.index("S.messages = msgs;")
     assert invalidate_pos < replace_pos
-    # #6392: capped same-session reload must reconcile with preserved stale transcript
-    assert "if(Array.isArray(S.messages) && S.messages.length > msgs.length && msgs.length > 0){" in ensure_body
-    reconcile_pos = ensure_body.index("msgs = S.messages.slice(0, keepCount).concat(msgs);")
-    assert invalidate_pos < reconcile_pos < replace_pos
+    # #6392/#6421: capped same-session reload must reconcile by server absolute interval
+    assert "const _prevOldestIdx = _oldestIdx;" in ensure_body
+    assert "_prevOldestIdx < _oldestIdx" in ensure_body
+    assert "msgs = S.messages.slice(0, keepCount).concat(msgs);" in ensure_body
+    assert "_oldestIdx = _prevOldestIdx;" in ensure_body
+    assert invalidate_pos < ensure_body.index("_prevOldestIdx", invalidate_pos) < replace_pos
