@@ -3177,6 +3177,16 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+  // #6392: reconcile a capped same-session reload response with the
+  // preserved stale transcript (keepStaleUntilLoaded path) so that
+  // already-loaded older rows beyond the msg_limit window are not dropped.
+  // When the server returned a bounded tail that is narrower than the
+  // currently-loaded transcript, keep the prefix from S.messages and
+  // replace only the tail with the server's authoritative response.
+  if(Array.isArray(S.messages) && S.messages.length > msgs.length && msgs.length > 0){
+    const keepCount = S.messages.length - msgs.length;
+    msgs = S.messages.slice(0, keepCount).concat(msgs);
+  }
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.

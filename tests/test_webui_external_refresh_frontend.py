@@ -427,13 +427,13 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);" in SESSIONS_JS
     assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
-    # The width hint is applied only when it stays within the server msg_limit
-    # ceiling; an over-ceiling hint would be clamped by the backend and could
-    # silently shrink an already-loaded transcript, so it falls back to the bare
-    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
-    # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
-    # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
+    # The width hint is always bounded by the server's msg_limit ceiling to
+    # prevent unbounded full-transcript reloads on every turn (#6392). When
+    # the hint exceeds the ceiling, it is capped at _msgLimitMax instead of
+    # falling back to null. The capped response is then reconciled with the
+    # preserved stale transcript in _ensureMessagesLoaded so already-loaded
+    # older rows beyond the tail window are not dropped.
+    assert "const boundedReloadLimit = (reloadLimit == null) ? null : Math.min(reloadLimit, _msgLimitMax);" in SESSIONS_JS
     assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
@@ -463,3 +463,7 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")
     replace_pos = ensure_body.index("S.messages = msgs;")
     assert invalidate_pos < replace_pos
+    # #6392: capped same-session reload must reconcile with preserved stale transcript
+    assert "if(Array.isArray(S.messages) && S.messages.length > msgs.length && msgs.length > 0){" in ensure_body
+    reconcile_pos = ensure_body.index("msgs = S.messages.slice(0, keepCount).concat(msgs);")
+    assert invalidate_pos < reconcile_pos < replace_pos
