@@ -79,8 +79,10 @@ def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
     assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery)" in fn
     assert "_restoreSettledSession(source,{status:true})" in fn
-    assert "if(status==='active'&&_streamEndRecoveryAttempts<10)" in fn
-    assert "_scheduleStreamEndRecovery(source,200);" in fn
+    assert "if(status==='active'){" in fn
+    assert "if(_streamEndRecoveryAttempts<16){" in fn
+    assert "_scheduleStreamEndRecovery(source,_streamEndRecoveryAttempts<10?200:1000);" in fn
+    assert "await _reconcileStreamEndRecoveryExhaustion(source);" in fn
     assert "_finalizeStreamEndFallback(source);" in fn
 
 
@@ -91,9 +93,24 @@ def test_stream_end_fallback_helper_clears_owner_state_before_closing():
     assert "_clearOwnerInflightState();" in fn
     assert "_clearApprovalForOwner();" in fn
     assert "_clearClarifyForOwner('terminal');" in fn
+    assert "const preserveVisibleAnswer=!!(options&&options.preserveVisibleAnswer)&&_visibleLiveAssistantAnswerPresent();" in fn
     assert "renderMessages({preserveScroll:true});" in fn
     assert "_setActivePaneIdleIfOwner();" in fn
     assert "_closeSource(source)" in fn
+
+
+def test_stream_end_recovery_closes_dead_chat_stream_owner_before_slow_polling():
+    fn = _function_body("_runStreamEndRecovery")
+    assert "if(_streamEndRecoveryAttempts===10){" in fn
+    assert "_closeSource(source);" in fn
+
+
+def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal_escape():
+    fn = _function_body("_reconcileStreamEndRecoveryExhaustion")
+    assert "api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`)" in fn
+    assert "_wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`" in fn
+    assert "if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true})) return true;" in fn
+    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in fn
 
 
 def test_stream_end_live_scene_detection_includes_empty_text_activity():

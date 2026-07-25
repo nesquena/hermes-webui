@@ -2330,7 +2330,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _pendingStreamEndRecovery=true;
     _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
   }
-  function _finalizeStreamEndFallback(source){
+  function _visibleLiveAssistantAnswerPresent(){
+    if(!_isActiveSession()) return false;
+    const liveBody=(assistantBody&&assistantBody.isConnected)
+      ? assistantBody
+      : (typeof document!=='undefined'
+          ? (($('liveAssistantTurn')||{}).querySelector&&$('liveAssistantTurn').querySelector('.assistant-segment[data-live-assistant="1"] .msg-body,[data-live-assistant="1"] .msg-body'))
+          : null);
+    return !!(
+      String(assistantText||'').trim()
+      && String(liveBody&&liveBody.textContent||'').trim()
+    );
+  }
+  function _finalizeStreamEndFallback(source, options=null){
     _clearStreamEndRecovery();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
@@ -2348,14 +2360,52 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _clearAnchorProseIncrementalNode();
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
+    const preserveVisibleAnswer=!!(options&&options.preserveVisibleAnswer)&&_visibleLiveAssistantAnswerPresent();
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      renderMessages({preserveScroll:true});
+      if(!preserveVisibleAnswer) renderMessages({preserveScroll:true});
     }
     renderSessionList();
     _setActivePaneIdleIfOwner();
     _closeSource(source);
+  }
+  async function _reconcileStreamEndRecoveryExhaustion(source){
+    if(!_isSessionCurrentPane(activeSid)){
+      _closeSource(source);
+      _clearStreamEndRecovery();
+      return true;
+    }
+    try{
+      if(streamId){
+        const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(_isActiveSession() && S.activeStreamId!==streamId){
+          _closeSource(source);
+          _clearStreamEndRecovery();
+          return true;
+        }
+        if(st&&st.active){
+          setComposerStatus('Reconnected');
+          _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+          _clearStreamEndRecovery();
+          return true;
+        }
+        if(st&&st.replay_available){
+          setComposerStatus('Restoring stream…');
+          _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+          _clearStreamEndRecovery();
+          return true;
+        }
+      }
+    }catch(_){ }
+    if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true})) return true;
+    if(_isActiveSession() && S.activeStreamId!==streamId){
+      _closeSource(source);
+      _clearStreamEndRecovery();
+      return true;
+    }
+    _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
+    return true;
   }
   async function _runStreamEndRecovery(source){
     if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery){
@@ -2368,9 +2418,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamEndRecovery();
       return;
     }
-    if(status==='active'&&_streamEndRecoveryAttempts<10){
+    if(status==='active'){
       _streamEndRecoveryAttempts+=1;
-      _scheduleStreamEndRecovery(source,200);
+      if(_streamEndRecoveryAttempts===10){
+        // stream_end already told us the chat SSE is terminal; after the fast
+        // polls exhaust, close that owner and keep waiting for the settled
+        // session instead of finalizing whatever partial live DOM is visible.
+        _closeSource(source);
+      }
+      if(_streamEndRecoveryAttempts<16){
+        _scheduleStreamEndRecovery(source,_streamEndRecoveryAttempts<10?200:1000);
+        return;
+      }
+      await _reconcileStreamEndRecoveryExhaustion(source);
       return;
     }
     _finalizeStreamEndFallback(source);
