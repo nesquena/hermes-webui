@@ -1545,7 +1545,7 @@ def _read_text_bounded(
 
 def _read_cron_output_bounded(
     path, *, max_bytes: int = _FILE_READ_MAX_BYTES, budget: int | None = None
-) -> tuple[str, bool, bool, int]:
+) -> tuple[str, bool, bool, int, bool]:
     """Read a cron output .md file preserving BOTH the frontmatter/usage block
     AND the response body, under a byte bound, with one pinned file identity.
 
@@ -1577,50 +1577,55 @@ def _read_cron_output_bounded(
       the batch allowance INSIDE the read, so an over-budget probe cannot read
       up to two caps and then be discarded. (#6141 r4)
 
-    Returns ``(text, truncated, ok, bytes_read)``. On open/fstat/read failure,
-    or when ``budget`` would be exceeded, returns ``("", False, False, 0)`` —
-    ``ok=False`` distinguishes a real read failure (or budget overflow) from a
-    legitimate empty file so the cron batch skips it entirely (no append, no
-    charge).
+    Returns ``(text, truncated, ok, bytes_read, declined)``. On open/fstat/read
+    failure returns ``("", False, False, 0, False)``; on budget decline (the
+    file was readable but its bounded windows exceed the remaining allowance)
+    returns ``("", False, False, 0, True)``. The ``declined`` flag lets the
+    cron batch distinguish a budget decline (mark truncated, stop — remaining
+    allowance insufficient for this and later large files) from a real I/O
+    failure (continue — a later smaller file may still fit). (#6141 r5 #3)
     """
     try:
         fh = open(path, "rb")
     except OSError:
-        return "", False, False, 0
+        return "", False, False, 0, False
     try:
         try:
             st = os.fstat(fh.fileno())
         except OSError:
-            return "", False, False, 0
+            return "", False, False, 0, False
         size = st.st_size
         cap = max_bytes
         if size <= cap:
-            # Under cap: read at most cap+1 so same-inode growth is detected,
-            # not read unbounded. (#6141 r2 #1)
+            # Under cap: cap the read by BOTH the growth-detection limit (cap+1)
+            # AND the remaining budget, so we never materialize more bytes than
+            # the caller's allowance permits. (#6141 r2 #1, r5 #1)
+            read_amount = cap + 1
+            if budget is not None and read_amount > budget:
+                # Decline BEFORE reading: a small file that exceeds the remaining
+                # allowance must not be read-then-discarded.
+                return "", False, False, 0, True
             try:
-                raw = fh.read(cap + 1)
+                raw = fh.read(read_amount)
             except OSError:
-                return "", False, False, 0
+                return "", False, False, 0, False
+            # Actual bytes consumed from this descriptor (not the planned size).
             bytes_read = min(len(raw), cap)
-            # Budget enforcement: if even the small-file read would exceed the
-            # remaining allowance, decline before charging. (#6141 r4)
-            if budget is not None and bytes_read > budget:
-                return "", False, False, 0
             if len(raw) > cap:
-                return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read
-            return raw.decode("utf-8", errors="replace"), False, True, bytes_read
+                return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read, False
+            return raw.decode("utf-8", errors="replace"), False, True, bytes_read, False
         # Over cap: read DISJOINT head + tail from this one descriptor.
         # Head = [0, cap). Tail starts at max(cap, size-cap) so the two ranges
         # never overlap (when size <= 2*cap, tail begins right after head; when
         # size > 2*cap, the middle prompt section is omitted). (#6141 r2 #2)
         head_len = cap
         tail_len = min(cap, max(0, size - cap))
-        bytes_read = head_len + tail_len
+        planned = head_len + tail_len
         # Budget enforcement INSIDE the descriptor read: if the disjoint windows
         # would exceed the remaining allowance, decline before reading — do NOT
-        # read up to two caps and then discard. (#6141 r4)
-        if budget is not None and bytes_read > budget:
-            return "", False, False, 0
+        # read up to two caps and then discard. (#6141 r4, r5 #1)
+        if budget is not None and planned > budget:
+            return "", False, False, 0, True
         try:
             fh.seek(0)
             head_raw = fh.read(head_len)
@@ -1628,7 +1633,10 @@ def _read_cron_output_bounded(
             fh.seek(tail_start)
             tail_raw = fh.read(tail_len)
         except OSError:
-            return "", False, False, 0
+            return "", False, False, 0, False
+        # Actual bytes consumed from the descriptor (handles short reads and
+        # shrink-after-fstat, where len(raw) < the planned window). (#6141 r5 #3)
+        bytes_read = len(head_raw) + len(tail_raw)
     finally:
         fh.close()
     head_text = head_raw.decode("utf-8", errors="replace")
@@ -1655,6 +1663,7 @@ def _read_cron_output_bounded(
         True,
         True,
         bytes_read,
+        False,
     )
 
 
@@ -21278,7 +21287,7 @@ def _handle_cron_run_detail(handler, parsed):
         # read when the response marker isn't in the head — otherwise a large
         # prompt section would push the reply past the cap and the snippet would
         # serve prompt bytes instead of the response.
-        content, truncated, ok, _bytes_read = _read_cron_output_bounded(fpath)
+        content, truncated, ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
         if not ok:
             return j(handler, {"error": "run output unreadable"}, status=500)
         snippet = _cron_output_snippet(content)
@@ -21414,26 +21423,34 @@ def _handle_cron_output(handler, parsed):
         spent = 0
         for f in files:
             remaining = total_budget - spent
+            # Stop before another reader call when no allowance remains — do not
+            # keep calling the reader for every older file after exhaustion.
+            # (#6141 r5 #2) The first (newest) file is always attempted even
+            # with zero remaining so the newest run is never blank.
+            if spent > 0 and remaining <= 0:
+                truncated_files = True
+                break
             # The newest (first) successful file is always admitted even if it
             # alone exceeds the budget, so the newest run is never blank.
             budget_for_call = None if spent == 0 else remaining
             try:
-                txt, file_truncated, read_ok, bytes_read = _read_cron_output_bounded(
+                txt, file_truncated, read_ok, bytes_read, declined = _read_cron_output_bounded(
                     f, budget=budget_for_call
                 )
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
                 continue
             if not read_ok:
-                # Real read failure OR over-budget decline. Per the gate spec:
-                # continue past read failures; a later (older, possibly smaller)
-                # file may still fit. (#6141 r2 #3, r4)
-                # If this was a budget decline (budget_for_call was set and the
-                # file exists but didn't fit), mark the batch truncated — there
-                # are more files we couldn't admit.
-                if budget_for_call is not None and remaining < _FILE_READ_MAX_BYTES * 2:
+                # Distinguish I/O failure from budget decline (#6141 r5 #3):
+                # - declined=True: the file was readable but its bounded windows
+                #   exceeded the remaining allowance. Mark truncated and stop —
+                #   remaining files would also decline.
+                # - declined=False: a real open/fstat/read failure. Continue to
+                #   the next file (a later smaller file may still fit).
+                if declined:
                     truncated_files = True
-                logger.debug("Skipped cron output file %s (failed or over-budget)", f)
+                    break
+                logger.debug("Skipped cron output file %s (read failure)", f)
                 continue
             entry = {"filename": f.name, "content": _cron_output_content_window(txt)}
             if file_truncated:
