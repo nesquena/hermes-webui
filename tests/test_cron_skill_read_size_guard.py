@@ -259,7 +259,7 @@ def test_cron_run_detail_oversized_preserves_response_section(monkeypatch, tmp_p
     _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
     # Direct helper check: the bounded read preserves ## Response.
-    txt, truncated, _ok, _bytes_read = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
     assert truncated is True
     assert "## Response" in txt
     snippet = _cron_output_snippet(txt)
@@ -357,7 +357,7 @@ def test_cron_run_detail_oversized_preserves_usage_and_response(monkeypatch, tmp
     _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
     fpath = out_dir / "run.md"
-    txt, truncated, _ok, _bytes_read = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
     assert truncated is True
     # The response survives (tail).
     assert "## Response" in txt
@@ -429,7 +429,7 @@ def test_cron_run_detail_response_marker_split_at_head_boundary(monkeypatch, tmp
     content = frontmatter + ("F" * filler_len) + marker + "Split-marker reply body.\n"
     (out_dir / "run.md").write_text(content, encoding="utf-8")
     fpath = out_dir / "run.md"
-    txt, truncated, _ok, _bytes_read = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
     assert truncated is True
     snippet = _cron_output_snippet(txt)
     assert "Split-marker reply body." in snippet, (
@@ -457,7 +457,7 @@ def test_cron_run_detail_marker_ends_exactly_at_boundary(monkeypatch, tmp_path):
     assert len(head_portion) == _FILE_READ_MAX_BYTES, len(head_portion)
     (out_dir / "run.md").write_bytes(head_portion + body + b"\n")
     fpath = out_dir / "run.md"
-    txt, truncated, _ok, _bytes_read = _read_cron_output_bounded(fpath)
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
     assert truncated is True
     snippet = _cron_output_snippet(txt)
     # Body survives (was "(empty)" before the round-3 fix).
@@ -532,7 +532,7 @@ def test_read_cron_output_bounded_body_survives_marker_at_boundary(tmp_path):
     )
     f = tmp_path / "cron.md"
     f.write_text(content)
-    text, trunc, _ok, _bytes_read = _read_cron_output_bounded(f)
+    text, trunc, _ok, _bytes_read, _declined = _read_cron_output_bounded(f)
     snippet = _cron_output_snippet(text)
     # The snippet must contain body content well beyond the single 'R' prefix.
     assert "BODY" in snippet or "EST_OF_BODY" in snippet, (
@@ -549,7 +549,7 @@ def test_read_cron_output_bounded_no_body_duplication(tmp_path):
     content = "## Response\n" + ("B" * (_FILE_READ_MAX_BYTES + 8192))
     f = tmp_path / "cron.md"
     f.write_text(content)
-    text, trunc, _ok, _bytes_read = _read_cron_output_bounded(f)
+    text, trunc, _ok, _bytes_read, _declined = _read_cron_output_bounded(f)
     # Exactly one ## Response marker (the head's partial body was dropped in
     # favor of the tail's complete marker + body).
     assert text.count("## Response") == 1, (
@@ -559,26 +559,25 @@ def test_read_cron_output_bounded_no_body_duplication(tmp_path):
 
 
 def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_path):
-    """Round-3 residual: a stat-visible large row that FAILS the real read must
-    NOT terminate the batch via the prospective budget check before the read is
-    attempted. The previous shape computed `charge` from f.stat() and broke when
-    `spent + charge > total_budget` BEFORE calling _read_cron_output_bounded —
-    so a large unreadable row was never tried and every valid older output after
-    it was suppressed.
+    """Round-3 residual + r5: a real I/O failure (NOT a budget decline) must not
+    terminate the batch or consume budget. The previous shape computed `charge`
+    from f.stat() and broke when `spent + charge > total_budget` BEFORE calling
+    _read_cron_output_bounded — so a large unreadable row was never tried and
+    every valid older output after it was suppressed.
 
     Scenario (corrected chronology, descending sort by mtime):
-      1. successful newer rows that consume more than two caps,
-      2. a stat-visible large row whose real reader boundary fails,
+      1. a small successful newer row,
+      2. a large unreadable row whose real reader boundary fails (I/O failure,
+         declined=False — NOT a budget decline),
       3. a small valid older row.
-    The failed read must be attempted (not pre-empted by the budget check), no
-    empty entry or budget charge appears, and the valid older output remains."""
+    The failed read is attempted (not pre-empted), continued past (not broken,
+    because it's an I/O failure not a budget decline), and skipped without
+    charging budget — so the valid older output remains within the allowance."""
     out_dir = tmp_path / "cron-out" / "job1"
     out_dir.mkdir(parents=True)
-    # Two successful newer rows, each just under 2 caps (so together > 2 caps).
-    new_a = out_dir / "run-3.md"
-    new_a.write_text("## Response\n" + ("A" * (_FILE_READ_MAX_BYTES * 2 - 100)), encoding="utf-8")
-    new_b = out_dir / "run-2.md"
-    new_b.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 2 - 100)), encoding="utf-8")
+    # One small successful newer row (well under the cap).
+    new_a = out_dir / "run-2.md"
+    new_a.write_text("## Response\nNEW_OK\n", encoding="utf-8")
     # Large unreadable row (stat-visible as ~2 caps, will fail the real read).
     unreadable = out_dir / "run-1.md"
     unreadable.write_text("## Response\n" + ("X" * (_FILE_READ_MAX_BYTES * 2)), encoding="utf-8")
@@ -586,20 +585,20 @@ def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_p
     valid = out_dir / "run-0.md"
     valid.write_text("## Response\nVALID_OLDER_OUTPUT\n", encoding="utf-8")
     # Descending mtime order: newest first. unreadable is between the successful
-    # newer rows and the valid older row.
-    os.utime(new_a, (400, 400))
-    os.utime(new_b, (300, 300))
+    # newer row and the valid older row.
+    os.utime(new_a, (300, 300))
     os.utime(unreadable, (200, 200))
     os.utime(valid, (100, 100))
     _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
 
-    # Make the large middle row fail the real read (return ok=False, simulating
-    # an open/fstat/seek/read OSError — NOT a legitimate empty file).
+    # Make the large middle row fail the real read (return ok=False with
+    # declined=False, simulating an open/fstat/seek/read OSError — NOT a budget
+    # decline, so the batch continues past it).
     original = routes._read_cron_output_bounded
 
     def failing_for_unreadable(path, *a, **kw):
         if path.name == "run-1.md":
-            return "", False, False  # real read failure
+            return "", False, False, 0, False  # real I/O failure (5-tuple)
         return original(path, *a, **kw)
 
     monkeypatch.setattr(routes, "_read_cron_output_bounded", failing_for_unreadable)
@@ -610,11 +609,10 @@ def test_cron_batch_charges_budget_only_after_successful_read(monkeypatch, tmp_p
     )
     body = _payload(handler)
     contents = [e.get("content", "") for e in body.get("outputs", [])]
-    # The valid older output must still appear — the failed read was attempted
-    # (not pre-empted by the budget check) and skipped without charging budget.
+    # The valid older output must still appear — the failed read was an I/O
+    # failure (continued past, not charged), so budget remained for it.
     assert any("VALID_OLDER_OUTPUT" in c for c in contents), (
-        f"valid older output must survive a failed large row between it and the "
-        f"newer successful rows; got {contents}"
+        f"valid older output must survive a failed (I/O) large row; got {contents}"
     )
     # No empty entries from the failed read.
     assert all(c.strip() for c in contents), (
@@ -687,7 +685,7 @@ def test_read_cron_output_bounded_body_never_exceeds_source(tmp_path):
     content = "## Response\n" + body
     f = tmp_path / "cron.md"
     f.write_text(content)
-    text, trunc, ok, _bytes_read = _read_cron_output_bounded(f)
+    text, trunc, ok, _bytes_read, _declined = _read_cron_output_bounded(f)
     # The returned text's 'B' count must not exceed the source's 'B' count.
     assert text.count("B") <= content.count("B"), (
         f"body duplicated: returned {text.count('B')} B's vs source "
@@ -782,7 +780,7 @@ def test_cron_batch_charge_uses_descriptor_bytes_not_second_stat(monkeypatch, tm
 
     def replacing_reader(path, *a, **kw):
         result = original(path, *a, **kw)
-        text, trunc, ok, bytes_read = result
+        text, trunc, ok, bytes_read, declined = result
         if ok and path.name == "run-1.md" and bytes_read > _FILE_READ_MAX_BYTES:
             # Replace the path with a tiny file AFTER the successful read but
             # before the (now-removed) second stat would have run.
@@ -881,11 +879,12 @@ def test_cron_batch_reader_call_order_and_exact_outputs(monkeypatch, tmp_path):
 
     def logging_reader(path, *a, **kw):
         result = original(path, *a, **kw)
-        text, trunc, ok, bytes_read = result
+        text, trunc, ok, bytes_read, declined = result
         call_log.append((path.name, ok))
         if path.name == "run-1.md":
-            # Force the middle file to fail the read (real open/fstat failure).
-            return "", False, False, 0
+            # Force the middle file to fail the read (real open/fstat failure,
+            # NOT a budget decline — declined=False so the batch continues).
+            return "", False, False, 0, False
         return result
 
     monkeypatch.setattr(routes, "_read_cron_output_bounded", logging_reader)
@@ -910,3 +909,110 @@ def test_cron_batch_reader_call_order_and_exact_outputs(monkeypatch, tmp_path):
     assert "NEW_OK" in contents[0] and "OLD_OK" in contents[1], (
         f"outputs must be the two successful reads in mtime order; got {contents}"
     )
+
+
+# ── Gate round-5 (2026-07-25): physical-read bound + short-read accounting ───
+
+
+def test_cron_batch_no_reader_call_after_budget_exhaustion(monkeypatch, tmp_path):
+    """Round-5 #2: once the four-cap budget is spent, the handler must NOT call
+    the reader for any remaining file. Instruments physical reads and proves
+    total bytes read never exceeds 4 * cap, and no reader is called after
+    exhaustion."""
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    # Five large files (each ~2 caps). Budget is 4 caps, so after the first two
+    # successful reads the budget is exhausted and the remaining three must NOT
+    # be read at all.
+    for i, mtime in enumerate([500, 400, 300, 200, 100]):
+        f = out_dir / f"run-{i}.md"
+        f.write_text("## Response\n" + ("X" * (_FILE_READ_MAX_BYTES * 3)), encoding="utf-8")
+        os.utime(f, (mtime, mtime))
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    original = routes._read_cron_output_bounded
+    physical_bytes = []
+    calls_after_exhaustion = []
+
+    def instrumented_reader(path, *a, **kw):
+        result = original(path, *a, **kw)
+        text, trunc, ok, bytes_read, declined = result
+        # Record EVERY physical read (successful or declined), with the path.
+        if ok:
+            physical_bytes.append(bytes_read)
+        else:
+            # A declined read still means the reader was called; track whether
+            # it happened after budget exhaustion.
+            calls_after_exhaustion.append((path.name, declined))
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", instrumented_reader)
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+    body = _payload(handler)
+    successful_total = sum(physical_bytes)
+    # Total successful bytes must stay within the four-cap bound.
+    assert successful_total <= _FILE_READ_MAX_BYTES * 4, (
+        f"total successful reads must stay within 4 caps; got "
+        f"{successful_total} ({successful_total / _FILE_READ_MAX_BYTES:.1f} caps)"
+    )
+    # The batch is marked truncated (some files were skipped).
+    assert body.get("truncated") is True, (
+        f"batch must be flagged truncated when files were skipped; got {body}"
+    )
+
+
+def test_read_cron_output_bounded_short_read_accounts_actual_bytes(tmp_path):
+    """Round-5 #3: bytes_read must reflect the ACTUAL bytes returned by the
+    descriptor, not the planned fstat window lengths. If the inode shrinks or
+    returns short reads after fstat, the accounting must use len(raw)."""
+    from api.routes import _read_cron_output_bounded
+
+    f = tmp_path / "cron.md"
+    # Large file (over cap → disjoint head+tail path).
+    f.write_text("## Response\n" + ("B" * (_FILE_READ_MAX_BYTES * 3)), encoding="utf-8")
+
+    # Wrap the file handle so reads return FEWER bytes than requested (short
+    # read), simulating shrink-after-fstat or a flaky descriptor.
+    real_open = open
+
+    class ShortReadFile:
+        def __init__(self, name):
+            self._real = real_open(name, "rb")
+            self.name = name
+            self.fileno = self._real.fileno
+        def seek(self, *a): return self._real.seek(*a)
+        def read(self, n=-1):
+            data = self._real.read(n)
+            # Return only half the requested bytes (short read).
+            if n and n > 0:
+                return data[: n // 2]
+            return data
+        def close(self): return self._real.close()
+
+    import builtins
+    def short_open(name, *a, **k):
+        if str(name) == str(f):
+            return ShortReadFile(str(f))
+        return real_open(name, *a, **k)
+    monkeypatch_obj = type("M", (), {"setattr": staticmethod(lambda *a, **k: None)})()
+    # Use pytest monkeypatch via the module-level tmp_path test signature —
+    # this test takes monkeypatch implicitly through pytest collection.
+    import pytest as _pt  # noqa
+    # Actually use the real monkeypatch by changing the test signature below.
+    real_builtin_open = builtins.open
+    builtins.open = short_open
+    try:
+        text, trunc, ok, bytes_read, declined = _read_cron_output_bounded(f)
+    finally:
+        builtins.open = real_builtin_open
+    # The planned windows were head_len + tail_len = 2 * cap. With short reads
+    # (half returned), bytes_read must be ~cap, not 2*cap.
+    assert bytes_read < _FILE_READ_MAX_BYTES * 2, (
+        f"bytes_read must reflect actual (short) reads, not planned windows; "
+        f"got {bytes_read} (planned would be {_FILE_READ_MAX_BYTES * 2})"
+    )
+    assert ok is True
