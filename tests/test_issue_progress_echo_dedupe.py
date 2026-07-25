@@ -1,8 +1,11 @@
 import queue
+import re
 import sys
 import types
 from typing import Callable, cast
 from unittest import mock
+
+import pytest
 
 
 _MISSING = object()
@@ -616,14 +619,94 @@ def test_redaction_mask_stays_within_one_scalar_across_all_delimiters():
         "a mask must not span the '|' delimiter into a changed status field"
     )
 
+    # (3) Third review: EVERY supported outside separator must fail closed the same
+    # way. `&`, `=` and `?` were missing from the boundary set, so a query-string /
+    # form-encoded progress line could still have its changed status swallowed.
+    for sep in (";", "|", "&", ",", "=", "?", " "):
+        cand = f"token=***{sep}status=completed"
+        vis = f"token=sk-abc123{sep}status=failed{sep}status=completed"
+        assert not match(cand, vis, anchor_end=False), (
+            f"a mask must not span the {sep!r} separator into a changed status field"
+        )
+        assert not match(cand, vis, anchor_end=True), (
+            f"a mask must not span the {sep!r} separator into a changed status field"
+        )
+
     # Two-mask semicolon variant — the middle field genuinely changed.
     assert not match("a=***;b=***;c=x", "a=s1;b=y;b=s2;c=x", anchor_end=False)
 
     # Legitimate redaction-only differences across the same delimiters dedup.
     assert match("token=***;status=ok", "token=sk-abc123;status=ok", anchor_end=True)
     assert match("token=***|status=ok", "token=sk-abc123|status=ok", anchor_end=False)
+    assert match("token=***&status=ok", "token=sk-abc123&status=ok", anchor_end=True)
     assert match("api_key: ***", "api_key: sk-abc123", anchor_end=True)
     assert match("api_key: ***", "api_key: sk-abc123", anchor_end=False)
+
+
+def test_redaction_mask_matches_quoted_secret_containing_delimiters():
+    """Third-review regression: a QUOTED secret may legitimately contain delimiters.
+
+    The context-free lexer split every `"`, `,`, `;`, `|` and space regardless of
+    whether it sat inside a quoted scalar. A redacted candidate has one `***`
+    field, but an otherwise-identical live secret containing one of those
+    characters lexed into several units, so the 1:1 unit alignment rejected a
+    genuine redaction-only echo — leaving the original navigate-back duplication
+    bug in place for exactly those credential values.
+
+    A mask that constitutes an ENTIRE quoted scalar now consumes the whole visible
+    quoted region up to the matching close quote, so such secrets dedup again. This
+    must NOT weaken the false-dedup protection: the quoted region is bounded by the
+    close quote, so a changed sibling field outside it still fails closed.
+    """
+    import api.streaming as streaming
+
+    match = streaming._redaction_tolerant_match
+
+    for label, secret in (
+        ("semicolon", "ab;cd"),
+        ("pipe", "ab|cd"),
+        ("comma", "ab,cd"),
+        ("space", "ab cd"),
+        ("equals", "ab=cd"),
+        ("ampersand", "ab&cd"),
+        ("question", "ab?cd"),
+        ("mixed", "a;b|c,d e=f"),
+    ):
+        cand = 'api_key: "***"'
+        vis = f'api_key: "{secret}"'
+        assert match(cand, vis, anchor_end=True), (
+            f"a quoted secret containing {label} must still dedup (suffix path)"
+        )
+        assert match(cand, vis + " and then more streamed prose", anchor_end=False), (
+            f"a quoted secret containing {label} must still dedup (substring path)"
+        )
+
+    # Backtick and single-quote scalars behave the same way.
+    assert match("key: `***`", "key: `ab;cd`", anchor_end=True)
+    assert match("key: '***'", "key: 'ab,cd'", anchor_end=True)
+
+    # Realistic JSON progress shape with a delimiter-bearing secret.
+    assert match(
+        '{"user":"sam","password":"***","status":"ok"}',
+        '{"user":"sam","password":"a;b c","status":"ok"}',
+        anchor_end=True,
+    )
+
+    # An escaped quote inside the secret stays inside the scalar.
+    assert match('k="***"', 'k="ab\\"cd"', anchor_end=True)
+
+    # CRITICAL: the quoted-scalar allowance must not reopen the false-dedup hole —
+    # a changed field OUTSIDE the quoted secret still fails closed.
+    assert not match(
+        '{"password":"***","status":"completed"}',
+        '{"password":"a;b","status":"started"}',
+        anchor_end=True,
+    ), "a changed sibling field must not be swallowed by a quoted mask"
+    assert not match(
+        '{"password":"***","status":"completed"}',
+        '{"password":"a;b","status":"started"}',
+        anchor_end=False,
+    )
 
 
 def test_redaction_mask_leading_trailing_and_multiple_forms():
@@ -652,55 +735,133 @@ def test_redaction_mask_leading_trailing_and_multiple_forms():
     assert not match('x"***"CHANGED"***"z', 'x"a"ORIG"b"z', anchor_end=True)
 
 
-def test_redaction_tolerant_match_growth_is_subquadratic():
-    """CORE regression: the matcher must be linear, not quadratic — revert-sensitive.
+def test_redaction_tolerant_match_cogrowing_near_match_is_bounded():
+    """CORE regression: work must stay bounded when BOTH inputs grow — revert-sensitive.
 
     The `anchor_end=False` call in `_is_visible_output_echo` scans the full,
-    unbounded visible output synchronously. The earlier implementations restarted
-    a `str.find`/suffix scan at every offset, which is Θ(n²) on an adversarial
-    leading-mask + absent-literal input (reviewer measured a 16.9× time increase
-    for an 8× input). The tokenized single-pass matcher is linear.
+    unbounded visible output synchronously from the streaming callback, so a
+    pathological input stalls the live stream for that turn.
 
-    This asserts the SHAPE (growth ratio), not a wall-clock ceiling, so it is
-    portable across machines AND revert-sensitive: the quadratic segment/regex
-    implementation grows ~3.4–4.7× per input doubling and fails this gate, while
-    the linear tokenizer grows ~2× and passes.
+    History of this gate:
+      * regex `[^"]*`-per-mask — catastrophic backtracking (2.73s at 4 masks/128
+        chars, >10s at the caller-sized probe).
+      * per-offset `str.find` restart — Θ(n²) on a leading mask + absent literal.
+      * the previous oracle held the CANDIDATE fixed at one unit while only the
+        visible side grew, so it measured fixed-pattern scaling and passed even
+        the quadratic implementation — it was not revert-sensitive.
+
+    This probe grows the candidate AND the visible text together on a near-match
+    that aligns for a long prefix before failing, which is the worst case for an
+    `O(v × m)` aligner. Asserting the growth SHAPE keeps it portable across
+    machines; the ratio ceiling cleanly separates linear (~2×) from quadratic
+    (~4×). Measured: this implementation 1.9–2.2× per doubling, the previous
+    per-offset implementation 3.6–3.8× (fails this gate).
     """
     import time
     import api.streaming as streaming
 
     match = streaming._redaction_tolerant_match
 
-    # Adversarial: a leading mask whose field literal never appears, over many
-    # tiny visible tokens — the worst case for a per-offset restart.
-    cand = "***zzzABSENT"
-
     def probe(n: int) -> float:
-        vis = " ".join(["x"] * n)
+        # Leading mask + a literal that never appears, over co-growing input.
+        cand = "***" + " " + "k=v " * n + "ABSENTLITERAL"
+        vis = ("sk-abc123" + " " + "k=v " * n) * 2
         best = float("inf")
-        # Best-of-3 to damp scheduler noise; we only care about growth shape.
+        # Best-of-3 to damp scheduler noise; only the growth shape matters.
         for _ in range(3):
             t0 = time.perf_counter()
-            for _ in range(10):
-                match(cand, vis, anchor_end=False)
-            best = min(best, (time.perf_counter() - t0) / 10)
+            match(cand, vis, anchor_end=False)
+            best = min(best, time.perf_counter() - t0)
         return best
 
-    sizes = [4000, 8000, 16000, 32000]
+    sizes = [75, 150, 300, 600]
     times = {n: probe(n) for n in sizes}
     ratios = [times[sizes[i + 1]] / max(times[sizes[i]], 1e-9) for i in range(len(sizes) - 1)]
 
-    # Linear ⇒ each doubling ≈ 2×. Quadratic ⇒ ≈ 4×. A 2.8× ceiling cleanly
-    # separates the two and leaves generous headroom for CI jitter.
     assert max(ratios) < 2.8, (
-        "redaction matcher growth must be sub-quadratic on the unbounded "
-        f"substring path; per-doubling ratios were {['%.2f' % r for r in ratios]} "
+        "redaction matcher work must stay sub-quadratic when candidate and visible "
+        f"text grow together; per-doubling ratios were {['%.2f' % r for r in ratios]} "
         f"(times={ {n: round(t * 1000, 3) for n, t in times.items()} } ms)"
+    )
+
+    # Repeated-literal variant: every candidate literal occurs at many visible
+    # offsets, so start-offset pruning cannot help and the aligner does real work.
+    def probe_repeated(n: int) -> float:
+        cand = '"***" ' + "a " * n + "ZZ"
+        vis = '"s" ' + "a " * (2 * n)
+        best = float("inf")
+        for _ in range(3):
+            t0 = time.perf_counter()
+            match(cand, vis, anchor_end=False)
+            best = min(best, time.perf_counter() - t0)
+        return best
+
+    rep_sizes = [100, 200, 400, 800]
+    rep_times = {n: probe_repeated(n) for n in rep_sizes}
+    rep_ratios = [
+        rep_times[rep_sizes[i + 1]] / max(rep_times[rep_sizes[i]], 1e-9)
+        for i in range(len(rep_sizes) - 1)
+    ]
+    assert max(rep_ratios) < 2.8, (
+        "repeated-literal co-growing near-match must stay sub-quadratic; "
+        f"ratios were {['%.2f' % r for r in rep_ratios]}"
+    )
+
+
+def test_redaction_tolerant_match_hard_bounds_fail_closed():
+    """The synchronous path must be hard-bounded, and every bound must fail CLOSED.
+
+    Because alignment is `O(visible × candidate)` in the worst case, both inputs
+    are capped and a total unit-comparison budget is enforced. Exceeding a bound
+    returns False ("not an echo"), which is the safe direction: a false negative
+    only re-appends a progress paragraph (cosmetic), while a false positive marks
+    genuinely-new progress as already_streamed and destroys it.
+
+    This also pins the documented tradeoff — oversized inputs are deliberately
+    NOT deduped rather than scanned unboundedly on the streaming callback.
+    """
+    import time
+    import api.streaming as streaming
+
+    match = streaming._redaction_tolerant_match
+
+    # Over-cap candidate and visible inputs must be rejected outright.
+    over_cand = "***" + "x" * (streaming._ECHO_REDACTION_MAX_CAND_CHARS + 1)
+    assert not match(over_cand, "y" * 100, anchor_end=False)
+    over_vis = 'a "s" b' + "z" * (streaming._ECHO_REDACTION_MAX_VIS_CHARS + 1)
+    assert not match('a "***" b', over_vis, anchor_end=False)
+
+    # A mask run may not be expanded an unbounded number of times per field.
+    assert not match("***" * (streaming._ECHO_REDACTION_MAX_MASKS_PER_FIELD + 4) + "z", "z", anchor_end=True)
+
+    # At the very hard bounds the call must still return quickly enough to be safe
+    # inline on the streaming callback. Generous ceiling for slow/loaded CI.
+    worst_cand = '"***" ' + "a " * 2040
+    worst_vis = '"s" ' + "a " * 32000
+    t0 = time.perf_counter()
+    match(worst_cand, worst_vis, anchor_end=False)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, (
+        "a worst-case at-the-bound match must not stall the synchronous streaming "
+        f"callback; took {elapsed * 1000:.1f}ms"
     )
 
 
 
-def test_redacted_interim_progress_echo_marks_already_streamed(cleanup_test_sessions):
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "koreader1",
+        # Third review: a real secret may contain characters the lexer treats as
+        # structural. The context-free lexer split these into extra units so the
+        # 1:1 alignment rejected the echo and the duplication bug survived for
+        # exactly these values. Both must reach already_streamed=True and replay
+        # to a single copy.
+        "ab;cd|ef,gh ij",
+    ],
+    ids=["plain-secret", "delimiter-bearing-secret"],
+)
+def test_redacted_interim_progress_echo_marks_already_streamed(secret, cleanup_test_sessions):
     """Regression: a credential-redacted interim echo must be flagged already_streamed.
 
     Reproduces the "repetition on navigate-back" bug: the assistant streams a
@@ -715,17 +876,18 @@ def test_redacted_interim_progress_echo_marks_already_streamed(cleanup_test_sess
     import api.streaming as streaming
     from api.models import _append_journaled_partial_output
 
-    secret = "koreader1"
     sentence_streamed = (
         'There\'s a legacy plaintext `password` fallback field, so I can seed '
         'with `{"username":"sam","password":"' + secret + '","serverUrl":"...",'
         '"matchMethod":1}` and it\'ll load. Let me build the simulator and seed the file.'
     )
     sentence_interim = sentence_streamed.replace(secret, "***")
+    # Unique per-parameter ids so the two runs cannot share journal/stream state.
+    secret_slug = re.sub(r"[^a-z0-9]+", "_", secret.lower()).strip("_")
 
     class FakeSession:
         def __init__(self):
-            self.session_id = "issue_redacted_interim_echo"
+            self.session_id = "issue_redacted_interim_echo_" + secret_slug
             self.title = "Redacted interim echo"
             self.workspace = "/tmp"
             self.model = "gpt-test"
@@ -825,7 +987,7 @@ def test_redacted_interim_progress_echo_marks_already_streamed(cleanup_test_sess
             pass
 
     fake_session = FakeSession()
-    fake_stream_id = "stream_issue_redacted_interim_echo"
+    fake_stream_id = "stream_issue_redacted_interim_echo_" + secret_slug
     fake_session.active_stream_id = fake_stream_id
     fake_queue = queue.Queue()
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")

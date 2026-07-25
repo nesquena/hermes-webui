@@ -101,21 +101,44 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
+# --- Credential-redaction-tolerant echo matching ------------------------------
+#
 # A credential redaction mask run (three or more '*'). Only these placeholders
 # are treated as wildcards during echo comparison; every other character must
 # still match literally (see _redaction_tolerant_match).
 _ECHO_REDACTION_MASK_RE = re.compile(r'\*{3,}')
 
-# Boundary characters that separate one scalar/token from the next. A redaction
-# mask replaces exactly ONE scalar, so the matcher tokenizes both texts on these
-# boundaries and a mask may only ever stand in for a single whole token/scalar —
-# never spanning a boundary into neighbouring status text. Quotes/backticks
-# close quoted strings; `,` `}` `]` `)` `:` `;` `|` close structured fields; a
-# space separates tokens. `;` and `|` are included so `a=***;b=x` cannot
-# masquerade as `a=secret;b=y;b=x` (an omitted delimiter would let the mask eat
-# the changed `b=y;` status field). Whitespace is folded to single spaces (not
-# stripped) so the token boundary survives.
-_ECHO_BOUNDARY_CHARS = frozenset('"`,}]):;| ')
+# Characters that open/close a quoted scalar. A secret may legitimately contain
+# structural characters (`ab;cd`), so the region between a matching pair of these
+# is treated as ONE scalar when the candidate's mask occupies that whole scalar.
+_ECHO_QUOTE_CHARS = frozenset('"\'`')
+
+# Separators that must align literally when they appear OUTSIDE a quoted scalar:
+# structural JSON/dict punctuation plus the assignment/query/field separators
+# (`;` `|` `&` `=` `?`). These are the characters a mask must never span, or an
+# omitted one lets a mask eat a changed status field — e.g. `token=***&status=ok`
+# must not match `token=sk-1&status=failed&status=ok`.
+_ECHO_STRUCTURAL_CHARS = frozenset(',{}[]():;|&=?')
+
+_ECHO_BOUNDARY_CHARS = _ECHO_QUOTE_CHARS | _ECHO_STRUCTURAL_CHARS | frozenset(' ')
+
+# Hard work bounds. `_redaction_tolerant_match` runs SYNCHRONOUSLY from the
+# streaming callback, including one call against the whole (unbounded) visible
+# output. Unit alignment is O(visible_units x candidate_units) in the worst case,
+# so rather than claim a linearity the algorithm does not have, both inputs are
+# hard-bounded and a total unit-comparison budget is enforced before/while doing
+# that work. Exceeding any bound returns False ("not an echo").
+#
+# Failing closed is the safe direction: a false negative merely re-appends a
+# progress paragraph (the pre-existing bug, cosmetic), whereas a false positive
+# marks a genuinely-new interim as already_streamed and silently DESTROYS real
+# progress output. Realistic inputs never approach these bounds - a progress
+# sentence is a few hundred characters, and the rarest-literal anchor prunes
+# candidate start offsets so typical matching is linear in the visible length.
+_ECHO_REDACTION_MAX_CAND_CHARS = 4096
+_ECHO_REDACTION_MAX_VIS_CHARS = 65536
+_ECHO_REDACTION_MAX_UNIT_COMPARISONS = 200000
+_ECHO_REDACTION_MAX_MASKS_PER_FIELD = 8
 
 
 def _fold_ws_for_redaction_match(value: str) -> str:
@@ -130,67 +153,81 @@ def _fold_ws_for_redaction_match(value: str) -> str:
 
 
 def _tokenize_for_redaction_match(text: str) -> list[tuple[str, str]]:
-    """Split folded ``text`` into an ordered list of alignment units.
+    """Escape-aware lex of folded ``text`` into an ordered list of alignment units.
 
-    Each unit is ``('d', ch)`` for a single boundary character or ``('f', s)``
-    for a *field* — a maximal run of non-boundary characters (which may contain
-    redaction mask runs). Every structural delimiter becomes its own unit so
-    punctuation must line up exactly between candidate and visible; a mask lives
-    inside a field and can only ever be resolved against that one field.
+    Each unit is ``('d', ch)`` for a single boundary character (quote or
+    structural/assignment separator or space) or ``('f', s)`` for a *field* — a
+    maximal run of non-boundary characters, which may contain redaction mask runs.
+
+    Escape-aware: a backslash escape (``\\"``) is consumed into the surrounding
+    field and never becomes a delimiter, so an escaped quote inside a secret does
+    not terminate its scalar.
     """
     units: list[tuple[str, str]] = []
+    buf: list[str] = []
     i = 0
     n = len(text)
+
+    def _flush() -> None:
+        if buf:
+            units.append(("f", "".join(buf)))
+            buf.clear()
+
     while i < n:
         ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            # Escaped character: part of the field, never structural.
+            buf.append(text[i:i + 2])
+            i += 2
+            continue
         if ch in _ECHO_BOUNDARY_CHARS:
+            _flush()
             units.append(("d", ch))
             i += 1
-        else:
-            j = i + 1
-            while j < n and text[j] not in _ECHO_BOUNDARY_CHARS:
-                j += 1
-            units.append(("f", text[i:j]))
-            i = j
+            continue
+        buf.append(ch)
+        i += 1
+    _flush()
     return units
 
 
 def _field_matches_redaction(cand_field: str, vis_field: str) -> bool:
-    """Compare one candidate FIELD (may contain mask runs) to one visible FIELD.
+    """Compare one candidate FIELD (may contain mask runs) to one visible scalar.
 
-    A field is boundary-free by construction, so any mask here stands for a run
-    of the *same* scalar — it only needs to consume >=1 character and the literal
-    parts around it must line up, anchored to both ends of the field. There is no
-    boundary to cross, so the boundary protection comes entirely from the unit
-    alignment in the caller (this field vs exactly one visible field).
+    ``cand_field`` is boundary-free by construction. Each mask run must consume at
+    least one character, the literal parts around it must line up, and the whole
+    of ``vis_field`` must be consumed. Literals are located with a forward-only
+    ``find`` (monotonic ``pos``), so the scan is linear in ``len(vis_field)`` per
+    literal and the mask count is capped.
     """
     if not _ECHO_REDACTION_MASK_RE.search(cand_field):
         return cand_field == vis_field
     parts = _ECHO_REDACTION_MASK_RE.split(cand_field)
-    # parts[0] = literal prefix, parts[-1] = literal suffix, masks sit between.
+    if len(parts) - 1 > _ECHO_REDACTION_MAX_MASKS_PER_FIELD:
+        return False
     if not vis_field.startswith(parts[0]):
         return False
     pos = len(parts[0])
     last = len(parts) - 1
-    for k in range(1, len(parts)):
+    for k in range(1, last):
         lit = parts[k]
-        if k == last:
-            if lit == "":
-                # Trailing mask: must consume >=1 char through the field's end.
-                return (len(vis_field) - pos) >= 1
-            # Mask then a final literal that must terminate the field, with the
-            # mask consuming >=1 char before it.
-            end = len(vis_field) - len(lit)
-            if end < pos + 1:
+        if lit == "":
+            # Adjacent mask runs collapse into one wildcard; still needs >=1 char.
+            pos += 1
+            if pos > len(vis_field):
                 return False
-            return vis_field.endswith(lit)
-        # Middle mask + literal: the literal must appear at least one char ahead
-        # (so the mask consumes >=1), searching forward only.
+            continue
         nxt = vis_field.find(lit, pos + 1)
         if nxt == -1:
             return False
         pos = nxt + len(lit)
-    return pos == len(vis_field)
+    tail = parts[last]
+    if tail == "":
+        # Trailing mask: must consume >=1 char through the end of the scalar.
+        return (len(vis_field) - pos) >= 1
+    # Mask then a final literal that must terminate the scalar, with the mask
+    # consuming >=1 char before it.
+    return vis_field.endswith(tail) and (len(vis_field) - len(tail)) >= pos + 1
 
 
 def _unit_matches_redaction(cand_unit: tuple[str, str], vis_unit: tuple[str, str]) -> bool:
@@ -204,55 +241,87 @@ def _unit_matches_redaction(cand_unit: tuple[str, str], vis_unit: tuple[str, str
     return _field_matches_redaction(cval, vval)
 
 
+def _cand_unit_is_whole_quoted_mask(cand_units: list[tuple[str, str]], ci: int) -> str:
+    """Return the quote char if candidate unit ``ci`` is an entire quoted mask scalar.
+
+    Matches the shape ``" *** "`` — a mask-bearing field whose immediately
+    surrounding units are the same quote character. Only in that shape may the
+    mask stand for a visible scalar that itself contains structural characters,
+    because the quotes delimit exactly how far it may reach. Returns "" otherwise.
+    """
+    kind, val = cand_units[ci]
+    if kind != "f" or not _ECHO_REDACTION_MASK_RE.search(val):
+        return ""
+    if ci == 0 or ci + 1 >= len(cand_units):
+        return ""
+    prev_kind, prev_val = cand_units[ci - 1]
+    if prev_kind != "d" or prev_val not in _ECHO_QUOTE_CHARS:
+        return ""
+    if cand_units[ci + 1] != (prev_kind, prev_val):
+        return ""
+    return prev_val
+
+
 def _redaction_tolerant_match(candidate_text: str, visible_text: str, *, anchor_end: bool) -> bool:
     """Match a credential-redacted echo against its unredacted live-streamed twin.
 
     The interim-assistant progress echo is credential-redacted before it is
-    journaled/queued (`"password":"***"`), while the live token stream is not
-    (`"password":"hunter2"`). A strict whitespace-only compare therefore treats
+    journaled/queued (``"password":"***"``) while the live token stream is not
+    (``"password":"hunter2"``). A strict whitespace-only compare therefore treats
     them as different text, so the echo is flagged NOT-already-streamed and the
     same sentence is appended a second time on live render and on run-journal
     replay (the "repetition on navigate-back" bug).
 
-    Both texts are folded (whitespace → single space) and tokenized into a unit
-    stream of boundary characters (`('d', ch)`) and boundary-free fields
-    (`('f', s)`). A match is a **1:1 alignment** of the candidate's unit run
-    against a contiguous run of visible units:
+    Both texts are folded (whitespace -> single space) and lexed into a unit stream
+    of boundary characters (``('d', ch)``) and boundary-free fields (``('f', s)``).
+    A match aligns the candidate's units against a contiguous run of visible units:
 
       * a delimiter unit must equal the visible delimiter exactly;
       * a field unit compares literally, except a redaction mask inside it may
-        stand for >=1 character of that one field (the same scalar) — it can
-        never reach across a boundary into a neighbouring field.
+        stand for >=1 character of that one visible scalar;
+      * a mask that constitutes an ENTIRE quoted scalar (``"***"``) consumes the
+        whole visible quoted region up to the matching close quote — so a real
+        secret containing ``;`` ``|`` ``,`` or a space still matches. The close
+        quote is the next unescaped occurrence, so this is deterministic: there is
+        no choice to backtrack over.
 
-    Because the alignment is unit-for-unit, a mask occupies exactly one whole
-    scalar/token, so genuinely different values are never masked away:
+    An unquoted mask therefore never spans a separator, which is what keeps
+    changed status text from being swallowed:
 
-      * `"status":"started"` vs `"status":"completed"` — the trailing field
-        differs literally, so no match: a real status update is never
-        suppressed as already-streamed.
-      * `Using token *** completed` vs `Using token sk-x failed then retried
-        and completed` — the mask aligns with the single field `sk-x`; the
-        following `token`/`completed` fields then fail to line up.
-      * `a=***;b=x` vs `a=secret;b=y;b=x` — `;` is a boundary, so the mask
-        cannot swallow the changed `b=y` field.
+      * ``"status":"started"`` vs ``"status":"completed"`` — the trailing scalar
+        differs literally, so a real status update is never suppressed.
+      * ``Using token *** completed`` vs ``Using token sk-x failed then retried
+        and completed`` — the mask binds to the single field ``sk-x``; the
+        following units then fail to line up.
+      * ``token=***&status=ok`` vs ``token=sk-1&status=failed&status=ok`` — ``&``
+        (like ``;`` ``|`` ``=`` ``?``) is a boundary, so the mask cannot reach the
+        changed ``status=failed`` field.
 
-    Complexity: tokenization is O(n); alignment tries each visible start once and
-    compares bounded units, so it is linear in ``len(visible_text)`` for a fixed
-    candidate — no per-offset ``str.find`` rescans, and thus none of the
-    super-linear backtracking of the earlier regex/segment implementations. Safe
-    to run inline on the synchronous streaming callback, including the unbounded
-    full-output substring path.
+    Work bound (NOT claimed to be linear): alignment is O(visible x candidate) in
+    the worst case, so both inputs are hard-capped and a total unit-comparison
+    budget is enforced; exceeding either returns False. Candidate start offsets are
+    pruned to the positions implied by the candidate's rarest literal unit, which
+    makes realistic inputs linear in the visible length and rejects an
+    absent-literal candidate after a single indexing pass. Every bound fails closed
+    (no dedup), never open, so genuine progress can never be discarded by a bound.
 
     ``anchor_end`` selects a suffix (tail-echo) match vs. a substring match.
     """
+    cand_raw = str(candidate_text or "")
+    vis_raw = str(visible_text or "")
     # Engage this relaxed path only when the candidate actually carries a mask;
     # a mask-free candidate is fully handled by the strict compare upstream.
-    if "*" not in str(candidate_text or "") or not _ECHO_REDACTION_MASK_RE.search(str(candidate_text)):
+    if "*" not in cand_raw or not _ECHO_REDACTION_MASK_RE.search(cand_raw):
         return False
-    cand = _fold_ws_for_redaction_match(candidate_text)
+    # Hard input bounds, applied BEFORE any alignment work.
+    if len(cand_raw) > _ECHO_REDACTION_MAX_CAND_CHARS:
+        return False
+    if len(vis_raw) > _ECHO_REDACTION_MAX_VIS_CHARS:
+        return False
+    cand = _fold_ws_for_redaction_match(cand_raw)
     if not cand or not _ECHO_REDACTION_MASK_RE.search(cand):
         return False
-    vis = _fold_ws_for_redaction_match(visible_text)
+    vis = _fold_ws_for_redaction_match(vis_raw)
     if not vis:
         return False
 
@@ -260,25 +329,98 @@ def _redaction_tolerant_match(candidate_text: str, visible_text: str, *, anchor_
     vis_units = _tokenize_for_redaction_match(vis)
     m = len(cand_units)
     v = len(vis_units)
-    if m == 0 or m > v:
+    if m == 0 or v == 0 or m > v:
         return False
 
-    def _match_at(vi: int) -> bool:
-        for k in range(m):
-            if not _unit_matches_redaction(cand_units[k], vis_units[vi + k]):
-                return False
-        return True
+    budget = [_ECHO_REDACTION_MAX_UNIT_COMPARISONS]
+
+    def _align_from(vi: int) -> int:
+        """Align the whole candidate starting at visible unit ``vi``.
+
+        Returns the visible index just past the match, or -1 on mismatch/budget
+        exhaustion. Monotonic: ``vi`` only ever advances, no restarts.
+        """
+        ci = 0
+        while ci < m:
+            if vi >= v:
+                return -1
+            budget[0] -= 1
+            if budget[0] <= 0:
+                return -1
+            quote = _cand_unit_is_whole_quoted_mask(cand_units, ci)
+            if quote:
+                # Consume the visible quoted region up to the matching close quote.
+                close = ("d", quote)
+                j = vi
+                while j < v and vis_units[j] != close:
+                    j += 1
+                if j >= v or j == vi:
+                    # Unterminated scalar, or empty scalar (mask needs >=1 char).
+                    return -1
+                budget[0] -= (j - vi)
+                if budget[0] <= 0:
+                    return -1
+                if not _field_matches_redaction(cand_units[ci][1], "".join(u[1] for u in vis_units[vi:j])):
+                    return -1
+                ci += 1
+                vi = j
+                continue
+            if not _unit_matches_redaction(cand_units[ci], vis_units[vi]):
+                return -1
+            ci += 1
+            vi += 1
+        return vi
+
+    # Prune candidate start offsets using the candidate's rarest LITERAL unit
+    # (a unit that must match a visible unit exactly). A literal that never occurs
+    # in the visible stream rejects the whole candidate after one indexing pass.
+    #
+    # Only units BEFORE the first whole-quoted-mask are eligible anchors: every
+    # other unit kind consumes exactly one visible unit, so such an anchor's
+    # distance from the candidate start is fixed and `p - anchor_offset` is exact.
+    # A quoted mask can consume several visible units, so any literal after it has
+    # no fixed offset and must not be used to derive a start.
+    first_variable_ci = m
+    for ci in range(m):
+        if _cand_unit_is_whole_quoted_mask(cand_units, ci):
+            first_variable_ci = ci
+            break
+
+    positions: dict[tuple[str, str], list[int]] = {}
+    for idx, unit in enumerate(vis_units):
+        positions.setdefault(unit, []).append(idx)
+
+    anchor_offset = -1
+    anchor_positions: list[int] | None = None
+    for ci in range(first_variable_ci):
+        unit = cand_units[ci]
+        if unit[0] == "f" and _ECHO_REDACTION_MASK_RE.search(unit[1]):
+            continue  # mask-bearing field: matches a scalar, not a literal
+        occurrences = positions.get(unit)
+        if not occurrences:
+            return False  # a required literal is absent: cannot possibly match
+        if anchor_positions is None or len(occurrences) < len(anchor_positions):
+            anchor_offset = ci
+            anchor_positions = occurrences
+
+    if anchor_positions is None:
+        # No fixed-offset literal anchor; scan every valid start (budget-capped).
+        starts: list[int] | range = range(0, v - m + 1)
+    else:
+        starts = sorted({p - anchor_offset for p in anchor_positions if 0 <= p - anchor_offset <= v - m})
 
     if anchor_end:
-        # Tail-echo: the candidate units must be exactly the LAST m visible units.
-        return _match_at(v - m)
+        for vi in starts:
+            if budget[0] <= 0:
+                return False
+            if _align_from(vi) == v:
+                return True
+        return False
 
-    # Substring: the candidate unit run must appear contiguously. Each start is
-    # attempted once with bounded per-unit work — linear in v for fixed m, with
-    # a fast first-unit reject when the anchor unit can't align (the adversarial
-    # leading-mask/absent-literal case fails in O(1) per start).
-    for vi in range(0, v - m + 1):
-        if _match_at(vi):
+    for vi in starts:
+        if budget[0] <= 0:
+            return False
+        if _align_from(vi) != -1:
             return True
     return False
 
