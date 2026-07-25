@@ -11899,7 +11899,7 @@ def _detect_server_mode() -> str:
 
 
 def _handle_server_restart(handler) -> bool:
-    """Restart the WebUI server process via ctl.sh (POS /api/server/restart).
+    """Restart the WebUI server process via ctl.sh (POST /api/server/restart).
 
     Validates ctl ownership via PID file, then delegates to ``./ctl.sh restart``.
     Concurrent requests are serialized by a threading lock.
@@ -11984,35 +11984,39 @@ def _handle_server_restart(handler) -> bool:
         )
 
     # ── Acknowledge, then restart asynchronously ──────────────────────────
-    logger.info(
-        "[server-restart] initiating restart for PID %s via %s",
-        pid_from_file,
-        ctl_path,
-    )
-    j(handler, {
-        "ok": True,
-        "status": "restarting",
-        "message": "Server restart initiated via ctl.sh",
-        "pid": pid_from_file,
-    })
+    try:
+        logger.info(
+            "[server-restart] initiating restart for PID %s via %s",
+            pid_from_file,
+            ctl_path,
+        )
+        j(handler, {
+            "ok": True,
+            "status": "restarting",
+            "message": "Server restart initiated via ctl.sh",
+            "pid": pid_from_file,
+        })
 
-    def _do_restart() -> None:
-        try:
-            import subprocess as _subprocess
+        def _do_restart() -> None:
+            try:
+                import subprocess as _subprocess
 
-            _subprocess.Popen(
-                [str(ctl_path), "restart"],
-                cwd=str(REPO_ROOT),
-                stdout=_subprocess.DEVNULL,
-                stderr=_subprocess.DEVNULL,
-            )
-        except Exception:
-            logger.exception("[server-restart] failed to spawn ctl.sh restart")
-        finally:
-            _SERVER_RESTART_LOCK.release()
+                _subprocess.Popen(
+                    [str(ctl_path), "restart"],
+                    cwd=str(REPO_ROOT),
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                )
+            except Exception:
+                logger.exception("[server-restart] failed to spawn ctl.sh restart")
+            finally:
+                _SERVER_RESTART_LOCK.release()
 
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return True
+        threading.Thread(target=_do_restart, daemon=True).start()
+        return True
+    except Exception:
+        _SERVER_RESTART_LOCK.release()
+        raise
 
 
 def _handle_health_restart(handler) -> bool:
