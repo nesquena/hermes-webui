@@ -850,7 +850,6 @@ def test_cron_batch_total_successful_bytes_within_four_caps(monkeypatch, tmp_pat
     routes._handle_cron_output(
         handler, SimpleNamespace(query="job_id=job1&limit=10")
     )
-    body = _payload(handler)
     successful_total = sum(total_read)
     assert successful_total <= _FILE_READ_MAX_BYTES * 4, (
         f"total successful batch reads must stay within 4 caps "
