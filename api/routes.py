@@ -13298,6 +13298,7 @@ def handle_get(handler, parsed) -> bool:
                 load_messages and msg_limit is not None and _messages_offset > 0
             )
             sess["_messages_offset"] = _messages_offset
+            sess["_msg_limit_max"] = _MAX_MSG_LIMIT
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": redact_session_data(sess)})
 

@@ -2098,8 +2098,20 @@ $('btnNewChat').onclick=async()=>{
   }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
 };
-$('btnDownload').onclick=()=>{
+$('btnDownload').onclick=async()=>{
   if(!S.session)return;
+  const sid=S.session.session_id;
+  if(typeof _messagesTruncated!=='undefined'&&_messagesTruncated){
+    if(S.busy||S.activeStreamId) return;
+    if(typeof _ensureAllMessagesLoaded!=='function') return;
+    try{
+      await _ensureAllMessagesLoaded();
+    }catch(e){
+      console.warn('btnDownload full-load failed:',e);
+      return;
+    }
+    if(!S.session||S.session.session_id!==sid||_messagesTruncated||S.busy||S.activeStreamId)return;
+  }
   const blob=new Blob([transcript()],{type:'text/markdown'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
