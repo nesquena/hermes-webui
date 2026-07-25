@@ -390,3 +390,147 @@ def test_a_header_write_failure_after_attach_still_unsubscribes(monkeypatch):
     assert terminal._reap_idle_terminals(
         term.unwatched_since + terminal._TERMINAL_IDLE_GRACE_SECONDS + 1
     ) == 1
+
+
+class _ScriptedStop:
+    """Stand-in for the reaper's stop event: run the body N times, then stop.
+
+    ``_terminal_reaper_loop`` is ``while not stop.wait(interval)``, so returning
+    False N times and then True runs exactly N passes with no real sleeping.
+    """
+
+    def __init__(self, passes):
+        self.remaining = passes
+        self.waits = []
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.remaining <= 0:
+            return True
+        self.remaining -= 1
+        return False
+
+
+def _run_reaper(monkeypatch, passes, side_effect, *, clock=None):
+    """Drive the real loop for `passes` iterations against a fake clock."""
+    stop = _ScriptedStop(passes)
+    monkeypatch.setattr(terminal, "_terminal_reaper_stop", stop)
+    monkeypatch.setattr(terminal, "_reap_idle_terminals", side_effect)
+    if clock is not None:
+        monkeypatch.setattr(terminal.time, "monotonic", clock)
+    terminal._terminal_reaper_loop()
+    return stop
+
+
+def test_a_failing_reaper_pass_leaves_a_breadcrumb(monkeypatch, caplog):
+    """A swallowed failure must not be a SILENT failure.
+
+    Keeping the daemon alive through a bad pass is correct — `_MAX_TERMINALS`
+    still bounds the registry. Saying nothing is not: a permanently broken
+    reaper then looks exactly like "there was nothing to reap", and the first
+    symptom anyone sees is terminal spawns failing against the cap, with no
+    trace of why.
+    """
+    def _boom(_now):
+        raise RuntimeError("reap exploded")
+
+    with caplog.at_level("INFO", logger="api.terminal"):
+        _run_reaper(monkeypatch, 1, _boom, clock=lambda: 0.0)
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+    assert "terminal idle reaper pass failed" in errors[0].getMessage()
+    # The traceback has to be attached, or the breadcrumb names a symptom with
+    # no cause and the next person still has to reproduce it.
+    assert errors[0].exc_info is not None
+    assert "reap exploded" in caplog.text
+
+
+def test_the_reaper_survives_a_failing_pass(monkeypatch):
+    """The pre-existing contract: a bad pass must not kill the thread.
+
+    Pinned here because the breadcrumb added new code inside the except branch;
+    an exception raised by the LOGGING would be a new way to lose the daemon.
+    """
+    calls = []
+
+    def _boom(now):
+        calls.append(now)
+        raise RuntimeError("reap exploded")
+
+    def _explode(*_a, **_kw):
+        raise RuntimeError("the log handler is broken")
+
+    monkeypatch.setattr(terminal.logger, "error", _explode)
+    _run_reaper(monkeypatch, 3, _boom, clock=lambda: 0.0)
+    assert len(calls) == 3, "the loop stopped early — a failing pass killed it"
+
+
+def test_a_repeating_failure_is_reported_once_per_cooldown(monkeypatch, caplog):
+    """Rate-limited, because unlimited is worse than silent.
+
+    The loop wakes every `_TERMINAL_REAPER_INTERVAL_SECONDS`; an unconditional
+    log turns one persistent fault into ~1440 identical tracebacks a day and
+    buries the very log an operator would read to diagnose it.
+    """
+    def _boom(_now):
+        raise RuntimeError("same every time")
+
+    ticks = iter([0.0] * 50)
+    with caplog.at_level("INFO", logger="api.terminal"):
+        _run_reaper(monkeypatch, 10, _boom, clock=lambda: next(ticks))
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1, f"{len(errors)} reports for one repeating fault"
+    # And the suppression is disclosed rather than hidden: the next report says
+    # how many it stood in for.
+    cooled = terminal._TERMINAL_REAPER_LOG_COOLDOWN_SECONDS + 1
+    ticks2 = iter([0.0, 0.0, 0.0, cooled, cooled, cooled])
+    caplog.clear()
+    with caplog.at_level("INFO", logger="api.terminal"):
+        _run_reaper(monkeypatch, 6, _boom, clock=lambda: next(ticks2))
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 2, errors
+    assert "suppressed" in errors[1]
+
+
+def test_a_different_failure_is_reported_immediately(monkeypatch, caplog):
+    """A new exception is new information and must not wait out the cooldown."""
+    seq = iter([RuntimeError("first"), ValueError("second"), ValueError("second")])
+
+    def _boom(_now):
+        raise next(seq)
+
+    with caplog.at_level("INFO", logger="api.terminal"):
+        _run_reaper(monkeypatch, 3, _boom, clock=lambda: 0.0)
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 2, [r.getMessage() for r in errors]
+    assert "first" in caplog.text and "second" in caplog.text
+
+
+def test_recovery_is_logged_and_resets_the_limiter(monkeypatch, caplog):
+    """"The errors stopped" must not be ambiguous.
+
+    Without a recovery line, a silenced-but-still-broken reaper and a working
+    one produce the same (empty) log.
+    """
+    state = {"fail": True}
+
+    def _flaky(_now):
+        if state["fail"]:
+            state["fail"] = False
+            raise RuntimeError("transient")
+
+    with caplog.at_level("INFO", logger="api.terminal"):
+        _run_reaper(monkeypatch, 2, _flaky, clock=lambda: 0.0)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("recovered after 1 failed pass" in m for m in messages), messages
+
+
+def test_a_healthy_reaper_logs_nothing(monkeypatch, caplog):
+    """The common case stays quiet."""
+    with caplog.at_level("INFO", logger="api.terminal"):
+        _run_reaper(monkeypatch, 5, lambda _now: None, clock=lambda: 0.0)
+    assert [r.getMessage() for r in caplog.records] == []
