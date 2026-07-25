@@ -108,6 +108,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "is_read_only",
     "gateway_routing",
     "last_used_model",
+    "runtime_state",
 }
 
 
