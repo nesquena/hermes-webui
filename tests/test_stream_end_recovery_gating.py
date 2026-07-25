@@ -79,6 +79,7 @@ def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
     assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery)" in fn
     assert "_restoreSettledSession(source,{status:true})" in fn
+    assert "status==='stale'" in fn
     assert "if(status==='active'){" in fn
     assert "if(_streamEndRecoveryAttempts<16){" in fn
     assert "_scheduleStreamEndRecovery(source,_streamEndRecoveryAttempts<10?200:1000);" in fn
@@ -108,9 +109,10 @@ def test_stream_end_recovery_closes_dead_chat_stream_owner_before_slow_polling()
 def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal_escape():
     fn = _function_body("_reconcileStreamEndRecoveryExhaustion")
     assert "api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`)" in fn
+    assert "_currentPaneRecoveryOwnerLost()" in fn
     assert "_wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`" in fn
     assert "if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true})) return true;" in fn
-    assert "_finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});" in fn
+    assert "_finalizeStreamEndFallback(source);" in fn
 
 
 def test_stream_end_live_scene_detection_includes_empty_text_activity():
@@ -127,8 +129,17 @@ def test_restore_settled_session_can_report_active_pending_status():
     assert "async function _restoreSettledSession(source, options=null)" in MESSAGES_JS
     assert "arguments[1]" not in fn
     assert "const returnStatus=!!(options&&options.status);" in fn
+    assert "const _restoreStartedAsCurrentPane=_isSessionCurrentPane(activeSid);" in fn
+    assert "const _restoreOwnerLost=()=>(" in fn
+    assert "return returnStatus?'stale':true;" in fn
     assert "return returnStatus?'active':false;" in fn
     assert "return returnStatus?'restored':true;" in fn
+
+
+def test_recovery_owner_guard_uses_current_pane_and_stream_owner_signals():
+    fn = _function_body("_currentPaneRecoveryOwnerLost")
+    assert "_isSessionCurrentPane(activeSid)" in fn
+    assert "_ownsActiveStreamOrBackground()" in fn
 
 
 def test_stream_end_recovery_state_is_cleared_on_done_and_terminal_events():

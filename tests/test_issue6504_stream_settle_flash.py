@@ -46,6 +46,8 @@ def _run_recovery_case(
     stream_id: str = "stream-1",
     current_pane: bool | None = None,
 ):
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
     fallback = _extract("_finalizeStreamEndFallback")
     visible = _extract("_visibleLiveAssistantAnswerPresent")
     reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
@@ -123,6 +125,8 @@ def _run_recovery_case(
         globalThis.renderSessionList = () => {{ sessionListCalls++; }};
         globalThis._setActivePaneIdleIfOwner = () => {{ idleCalls++; }};
         globalThis._closeSource = () => {{ closeCalls++; }};
+        {owner}
+        {recovery_owner}
         {fallback}
         {visible}
         {reconcile}
@@ -167,6 +171,8 @@ def _run_recovery_case(
 
 
 def _run_restore_stale_guard_case():
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery = _extract("_currentPaneRecoveryOwnerLost")
     restore = _extract("_restoreSettledSession")
     script = textwrap.dedent(
         """
@@ -175,16 +181,28 @@ def _run_restore_stale_guard_case():
         let activeSid = 'sid-1';
         let streamId = 'old-stream';
         let _streamFinalized = false;
+        let _pendingStreamEndRecovery = true;
+        let _streamEndRecoveryAttempts = 3;
+        let _streamEndRecoveryTimer = {};
         globalThis.S = {
           session: { session_id: 'sid-1' },
           activeStreamId: 'replacement-stream',
         };
+        globalThis._loadingSessionId = null;
         globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = (sid) => !globalThis._loadingSessionId || globalThis._loadingSessionId === sid;
         globalThis.api = async () => {
           apiCalls += 1;
           return { session: null };
         };
         globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._clearStreamEndRecovery = () => {
+          _pendingStreamEndRecovery = false;
+          _streamEndRecoveryAttempts = 0;
+          _streamEndRecoveryTimer = null;
+        };
+        """ + owner + """
+        """ + recovery + """
         """ + restore + """
         (async () => {
           const status = await _restoreSettledSession({}, { status: true });
@@ -193,6 +211,7 @@ def _run_restore_stale_guard_case():
             closeCalls,
             apiCalls,
             activeStreamId: S.activeStreamId,
+            pending: _pendingStreamEndRecovery,
           }));
         })().catch((error) => {
           console.error(error && error.stack ? error.stack : String(error));
@@ -281,6 +300,7 @@ def test_replacement_stream_stale_guard_bails_before_old_recovery_fetches_or_fin
     assert result["closeCalls"] == 1
     assert result["apiCalls"] == 0
     assert result["activeStreamId"] == "replacement-stream"
+    assert result["pending"] is False
 
 
 def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
@@ -310,7 +330,9 @@ def test_long_tail_recovery_terminates_without_rescheduling_when_stream_is_inact
 
     assert result["wireCalls"] == 0
     assert result["scheduleDelays"] == []
-    assert result["renderCalls"] == 0
+    assert result["renderCalls"] == 1
+    assert result["clearLiveToolCalls"] == 1
+    assert result["removeThinkingCalls"] == 0
     assert result["activeStreamId"] is None
     assert result["finalized"] is True
 
@@ -331,3 +353,213 @@ def test_long_tail_recovery_does_not_reattach_stale_stream_over_replacement_owne
     assert result["closeCalls"] == 1
     assert result["pending"] is False
     assert result["activeStreamId"] == "replacement-stream"
+
+
+def test_long_tail_recovery_does_not_reattach_after_pane_ownership_switch_during_status_await():
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
+    script = textwrap.dedent(
+        """
+        let closeCalls = 0;
+        let wireCalls = 0;
+        let composerStatuses = [];
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _streamFinalized = false;
+        let _terminalStateReached = false;
+        let _pendingStreamEndRecovery = true;
+        let _streamEndRecoveryAttempts = 15;
+        let _streamEndRecoveryTimer = {};
+        let resolveStatus;
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [],
+        };
+        globalThis.LIVE_STREAMS = {};
+        globalThis._loadingSessionId = null;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = (sid) => !globalThis._loadingSessionId || globalThis._loadingSessionId === sid;
+        globalThis.api = () => new Promise((resolve) => { resolveStatus = resolve; });
+        globalThis.setComposerStatus = (status) => { composerStatuses.push(status); };
+        globalThis._restoreSettledSession = async () => false;
+        globalThis._runJournalReplayParams = () => '';
+        globalThis.EventSource = function(url) { this.url = url; };
+        globalThis._wireSSE = () => { wireCalls += 1; LIVE_STREAMS[activeSid] = { owner: streamId }; };
+        globalThis.document = { baseURI: 'http://localhost:8787/' };
+        globalThis.location = { href: 'http://localhost:8787/' };
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._clearStreamEndRecovery = () => {
+          _pendingStreamEndRecovery = false;
+          _streamEndRecoveryAttempts = 0;
+          _streamEndRecoveryTimer = null;
+        };
+        """ + owner + """
+        """ + recovery_owner + """
+        """ + reconcile + """
+        (async () => {
+          const pending = _reconcileStreamEndRecoveryExhaustion({});
+          globalThis._loadingSessionId = 'sid-2';
+          S.activeStreamId = 'replacement-stream';
+          resolveStatus({ active: true, replay_available: false });
+          await pending;
+          console.log(JSON.stringify({
+            closeCalls,
+            wireCalls,
+            composerStatuses,
+            pending: _pendingStreamEndRecovery,
+            activeStreamId: S.activeStreamId,
+            liveOwner: LIVE_STREAMS['sid-1'] || null,
+          }));
+        })().catch((error) => {
+          console.error(error && error.stack ? error.stack : String(error));
+          process.exit(1);
+        });
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["closeCalls"] == 1
+    assert result["wireCalls"] == 0
+    assert result["composerStatuses"] == []
+    assert result["pending"] is False
+    assert result["activeStreamId"] == "replacement-stream"
+    assert result["liveOwner"] is None
+
+
+def test_restore_settled_session_does_not_mutate_after_pane_ownership_switch_during_await():
+    owner = _extract("_ownsActiveStreamOrBackground")
+    recovery_owner = _extract("_currentPaneRecoveryOwnerLost")
+    restore = _extract("_restoreSettledSession")
+    script = textwrap.dedent(
+        """
+        let closeCalls = 0;
+        let renderCalls = 0;
+        let sessionListCalls = 0;
+        let idleCalls = 0;
+        let clearLiveToolCalls = 0;
+        let removeThinkingCalls = 0;
+        let hydrateCalls = 0;
+        let resolveSession;
+        let activeSid = 'sid-1';
+        let streamId = 'stream-1';
+        let _streamFinalized = false;
+        let _pendingStreamEndRecovery = true;
+        let _streamEndRecoveryAttempts = 4;
+        let _streamEndRecoveryTimer = {};
+        globalThis.S = {
+          session: { session_id: 'sid-1' },
+          activeStreamId: 'stream-1',
+          messages: [{ role: 'assistant', content: 'replacement pane answer' }],
+          toolCalls: [{ id: 'tool-1' }],
+        };
+        globalThis.INFLIGHT = {};
+        globalThis.assistantText = 'replacement pane answer';
+        globalThis._loadingSessionId = null;
+        globalThis._isActiveSession = () => true;
+        globalThis._isSessionCurrentPane = (sid) => !globalThis._loadingSessionId || globalThis._loadingSessionId === sid;
+        globalThis.api = () => new Promise((resolve) => { resolveSession = resolve; });
+        globalThis._closeSource = () => { closeCalls += 1; };
+        globalThis._clearStreamEndRecovery = () => {
+          _pendingStreamEndRecovery = false;
+          _streamEndRecoveryAttempts = 0;
+          _streamEndRecoveryTimer = null;
+        };
+        globalThis._persistTimer = null;
+        globalThis._cancelThrottledSnapshotTimer = () => {};
+        globalThis._clearAnchorProseIncrementalNode = () => {};
+        globalThis._cancelAnimationFramePendingStreamRender = () => {};
+        globalThis._streamFadeCleanupReduceMotionListener = () => {};
+        globalThis._smdEndParser = () => {};
+        globalThis.finalizeThinkingCard = () => {};
+        globalThis._clearOwnerInflightState = () => {};
+        globalThis._flushReasoningToAnchor = () => {};
+        globalThis._scheduleAnchorRegistryCleanup = () => {};
+        globalThis._clearApprovalForOwner = () => {};
+        globalThis._clearClarifyForOwner = () => {};
+        globalThis._isSessionActivelyViewed = () => true;
+        globalThis._markSessionCompletionUnread = () => {};
+        globalThis.clearLiveToolCards = () => { clearLiveToolCalls += 1; };
+        globalThis.removeThinking = () => { removeThinkingCalls += 1; };
+        globalThis._filterRecoveryControlMessages = (messages) => messages;
+        globalThis._carryForwardEphemeralTurnFields = (_current, next) => next;
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => {};
+        globalThis._hydrateTodosFromSession = () => { hydrateCalls += 1; };
+        globalThis.localStorage = { setItem: () => {} };
+        globalThis._setActiveSessionUrl = () => {};
+        globalThis._replaceMarkerOnlyAssistantWithStreamError = () => false;
+        globalThis.showToast = () => {};
+        globalThis._mergeSettledToolCallsWithLiveMetadata = (toolCalls) => toolCalls;
+        globalThis._markSessionViewed = () => {};
+        globalThis._messageRenderableMessageCount = () => 1;
+        globalThis._currentMessageRenderWindowSize = () => 50;
+        globalThis._messageRenderWindowSize = 50;
+        globalThis.syncTopbar = () => {};
+        globalThis.renderMessages = () => { renderCalls += 1; };
+        globalThis.renderSessionList = () => { sessionListCalls += 1; };
+        globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
+        """ + owner + """
+        """ + recovery_owner + """
+        """ + restore + """
+        (async () => {
+          const pending = _restoreSettledSession({}, { preserveVisibleOnShorterTerminalSnapshot: true });
+          globalThis._loadingSessionId = 'sid-2';
+          S.activeStreamId = 'replacement-stream';
+          resolveSession({
+            session: {
+              session_id: 'sid-1',
+              messages: [{ role: 'assistant', content: 'stale settled answer' }],
+              tool_calls: [{ id: 'tool-stale' }],
+              message_count: 1,
+            }
+          });
+          const result = await pending;
+          console.log(JSON.stringify({
+            result,
+            closeCalls,
+            renderCalls,
+            sessionListCalls,
+            idleCalls,
+            clearLiveToolCalls,
+            removeThinkingCalls,
+            hydrateCalls,
+            pending: _pendingStreamEndRecovery,
+            activeStreamId: S.activeStreamId,
+            messages: S.messages,
+          }));
+        })().catch((error) => {
+          console.error(error && error.stack ? error.stack : String(error));
+          process.exit(1);
+        });
+        """
+    )
+    proc = subprocess.run(
+        [NODE, "-e", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["result"] is True
+    assert result["closeCalls"] == 1
+    assert result["renderCalls"] == 0
+    assert result["sessionListCalls"] == 0
+    assert result["idleCalls"] == 0
+    assert result["clearLiveToolCalls"] == 0
+    assert result["removeThinkingCalls"] == 0
+    assert result["hydrateCalls"] == 0
+    assert result["pending"] is False
+    assert result["activeStreamId"] == "replacement-stream"
+    assert result["messages"] == [{"role": "assistant", "content": "replacement pane answer"}]

@@ -2153,6 +2153,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
+  function _currentPaneRecoveryOwnerLost(){
+    return !_isSessionCurrentPane(activeSid) || !_ownsActiveStreamOrBackground();
+  }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
@@ -2371,7 +2374,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _closeSource(source);
   }
   async function _reconcileStreamEndRecoveryExhaustion(source){
-    if(!_isSessionCurrentPane(activeSid)){
+    if(_currentPaneRecoveryOwnerLost()){
       _closeSource(source);
       _clearStreamEndRecovery();
       return true;
@@ -2379,7 +2382,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{
       if(streamId){
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(_isActiveSession() && S.activeStreamId!==streamId){
+        if(_currentPaneRecoveryOwnerLost()){
           _closeSource(source);
           _clearStreamEndRecovery();
           return true;
@@ -2404,7 +2407,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamEndRecovery();
       return true;
     }
-    _finalizeStreamEndFallback(source,{preserveVisibleAnswer:true});
+    _finalizeStreamEndFallback(source);
     return true;
   }
   async function _runStreamEndRecovery(source){
@@ -2414,7 +2417,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     _streamEndRecoveryTimer=null;
     const status=await _restoreSettledSession(source,{status:true});
-    if(status==='restored'){
+    if(status==='restored'||status==='stale'){
       _clearStreamEndRecovery();
       return;
     }
@@ -2604,6 +2607,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(_currentPaneRecoveryOwnerLost()) return;
           if(st.active){
             setComposerStatus('Reconnected');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -6123,7 +6127,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
       const status=await _restoreSettledSession(source,{status:true});
-      if(status==='restored'){
+      if(status==='restored'||status==='stale'){
         return;
       }
       if(status==='active'&&S.activeStreamId===streamId){
@@ -6410,6 +6414,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            if(_currentPaneRecoveryOwnerLost()) return;
             if(st&&st.active){
               setComposerStatus('Reconnected');
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -6634,12 +6639,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
-    if(_isActiveSession() && S.activeStreamId!==streamId){
+    const _restoreStartedAsCurrentPane=_isSessionCurrentPane(activeSid);
+    const _restoreOwnerLost=()=>(
+      !_isSessionCurrentPane(activeSid) ||
+      (_isActiveSession() && S.activeStreamId!==streamId)
+    );
+    const _staleRestoreResult=()=>{
       _closeSource(source);
-      return returnStatus?'stale':false;
+      if(_restoreStartedAsCurrentPane) _clearStreamEndRecovery();
+      return returnStatus?'stale':true;
+    };
+    if(_restoreStartedAsCurrentPane){
+      if(_restoreOwnerLost()) return _staleRestoreResult();
+    }else if(_isActiveSession() && S.activeStreamId!==streamId){
+      return _staleRestoreResult();
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      if(_restoreStartedAsCurrentPane){
+        if(_restoreOwnerLost()) return _staleRestoreResult();
+      }else if(_isActiveSession() && S.activeStreamId!==streamId){
+        return _staleRestoreResult();
+      }
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -6811,6 +6832,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(_currentPaneRecoveryOwnerLost()) return;
         if(!st.active&&st.replay_available){
           replayOnly=true;
         }else if(!st.active){
