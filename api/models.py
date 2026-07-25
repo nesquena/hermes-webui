@@ -42,6 +42,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
+from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -919,8 +920,7 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    if pending_source and pending_source != 'webui':
-        recovered['_source'] = pending_source
+    stamp_message_source(recovered, pending_source)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)

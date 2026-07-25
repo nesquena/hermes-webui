@@ -2334,6 +2334,33 @@
   .process-wakeup-row .msg-body pre.process-wakeup-text{margin:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--muted);font-family:var(--font-mono);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}
   .process-wakeup-row .msg-foot{padding-left:0;margin-top:5px;}
   @media(max-width:700px){.process-wakeup-notice{margin-left:0;}}
+  /* #6345: collapsed summary-card variant for parseable wakeups. */
+  .process-wakeup-notice.process-wakeup-fail{border-left-color:var(--error,#f85149);}
+  .process-wakeup-card{margin:0;}
+  /* Wrap rather than clip when the row can't fit one line: keeps the label,
+     chip, and timestamp inside the card at narrow widths (#6350 review finding 3). */
+  .process-wakeup-card>summary{list-style:none;cursor:pointer;display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-width:0;}
+  .process-wakeup-card>summary::-webkit-details-marker{display:none;}
+  .process-wakeup-toggle{display:inline-flex;flex:0 0 auto;color:var(--muted);transition:transform .15s ease;}
+  .process-wakeup-card[open]>summary .process-wakeup-toggle{transform:rotate(90deg);}
+  .process-wakeup-summary .process-wakeup-label{margin-bottom:0;flex:0 0 auto;}
+  .process-wakeup-summary .msg-time{margin-left:auto;flex:0 0 auto;}
+  .process-wakeup-cmd{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11.5px;color:var(--text);background:transparent;padding:0;}
+  .process-wakeup-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:600;border:1px solid var(--border);color:var(--muted);flex:0 0 auto;white-space:nowrap;}
+  .process-wakeup-chip svg{width:11px;height:11px;flex:0 0 auto;}
+  .process-wakeup-chip.ok{color:var(--success,#3fb950);border-color:currentColor;}
+  .process-wakeup-chip.fail{color:var(--error,#f85149);border-color:currentColor;}
+  /* Watch chip must shrink so a long pattern truncates instead of pushing the
+     row past the card edge on narrow viewports (#6350 review finding 3). */
+  .process-wakeup-chip.watch{flex:0 1 auto;min-width:0;}
+  .process-wakeup-chip.watch code{flex:0 1 auto;min-width:0;font-family:var(--font-mono);font-size:10.5px;background:transparent;padding:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .process-wakeup-detail{margin-top:8px;}
+  .process-wakeup-cmd-row,.process-wakeup-pattern-row{margin-bottom:6px;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;}
+  .process-wakeup-detail-key{font-size:10.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);flex:0 0 auto;}
+  .process-wakeup-cmd-row code,.process-wakeup-pattern-row code{font-family:var(--font-mono);font-size:11.5px;color:var(--text);background:transparent;padding:0;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
+  .process-wakeup-detail pre.process-wakeup-text{max-height:320px;overflow:auto;}
+  /* Guarantee a >=44px disclosure touch target under the mobile breakpoint (#6350 review finding 3). */
+  @media(max-width:700px){.process-wakeup-card>summary{min-height:44px;}}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
   /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */

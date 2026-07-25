@@ -71,6 +71,7 @@ from api.process_event_utils import (
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
+    stamp_message_source,
 )
 
 
@@ -5896,8 +5897,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
-        if source and source != 'webui':
-            current_user_msg['_source'] = source
+        stamp_message_source(current_user_msg, source)
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -5958,8 +5958,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
-            if source and source != 'webui':
-                display_msg['_source'] = source
+            stamp_message_source(display_msg, source)
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -6475,8 +6474,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
-    if pending_source != 'webui':
-        recovered['_source'] = pending_source
+    stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -11433,8 +11431,7 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            if _pending_source and _pending_source != 'webui':
-                                _user_turn['_source'] = _pending_source
+                            stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
