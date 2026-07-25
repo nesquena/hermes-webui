@@ -1434,12 +1434,22 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
+    # Also try stripping the "custom:" prefix's colon-hyphen variant
+    # (e.g., config.yaml has provider: custom:192.168.5.242:8000 but the
+    # custom_providers entry name "192.168.5.242:8000" slugifies to
+    # custom:192.168.5.242-8000 because colons are replaced with hyphens).
+    raw_suffix_hyphen = raw_suffix.replace(":", "-")
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
         slug = _custom_provider_slug_from_name(entry_name)
         if not entry_name or not slug:
             continue
-        if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
+        slug_suffix = slug.removeprefix("custom:")
+        if (
+            raw in {entry_name, slug}
+            or raw_suffix == slug_suffix
+            or raw_suffix_hyphen == slug_suffix
+        ):
             return slug
     return ""
 
@@ -2579,10 +2589,13 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
 def _get_provider_base_url(provider_id):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
-    Checks two locations, in order:
+    Checks three locations, in order:
       1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
          per-provider override.
-      2. ``cfg["model"]["base_url"]`` — falls back here when
+      2. ``cfg["custom_providers"][]`` entries whose slug matches
+         *provider_id* — handles custom providers declared via the
+         ``custom_providers`` list (e.g. ``custom:192.168.5.250-8000``).
+      3. ``cfg["model"]["base_url"]`` — falls back here when
          ``cfg["model"]["provider"] == provider_id``. This is the historical
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
@@ -2593,6 +2606,16 @@ def _get_provider_base_url(provider_id):
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
+    # Check custom_providers list for a matching entry
+    pid_lower = str(provider_id or "").strip().lower()
+    for entry in _custom_provider_entries():
+        if not isinstance(entry, dict):
+            continue
+        slug = _custom_provider_slug_from_name(entry.get("name"))
+        if slug and slug.lower() == pid_lower:
+            cp_base = str(entry.get("base_url") or "").strip().rstrip("/")
+            if cp_base:
+                return cp_base
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -9468,7 +9491,11 @@ def load_settings() -> dict:
     try:
         model_cfg = get_config().get("model", {})
         if isinstance(model_cfg, dict) and model_cfg.get("provider"):
-            settings["default_model_provider"] = str(model_cfg.get("provider"))
+            raw_provider = str(model_cfg.get("provider"))
+            resolved = _resolve_configured_provider_id(
+                raw_provider, get_config(), base_url=model_cfg.get("base_url", "")
+            )
+            settings["default_model_provider"] = resolved or raw_provider
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
     return settings
