@@ -10,7 +10,6 @@ If WebUI is local (127.0.0.1 browser), no warning even without browser_url (safe
 The node-driver extraction pattern runs all logic in Node.js without a browser.
 """
 import os
-import re
 import shutil
 import subprocess
 import tempfile
