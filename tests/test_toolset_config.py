@@ -595,10 +595,14 @@ def test_put_unknown_toolset_subpath_returns_404(monkeypatch, path):
 
 
 def test_put_bare_toolsets_collection_is_not_claimed(monkeypatch):
-    """`PUT /api/tools/toolsets` has no handler; the block must not claim it.
+    """`PUT /api/tools/toolsets` has no handler and must stay unclaimed.
 
-    The old condition admitted the bare path, produced an empty `parts` list,
-    matched nothing and fell through anyway — dead code in the condition.
+    Honest scope: this is a GUARD, not a regression pin. The removed
+    `or parsed.path == "/api/tools/toolsets"` clause was dead — with the bare
+    path `parts` is `[]` either way, so old and new code both fall through to
+    `return False`. Asserting on the response cannot distinguish them. What it
+    CAN do is pin that the block never starts claiming the collection path, so
+    the assertion below checks the block is not entered at all.
     """
     import api.routes as routes
 
@@ -610,8 +614,18 @@ def test_put_bare_toolsets_collection_is_not_claimed(monkeypatch):
         routes, "_guard_request_session_visibility",
         lambda *a, **kw: True,
     )
+    # If the block were entered, it would import the toolset writers. Make that
+    # observable: this is the only assertion that actually discriminates.
+    entered = []
+    real_import = toolset_config.toggle_toolset
+    monkeypatch.setattr(
+        toolset_config, "toggle_toolset",
+        lambda *a, **kw: entered.append(True) or real_import(*a, **kw),
+    )
+
     path = "/api/tools/toolsets"
     handler = _RouteHandler(path)
 
     assert routes.handle_put(handler, urlparse(path)) is False
     assert handler.status is None
+    assert entered == [], "the bare collection path reached a toolset writer"
