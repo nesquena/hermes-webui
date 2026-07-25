@@ -500,74 +500,113 @@ def execute_plugin_command(command: str) -> str:
 def _run_learn_command(what: str) -> str:
     """Execute the agent's /learn command — creates a skill from a description.
 
-    Delegates to the agent's skill-learning infrastructure, forwarding
-    the user's description (file path, URL, or free text). Returns the
-    agent handler's output text.
+    Dispatches to the Hermes CLI's /learn handler via subprocess so the
+    agent's built-in skill-learning pipeline handles file scanning, URL
+    fetching, and skill creation. Falls back to a descriptive message
+    when the Hermes CLI binary is not available.
     """
     if not what:
-        return "/learn <what to learn from>\n\nLearn a reusable skill from a directory, URL, or your own description.\nExample: /learn ~/my-project, /learn https://example.com/docs\n\nThis command is dispatched to Hermes Agent's built-in /learn handler."
+        return (
+            "/learn <what to learn from>\n\n"
+            "Learn a reusable skill from a directory, URL, or your own description.\n"
+            "Example: /learn ~/my-project, /learn https://example.com/docs\n\n"
+            "This command is dispatched to Hermes Agent's built-in /learn handler."
+        )
     try:
-        from hermes_cli.commands import resolve_command
+        # First check that the agent knows this command
+        try:
+            from hermes_cli.commands import resolve_command
+            if resolve_command("learn") is None:
+                return "Error: /learn is not available (Hermes Agent too old or not installed)."
+        except ImportError:
+            return "Error: /learn requires Hermes Agent to be installed."
 
-        cmd_def = resolve_command("learn")
-        if cmd_def is None:
-            return "Error: /learn is not available (Hermes Agent too old or not installed)."
+        # Dispatch via the hermes CLI if available
+        import subprocess as _subprocess
 
-        # Execute via the agent's CLI command parser for /learn
-        import subprocess
-        hermes_bin = shutil.which("hermes") or os.path.expanduser("~/.hermes/hermes-agent/.venv/bin/hermes")
-        if not os.path.isfile(hermes_bin):
-            hermes_bin = shutil.which("hermes")
-        if hermes_bin and os.access(hermes_bin, os.X_OK):
-            result = subprocess.run(
-                [hermes_bin, "chat", "-q", f"/learn {what}"],
-                capture_output=True, text=True, timeout=120,
-                env={**os.environ, "HERMES_NON_INTERACTIVE": "1"},
-            )
-            output = result.stdout.strip() or result.stderr.strip()
-            return output or f"Agent processed /learn for: {what}"
-        return f"/learn dispatched for: {what}\n(Install Hermes Agent CLI for full execution)"
+        hermes_bin = shutil.which("hermes")
+        if not hermes_bin:
+            hermes_bin = os.path.expanduser("~/.hermes/hermes-agent/.venv/bin/hermes")
+            if not os.path.isfile(hermes_bin):
+                return f"/learn dispatched for: {what}\n(Install Hermes Agent CLI for full execution.)"
+
+        if not os.access(hermes_bin, os.X_OK):
+            return f"/learn dispatched for: {what}\n(Hermes CLI binary at {hermes_bin} is not executable.)"
+
+        result = _subprocess.run(
+            [hermes_bin, "chat", "-q", f"/learn {what}"],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "HERMES_NON_INTERACTIVE": "1"},
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        return output or f"Agent processed /learn for: {what}"
+    except _subprocess.TimeoutExpired:
+        return f"/learn timed out after 120 seconds for: {what}"
     except Exception as exc:
         logger.warning("Failed to execute /learn command", exc_info=True)
         return f"Learn command error: {type(exc).__name__}"
 
 
 def _run_fast_command(arg_string: str) -> str:
-    """Toggle fast processing mode (Priority Processing / Fast Mode)."""
+    """Toggle fast processing mode (Priority Processing / Fast Mode).
+
+    Reads and writes the active WebUI profile's config via the profile-
+    aware api.config module, so the toggle affects the requesting
+    profile rather than a global config file.
+    """
     try:
-        from hermes_cli.config import load_config, save_config
+        from api import config as _webui_config
 
-        cfg = load_config()
-        current = cfg.get("fast", {}).get("enabled", False) if isinstance(cfg, dict) else False
-        enable = not current
+        raw = _webui_config.get_config()
+        if not isinstance(raw, dict):
+            return "Fast mode: unable to read active profile config."
 
-        if isinstance(cfg, dict):
-            cfg.setdefault("fast", {})["enabled"] = enable
-            save_config(cfg)
+        current_fast = raw.get("fast", {})
+        if isinstance(current_fast, dict):
+            current_enabled = current_fast.get("enabled", False)
+        else:
+            current_enabled = False
 
-        return f"Fast mode {'enabled' if enable else 'disabled'}.\nRestart the session for the change to take full effect."
+        enable = not current_enabled
+
+        raw.setdefault("fast", {})
+        if isinstance(raw["fast"], dict):
+            raw["fast"]["enabled"] = enable
+        else:
+            raw["fast"] = {"enabled": enable}
+
+        _webui_config._save_yaml_config_file(
+            _webui_config._get_config_path(), raw
+        )
+        _webui_config.reload_config()
+
+        return f"Fast mode {'enabled' if enable else 'disabled'} for active profile.\nRestart the session for the change to take full effect."
     except Exception as exc:
         logger.warning("Failed to toggle fast mode", exc_info=True)
         return f"Fast mode error: {type(exc).__name__}"
 
 
 def _run_profile_command() -> str:
-    """Show active profile information."""
+    """Show active profile information from the WebUI runtime."""
     try:
-        from hermes_cli.config import load_config as _load_config
+        from api import config as _webui_config
 
-        cfg = _load_config() if isinstance(_load_config(), dict) else {}
+        raw = _webui_config.get_config()
 
         profile = os.environ.get("HERMES_PROFILE", "default")
         home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        model = (raw or {}).get("model", {}).get("default", "not set")
 
         lines = [
             f"Active profile: {profile}",
             f"Profile home: {home}",
+            f"Default model: {model}",
         ]
         return "\n".join(lines)
     except Exception:
-        return "Active profile: default\nHome: ~/.hermes"
+        profile = os.environ.get("HERMES_PROFILE", "default")
+        home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        return f"Active profile: {profile}\nHome: {home}"
 
 
 def _run_version_command() -> str:

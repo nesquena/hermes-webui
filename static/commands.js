@@ -41,7 +41,6 @@ const COMMANDS=[
   {name:'agents', desc:t('cmd_agents'), fn:cmdAgents, noEcho:true},
   {name:'insights', desc:t('cmd_insights'), fn:cmdInsights, arg:'[days]', noEcho:true},
   {name:'rollback', desc:t('cmd_rollback'), fn:cmdRollback, arg:'[number]', noEcho:true},
-  {name:'moa', desc:t('cmd_moa'), fn:cmdMoa, arg:'<prompt>', noEcho:true},
   {name:'learn', desc:t('cmd_learn'), fn:cmdLearn, arg:'<what to learn from>', noEcho:true},
 ];
 
@@ -2305,28 +2304,6 @@ async function cmdRollback(args){
   }catch(e){showToast('Rollback: '+e.message);}
 }
 
-// ── MoA (Mixture of Agents) ───────────────────────────────────────────────
-// /moa is already handled inside send() in messages.js. This handler provides
-// the autocomplete entry in the / dropdown, and a no-arg usage fallback.
-async function cmdMoa(args){
-  const prompt=(args||'').trim();
-  if(!prompt){
-    try{
-      const _moaCfgU=await api('/api/commands/moa/resolve');
-      const usage=_moaCfgU.usage||'/moa <prompt>';
-      S.messages.push({role:'assistant',content:usage,_ts:Date.now()/1000});
-      renderMessages();return;
-    }catch(_e){}
-    showToast('/moa <prompt> — run a prompt through Mixture of Agents');
-    return;
-  }
-  // Fall through to normal send — messages.js send() rewrites /moa <prompt>
-  // into just <prompt> with _pendingMoaConfig=true, which sets moa config on
-  // the outgoing chat request.  Returning false tells executeCommand to NOT
-  // intercept, so the text passes through to send() normally.
-  return false;
-}
-
 // ── /learn ────────────────────────────────────────────────────────────────
 async function cmdLearn(args){
   const what=(args||'').trim();
@@ -2357,5 +2334,4 @@ HANDLERS.version = cmdVersion;
 HANDLERS.agents = cmdAgents;
 HANDLERS.insights = cmdInsights;
 HANDLERS.rollback = cmdRollback;
-HANDLERS.moa = cmdMoa;
 HANDLERS.learn = cmdLearn;
