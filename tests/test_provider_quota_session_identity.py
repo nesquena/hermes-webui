@@ -280,6 +280,38 @@ def test_provider_quota_refresh_follows_each_authoritative_provider_transition()
     assert "refreshProviderQuotaIndicator();" not in boot_prefix
 
 
+def test_empty_composer_boot_refresh_uses_retained_provider_or_default_fallback():
+    assert NODE is not None
+    boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    helper = _between(boot, "const _refreshQuotaForEmptyComposer=()=>", "const urlSession")
+    script = f"""
+function run(provider) {{
+  const calls = [];
+  const S = {{session: null}};
+  const refreshProviderQuotaIndicator = value => calls.push(value);
+  const _currentQuotaProvider = provider === undefined ? undefined : () => provider;
+  const refresh = (function() {{
+    {helper}
+    return _refreshQuotaForEmptyComposer;
+  }})();
+  refresh();
+  return calls;
+}}
+process.stdout.write(JSON.stringify({{retained: run('ollama-cloud'), fallback: run(undefined)}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        check=False,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["retained"] == ["ollama-cloud"]
+    assert report["fallback"] == [None]
+
+
 def test_visibility_and_settings_refresh_use_current_quota_provider_helper():
     ui_js = UI_JS.read_text(encoding="utf-8")
     panels_js = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
