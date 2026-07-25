@@ -1545,6 +1545,7 @@ async function newSession(flash, options={}){
       });
     }
     updateQueueBadge(S.session.session_id);
+    if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);
     syncTopbar();renderMessages();
     if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);
     // Keep new-chat first paint instant. The workspace tree / git badge can
@@ -1991,6 +1992,7 @@ async function loadSession(sid){
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
+  if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);
   _resolveSessionModelForDisplaySoon(sid);
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).

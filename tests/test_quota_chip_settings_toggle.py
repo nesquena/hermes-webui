@@ -50,7 +50,7 @@ def test_quota_chip_render_short_circuits_when_disabled():
     )
 
     # Refresher must short-circuit fetch when disabled
-    refresh_start = js.index("async function refreshProviderQuotaIndicator(){")
+    refresh_start = js.index("async function refreshProviderQuotaIndicator(providerId){")
     # Find the closing brace of the function — first 'try{' line marks the live body
     # Just check the entire snippet ahead of try{
     refresh_head = js[refresh_start:js.index("try{", refresh_start)]
@@ -82,8 +82,10 @@ def test_quota_chip_panels_round_trip():
     assert "showQuotaChipCb.checked=settings.show_quota_chip===true;" in js
     # Window-state propagation
     assert "window._showQuotaChip=showQuotaChip===true;" in js
-    # Live refresh on toggle (immediate visual feedback)
-    assert "if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();" in js
+    # Live refresh uses the active session provider (immediate visual feedback without
+    # falling back to a different configured default during a provider-specific chat).
+    assert "refreshProviderQuotaIndicator(provider)" in js
+    assert "S.session.model_provider" in js
 
 
 def test_quota_chip_localized_in_all_locales():

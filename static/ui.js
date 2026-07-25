@@ -2714,7 +2714,10 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
-let _providerQuotaRefreshInFlight=false;
+// A provider switch can complete before an older account-quota request returns.
+// Only the newest request may update the composer; otherwise an old Codex result
+// can reappear while the active conversation uses another provider.
+let _providerQuotaRefreshSeq=0;
 
 function _formatQuotaMoneyShort(value){
   const n=Number(value);
@@ -2751,62 +2754,67 @@ function _providerQuotaIndicatorText(status){
   }
   return null;
 }
+function clearProviderQuotaIndicator(){
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
+  if(chip){chip.hidden=true;chip.removeAttribute('title');}
+  if(label) label.textContent='';
+  if(mobileAction){mobileAction.hidden=true;mobileAction.removeAttribute('title');}
+  if(mobileLabel) mobileLabel.textContent='';
+}
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
   const mobileAction=$('composerMobileQuotaAction');
   const mobileLabel=$('composerMobileQuotaLabel');
-  if(!chip||!label) return;
+  if(!chip||!label){
+    clearProviderQuotaIndicator();
+    return;
+  }
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
   // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
-  chip.hidden=false;
-  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
   if(mobileLabel) mobileLabel.textContent=text.label;
+  if(mobileAction) mobileAction.title=text.title;
+  chip.hidden=false;
+  if(mobileAction) mobileAction.hidden=false;
 }
-async function refreshProviderQuotaIndicator(){
+async function refreshProviderQuotaIndicator(providerId){
+  const requestSeq=++_providerQuotaRefreshSeq;
+  // Clear before the request so the old provider's account state is not visible
+  // or keyboard-reachable while the active session changes provider.
+  clearProviderQuotaIndicator();
   // Short-circuit before the fetch when the chip is disabled — no point asking
   // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
-    const chip=$('providerQuotaChip');
-    if(chip){chip.hidden=true;chip.removeAttribute('title');}
-    const mobileAction=$('composerMobileQuotaAction');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    const mobileLabel=$('composerMobileQuotaLabel');
-    if(mobileLabel) mobileLabel.textContent='';
-    return;
-  }
-  if(_providerQuotaRefreshInFlight) return;
-  _providerQuotaRefreshInFlight=true;
+  if(window._showQuotaChip!==true) return;
+  const provider=String(providerId||'').trim();
+  const query=provider?'?provider='+encodeURIComponent(provider):'';
   try{
-    const status=await api('/api/provider/quota');
+    const status=await api('/api/provider/quota'+query);
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
     renderProviderQuotaIndicator(status);
   }catch(_e){
-    renderProviderQuotaIndicator(null);
-  }finally{
-    _providerQuotaRefreshInFlight=false;
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
+    clearProviderQuotaIndicator();
   }
 }
 window.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function'){
+    const provider=(typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null;
+    void refreshProviderQuotaIndicator(provider);
+  }
 });
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
