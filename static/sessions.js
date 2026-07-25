@@ -1618,6 +1618,11 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    if(composerTransition&&typeof _bindComposerOwnershipDestination==='function'){
+      _bindComposerOwnershipDestination(
+        composerTransition,S.session.session_id,S.session.profile||reqBody.profile
+      );
+    }
     // Owner swap, destination restore, and ordered mutation drain are one
     // synchronous transaction. There is deliberately no await in this block:
     // producer callbacks can only run before it (and be buffered) or after it

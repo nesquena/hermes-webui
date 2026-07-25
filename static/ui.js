@@ -24,7 +24,56 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 let _composerOwnershipTransition=null;
+let _composerOwnershipGeneration=0;
+let _composerProducerSequence=0;
 
+function _newComposerProducerToken(prefix='producer'){
+  _composerProducerSequence+=1;
+  return `${prefix}:${_composerProducerSequence}`;
+}
+function _composerOwnerSnapshot(sid,profile){
+  const tx=_composerOwnershipTransition;
+  if(!tx||!tx.sourceSid||tx.sourceSid!==sid)return null;
+  const requestedProfile=String(profile||'').trim();
+  if(requestedProfile&&requestedProfile!==tx.sourceProfile)return null;
+  const state=tx.sourceState;
+  return {
+    generation:tx.generation,revision:state.revision,text:state.text,
+    files:[...state.files],profile:tx.sourceProfile,session_id:tx.sourceSid,
+  };
+}
+function _composerBlockJoin(current,value){
+  const base=String(current||'');
+  const addition=String(value||'');
+  if(!base.trim())return addition;
+  return `${base.replace(/\s+$/,'')}\n\n${addition}`;
+}
+function _composerRenderDestinationText(tx){
+  let text='';
+  for(const token of tx.destinationOrder){
+    const slot=tx.destinationSlots.get(token);
+    if(!slot)continue;
+    text=slot.semantics==='block-append'
+      ? _composerBlockJoin(text,slot.value)
+      : text+String(slot.value||'');
+  }
+  tx.destinationText=text;
+  return text;
+}
+function _composerApplyRecordToState(state,record,useAbortValue=false){
+  const value=useAbortValue?record.abortValue:record.value;
+  if(record.kind==='text-set')state.text=String(value||'');
+  else if(record.kind==='text-append'){
+    state.text=record.semantics==='block-append'
+      ? _composerBlockJoin(state.text,value)
+      : state.text+String(value||'');
+  }else if(record.kind==='files-add'){
+    const additions=Array.from(value||[]).filter(Boolean);
+    state.files=[...state.files,...additions.filter(file=>!state.files.includes(file))];
+  }else if(record.kind==='files-replace')state.files=[...Array.from(value||[]).filter(Boolean)];
+  else if(record.kind==='file-remove')state.files=state.files.filter(item=>item!==value);
+  state.revision=record.revision;
+}
 function _composerControlSetDisabledReason(control,reason,active){
   if(!control||!reason)return;
   if(!control._composerDisabledReasons){
@@ -41,64 +90,159 @@ function _composerControlSetDisabledReason(control,reason,active){
 }
 
 function _beginComposerOwnershipTransition(sourceSid,sourceProfile){
-  const token={sourceSid:sourceSid||null,sourceProfile:sourceProfile||'default',revision:0,mutations:[]};
+  const profile=String(sourceProfile||'default').trim()||'default';
+  const input=$('msg');
+  const token={
+    generation:++_composerOwnershipGeneration,
+    sourceSid:sourceSid||null,
+    sourceProfile:profile,
+    destinationSid:null,
+    destinationProfile:profile,
+    revision:0,
+    mutations:[],
+    sourceState:{
+      text:input?String(input.value||''):'',
+      files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
+      revision:0,
+      dirty:false,
+    },
+    abortState:{
+      text:input?String(input.value||''):'',
+      files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
+      revision:0,
+    },
+    destinationSlots:new Map(),
+    destinationOrder:[],
+    destinationText:'',
+  };
   _composerOwnershipTransition=token;
   return token;
 }
-function _composerTransitionRecord(kind,value,ownerSid,abortValue){
+function _bindComposerOwnershipDestination(token,sid,profile){
+  if(!token||_composerOwnershipTransition!==token)return false;
+  token.destinationSid=sid||null;
+  token.destinationProfile=String(profile||token.sourceProfile||'default').trim()||'default';
+  for(const mutation of token.mutations){
+    if(mutation.ownerRole==='destination'){
+      mutation.session_id=token.destinationSid;
+      mutation.profile=token.destinationProfile;
+    }
+  }
+  return true;
+}
+function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
   const tx=_composerOwnershipTransition;
   if(!tx)return false;
-  if(ownerSid&&tx.sourceSid&&ownerSid===tx.sourceSid)return false;
-  tx.mutations.push({
-    revision:++tx.revision,
+  const sourceOwned=!!(ownerSid&&tx.sourceSid&&ownerSid===tx.sourceSid);
+  const semantics=options.semantics||kind;
+  const producerToken=String(options.producerToken||(
+    kind==='text-set'?'default-text-producer':_newComposerProducerToken(kind)
+  ));
+  const revision=++tx.revision;
+  const record={
+    generation:tx.generation,
+    revision,
+    producerToken,
+    semantics,
     kind,
     value,
     abortValue:arguments.length>3?abortValue:value,
-  });
+    ownerRole:sourceOwned?'source':'destination',
+    profile:sourceOwned
+      ? String(options.ownerProfile||tx.sourceProfile||'default').trim()||'default'
+      : tx.destinationProfile,
+    session_id:sourceOwned?tx.sourceSid:tx.destinationSid,
+  };
+  tx.mutations.push(record);
+  _composerApplyRecordToState(tx.abortState,record,!sourceOwned);
+
+  if(sourceOwned){
+    const state=tx.sourceState;
+    _composerApplyRecordToState(state,record);
+    state.dirty=true;
+    if(kind.startsWith('text-')){const input=$('msg');if(input)input.value=state.text;}
+    else S.pendingFiles=[...state.files];
+    return true;
+  }
+
+  if(kind==='text-set'||kind==='text-append'){
+    if(!tx.destinationSlots.has(producerToken))tx.destinationOrder.push(producerToken);
+    tx.destinationSlots.set(producerToken,{semantics,value:String(value||'')});
+    _composerRenderDestinationText(tx);
+  }
   return true;
 }
-function _composerSetText(value,transitionValue,ownerSid){
+function _composerSetText(value,transitionValue,ownerSid,producerToken,ownerProfile){
   const next=String(value||'');
   const buffered=arguments.length>1?String(transitionValue||''):next;
-  if(_composerTransitionRecord('text-set',buffered,ownerSid,next))return false;
+  if(_composerTransitionRecord('text-set',buffered,ownerSid,next,{
+    semantics:'producer-set',producerToken,ownerProfile,
+  }))return false;
   const input=$('msg');if(input)input.value=next;
   return true;
 }
-function _composerAppendText(value){
+function _composerAppendText(value,ownerSid,producerToken,ownerProfile,semantics='append'){
   const addition=String(value||'');
-  if(_composerTransitionRecord('text-append',addition))return false;
-  const input=$('msg');if(input)input.value=String(input.value||'')+addition;
+  if(_composerTransitionRecord('text-append',addition,ownerSid,addition,{
+    semantics:semantics==='block'?'block-append':'append',producerToken,ownerProfile,
+  }))return false;
+  const input=$('msg');
+  if(input)input.value=semantics==='block'
+    ? _composerBlockJoin(input.value,addition)
+    : String(input.value||'')+addition;
   return true;
 }
-function _composerAddFiles(files,ownerSid){
+function _composerAddFiles(files,ownerSid,producerToken,ownerProfile){
   const additions=Array.from(files||[]).filter(Boolean);
-  if(_composerTransitionRecord('files-add',additions,ownerSid))return false;
+  if(_composerTransitionRecord('files-add',additions,ownerSid,additions,{
+    producerToken,ownerProfile,
+  }))return false;
   const current=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
   S.pendingFiles=[...current,...additions.filter(file=>!current.includes(file))];
   return true;
 }
-function _composerReplaceFiles(files,ownerSid){
+function _composerReplaceFiles(files,ownerSid,producerToken,ownerProfile){
   const replacement=Array.from(files||[]).filter(Boolean);
-  if(_composerTransitionRecord('files-replace',replacement,ownerSid))return false;
+  if(_composerTransitionRecord('files-replace',replacement,ownerSid,replacement,{
+    producerToken,ownerProfile,
+  }))return false;
   S.pendingFiles=[...replacement];
   return true;
 }
-function _composerRemoveFile(file,ownerSid){
-  if(_composerTransitionRecord('file-remove',file,ownerSid))return false;
+function _composerRemoveFile(file,ownerSid,producerToken,ownerProfile){
+  if(_composerTransitionRecord('file-remove',file,ownerSid,file,{
+    producerToken,ownerProfile,
+  }))return false;
   S.pendingFiles=(Array.isArray(S.pendingFiles)?S.pendingFiles:[]).filter(item=>item!==file);
   return true;
+}
+function _persistComposerTransitionSource(token){
+  const state=token&&token.sourceState;
+  if(!token||!token.sourceSid||!state||!state.dirty)return;
+  if(typeof _saveComposerDraftNow==='function'){
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        token.sourceSid,state.text,[...state.files],token.sourceProfile
+      )).catch(()=>{});
+    }catch(_){}
+  }
 }
 function _drainComposerOwnershipTransition(token,aborted=false){
   if(!token||_composerOwnershipTransition!==token)return false;
   _composerOwnershipTransition=null;
-  for(const mutation of token.mutations){
-    const value=aborted?mutation.abortValue:mutation.value;
-    if(mutation.kind==='text-set')_composerSetText(value);
-    else if(mutation.kind==='text-append')_composerAppendText(value);
-    else if(mutation.kind==='files-add')_composerAddFiles(value);
-    else if(mutation.kind==='files-replace')_composerReplaceFiles(value);
-    else if(mutation.kind==='file-remove')_composerRemoveFile(value);
+  if(aborted){
+    _composerSetText(token.abortState.text);
+    _composerReplaceFiles(token.abortState.files);
+  }else{
+    if(token.destinationSlots.size)_composerSetText(token.destinationText);
+    for(const mutation of token.mutations){
+      if(mutation.ownerRole==='source')continue;
+      if(mutation.kind==='files-add')_composerAddFiles(mutation.value);
+      else if(mutation.kind==='files-replace')_composerReplaceFiles(mutation.value);
+      else if(mutation.kind==='file-remove')_composerRemoveFile(mutation.value);
+    }
   }
+  _persistComposerTransitionSource(token);
   return true;
 }
 function _abortComposerOwnershipTransition(token){return _drainComposerOwnershipTransition(token,true);}

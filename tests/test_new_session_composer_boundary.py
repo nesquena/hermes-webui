@@ -53,6 +53,152 @@ def _composer_authority_helpers() -> str:
     return UI_JS[start:end]
 
 
+def _review_race_production_helpers() -> str:
+    names_and_markers = (
+        ("insertSavedPromptIntoComposer", "\n\nlet _savedPromptsCache"),
+        ("_restoreComposerDraftAfterFailedSend", "\n\nasync function send("),
+        ("_stashClarifyDraft", "\n\nfunction _resetClarifyCardState("),
+    )
+    return "\n\n".join(
+        _function(MESSAGES_JS, name, marker) for name, marker in names_and_markers
+    )
+
+
+def _run_review_race_harness(schedule: str) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        {_composer_authority_helpers()}
+        {_review_race_production_helpers()}
+        {_new_session_function()}
+
+        let _newSessionInFlight = null;
+        let _sessionSourceFilter = 'webui';
+        let _activeProject = null;
+        const NO_PROJECT_FILTER = '__none__';
+        let _messagesTruncated = false;
+        let _oldestIdx = 0;
+        let _clarifySessionId = 'old-session';
+        let _clarifySignature = 'sig';
+        let resolveClear;
+        const clearPromise = new Promise(resolve => {{ resolveClear = resolve; }});
+        const saves = [];
+        const sourceFile = {{name:'source.txt',size:1,type:'text/plain'}};
+        const restoredFile = {{name:'restored.txt',size:2,type:'text/plain'}};
+        const msg = {{
+          value:'source draft', focus(){{}}, setSelectionRange(){{}}, dispatchEvent(){{}}
+        }};
+        const clarifyInput = {{value:'clarify answer'}};
+        const elements = {{
+          msg,
+          clarifyInput,
+          clarifySubmit: {{classList:{{contains(){{return false;}}}}}},
+          btnNewChat: {{disabled:false,setAttribute(){{}}}},
+          btnTitlebarNewChat: {{disabled:false,setAttribute(){{}}}},
+          composerStatus: {{textContent:''}},
+          modelSelect: {{value:''}},
+        }};
+        const $ = id => elements[id] || null;
+        const S = {{
+          session:{{session_id:'old-session',profile:'default',workspace:'/workspace',message_count:1}},
+          messages:[{{role:'user',content:'existing'}}], pendingFiles:[sourceFile],
+          toolCalls:[],activeProfile:'default',_profileSwitchWorkspace:null,
+          _profileDefaultWorkspace:null,_pendingSessionToolsets:null,busy:false,activeStreamId:null,
+        }};
+        const window = {{_defaultModel:null}};
+        const localStorage = {{setItem(){{}},getItem(){{return null;}},removeItem(){{}}}};
+        const sessionStorage = {{setItem(){{}}}};
+        const document = {{createElement(){{return {{dataset:{{}}}};}},getElementById:id=>elements[id]||null}};
+        class Event {{ constructor(type,opts){{this.type=type;this.opts=opts;}} }}
+
+        function _setNewSessionPending(){{}}
+        function _newSessionPendingText(){{return 'Starting';}}
+        function showToast(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function clearLiveToolCards(){{}}
+        function autoResize(){{}}
+        function updateSendBtn(){{}}
+        function renderTray(){{}}
+        function _rememberComposerPendingFiles(){{}}
+        function _saveComposerDraftNow(sid,text,files,profile){{
+          saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile:profile||null}});
+          return Promise.resolve();
+        }}
+        function _restoreComposerDraft(draft){{
+          msg.value=draft&&typeof draft.text==='string'?draft.text:'';
+          S.pendingFiles=[];
+        }}
+        async function api(path){{
+          assert.strictEqual(path,'/api/session/new');
+          const schedule={json.dumps(schedule)};
+          if(schedule==='failed-send'){{
+            msg.value='';
+            S.pendingFiles=[];
+            _restoreComposerDraftAfterFailedSend('failed restore',[restoredFile],'old-session',clearPromise);
+          }}else if(schedule==='clarify'||schedule==='clarify-terminal'||schedule==='clarify-abort'){{
+            _stashClarifyDraft(schedule==='clarify-terminal'?'terminal':'expired');
+            if(schedule==='clarify-abort')throw new Error('create failed');
+          }}else if(schedule==='voice-clarify-abort'){{
+            _composerSetText('source draft voice','source draft voice',null,'voice-producer');
+            _stashClarifyDraft('expired');
+            throw new Error('create failed');
+          }}else if(schedule==='voice-then-prompt'){{
+            _composerSetText('source draft voice','voice');
+            insertSavedPromptIntoComposer('saved prompt');
+          }}else if(schedule==='prompt-then-voice'){{
+            insertSavedPromptIntoComposer('saved prompt');
+            _composerSetText('source draft voice','voice');
+          }}else if(schedule==='voice-prompt-voice'){{
+            _composerSetText('source draft interim','interim',null,'voice-producer');
+            insertSavedPromptIntoComposer('saved prompt');
+            _composerSetText('source draft final','final',null,'voice-producer');
+          }}
+          return {{session:{{session_id:'new-session',profile:'default',workspace:'/workspace',
+            messages:[],composer_draft:{{text:'',files:[]}},message_count:0}}}};
+        }}
+        function _hydrateTodosFromSession(){{}}
+        function _rememberNewChatDraftSession(){{}}
+        function _setActiveSessionUrl(){{}}
+        function startSessionStream(){{}}
+        function _setSessionViewedCount(){{}}
+        function setStatus(){{}}
+        function syncTopbar(){{}}
+        function renderMessages(){{}}
+        function loadDir(){{return Promise.resolve();}}
+        function refreshSessionList(){{return Promise.resolve();}}
+
+        (async()=>{{
+          let error=null;
+          try{{await newSession();}}catch(err){{error=err.message;}}
+          if({json.dumps(schedule)}==='failed-send-after-swap'){{
+            _restoreComposerDraftAfterFailedSend('failed restore',[restoredFile],'old-session',clearPromise);
+          }}
+          if({json.dumps(schedule)}==='failed-send'||{json.dumps(schedule)}==='failed-send-after-swap'){{
+            resolveClear();
+            await Promise.resolve();await Promise.resolve();await Promise.resolve();
+          }}
+          process.stdout.write(JSON.stringify({{
+            error,
+            activeSid:S.session&&S.session.session_id,
+            text:msg.value,
+            files:S.pendingFiles.map(f=>f.name),
+            saves,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = subprocess.run(
+        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
 def _run_pending_file_ownership_harness() -> dict:
     node = shutil.which("node")
     if not node:
@@ -247,6 +393,8 @@ def _run_new_session_harness(
             value: msg.value,
             activeSid: S.session && S.session.session_id,
             pendingFileNames: S.pendingFiles.map(file => file.name),
+            lateFileIdentity: S.pendingFiles.includes(lateFile),
+            sourceFileIdentity: S.pendingFiles.includes(pendingFile),
             createCalls,
             saves,
           }}));
@@ -325,6 +473,7 @@ def test_destination_draft_failure_does_not_orphan_created_session_or_drop_input
     assert result["activeSid"] == "new-session"
     assert result["value"] == " voice addition"
     assert result["pendingFileNames"] == ["late-audio.webm"]
+    assert result["lateFileIdentity"] is True
     assert [save["sid"] for save in result["saves"]] == [
         "old-session",
         "new-session",
@@ -337,6 +486,7 @@ def test_first_send_without_previous_session_transfers_entire_composer():
     assert result["activeSid"] == "new-session"
     assert result["value"] == "draft owned by the old session"
     assert result["pendingFileNames"] == ["private.pdf"]
+    assert result["sourceFileIdentity"] is True
     assert result["saves"] == [
         {
             "sid": "new-session",
@@ -360,6 +510,7 @@ def test_programmatic_input_arriving_in_flight_moves_only_the_delta_to_new_sessi
     assert result["value"] == " voice addition"
     assert source_text not in result["value"]
     assert result["pendingFileNames"] == ["late-audio.webm"]
+    assert result["lateFileIdentity"] is True
     assert result["saves"][0]["sid"] == "old-session"
     assert result["saves"][0]["text"] == source_text
     assert result["saves"][1] == {
@@ -632,6 +783,90 @@ def test_ordered_programmatic_callbacks_preserve_latest_replacement_and_raw_file
     assert json.loads(proc.stdout) == {"text": "Hello", "files": ["voice-input.webm"]}
 
 
+def test_failed_send_restore_during_create_survives_late_clear_settlement():
+    result = _run_review_race_harness("failed-send")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == ""
+    assert result["files"] == []
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1] == {
+        "sid": "old-session",
+        "text": "failed restore",
+        "files": ["restored.txt"],
+        "profile": "default",
+    }
+
+
+def test_failed_send_restore_after_owner_swap_stays_with_source_session():
+    result = _run_review_race_harness("failed-send-after-swap")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == ""
+    assert result["files"] == []
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "failed restore"
+    assert source_saves[-1]["files"] == ["restored.txt"]
+
+
+def test_clarify_rescue_during_create_is_persisted_to_its_source_owner():
+    result = _run_review_race_harness("clarify")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == ""
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+    assert source_saves[-1]["files"] == ["source.txt"]
+
+
+def test_clarify_terminal_rescue_during_create_is_persisted_to_source_owner():
+    result = _run_review_race_harness("clarify-terminal")
+
+    assert result["activeSid"] == "new-session"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+
+
+def test_clarify_rescue_survives_aborted_session_creation():
+    result = _run_review_race_harness("clarify-abort")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["text"] == "source draft\n\nclarify answer"
+    assert result["files"] == ["source.txt"]
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+
+
+def test_abort_shadow_preserves_destination_voice_then_source_clarify_order():
+    result = _run_review_race_harness("voice-clarify-abort")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["text"] == "source draft voice\n\nclarify answer"
+
+
+@pytest.mark.parametrize(
+    ("schedule", "expected"),
+    [
+        ("voice-then-prompt", "voice\n\nsaved prompt\n\n"),
+        ("prompt-then-voice", "saved prompt\n\nvoice"),
+    ],
+)
+def test_saved_prompt_and_voice_producers_compose_in_arrival_order(schedule, expected):
+    result = _run_review_race_harness(schedule)
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == expected
+
+
+def test_voice_final_replaces_its_interim_slot_without_dropping_saved_prompt():
+    result = _run_review_race_harness("voice-prompt-voice")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == "final\n\nsaved prompt\n\n"
+
+
 def test_failed_handoff_replays_full_source_form_not_destination_delta():
     node = shutil.which("node")
     if not node:
@@ -678,9 +913,9 @@ def test_new_session_and_clarify_disabled_reasons_do_not_unlock_each_other():
 
 
 def test_async_composer_producers_route_through_ownership_authority():
-    assert "_composerAddFiles([file])" in BOOT_JS
+    assert "_composerAddFiles([file],null,_micComposerProducerToken)" in BOOT_JS
     assert BOOT_JS.count("_composerSetText(") >= 5
-    assert "_composerSetText(next,`${text}\\n\\n`)" in MESSAGES_JS
+    assert "_composerAppendText(addition,null,producer,null,'block')" in MESSAGES_JS
     assert "_composerAddFiles(accepted)" in UI_JS
     assert "_composerRemoveFile(f,S.session&&S.session.session_id)" in UI_JS
 

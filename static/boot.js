@@ -708,6 +708,7 @@ function _micToastKeyForRecognitionError(error){
   let audioChunks=[];
   let _finalText='';
   let _prefix='';
+  let _micComposerProducerToken='composer-mic';
   let _isRecording=false;
   // #5294 salvage — mobile composer-mic dictation continuity.
   // _speechStopRequested distinguishes an intentional stop (send/toggle) from a
@@ -774,7 +775,7 @@ function _micToastKeyForRecognitionError(error){
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
-    if(typeof _composerAddFiles==='function')_composerAddFiles([file]);
+    if(typeof _composerAddFiles==='function')_composerAddFiles([file],null,_micComposerProducerToken);
     else S.pendingFiles.push(file);
     if(typeof _composerOwnershipTransition==='undefined'||!_composerOwnershipTransition)renderTray();
     // An explicit Send-button click while recording sets _micPendingSend — that
@@ -825,7 +826,7 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    if(typeof _composerSetText==='function')_composerSetText(committed,clean);
+    if(typeof _composerSetText==='function')_composerSetText(committed,clean,null,_micComposerProducerToken);
     else ta.value=committed;
     autoResize();
     if(window._micPendingSend){
@@ -1005,7 +1006,9 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
-      if(typeof _composerSetText==='function')_composerSetText(_prefix+(final||interim),final||interim);
+      if(typeof _composerSetText==='function')_composerSetText(
+        _prefix+(final||interim),final||interim,null,_micComposerProducerToken
+      );
       else ta.value=_prefix+(final||interim);
       autoResize();
     };
@@ -1016,7 +1019,9 @@ function _micToastKeyForRecognitionError(error){
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      if(typeof _composerSetText==='function')_composerSetText(committed,_finalText||committed);
+      if(typeof _composerSetText==='function')_composerSetText(
+        committed,_finalText||committed,null,_micComposerProducerToken
+      );
       else ta.value=committed;
       autoResize();
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
@@ -1157,6 +1162,9 @@ function _micToastKeyForRecognitionError(error){
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    _micComposerProducerToken=typeof _newComposerProducerToken==='function'
+      ? _newComposerProducerToken('composer-mic')
+      : `composer-mic-${startSeq}`;
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
       window._micPendingSend=false;
@@ -1529,6 +1537,7 @@ window.renderTranscript=function(container, messages, opts){
 
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
+  let _voiceComposerProducerToken='voice-mode';
   let _silenceTimer=null;
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
@@ -1601,6 +1610,9 @@ window.renderTranscript=function(container, messages, opts){
     }
     _clearBrowserTtsRecovery();
     _setState('listening');
+    _voiceComposerProducerToken=typeof _newComposerProducerToken==='function'
+      ? _newComposerProducerToken('voice-mode')
+      : `voice-mode-${Date.now()}`;
 
     _recognition=new SpeechRecognition();
     _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
@@ -1621,7 +1633,9 @@ window.renderTranscript=function(container, messages, opts){
         if(event.results[i].isFinal){ final+=txt; _finalText=final; }
         else{ interim+=txt; }
       }
-      if(typeof _composerSetText==='function')_composerSetText(final||interim);
+      if(typeof _composerSetText==='function')_composerSetText(
+        final||interim,final||interim,null,_voiceComposerProducerToken
+      );
       else ta.value=final||interim;
       autoResize();
 
@@ -1675,7 +1689,9 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive) return;
     const text=(ta.value||'').trim();
     if(!text){
-      if(typeof _composerSetText==='function')_composerSetText('');
+      if(typeof _composerSetText==='function')_composerSetText(
+        '','',null,_voiceComposerProducerToken
+      );
       else ta.value='';
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
       return;
@@ -2006,7 +2022,9 @@ window.renderTranscript=function(container, messages, opts){
     // Restore original autoReadLastAssistant
     if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
     // Clear textarea if it was only voice input
-    if(typeof _composerSetText==='function')_composerSetText('');
+    if(typeof _composerSetText==='function')_composerSetText(
+      '','',null,_voiceComposerProducerToken
+    );
     else ta.value='';
     autoResize();
   }

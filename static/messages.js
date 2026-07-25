@@ -797,10 +797,18 @@ function _formatSelectedTextReplyQuote(text){
 function insertSavedPromptIntoComposer(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
-  const current=String(composer.value||'');
-  const next=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
-  if(typeof _composerSetText==='function')_composerSetText(next,`${text}\n\n`);
-  else composer.value=next;
+  const addition=`${text}\n\n`;
+  if(typeof _composerAppendText==='function'){
+    const producer=typeof _newComposerProducerToken==='function'
+      ? _newComposerProducerToken('saved-prompt')
+      : 'saved-prompt';
+    _composerAppendText(addition,null,producer,null,'block');
+  }else{
+    const current=String(composer.value||'');
+    composer.value=current.trim()
+      ? `${current.replace(/\s+$/,'')}\n\n${addition}`
+      : addition;
+  }
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
@@ -1259,19 +1267,26 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     _rememberComposerPendingFiles(sid,files,ownerProfile);
   }
   let restoredVisible=false;
+  let ownerTransactionSnapshot=null;
   if(belongsToVisible){
     const inp=$('msg');
     // Do not clobber a new message the user began typing during the async window.
     if(inp && !String(inp.value||'').trim()){
-      if(typeof _composerSetText==='function')_composerSetText(restore,restore,sid);
+      const producer=typeof _newComposerProducerToken==='function'
+        ? _newComposerProducerToken(`failed-send-${sid||'unknown'}`)
+        : `failed-send-${sid||'unknown'}`;
+      if(typeof _composerSetText==='function')_composerSetText(restore,restore,sid,producer,ownerProfile);
       else inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
       // Re-stage the originally attached files so a one-key resend keeps them.
       if(files.length){
-        if(typeof _composerReplaceFiles==='function')_composerReplaceFiles(files,sid);
+        if(typeof _composerReplaceFiles==='function')_composerReplaceFiles(files,sid,producer,ownerProfile);
         else S.pendingFiles=files;
         if(typeof renderTray==='function') renderTray();
+      }
+      if(typeof _composerOwnerSnapshot==='function'){
+        ownerTransactionSnapshot=_composerOwnerSnapshot(sid,ownerProfile);
       }
       restoredVisible=true;
     }
@@ -1289,6 +1304,13 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       try{
+        const ownerSnapshot=ownerTransactionSnapshot;
+        if(ownerSnapshot){
+          _saveComposerDraftNow(
+            sid,ownerSnapshot.text,[...(ownerSnapshot.files||[])],ownerSnapshot.profile
+          );
+          return;
+        }
         const stillVisible=(S.session&&S.session.session_id)===sid;
         if(stillVisible){
           const inp=$('msg');
@@ -8121,8 +8143,16 @@ function _stashClarifyDraft(reason) {
   } catch (_) {}
   const composer = $('msg');
   if (composer) {
-    const current = String(composer.value || "");
-    composer.value = current.trim() ? `${current.replace(/\s+$/, "")}\n\n${draft}` : draft;
+    const ownerProfile=String(
+      (S.session&&S.session.session_id===sid&&S.session.profile)||S.activeProfile||'default'
+    ).trim()||'default';
+    const producer=`clarify-${sid}-${_clarifySignature||'unknown'}`;
+    if(typeof _composerAppendText==='function'){
+      _composerAppendText(draft,sid,producer,ownerProfile,'block');
+    }else{
+      const current = String(composer.value || "");
+      composer.value = current.trim() ? `${current.replace(/\s+$/, "")}\n\n${draft}` : draft;
+    }
     if (typeof autoResize === "function") autoResize();
     if (typeof updateSendBtn === "function") updateSendBtn();
   }
