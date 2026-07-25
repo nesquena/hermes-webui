@@ -425,7 +425,15 @@ def test_a_different_key_neither_blocks_on_nor_inherits_an_in_flight_load(
 
 
 def test_ttl_is_stamped_on_completion_not_on_entry(monkeypatch, badge_cache):
-    """A load slower than the TTL must not be published already expired."""
+    """A load slower than the TTL must not be published already expired.
+
+    Scope note: a regression that stamps at leader-acquire time IN ADDITION to
+    the completion stamp is invisible here — the completion stamp overwrites it
+    before any sequential reader looks. That variant is caught by
+    `test_slow_cold_followers_consume_the_leader_result`, where a follower
+    arriving mid-load sees a future `expires` with `has_good` still False and
+    returns [] instead of waiting (verified by mutation).
+    """
     import time as time_mod
 
     ttl = 0.4
@@ -444,6 +452,19 @@ def test_ttl_is_stamped_on_completion_not_on_entry(monkeypatch, badge_cache):
     # fresh — an entry-stamped expiry would already be in the past here.
     assert len(badge_cache.get_cli_sessions_for_badges(profile_key="default")) == 3
     assert calls["n"] == 1, "a slow load was born expired and re-projected at once"
+
+    # Assert on the stamp itself, not only on the observable effect: a
+    # regression that ALSO stamps at leader-acquire time is invisible to the
+    # calls-count check above, because the completion stamp overwrites it
+    # before any sequential reader looks.
+    key = (None, False, True, "default")
+    with badge_cache._CLI_BADGE_CACHE_LOCK:
+        entry = badge_cache._CLI_BADGE_CACHE[key]
+        remaining = entry.expires - time_mod.monotonic()
+    assert remaining > 0, "the entry was published already expired"
+    assert remaining <= ttl + 0.05, (
+        "expiry is further out than one TTL from completion"
+    )
 
 
 def test_publication_failure_releases_ownership_and_allows_retry(monkeypatch, badge_cache):
@@ -508,7 +529,7 @@ def test_generation_bump_is_key_local(monkeypatch, badge_cache):
     assert badge_cache._cli_badge_cache_generation(scope_beta) == beta_gen
 
 
-def test_cache_is_bounded_and_never_evicts_an_in_flight_entry(monkeypatch, badge_cache):
+def test_cache_is_bounded(monkeypatch, badge_cache):
     """Many scopes must not grow the map without limit."""
     _install_loader(
         monkeypatch,
@@ -520,3 +541,51 @@ def test_cache_is_bounded_and_never_evicts_an_in_flight_entry(monkeypatch, badge
 
     with badge_cache._CLI_BADGE_CACHE_LOCK:
         assert len(badge_cache._CLI_BADGE_CACHE) <= badge_cache._CLI_BADGE_CACHE_MAX_KEYS
+
+
+def test_eviction_never_removes_an_entry_with_a_load_in_flight(monkeypatch, badge_cache):
+    """The LRU sweep must skip `loading` entries.
+
+    Evicting one would detach the object its leader publishes into and its
+    waiters wait on, so the leader's result would go nowhere and every waiter
+    would time out. The bounded-map test above cannot see this: with an instant
+    loader no entry is ever in flight while eviction runs.
+    """
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def loader(source_filter=None, all_profiles=False):
+        if not started.is_set():
+            started.set()
+            assert release.wait(timeout=5)
+            return _external_cli_rows(9)
+        return _external_cli_rows(1)
+
+    _install_loader(monkeypatch, loader)
+
+    held = {}
+    slow = threading.Thread(
+        target=lambda: held.update(
+            rows=badge_cache.get_cli_sessions_for_badges(profile_key="pinned")
+        )
+    )
+    slow.start()
+    assert started.wait(timeout=5)
+
+    pinned_key = (None, False, True, "pinned")
+    # Flood well past the cap while "pinned" is still loading.
+    for index in range(badge_cache._CLI_BADGE_CACHE_MAX_KEYS * 2):
+        badge_cache.get_cli_sessions_for_badges(profile_key=f"flood{index}")
+
+    with badge_cache._CLI_BADGE_CACHE_LOCK:
+        assert pinned_key in badge_cache._CLI_BADGE_CACHE, (
+            "an entry with a load in flight was evicted"
+        )
+        assert len(badge_cache._CLI_BADGE_CACHE) <= badge_cache._CLI_BADGE_CACHE_MAX_KEYS
+
+    release.set()
+    slow.join(timeout=10)
+    assert not slow.is_alive()
+    assert len(held["rows"]) == 9, "the leader's result did not reach its caller"
