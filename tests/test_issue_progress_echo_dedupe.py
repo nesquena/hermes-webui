@@ -622,28 +622,46 @@ def test_redaction_mask_stays_within_one_scalar_across_all_delimiters():
     # (3) Third review: EVERY supported outside separator must fail closed the same
     # way. `&`, `=` and `?` were missing from the boundary set, so a query-string /
     # form-encoded progress line could still have its changed status swallowed.
-    for sep in (";", "|", "&", ",", "=", "?", " "):
-        cand = f"token=***{sep}status=completed"
-        vis = f"token=sk-abc123{sep}status=failed{sep}status=completed"
-        assert not match(cand, vis, anchor_end=False), (
-            f"a mask must not span the {sep!r} separator into a changed status field"
-        )
-        assert not match(cand, vis, anchor_end=True), (
-            f"a mask must not span the {sep!r} separator into a changed status field"
-        )
+    #
+    # Fourth review: the matrix is DERIVED from the production boundary set rather
+    # than hardcoded, so it cannot silently drift from `_ECHO_STRUCTURAL_CHARS`
+    # again — the previous hardcoded tuple omitted `{ } [ ] ( ) :` while BUGS.md
+    # claimed every supported separator was covered. Both directions are asserted
+    # for both anchoring modes: a changed status field must never be swallowed
+    # (negative), and a redaction-only difference across the same separator must
+    # still dedup (positive).
+    separators = sorted(streaming._ECHO_STRUCTURAL_CHARS | {" "})
+    assert separators == sorted(' &(),:;=?[]{|}'), (
+        "the production boundary set changed; update this matrix deliberately "
+        f"rather than letting coverage drift. got {separators!r}"
+    )
+    for sep in separators:
+        neg_cand = f"token=***{sep}status=completed"
+        neg_vis = f"token=sk-abc123{sep}status=failed{sep}status=completed"
+        for anchor in (True, False):
+            assert not match(neg_cand, neg_vis, anchor_end=anchor), (
+                f"a mask must not span the {sep!r} separator into a changed status "
+                f"field (anchor_end={anchor})"
+            )
+        pos_cand = f"token=***{sep}status=ok"
+        pos_vis = f"token=sk-abc123{sep}status=ok"
+        for anchor in (True, False):
+            assert match(pos_cand, pos_vis, anchor_end=anchor), (
+                f"a redaction-only difference across the {sep!r} separator must "
+                f"still dedup (anchor_end={anchor})"
+            )
 
     # Two-mask semicolon variant — the middle field genuinely changed.
     assert not match("a=***;b=***;c=x", "a=s1;b=y;b=s2;c=x", anchor_end=False)
+    assert not match("a=***;b=***;c=x", "a=s1;b=y;b=s2;c=x", anchor_end=True)
 
     # Legitimate redaction-only differences across the same delimiters dedup.
-    assert match("token=***;status=ok", "token=sk-abc123;status=ok", anchor_end=True)
-    assert match("token=***|status=ok", "token=sk-abc123|status=ok", anchor_end=False)
-    assert match("token=***&status=ok", "token=sk-abc123&status=ok", anchor_end=True)
     assert match("api_key: ***", "api_key: sk-abc123", anchor_end=True)
     assert match("api_key: ***", "api_key: sk-abc123", anchor_end=False)
 
 
-def test_redaction_mask_matches_quoted_secret_containing_delimiters():
+@pytest.mark.parametrize("anchor_end", [True, False], ids=["suffix", "substring"])
+def test_redaction_mask_matches_quoted_secret_containing_delimiters(anchor_end):
     """Third-review regression: a QUOTED secret may legitimately contain delimiters.
 
     The context-free lexer split every `"`, `,`, `;`, `|` and space regardless of
@@ -657,82 +675,114 @@ def test_redaction_mask_matches_quoted_secret_containing_delimiters():
     quoted region up to the matching close quote, so such secrets dedup again. This
     must NOT weaken the false-dedup protection: the quoted region is bounded by the
     close quote, so a changed sibling field outside it still fails closed.
+
+    Fourth review: every case runs in BOTH anchoring modes. The full-output
+    substring path is the riskier synchronous call, so suffix-only coverage left
+    the more dangerous mode unproven. In substring mode a trailing suffix is
+    appended to the visible text so the match cannot accidentally be a tail match.
     """
     import api.streaming as streaming
 
     match = streaming._redaction_tolerant_match
 
-    for label, secret in (
-        ("semicolon", "ab;cd"),
-        ("pipe", "ab|cd"),
-        ("comma", "ab,cd"),
-        ("space", "ab cd"),
-        ("equals", "ab=cd"),
-        ("ampersand", "ab&cd"),
-        ("question", "ab?cd"),
-        ("mixed", "a;b|c,d e=f"),
-    ):
-        cand = 'api_key: "***"'
-        vis = f'api_key: "{secret}"'
-        assert match(cand, vis, anchor_end=True), (
-            f"a quoted secret containing {label} must still dedup (suffix path)"
-        )
-        assert match(cand, vis + " and then more streamed prose", anchor_end=False), (
-            f"a quoted secret containing {label} must still dedup (substring path)"
-        )
+    def vis_for(text: str) -> str:
+        return text if anchor_end else text + " and then more streamed prose"
 
-    # Backtick and single-quote scalars behave the same way.
-    assert match("key: `***`", "key: `ab;cd`", anchor_end=True)
-    assert match("key: '***'", "key: 'ab,cd'", anchor_end=True)
+    # Each supported quote style, each carrying every structural separator plus a
+    # space inside the secret — the exact shapes the context-free lexer rejected.
+    for quote in ('"', "`", "'"):
+        for label, secret in (
+            ("semicolon", "ab;cd"),
+            ("pipe", "ab|cd"),
+            ("comma", "ab,cd"),
+            ("space", "ab cd"),
+            ("equals", "ab=cd"),
+            ("ampersand", "ab&cd"),
+            ("question", "ab?cd"),
+            ("colon", "ab:cd"),
+            ("braces", "ab{cd}ef"),
+            ("brackets", "ab[cd]ef"),
+            ("parens", "ab(cd)ef"),
+            ("mixed", "a;b|c,d e=f:g"),
+        ):
+            cand = f"api_key: {quote}***{quote}"
+            vis = f"api_key: {quote}{secret}{quote}"
+            assert match(cand, vis_for(vis), anchor_end=anchor_end), (
+                f"a {quote!r}-quoted secret containing {label} must still dedup "
+                f"(anchor_end={anchor_end})"
+            )
 
     # Realistic JSON progress shape with a delimiter-bearing secret.
     assert match(
         '{"user":"sam","password":"***","status":"ok"}',
-        '{"user":"sam","password":"a;b c","status":"ok"}',
-        anchor_end=True,
+        vis_for('{"user":"sam","password":"a;b c","status":"ok"}'),
+        anchor_end=anchor_end,
     )
 
-    # An escaped quote inside the secret stays inside the scalar.
-    assert match('k="***"', 'k="ab\\"cd"', anchor_end=True)
+    # Escaped quotes inside the secret stay inside the scalar. Odd/even counts are
+    # both exercised: an even number of escapes must not leave the scalar open.
+    assert match('k="***"', vis_for('k="ab\\"cd"'), anchor_end=anchor_end)
+    assert match('k="***"', vis_for('k="ab\\"cd\\"ef"'), anchor_end=anchor_end)
+    assert match('k="***"', vis_for('k="ab\\\\cd"'), anchor_end=anchor_end)
 
     # CRITICAL: the quoted-scalar allowance must not reopen the false-dedup hole —
-    # a changed field OUTSIDE the quoted secret still fails closed.
+    # a changed field OUTSIDE the quoted secret still fails closed, in both modes.
     assert not match(
         '{"password":"***","status":"completed"}',
-        '{"password":"a;b","status":"started"}',
-        anchor_end=True,
+        vis_for('{"password":"a;b","status":"started"}'),
+        anchor_end=anchor_end,
     ), "a changed sibling field must not be swallowed by a quoted mask"
-    assert not match(
-        '{"password":"***","status":"completed"}',
-        '{"password":"a;b","status":"started"}',
-        anchor_end=False,
-    )
+    for quote in ('"', "`", "'"):
+        assert not match(
+            f"token={quote}***{quote};status=completed",
+            vis_for(f"token={quote}a;b{quote};status=failed;status=completed"),
+            anchor_end=anchor_end,
+        ), f"a {quote!r}-quoted mask must not swallow a changed status field"
 
 
-def test_redaction_mask_leading_trailing_and_multiple_forms():
-    """Cover leading/trailing/empty/multiple mask placements in both modes.
+@pytest.mark.parametrize("anchor_end", [True, False], ids=["suffix", "substring"])
+def test_redaction_mask_leading_trailing_and_multiple_forms(anchor_end):
+    """Cover leading/trailing/empty/multiple mask placements in BOTH modes.
 
     A mask must consume at least one character of its scalar, the surrounding
     literals must line up, and multiple masks each bind to their own field.
+
+    Fourth review: previously several of these ran only on the suffix path, which
+    left the riskier full-output substring call unproven for exactly the placements
+    most likely to misalign.
     """
     import api.streaming as streaming
 
     match = streaming._redaction_tolerant_match
 
-    # Leading and trailing masks (redaction-only) dedup on both anchors.
-    assert match("***-tail", "secret-tail", anchor_end=True)
-    assert match("***-tail", "secret-tail", anchor_end=False)
-    assert match("head-***", "head-secret", anchor_end=True)
+    def vis_for(text: str) -> str:
+        return text if anchor_end else text + " trailing prose"
+
+    # Leading and trailing masks (redaction-only) dedup.
+    assert match("***-tail", vis_for("secret-tail"), anchor_end=anchor_end)
+    assert match("head-***", vis_for("head-secret"), anchor_end=anchor_end)
+    # Mask in the middle, literals on both sides.
+    assert match("head-***-tail", vis_for("head-secret-tail"), anchor_end=anchor_end)
 
     # A mask must stand for >=1 real char — an empty expansion must NOT match.
-    assert not match("***tail", "tail", anchor_end=True)
+    assert not match("***tail", vis_for("tail"), anchor_end=anchor_end)
+    assert not match("head***", vis_for("head"), anchor_end=anchor_end)
 
-    # Multiple masks, each bound to its own quoted scalar, still dedup.
-    assert match('x"***"y"***"z', 'x"secretA"y"secretB"z', anchor_end=True)
-    assert match('x"***"y"***"z', 'x"secretA"y"secretB"z', anchor_end=False)
+    # Multiple masks, each bound to its own quoted scalar, still dedup — for every
+    # supported quote style.
+    for quote in ('"', "`", "'"):
+        cand = f"x{quote}***{quote}y{quote}***{quote}z"
+        vis = f"x{quote}secretA{quote}y{quote}secretB{quote}z"
+        assert match(cand, vis_for(vis), anchor_end=anchor_end)
 
     # But if a NON-masked field between two masks differs, it must fail closed.
-    assert not match('x"***"CHANGED"***"z', 'x"a"ORIG"b"z', anchor_end=True)
+    assert not match(
+        'x"***"CHANGED"***"z', vis_for('x"a"ORIG"b"z'), anchor_end=anchor_end
+    )
+    # ...and if a literal after the final mask differs.
+    assert not match(
+        'x"***"y"***"CHANGED', vis_for('x"a"y"b"ORIG'), anchor_end=anchor_end
+    )
 
 
 def test_redaction_tolerant_match_cogrowing_near_match_is_bounded():
@@ -808,7 +858,7 @@ def test_redaction_tolerant_match_cogrowing_near_match_is_bounded():
     )
 
 
-def test_redaction_tolerant_match_hard_bounds_fail_closed():
+def test_redaction_tolerant_match_hard_bounds_fail_closed(monkeypatch):
     """The synchronous path must be hard-bounded, and every bound must fail CLOSED.
 
     Because alignment is `O(visible × candidate)` in the worst case, both inputs
@@ -819,31 +869,89 @@ def test_redaction_tolerant_match_hard_bounds_fail_closed():
 
     This also pins the documented tradeoff — oversized inputs are deliberately
     NOT deduped rather than scanned unboundedly on the streaming callback.
+
+    Fourth review: each bound is now proven by an AT-CAP positive paired with a
+    CAP+1 negative, so the assertions cannot pass vacuously. The previous mask-cap
+    assertion (`"***" * (MAX + 4) + "z"` vs `"z"`) was vacuous — adjacent stars
+    collapse into a SINGLE mask run under `_ECHO_REDACTION_MASK_RE`, so it returned
+    False because the wildcard had no character to consume before `z`, not because
+    the cap fired.
     """
-    import time
     import api.streaming as streaming
 
     match = streaming._redaction_tolerant_match
+    max_cand = streaming._ECHO_REDACTION_MAX_CAND_CHARS
+    max_vis = streaming._ECHO_REDACTION_MAX_VIS_CHARS
+    max_masks = streaming._ECHO_REDACTION_MAX_MASKS_PER_FIELD
 
-    # Over-cap candidate and visible inputs must be rejected outright.
-    over_cand = "***" + "x" * (streaming._ECHO_REDACTION_MAX_CAND_CHARS + 1)
-    assert not match(over_cand, "y" * 100, anchor_end=False)
-    over_vis = 'a "s" b' + "z" * (streaming._ECHO_REDACTION_MAX_VIS_CHARS + 1)
-    assert not match('a "***" b', over_vis, anchor_end=False)
+    # --- mask-count cap: use genuinely DISTINCT runs (separated by a literal) ----
+    # `***a***a…` splits into `max_masks` separate mask runs, unlike adjacent stars.
+    def masked_pair(k: int) -> tuple[str, str]:
+        return ("***a" * k + "z", "Xa" * k + "z")
 
-    # A mask run may not be expanded an unbounded number of times per field.
-    assert not match("***" * (streaming._ECHO_REDACTION_MAX_MASKS_PER_FIELD + 4) + "z", "z", anchor_end=True)
+    # Pin the LITERAL cap as well as the derived boundary. Deriving both sides of
+    # the boundary from the constant alone would make this self-referential: the
+    # cap could be raised to 99 and the test would still pass, having silently
+    # moved its own goalposts. Verified by mutation: with only the derived form,
+    # raising the cap was caught by no test.
+    assert max_masks == 8, (
+        "the per-field mask cap changed; confirm the new value is intended and "
+        f"update this test deliberately (got {max_masks})"
+    )
+    at_cap_cand, at_cap_vis = masked_pair(max_masks)
+    assert len(streaming._ECHO_REDACTION_MASK_RE.findall(at_cap_cand)) == max_masks, (
+        "the at-cap candidate must really contain max_masks distinct mask runs"
+    )
+    assert match(at_cap_cand, at_cap_vis, anchor_end=True), (
+        f"exactly {max_masks} distinct mask runs must still be matched (at cap)"
+    )
+    over_cap_cand, over_cap_vis = masked_pair(max_masks + 1)
+    assert not match(over_cap_cand, over_cap_vis, anchor_end=True), (
+        f"{max_masks + 1} distinct mask runs must exceed the cap and fail closed"
+    )
 
-    # At the very hard bounds the call must still return quickly enough to be safe
-    # inline on the streaming callback. Generous ceiling for slow/loaded CI.
-    worst_cand = '"***" ' + "a " * 2040
-    worst_vis = '"s" ' + "a " * 32000
-    t0 = time.perf_counter()
-    match(worst_cand, worst_vis, anchor_end=False)
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 1.0, (
-        "a worst-case at-the-bound match must not stall the synchronous streaming "
-        f"callback; took {elapsed * 1000:.1f}ms"
+    # --- candidate length cap: at-cap matches, cap+1 fails closed ---------------
+    # Literal values pinned for the same anti-self-reference reason as above.
+    assert (max_cand, max_vis) == (4096, 65536), (
+        "the input caps changed; confirm intended and update deliberately "
+        f"(got cand={max_cand}, vis={max_vis})"
+    )
+    head = 'api_key: "***"'
+    tail = " " + "a" * (max_cand - len(head) - 1)
+    cand_at_cap = head + tail
+    assert len(cand_at_cap) == max_cand
+    vis_at_cap = 'api_key: "sk-secret"' + tail
+    assert match(cand_at_cap, vis_at_cap, anchor_end=True), (
+        "a candidate of exactly the cap length must still be compared"
+    )
+    assert not match(cand_at_cap + "a", vis_at_cap + "a", anchor_end=True), (
+        "a candidate one char over the cap must fail closed"
+    )
+
+    # --- visible length cap: at-cap matches, cap+1 fails closed ----------------
+    vis_head = 'api_key: "sk-secret"'
+    vis_at = vis_head + " " + "a" * (max_vis - len(vis_head) - 1)
+    assert len(vis_at) == max_vis
+    assert match('api_key: "***"', vis_at, anchor_end=False), (
+        "visible text of exactly the cap length must still be scanned"
+    )
+    assert not match('api_key: "***"', vis_at + "a", anchor_end=False), (
+        "visible text one char over the cap must fail closed"
+    )
+
+    # --- comparison budget: force the fail-closed branch on a matching input ---
+    # Same input, two budgets: it matches under the real budget and must fail
+    # CLOSED (not raise, not match) once the budget is too small to finish.
+    cand = 'api_key: "***" and then a long tail of many more units here'
+    vis = 'api_key: "sk-secret" and then a long tail of many more units here'
+    assert match(cand, vis, anchor_end=True), "sanity: matches under the real budget"
+    monkeypatch.setattr(streaming, "_ECHO_REDACTION_MAX_UNIT_COMPARISONS", 3)
+    assert not match(cand, vis, anchor_end=True), (
+        "an exhausted comparison budget must fail closed (report 'not an echo'), "
+        "never fall through to a permissive match"
+    )
+    assert not match(cand, vis, anchor_end=False), (
+        "the substring path must also fail closed on an exhausted budget"
     )
 
 
