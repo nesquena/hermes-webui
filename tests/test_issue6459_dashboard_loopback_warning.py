@@ -45,19 +45,18 @@ def test_apply_dashboard_status_suppresses_warning_when_browser_url_set():
     """
     body = _extract_function_body(_read_static("ui.js"), "function _applyDashboardStatus(")
 
-    # The warning derivation must reference status.browser_url (or status.url)
-    # — the mere presence of _dashboardIsBrowserLoopback alone is insufficient.
-    assert "browser_url" in body or "status.url" in body, (
-        "_applyDashboardStatus warning logic must check status.browser_url "
-        "to suppress the false loopback-only warning (#6459)"
+    # The warning derivation must check whether the resolved browser target is
+    # non-loopback — mere truthiness of browser_url is insufficient because a
+    # configured loopback URL (e.g. http://127.0.0.1:port) would still suppress.
+    assert "_isLoopbackHostname" in body, (
+        "_applyDashboardStatus warning logic must classify the browser target "
+        "via _isLoopbackHostname to suppress only for non-loopback URLs (#6459)"
     )
 
-    # The warning ternary must NOT be the old unconditional form that only
-    # checks browser loopback. We verify the guard variable is present AND used
-    # in the warning derivation (not just declared).
-    assert "hasBrowserUrl" in body, (
-        "_applyDashboardStatus must derive a hasBrowserUrl guard from "
-        "status.browser_url before deciding the warning (#6459)"
+    # The guard variable must be present AND used in the warning derivation.
+    assert "hasNonLoopbackBrowserUrl" in body, (
+        "_applyDashboardStatus must derive a hasNonLoopbackBrowserUrl guard "
+        "that classifies the resolved target before deciding the warning (#6459)"
     )
 
     # Critical: the guard must appear in the WARNING derivation line itself,
@@ -65,8 +64,8 @@ def test_apply_dashboard_status_suppresses_warning_when_browser_url_set():
     warning_idx = body.index("const warning=")
     warning_line_end = body.index("\n", warning_idx)
     warning_line = body[warning_idx:warning_line_end]
-    assert "hasBrowserUrl" in warning_line, (
-        "hasBrowserUrl guard must be used in the warning derivation ternary, "
+    assert "hasNonLoopbackBrowserUrl" in warning_line, (
+        "hasNonLoopbackBrowserUrl guard must be used in the warning derivation, "
         "not merely declared elsewhere in the function (#6459)"
     )
 
