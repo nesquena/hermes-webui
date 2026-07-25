@@ -3852,6 +3852,9 @@ async function _ensureAllMessagesLoaded() {
     // overwrite the new session's messages.
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    // A same-session live turn can start while this fetch is in flight. Let the
+    // live path own S.messages rather than replace it with settled history.
+    if (S.busy || S.activeStreamId) return;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex
