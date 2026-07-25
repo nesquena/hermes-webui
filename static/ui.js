@@ -6056,6 +6056,24 @@ if(typeof window!=='undefined'){
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
     if(_freshProgrammaticScrollActive()) return;
+    // #6414: if the user is actively scrolling (wheel, touch, keyboard, scrollbar
+    // drag), clear _programmaticScroll immediately instead of suppressing the real
+    // scroll event. Previously _programmaticScroll could suppress user scrolls for
+    // ~150ms during streaming when programmatic scrolls overlapped frequently,
+    // making the viewport feel stuck ~16% of the time. The recency helpers are
+    // set by the keyboard/touch/wheel listeners above and by the scrollbar drag
+    // tracker; if none are recent this is still a programmatic artifact and we
+    // fall through to the existing guard.
+    var _now=_programmaticScroll&&typeof performance!=='undefined'?performance.now():0;
+    if(_programmaticScroll&&_now>0&&(
+      _now-_lastMessageTouchScrollIntentMs<150
+      ||_now-_lastMessageWheelIntentMs<150
+      ||_now-_lastMessageKeyScrollIntentMs<150
+      ||_now-_lastNonMessageScrollIntentMs<150
+      ||(typeof _scrollbarDragActive!=='undefined'&&_scrollbarDragActive)
+    )){ _programmaticScroll=false; }
+    if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
+    if(_programmaticScroll) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -6745,7 +6763,16 @@ function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  el.scrollTop=el.scrollHeight;
+  // #6414: use semantic scroll anchoring (scrollIntoView on last msgInner child)
+  // instead of absolute scrollTop=scrollHeight. Adapts to worklog collapse/expand
+  // height changes without pixel jumps.
+  const inner=$('msgInner');
+  const bottomAnchor=inner&&inner.lastElementChild;
+  if(bottomAnchor&&typeof bottomAnchor.scrollIntoView==='function'){
+    try{ bottomAnchor.scrollIntoView({block:'end'}); }catch(_){ bottomAnchor.scrollIntoView(); }
+  }else{
+    el.scrollTop=el.scrollHeight;
+  }
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
@@ -6760,7 +6787,15 @@ function _setMessageScrollToBottom(){
       _deferClearProgrammaticScroll();
       return;
     }
-    el.scrollTop=el.scrollHeight;
+    // #6414: semantic retry — scrollIntoView on bottom anchor adapts to layout
+    // changes from post-render processing (Prism, KaTeX, worklog collapse).
+    const inner2=$('msgInner');
+    const anchor2=inner2&&inner2.lastElementChild;
+    if(anchor2&&typeof anchor2.scrollIntoView==='function'){
+      try{ anchor2.scrollIntoView({block:'end'}); }catch(_){ anchor2.scrollIntoView(); }
+    }else{
+      el.scrollTop=el.scrollHeight;
+    }
     _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
     _nearBottomCount=2;
     _scrollPinned=true;
@@ -6905,7 +6940,19 @@ function _settleFinalScroll(token){
     return;
   }
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  el.scrollTop=el.scrollHeight;
+  // #6414: use semantic scroll anchoring instead of absolute scrollTop=scrollHeight.
+  // When worklog content collapses (e.g. STREAM_DONE shrink), scrollHeight changes
+  // but the scrollTop pixel value is stale — the viewport jumps. Finding the last
+  // element in msgInner and scrolling it into view provides a true bottom anchor
+  // that adapts to layout changes naturally, matching the browser's overflow-anchor
+  // behavior on desktop and iOS.
+  const inner=document.getElementById('msgInner');
+  const bottomAnchor=inner&&inner.lastElementChild;
+  if(bottomAnchor&&typeof bottomAnchor.scrollIntoView==='function'){
+    try{ bottomAnchor.scrollIntoView({block:'end'}); }catch(_){ bottomAnchor.scrollIntoView(); }
+  }else{
+    el.scrollTop=el.scrollHeight;
+  }
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
@@ -12730,6 +12777,12 @@ function _anchorSceneWorklogGroup(blocks, opts){
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
+  // #6414: incremental DOM updates for settled renders to avoid flicker from
+  // wholesale innerHTML replacement. For live (streaming) calls we still
+  // rebuild from scratch since the DOM changes dynamically each frame.
+  if(opts&&opts.settled&&list.children.length>0){
+    return _renderAnchorSceneRowsIncremental(list, rows, opts);
+  }
   list.innerHTML='';
   let wrote=false;
   let currentTools=null;
@@ -12752,6 +12805,82 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   }
   if(wrote){
     _syncToolCallGroupSummary(group);
+  }
+  return wrote;
+}
+function _renderAnchorSceneRowsIncremental(list, rows, opts){
+  // #6414: incremental DOM update for settled worklog renders. Builds a map of
+  // existing nodes keyed by data-anchor-local-id, then only adds/removes what
+  // changed — no wholesale innerHTML replacement so the viewport never flashes.
+  var existingById={};
+  var preserve=[];
+  var child=list.firstElementChild;
+  while(child){
+    // Flatten tool containers — we track their children individually.
+    var isToolsContainer=child.getAttribute&&child.getAttribute('data-worklog-tools')==='1';
+    if(isToolsContainer){
+      var toolChild=child.firstElementChild;
+      while(toolChild){
+        var tid=toolChild.getAttribute&&toolChild.getAttribute('data-anchor-local-id');
+        if(tid){ existingById[tid]={el:toolChild,container:child}; }
+        toolChild=toolChild.nextElementSibling;
+      }
+      preserve.push(child);
+    }else{
+      var id=child.getAttribute&&child.getAttribute('data-anchor-local-id');
+      if(id){ existingById[id]={el:child,container:null}; }
+      preserve.push(child);
+    }
+    child=child.nextElementSibling;
+  }
+  var wrote=false;
+  var currentTools=null;
+  var seenIds={};
+  for(var ri=0;ri<rows.length;ri++){
+    var row=rows[ri];
+    var rowId=row&&(row.local_id||row['data-anchor-local-id']);
+    // If we already have a DOM node for this row — mark it as seen and keep it.
+    if(rowId&&existingById[rowId]){
+      seenIds[rowId]=true;
+      wrote=true;
+      continue;
+    }
+    var node=_anchorSceneNodeForRow(row,opts);
+    if(!node) continue;
+    if(row.role==='tool'){
+      if(!currentTools){
+        currentTools=document.createElement('div');
+        currentTools.className='wl-step-tools tool-worklog-tools';
+        currentTools.setAttribute('data-worklog-tools','1');
+        list.appendChild(currentTools);
+      }
+      currentTools.appendChild(node);
+    }else{
+      currentTools=null;
+      list.appendChild(node);
+    }
+    wrote=true;
+  }
+  // Remove stale nodes (present in DOM but no longer in the row set).
+  for(var pi=0;pi<preserve.length;pi++){
+    var p=preserve[pi];
+    var isTools=p.getAttribute&&p.getAttribute('data-worklog-tools')==='1';
+    if(isTools){
+      var tc=p.firstElementChild;
+      while(tc){
+        var nxt=tc.nextElementSibling;
+        var tid=tc.getAttribute&&tc.getAttribute('data-anchor-local-id');
+        if(tid&&!seenIds[tid]) tc.remove();
+        tc=nxt;
+      }
+      if(!p.firstElementChild) p.remove();
+    }else{
+      var pid=p.getAttribute&&p.getAttribute('data-anchor-local-id');
+      if(pid&&!seenIds[pid]) p.remove();
+    }
+  }
+  if(wrote){
+    _syncToolCallGroupSummary(list.closest&&list.closest('.tool-worklog-group,.tool-call-group,.live-worklog'));
   }
   return wrote;
 }
