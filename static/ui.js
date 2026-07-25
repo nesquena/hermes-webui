@@ -6064,12 +6064,11 @@ if(typeof window!=='undefined'){
     // set by the keyboard/touch/wheel listeners above and by the scrollbar drag
     // tracker; if none are recent this is still a programmatic artifact and we
     // fall through to the existing guard.
-    var _now=_programmaticScroll&&typeof performance!=='undefined'?performance.now():0;
+    const _now=_programmaticScroll&&typeof performance!=='undefined'?performance.now():0;
     if(_programmaticScroll&&_now>0&&(
       _now-_lastMessageTouchScrollIntentMs<150
       ||_now-_lastMessageWheelIntentMs<150
       ||_now-_lastMessageKeyScrollIntentMs<150
-      ||_now-_lastNonMessageScrollIntentMs<150
       ||(typeof _scrollbarDragActive!=='undefined'&&_scrollbarDragActive)
     )){ _programmaticScroll=false; }
     if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
@@ -6763,13 +6762,15 @@ function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  // #6414: use semantic scroll anchoring (scrollIntoView on last msgInner child)
+  // #6414: use semantic scroll anchoring (manual scrollTop from last msgInner child)
   // instead of absolute scrollTop=scrollHeight. Adapts to worklog collapse/expand
-  // height changes without pixel jumps.
+  // height changes without pixel jumps. Also scoped to 'el' only — scrollIntoView
+  // scrolls ALL scrollable ancestors, which could nudge outer containers.
   const inner=$('msgInner');
   const bottomAnchor=inner&&inner.lastElementChild;
-  if(bottomAnchor&&typeof bottomAnchor.scrollIntoView==='function'){
-    try{ bottomAnchor.scrollIntoView({block:'end'}); }catch(_){ bottomAnchor.scrollIntoView(); }
+  if(bottomAnchor&&bottomAnchor.offsetParent!==null){
+    const anchorBottom=bottomAnchor.offsetTop+bottomAnchor.offsetHeight;
+    el.scrollTop=anchorBottom-el.clientHeight;
   }else{
     el.scrollTop=el.scrollHeight;
   }
@@ -6787,12 +6788,14 @@ function _setMessageScrollToBottom(){
       _deferClearProgrammaticScroll();
       return;
     }
-    // #6414: semantic retry — scrollIntoView on bottom anchor adapts to layout
+    // #6414: semantic retry — manual scrollTop on bottom anchor adapts to layout
     // changes from post-render processing (Prism, KaTeX, worklog collapse).
+    // Scoped to 'el' only — scrollIntoView scrolls ALL scrollable ancestors.
     const inner2=$('msgInner');
     const anchor2=inner2&&inner2.lastElementChild;
-    if(anchor2&&typeof anchor2.scrollIntoView==='function'){
-      try{ anchor2.scrollIntoView({block:'end'}); }catch(_){ anchor2.scrollIntoView(); }
+    if(anchor2&&anchor2.offsetParent!==null){
+      const anchorBottom2=anchor2.offsetTop+anchor2.offsetHeight;
+      el.scrollTop=anchorBottom2-el.clientHeight;
     }else{
       el.scrollTop=el.scrollHeight;
     }
@@ -6940,16 +6943,18 @@ function _settleFinalScroll(token){
     return;
   }
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  // #6414: use semantic scroll anchoring instead of absolute scrollTop=scrollHeight.
-  // When worklog content collapses (e.g. STREAM_DONE shrink), scrollHeight changes
-  // but the scrollTop pixel value is stale — the viewport jumps. Finding the last
-  // element in msgInner and scrolling it into view provides a true bottom anchor
-  // that adapts to layout changes naturally, matching the browser's overflow-anchor
-  // behavior on desktop and iOS.
+  // #6414: use semantic scroll anchoring (manual scrollTop) instead of absolute
+  // scrollTop=scrollHeight. When worklog content collapses (e.g. STREAM_DONE
+  // shrink), scrollHeight changes but the scrollTop pixel value is stale — the
+  // viewport jumps. Finding the last element in msgInner and scrolling to it
+  // manually on 'el' provides a true bottom anchor that adapts to layout changes
+  // naturally. Manual scrollTop is scoped to 'el' only — scrollIntoView scrolls
+  // ALL scrollable ancestors, which could nudge outer containers.
   const inner=document.getElementById('msgInner');
   const bottomAnchor=inner&&inner.lastElementChild;
-  if(bottomAnchor&&typeof bottomAnchor.scrollIntoView==='function'){
-    try{ bottomAnchor.scrollIntoView({block:'end'}); }catch(_){ bottomAnchor.scrollIntoView(); }
+  if(bottomAnchor&&bottomAnchor.offsetParent!==null){
+    const anchorBottom=bottomAnchor.offsetTop+bottomAnchor.offsetHeight;
+    el.scrollTop=anchorBottom-el.clientHeight;
   }else{
     el.scrollTop=el.scrollHeight;
   }
@@ -12637,7 +12642,7 @@ function _anchorSceneNodeForRow(row, opts){
   if(!node) return null;
   node.setAttribute('data-anchor-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
-  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
+  if(row.local_id||row.row_id) node.setAttribute('data-anchor-local-id',String(row.local_id||row.row_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   return node;
@@ -12707,7 +12712,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   if(settled) node.setAttribute('data-anchor-settled-scene-row','1');
   if(live) node.setAttribute('data-anchor-live-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
-  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
+  if(row.local_id||row.row_id) node.setAttribute('data-anchor-local-id',String(row.local_id||row.row_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   if(opts&&opts.streamId) node.setAttribute('data-anchor-stream-id',String(opts.streamId));
@@ -12838,7 +12843,7 @@ function _renderAnchorSceneRowsIncremental(list, rows, opts){
   var seenIds={};
   for(var ri=0;ri<rows.length;ri++){
     var row=rows[ri];
-    var rowId=row&&(row.local_id||row['data-anchor-local-id']);
+    var rowId=row&&(row.local_id||row.row_id||row['data-anchor-local-id']);
     // If we already have a DOM node for this row — mark it as seen and keep it.
     if(rowId&&existingById[rowId]){
       seenIds[rowId]=true;
