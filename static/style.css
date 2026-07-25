@@ -2306,6 +2306,17 @@
   .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:680px;overflow-wrap:anywhere;}
+  /* Tables and code blocks are not prose — the 680px reading measure that keeps
+     paragraphs legible also crushes wide tabular/code content into a narrow strip
+     while the rest of the column sits empty. Let a message that CONTAINS a table or
+     code block use the content width; prose-only messages keep 680px. :has() ships
+     in all current evergreen browsers and degrades to the prose measure otherwise. */
+  .msg-body:has(table),
+  .msg-body:has(pre),
+  .msg-body:has(.csv-table-wrap){max-width:min(1100px,100%);}
+  /* Keep column headers on one line ("Rate", not "Ra te"); .csv-table-wrap already
+     scrolls (overflow-x:auto) if a row needs more than the widened column. */
+  .msg-body .csv-table th,.msg-body table th{white-space:nowrap;}
   .msg-body p{margin-bottom:10px;}.msg-body p:last-child{margin-bottom:0;}
   .msg-body td p,.msg-body th p{margin:0;}
   .msg-body ul,.msg-body ol{margin:6px 0 10px 20px;}.msg-body li{margin-bottom:3px;}
