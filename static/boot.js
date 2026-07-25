@@ -2571,6 +2571,9 @@ if(window.visualViewport){
   };
   window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
   window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+  // #boot-reflow: force a reflow on initial paint so the first layout
+  // matches the actual visualViewport, not a stale 100dvh value.
+  _forceMobileViewportReflow();
 }
 
 // Boot: restore last session or start fresh
@@ -3699,6 +3702,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
+  
+  // Check if user wants to always start fresh (skips auto-resume)
+  if(savedLocal && localStorage.getItem('hermes-always-new-chat')==='true'){
+    try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+  }
+  
   if(saved){
     try{
       const savedSidebarOnlyState=(!urlSession&&savedLocal)

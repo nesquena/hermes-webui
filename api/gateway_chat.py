@@ -230,6 +230,35 @@ def _iter_sse_lines_cancellable(resp, cancel_event):
         yield raw_line
 
 
+def _open_gateway_stream(req: urllib.request.Request, timeout: float, max_attempts: int = 2):
+    """Establish the gateway SSE connection, retrying once on a pure
+    connection-level failure (e.g. the gateway process was mid-restart and
+    refused the TCP connection outright).
+
+    Deliberately does NOT retry anything once a response has been obtained —
+    a read-timeout on an already-established stream must stay terminal (see
+    ``_iter_sse_lines_cancellable``'s docstring and gate finding #5789):
+    retrying there could silently replay a turn that already produced
+    tool-call side effects on the gateway. This only covers the narrower,
+    safe case where the request never reached the server at all, so nothing
+    has happened yet and a retry is a no-op from the gateway's perspective.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise  # a real response from the gateway, not a connection failure
+        except urllib.error.URLError as exc:
+            last_exc = exc
+            if attempt + 1 < max_attempts and isinstance(exc.reason, OSError):
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
+
+
 def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = None) -> str:
     """Return the explicitly selected browser chat backend.
 
@@ -1032,7 +1061,7 @@ def _run_gateway_chat_streaming(
             update_active_run(stream_id, phase="gateway-request")
             last_payload = {}
             sse_event = "message"
-            with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+            with _open_gateway_stream(req, timeout=_gateway_read_timeout_secs()) as resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})

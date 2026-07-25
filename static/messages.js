@@ -1336,6 +1336,21 @@ async function send(){
     return;
   }
 
+  // /ask and /plan mode intercept — strips the command prefix, sets a mode
+  // flag for the chat/start payload, and hides the prefix from chat display.
+  window._pendingChatMode = null;
+  const _askMatch = text.match(/^\/ask\s+(.*)/s) || text.match(/^\/ask$/s);
+  const _planMatch = text.match(/^\/plan\s+(.*)/s);
+  if (_askMatch) {
+    text = _askMatch[1] || '';
+    window._pendingChatMode = 'ask';
+    $('msg').value = text;
+  } else if (_planMatch) {
+    text = _planMatch[1] || '';
+    window._pendingChatMode = 'plan';
+    $('msg').value = text;
+  }
+
   // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
   // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
   // clears S.pendingFiles. If /api/chat/start throws (turn never durably
@@ -1755,7 +1770,8 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      mode:window._pendingChatMode||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;

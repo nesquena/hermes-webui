@@ -13710,6 +13710,10 @@ def handle_get(handler, parsed) -> bool:
         return _handle_notes_search(handler, parsed)
     if parsed.path == "/api/notes/item":
         return _handle_notes_item(handler, parsed)
+    if parsed.path == "/api/notes/local/search":
+        return _handle_notes_local_search(handler, parsed)
+    if parsed.path == "/api/notes/local/read":
+        return _handle_notes_local_read(handler, parsed)
 
     # ── Checkpoints / Rollback (GET) ──
     if parsed.path == "/api/rollback/list":
@@ -22139,6 +22143,27 @@ def _handle_chat_start(handler, body, diag=None):
         msg = str(body.get("message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
+        # Apply mode prefixes for chat-type modes (Ask / Plan / Build / Team).
+        # Queue is handled client-side via /api/background — do not prefix here.
+        mode = str(body.get("mode") or "").strip().lower()
+        if mode == "ask":
+            msg = "[Ask mode] Answer directly and concisely. You may search the web for information. Do NOT run shell commands, execute code, or use any other tools.\n\n" + msg
+        elif mode == "plan":
+            msg = "[Plan mode] Create a detailed step-by-step plan. Analyze the request and break it into specific, actionable tasks. Show the plan clearly. Do NOT execute any steps yet — wait for approval.\n\n" + msg
+        elif mode == "build":
+            msg = (
+                "[Build mode] Implement the request. Prefer concrete changes over speculation. "
+                "Scaffold project structure, files, and setup when the task needs a foundation. "
+                "Execute tools as needed to complete the work.\n\n"
+                + msg
+            )
+        elif mode == "team":
+            msg = (
+                "[Team mode] Treat this as a coordinated multi-specialist task. "
+                "Decompose the work, delegate to appropriate specialist roles or sub-agents when available, "
+                "and synthesize their results. Prefer orchestration and parallel specialist work over a single monolithic pass.\n\n"
+                + msg
+            )
         diag.stage("normalize_attachments") if diag else None
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         recovery = compression_recovery_payload_for_session(s)
@@ -26520,6 +26545,24 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
         })
     sources.sort(key=lambda row: (not row.get("active"), row.get("label", "")))
     return sources
+
+
+def _handle_notes_local_search(handler, parsed):
+    """Search local knowledge base files."""
+    try:
+        from api.notes_local import handle_notes_local_search
+        return handle_notes_local_search(handler, parsed)
+    except Exception:
+        return j(handler, {"results": []})
+
+
+def _handle_notes_local_read(handler, parsed):
+    """Read a local knowledge base file."""
+    try:
+        from api.notes_local import handle_notes_local_read
+        return handle_notes_local_read(handler, parsed)
+    except Exception:
+        return bad(handler, "local notes unavailable")
 
 
 def _handle_notes_sources_list(handler):

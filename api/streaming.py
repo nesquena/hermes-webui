@@ -700,6 +700,19 @@ WebUI progress guidance:
 """.strip()
 
 
+# Aligns with hermes-svelte-ui report layout: real ## headings + lists render as
+# briefing cards; bold-only labels and wall-of-text paragraphs do not.
+_WEBUI_REPLY_FORMAT_PROMPT = """
+WebUI reply format:
+- For multi-part finals (status, findings, changes, next steps), write a short briefing — not one dense paragraph.
+- When work completed, open with a one-line status lead such as **Done.** / **Fixed.** / **Summary.** when it fits.
+- Use real markdown headings (`## Section`) for each section. Do not jam bold section labels into the same paragraph as the body.
+- Put bullets and numbered steps on their own lines (one item per line), with a blank line before the list.
+- Leave a blank line between sections so the UI can render a report layout.
+- Keep short direct answers as plain prose; skip headings and lists for one-liners.
+""".strip()
+
+
 def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
     """Return safe WebUI session metadata for the agent's ephemeral context.
 
@@ -746,6 +759,7 @@ def _webui_ephemeral_system_prompt(
     if surface_prompt:
         parts.append(surface_prompt)
     parts.append(_WEBUI_PROGRESS_PROMPT)
+    parts.append(_WEBUI_REPLY_FORMAT_PROMPT)
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)
@@ -2452,7 +2466,50 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
 
     # ── Check image_input_mode before embedding anything ──
     if cfg is not None and _resolve_image_input_mode(cfg) == "text":
-        return workspace_ctx + msg_text
+        # Text mode: the agent uses vision_analyze for images and file tools for
+        # non-image attachments. Append file paths as markers so the agent knows
+        # where they live instead of silently dropping them.
+        text = workspace_ctx + msg_text
+        try:
+            from api.upload import _attachment_root
+            attachment_root = _attachment_root()
+            _allowed_roots = (Path(workspace).expanduser().resolve(), attachment_root)
+        except Exception:
+            _allowed_roots = (Path(workspace).expanduser().resolve(),)
+        image_markers = []
+        file_markers = []
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            raw_path = str(att.get('path') or '').strip()
+            if not raw_path:
+                continue
+            try:
+                path = Path(raw_path).expanduser().resolve()
+                if not any(path.is_relative_to(r) for r in _allowed_roots):
+                    continue
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+                if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
+                    continue
+            except Exception:
+                continue
+            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            if mime.startswith('image/') and _is_valid_image(path, mime):
+                image_markers.append(str(path))
+            else:
+                file_markers.append(str(path))
+        if image_markers or file_markers:
+            parts = []
+            if image_markers:
+                for p in image_markers:
+                    parts.append(f"[Image: {p}]")
+            if file_markers:
+                for p in file_markers:
+                    parts.append(f"[File: {p}]")
+            text = text.rstrip() + "\n\n" + "\n".join(parts)
+        return text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
     workspace_root = Path(workspace).expanduser().resolve()
@@ -7591,6 +7648,7 @@ def _run_agent_streaming(
     # exception fires before the checkpoint thread is created (Issue #765).
     _checkpoint_stop = None
     _ckpt_thread = None
+    _heartbeat_stop = None
     _agent_lock = None
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
@@ -7598,6 +7656,23 @@ def _run_agent_streaming(
         # end_session()/_metering_stop.set() teardown is always paired (#4633/#2476).
         meter().begin_session(stream_id)
         _metering_thread.start()
+
+        # Keepalive heartbeat: send a "thinking" status event every 25s so the
+        # frontend's stall-detection timeout never fires during long reasoning
+        # or tool-execution gaps. The daemon thread stops when the stream ends
+        # (the queue consumer closes the stream). The put() silently drops the
+        # event if the queue is gone (cancel_event is set).
+        _heartbeat_stop = threading.Event()
+        def _heartbeat_loop():
+            while not _heartbeat_stop.wait(25):
+                if cancel_event.is_set():
+                    break
+                try:
+                    put('status', {'state': 'thinking', 'message': 'Still working...'})
+                except Exception:
+                    break
+        _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+        _heartbeat_thread.start()
         # Bind THIS turn's session identity to the worker thread/context BEFORE
         # any agent work (so every mid-turn notify_on_complete background spawn
         # captures THIS session, not a concurrent turn's process-global env).
@@ -10623,6 +10698,8 @@ def _run_agent_streaming(
                 pass
             # Stop the live metering ticker
             _metering_stop.set()
+            if _heartbeat_stop is not None:
+                _heartbeat_stop.set()
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
             if _approval_registered and _unreg_notify is not None:
@@ -10980,6 +11057,8 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to end metering session for stream %s", stream_id, exc_info=True)
         _metering_stop.set()
+        if _heartbeat_stop is not None:
+            _heartbeat_stop.set()
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
