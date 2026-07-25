@@ -7,6 +7,8 @@ so the frontend can still load with WEBUI_ONLY commands.
 from __future__ import annotations
 from contextlib import nullcontext
 import logging
+import os
+import shutil
 import threading
 from typing import Any
 
