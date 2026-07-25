@@ -3335,7 +3335,11 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         if idx + 1 < len(tokens) and tokens[idx + 1].startswith(("v", "r")):
             return True
     if "grok" in token_set or normalized.startswith("grok"):
-        return True
+        # Restrict to Grok 4+ (exclude Grok-1, Grok-2, Grok-3 — no reasoning).
+        m = re.search(r"grok[._-]?(\d+)", normalized)
+        if m and int(m.group(1)) >= 4:
+            return True
+        return False
     return False
 
 
@@ -3529,7 +3533,7 @@ def _filter_reasoning_efforts_for_provider(
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff != "max"]
     # xAI / Grok-4.5 tops out at 'high' (does not support xhigh/max).
-    if provider == "xai" and re.search(r"grok[._-]?4[._-]?5", bare):
+    if provider == "xai" and re.search(r"grok[._-]?4[._-]?5(?![0-9])", bare):
         return [eff for eff in normalized if eff in {"low", "medium", "high"}]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
     # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
